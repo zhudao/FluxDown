@@ -183,6 +183,7 @@ class SettingsProvider extends ChangeNotifier {
   bool _localServerApiEnabled = false;
   bool _localServerMcpEnabled = false;
   bool _localServerLanEnabled = false;
+  bool _localServerCorsAllowAll = false;
 
   // UA 设置
   String _globalUserAgent = ''; // 空字符串 = 使用内置 Chrome UA
@@ -446,6 +447,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get localServerApiEnabled => _localServerApiEnabled;
   bool get localServerMcpEnabled => _localServerMcpEnabled;
   bool get localServerLanEnabled => _localServerLanEnabled;
+  bool get localServerCorsAllowAll => _localServerCorsAllowAll;
 
   // UA 设置 Getter
   String get globalUserAgent => _globalUserAgent;
@@ -925,6 +927,57 @@ class SettingsProvider extends ChangeNotifier {
     _customCategories = CustomCategory.defaultCategories();
     notifyListeners();
     _persistCategories();
+  }
+
+  /// 一键分类目录 —— 把每个分类（「全部文件」除外，它等同于全局默认目录）的保存
+  /// 目录设为默认下载目录下的同名子目录。[labelOf] 给出分类的本地化显示名，
+  /// 内置分类按当前界面语言落盘（`视频` / `Video`）。
+  ///
+  /// 返回实际改写的分类数；默认下载目录为空时什么都不做。
+  int applyCategorySaveDirs(String Function(CustomCategory) labelOf) {
+    var changed = 0;
+    for (var i = 0; i < _customCategories.length; i++) {
+      final cat = _customCategories[i];
+      if (cat.builtinType == 'all') continue;
+      final dir = categoryDirUnder(_defaultSaveDir, labelOf(cat));
+      if (dir.isEmpty || dir == cat.saveDir) continue;
+      _customCategories[i] = cat.copyWith(saveDir: dir);
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _persistCategories();
+    return changed;
+  }
+
+  /// 清除所有分类的保存目录，回到「一切都落默认下载目录」。返回清空的分类数。
+  int clearCategorySaveDirs() {
+    var changed = 0;
+    for (var i = 0; i < _customCategories.length; i++) {
+      final cat = _customCategories[i];
+      if (cat.saveDir.isEmpty) continue;
+      _customCategories[i] = cat.copyWith(saveDir: '');
+      changed++;
+    }
+    if (changed == 0) return 0;
+    notifyListeners();
+    _persistCategories();
+    return changed;
+  }
+
+  /// 每个可设目录的分类是否都已指向「默认下载目录 / 分类名」。
+  /// 一键按钮据此在「应用」与「清除」两态之间切换；任一分类被手动改成别的目录
+  /// 都算未应用，此时再点一次按钮就是覆盖式重新应用。
+  bool categorySaveDirsApplied(String Function(CustomCategory) labelOf) {
+    var any = false;
+    for (final cat in _customCategories) {
+      if (cat.builtinType == 'all') continue;
+      final dir = categoryDirUnder(_defaultSaveDir, labelOf(cat));
+      if (dir.isEmpty) continue;
+      any = true;
+      if (cat.saveDir != dir) return false;
+    }
+    return any;
   }
 
   // 代理设置 Setters
@@ -1446,6 +1499,16 @@ class SettingsProvider extends ChangeNotifier {
     _localServerLanEnabled = value;
     notifyListeners();
     _saveToRust('local_server_lan_enabled', value.toString());
+  }
+
+  /// 允许任意来源的跨域（CORS）请求：开启后本机 API 对所有响应带
+  /// `Access-Control-Allow-Origin: *`（Rust 端热重启监听），使浏览器页面里的
+  /// 跨域 `fetch()` 能直接调用本机服务；关闭则预检失败、网页无法访问。
+  void setLocalServerCorsAllowAll(bool value) {
+    if (_localServerCorsAllowAll == value) return;
+    _localServerCorsAllowAll = value;
+    notifyListeners();
+    _saveToRust('local_server_cors_allow_all', value.toString());
   }
 
   /// 生成 32 位随机 hex token（管理 API 自动鉴权 / UI 手动重新生成共用）
@@ -1980,6 +2043,8 @@ class SettingsProvider extends ChangeNotifier {
           _localServerMcpEnabled = entry.value == 'true';
         case 'local_server_lan_enabled':
           _localServerLanEnabled = entry.value == 'true';
+        case 'local_server_cors_allow_all':
+          _localServerCorsAllowAll = entry.value == 'true';
         case 'global_user_agent':
           _globalUserAgent = entry.value;
         case 'default_queue_id':
@@ -2130,17 +2195,20 @@ class SettingsProvider extends ChangeNotifier {
   /// 平台默认下载目录（公开只读：供移动端判断「用户是否已自定义」）
   static String get platformDefaultSaveDir => _platformDefaultSaveDir();
 
-  /// 平台默认下载目录
+  /// 平台默认下载目录。
+  ///
+  /// **桌面端不在 Dart 侧推导**：真实默认值由 Rust 用系统 API 解析
+  /// （Windows 已知文件夹 `FOLDERID_Downloads` / Linux XDG user-dirs /
+  /// macOS，见 `native/engine/src/user_dirs.rs`），首次运行写入 config 并随
+  /// 配置下发到这里。`$HOME/Downloads` 拼接在用户迁移过「下载」文件夹时是
+  /// 错的，故桌面端返回空串——配置到达前 UI 只显示占位符，不会写出错路径。
   static String _platformDefaultSaveDir() {
     if (Platform.isAndroid) {
       // 应用专属外部目录，无需存储权限即可写入；
       // 公共 Download 目录（SAF/MediaStore）作为后续跟进项。
+      // 与 Rust 侧 `download_actor::default_save_dir` 的 Android 分支保持一致。
       return '/storage/emulated/0/Android/data/com.fluxdown.app/files/Download';
     }
-    final home =
-        Platform.environment['USERPROFILE'] ??
-        Platform.environment['HOME'] ??
-        '.';
-    return '$home${Platform.pathSeparator}Downloads';
+    return '';
   }
 }

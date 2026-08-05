@@ -36,6 +36,7 @@ import '../services/cloud/nickname_pool.dart';
 import '../services/floating_ball/floating_ball_service.dart';
 import '../services/link/link_models.dart';
 import '../services/link/local_pairing_service.dart';
+import '../services/local_interfaces.dart';
 import '../services/log_service.dart';
 import '../services/update_service.dart';
 import '../theme/app_colors.dart';
@@ -2259,7 +2260,9 @@ class _CustomCategoryManager extends StatelessWidget {
 
   const _CustomCategoryManager({required this.settingsProvider});
 
-  /// 内置分类的 i18n 名称
+  /// 内置分类的 i18n 名称。这些文案不只是标签：「一键分类目录」拿它当目录名
+  /// （`categoryDirUnder`），Web 侧 `web/src/lib/categories.ts` 的 BUILTIN_LABEL
+  /// 必须逐字一致，否则两端会在同一台机器上建出两套目录。
   static String _builtinLabel(S s, String? builtinType) =>
       switch (builtinType) {
         'all' => s.categoryAll,
@@ -2288,60 +2291,56 @@ class _CustomCategoryManager extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 标题行
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    s.customCategories,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: c.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    s.categoryPriorityNote,
-                    style: TextStyle(fontSize: 11.5, color: c.textMuted),
-                  ),
-                ],
+        // 标题 + 操作区（按钮换行排布：三枚按钮在窄栏下不会溢出）
+        Text(
+          s.customCategories,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: c.textPrimary,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          s.categoryPriorityNote,
+          style: TextStyle(fontSize: 11.5, color: c.textMuted),
+        ),
+        const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            alignment: WrapAlignment.end,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              _oneClickDirsButton(context, s, c),
+              ShadButton.outline(
+                size: ShadButtonSize.sm,
+                onPressed: () => _confirmResetAll(context, s, c),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.rotateCcw, size: 13, color: c.textMuted),
+                    const SizedBox(width: 4),
+                    Text(s.resetBuiltinCategories),
+                  ],
+                ),
               ),
-            ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                ShadButton.outline(
-                  size: ShadButtonSize.sm,
-                  onPressed: () => _confirmResetAll(context, s, c),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.rotateCcw, size: 13, color: c.textMuted),
-                      const SizedBox(width: 4),
-                      Text(s.resetBuiltinCategories),
-                    ],
-                  ),
+              ShadButton.outline(
+                size: ShadButtonSize.sm,
+                onPressed: () => _showCategoryDialog(context, s, c),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(LucideIcons.plus, size: 13, color: c.textSecondary),
+                    const SizedBox(width: 4),
+                    Text(s.addCategory),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                ShadButton.outline(
-                  size: ShadButtonSize.sm,
-                  onPressed: () => _showCategoryDialog(context, s, c),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(LucideIcons.plus, size: 13, color: c.textSecondary),
-                      const SizedBox(width: 4),
-                      Text(s.addCategory),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
         const SizedBox(height: 10),
         // 分类列表（Column 替代 ReorderableListView，避免 MaterialLocalizations 依赖）
@@ -2374,6 +2373,88 @@ class _CustomCategoryManager extends StatelessWidget {
                 : null,
           ),
       ],
+    );
+  }
+
+  /// 一键分类目录：两态按钮。尚未全部指向「默认下载目录 / 分类名」时是「应用」，
+  /// 已全部指向时变成「清除」，用同一枚按钮完成开与关。
+  Widget _oneClickDirsButton(BuildContext context, S s, AppColors c) {
+    String labelOf(CustomCategory cat) => displayName(s, cat);
+    final applied = settingsProvider.categorySaveDirsApplied(labelOf);
+    final baseDir = settingsProvider.defaultSaveDir;
+    // 默认下载目录为空时推导不出任何目录，按钮直接禁用。
+    final enabled = baseDir.trim().isNotEmpty;
+    return ShadButton.outline(
+      size: ShadButtonSize.sm,
+      onPressed: enabled
+          ? () => _confirmCategoryDirs(context, s, c, applied: applied)
+          : null,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            applied ? LucideIcons.folderX : LucideIcons.folderTree,
+            size: 13,
+            color: c.textSecondary,
+          ),
+          const SizedBox(width: 4),
+          Text(applied ? s.clearCategoryDirs : s.autoCategoryDirs),
+        ],
+      ),
+    );
+  }
+
+  void _confirmCategoryDirs(
+    BuildContext context,
+    S s,
+    AppColors c, {
+    required bool applied,
+  }) {
+    // 举例用第一个可推导出目录的分类，让用户先看清实际会建在哪。
+    var sample = '';
+    for (final cat in settingsProvider.customCategories) {
+      if (cat.builtinType == 'all') continue;
+      final dir = categoryDirUnder(
+        settingsProvider.defaultSaveDir,
+        displayName(s, cat),
+      );
+      if (dir.isNotEmpty) {
+        sample = dir;
+        break;
+      }
+    }
+    showShadDialog(
+      context: context,
+      barrierColor: c.dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => ShadDialog(
+        title: Text(applied ? s.clearCategoryDirs : s.autoCategoryDirs),
+        description: Text(
+          applied
+              ? s.clearCategoryDirsConfirm
+              : s.autoCategoryDirsConfirm(sample),
+        ),
+        actions: [
+          ShadButton.outline(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(s.cancel),
+          ),
+          ShadButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              if (applied) {
+                settingsProvider.clearCategorySaveDirs();
+              } else {
+                settingsProvider.applyCategorySaveDirs(
+                  (cat) => displayName(s, cat),
+                );
+              }
+            },
+            child: Text(s.confirm),
+          ),
+        ],
+      ),
     );
   }
 
@@ -2492,8 +2573,15 @@ class _CategoryTile extends StatefulWidget {
 class _CategoryTileState extends State<_CategoryTile> {
   bool _isHovered = false;
 
-  /// 描述文本：内置特殊分类显示"内置"，其余显示扩展名或正则
+  /// 描述文本：内置特殊分类显示"内置"，其余显示扩展名或正则；
+  /// 设了分类保存目录的再在后面挂上目录（一键分类目录后能直接看到落点）。
   String _subtitle(CustomCategory cat, S s) {
+    final rule = _matchSummary(cat, s);
+    if (cat.saveDir.isEmpty) return rule;
+    return rule.isEmpty ? cat.saveDir : '$rule  ·  ${cat.saveDir}';
+  }
+
+  String _matchSummary(CustomCategory cat, S s) {
     // "全部文件" 和 "其他" 不显示扩展名
     if (cat.builtinType == 'all' || cat.builtinType == 'other') {
       return s.builtinCategory;
@@ -5940,6 +6028,18 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
   late TextEditingController _tokenController;
   late FocusNode _tokenFocusNode;
 
+  /// 本机非回环 IPv4 网卡快照，供开启局域网 / 组网访问后在地址预览里下拉切换。
+  /// 网卡会随插拔 / 切网 / VPN 上下线变化，所以不是一次性探测：[_ifaceTicker]
+  /// 每 5s 重采一次，列表未变时不 setState。
+  List<LocalInterface> _localIps = const [];
+
+  /// 用户在下拉里选中的展示主机；null = 未选过（跟随首个可用网卡）。
+  String? _selectedHost;
+
+  Timer? _ifaceTicker;
+
+  static const String _loopback = LocalInterfaces.loopback;
+
   @override
   void initState() {
     super.initState();
@@ -5951,6 +6051,11 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
       text: widget.settingsProvider.localServerToken,
     );
     _tokenFocusNode = FocusNode()..addListener(_onTokenFocusChange);
+    unawaited(_loadLocalIps());
+    _ifaceTicker = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_loadLocalIps()),
+    );
   }
 
   @override
@@ -5966,6 +6071,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
     if (token != sp.localServerToken) {
       _commitOnUnmount(() => sp.setLocalServerToken(token));
     }
+    _ifaceTicker?.cancel();
     _portFocusNode.removeListener(_onPortFocusChange);
     _portFocusNode.dispose();
     _portController.dispose();
@@ -6000,6 +6106,36 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
       return;
     }
     sp.setLocalServerPort(value);
+  }
+
+  /// 重采本机非回环 IPv4 网卡（枚举与排序见 [LocalInterfaces]）。列表未变且选
+  /// 中项仍有效时直接返回，不触发重建；选中的网卡消失（拔网线 / 切 Wi-Fi /
+  /// VPN 断开）时回落到「跟随首个网卡」。
+  Future<void> _loadLocalIps() async {
+    final ips = await LocalInterfaces.list();
+    if (!mounted) return;
+    final staleSelection =
+        _selectedHost != null &&
+        _selectedHost != _loopback &&
+        !ips.any((e) => e.ip == _selectedHost);
+    final unchanged =
+        ips.length == _localIps.length &&
+        Iterable<int>.generate(ips.length).every((i) => ips[i] == _localIps[i]);
+    if (unchanged && !staleSelection) return;
+    setState(() {
+      _localIps = ips;
+      if (staleSelection) _selectedHost = null;
+    });
+  }
+
+  /// 下拉项文案：`IP · 网卡名`（回环为 `127.0.0.1 · 本机`）。同一 IP 出现在
+  /// 多张网卡上时取首个匹配，够用且不至于让选项文案变成一串网卡名。
+  String _hostLabel(S s, String host) {
+    if (host == _loopback) return '$_loopback · ${s.apiServiceHostLoopback}';
+    for (final e in _localIps) {
+      if (e.ip == host) return '${e.ip} · ${e.name}';
+    }
+    return host;
   }
 
   void _onTokenFocusChange() {
@@ -6107,6 +6243,15 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
         // 地址预览随端口输入框实时更新，不等待失焦提交
         final typedPort = _portController.text.trim();
         final livePort = typedPort.isEmpty ? committedPortText : typedPort;
+        // 关闭局域网访问时服务只绑回环，地址预览必须固定回环；开启后默认展示
+        // 首个可用网卡，用户可在下拉里改（仅影响展示，实际监听恒为 0.0.0.0）。
+        final lanOn = enabled && sp.localServerLanEnabled;
+        final hostOptions = lanOn
+            ? [_loopback, ..._localIps.map((e) => e.ip)]
+            : const [_loopback];
+        final liveHost = lanOn && hostOptions.contains(_selectedHost)
+            ? _selectedHost!
+            : (lanOn && _localIps.isNotEmpty ? _localIps.first.ip : _loopback);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -6298,7 +6443,126 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
                         value: sp.localServerLanEnabled,
                         enabled: enabled,
                         onChanged: enabled
-                            ? (v) => sp.setLocalServerLanEnabled(v)
+                            ? (v) {
+                                sp.setLocalServerLanEnabled(v);
+                                // 刚开启时立刻补一次网卡快照，不等 5s ticker。
+                                if (v) unawaited(_loadLocalIps());
+                              }
+                            : null,
+                      ),
+                    ],
+                  ),
+                  if (lanOn) ...[
+                    const SizedBox(height: 12),
+                    // 网卡选择：下方各功能地址跟随此处选中的 IP。实际监听恒为
+                    // 0.0.0.0，这里只决定「拿哪个地址给对端用」。
+                    Row(
+                      children: [
+                        SizedBox(
+                          width: 56,
+                          child: Text(
+                            s.apiServiceHost,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: c.textSecondary,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: ShadSelect<String>(
+                            // 网卡列表变化时重建，避免内部选中态残留已消失的 IP。
+                            key: ValueKey('api-host-${hostOptions.join(',')}'),
+                            initialValue: liveHost,
+                            options: [
+                              for (final host in hostOptions)
+                                ShadOption(
+                                  value: host,
+                                  child: Text(_hostLabel(s, host)),
+                                ),
+                            ],
+                            selectedOptionBuilder: (context, value) =>
+                                Text(_hostLabel(s, value)),
+                            onChanged: (v) {
+                              if (v != null) setState(() => _selectedHost = v);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_localIps.isEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        s.apiServiceHostNone,
+                        style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                      ),
+                    ],
+                  ],
+                  const SizedBox(height: 14),
+                  Divider(height: 1, color: m.borderFaint(c.border)),
+                  const SizedBox(height: 14),
+                  // 允许任意来源跨域：默认关闭时本服务不回任何 Access-Control-*
+                  // 头，网页的跨域 fetch 在预检就被浏览器拦下（这正是挡住恶意
+                  // 网页的那道门）。部分网站把「aria2 探活」写死成浏览器
+                  // fetch，必须开这个开关才能识别到本机服务。
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text(
+                                  s.apiServiceCorsAllowAll,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                    color: enabled
+                                        ? c.textPrimary
+                                        : c.textDisabled,
+                                  ),
+                                ),
+                                const SizedBox(width: 4),
+                                ShadTooltip(
+                                  waitDuration: const Duration(milliseconds: 200),
+                                  effects: const [],
+                                  builder: (_) => ConstrainedBox(
+                                    constraints: const BoxConstraints(maxWidth: 360),
+                                    child: Text(
+                                      s.apiServiceCorsAllowAllHelp,
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        height: 1.6,
+                                      ),
+                                    ),
+                                  ),
+                                  child: ShadGestureDetector(
+                                    cursor: SystemMouseCursors.help,
+                                    onTap: () {},
+                                    child: Icon(
+                                      LucideIcons.circleHelp,
+                                      size: 13,
+                                      color: c.textMuted,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              s.apiServiceCorsAllowAllDesc,
+                              style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      ShadSwitch(
+                        value: sp.localServerCorsAllowAll,
+                        enabled: enabled,
+                        onChanged: enabled
+                            ? (v) => sp.setLocalServerCorsAllowAll(v)
                             : null,
                       ),
                     ],
@@ -6338,7 +6602,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
               description: s.apiServiceTakeoverDesc,
               value: sp.localServerTakeoverEnabled,
               onChanged: (v) => sp.setLocalServerTakeoverEnabled(v),
-              address: 'http://127.0.0.1:$livePort',
+              address: 'http://$liveHost:$livePort',
               extra: _CopyUserscriptButton(enabled: enabled),
             ),
             const SizedBox(height: 10),
@@ -6348,7 +6612,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
               description: s.apiServiceJsonrpcDesc,
               value: sp.localServerJsonrpcEnabled,
               onChanged: (v) => sp.setLocalServerJsonrpcEnabled(v),
-              address: 'http://127.0.0.1:$livePort/jsonrpc',
+              address: 'http://$liveHost:$livePort/jsonrpc',
             ),
             const SizedBox(height: 10),
             _ApiSubFeatureCard(
@@ -6357,7 +6621,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
               description: s.apiServiceApiDesc,
               value: sp.localServerApiEnabled,
               onChanged: (v) => sp.setLocalServerApiEnabled(v),
-              address: 'http://127.0.0.1:$livePort/api/v1',
+              address: 'http://$liveHost:$livePort/api/v1',
             ),
             const SizedBox(height: 10),
             _ApiSubFeatureCard(
@@ -6366,7 +6630,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
               description: s.apiServiceMcpDesc,
               value: sp.localServerMcpEnabled,
               onChanged: (v) => sp.setLocalServerMcpEnabled(v),
-              address: 'http://127.0.0.1:$livePort/mcp',
+              address: 'http://$liveHost:$livePort/mcp',
             ),
           ],
         );
@@ -12042,21 +12306,11 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
   }
 
   /// 探测本机非回环 IPv4，用于「本机地址」展示（供对端在同网络/组网内连接）。
+  /// 与 API 服务页共用 [LocalInterfaces]：同一套跨平台枚举 + 局域网可达性排序，
+  /// 最可能连得上的地址排在最前。
   Future<void> _loadLocalIps() async {
-    try {
-      final ifaces = await NetworkInterface.list(
-        includeLoopback: false,
-        includeLinkLocal: false,
-        type: InternetAddressType.IPv4,
-      );
-      final ips = [
-        for (final iface in ifaces)
-          for (final addr in iface.addresses) addr.address,
-      ];
-      if (mounted) setState(() => _localIps = ips);
-    } catch (_) {
-      // 权限/平台限制：静默降级为仅展示端口地址。
-    }
+    final ips = await LocalInterfaces.list();
+    if (mounted) setState(() => _localIps = [for (final e in ips) e.ip]);
   }
 
   void _copyCode(BuildContext context, String code) {
