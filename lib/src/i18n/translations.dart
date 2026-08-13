@@ -613,11 +613,18 @@ class S {
   String get accountErrorRegistrationIncomplete =>
       _r('accountErrorRegistrationIncomplete');
   String get accountErrorValidation => _r('accountErrorValidation');
+  String get accountErrorInvalidEmail => _r('accountErrorInvalidEmail');
+  String get accountErrorPasswordTooShort =>
+      _r('accountErrorPasswordTooShort');
   String get accountErrorNetwork => _r('accountErrorNetwork');
   String get accountErrorUnknown => _r('accountErrorUnknown');
   String get accountErrorDeviceLimit => _r('accountErrorDeviceLimit');
   String get accountDeviceRenameTitle => _r('accountDeviceRenameTitle');
   String get accountDeviceRenameInvalid => _r('accountDeviceRenameInvalid');
+  String get accountNicknameEditTooltip => _r('accountNicknameEditTooltip');
+  String get accountNicknameEditTitle => _r('accountNicknameEditTitle');
+  String get accountNicknameEditInvalid => _r('accountNicknameEditInvalid');
+  String get accountNicknameEditSuccess => _r('accountNicknameEditSuccess');
   String get accountDeviceDeleteConfirmTitle =>
       _r('accountDeviceDeleteConfirmTitle');
   String get accountDeviceDeleteConfirmDesc =>
@@ -655,6 +662,51 @@ class S {
   String get accountServerAddressInvalid => _r('accountServerAddressInvalid');
   String get accountServerAddressReset => _r('accountServerAddressReset');
   String get accountServerAddressSaved => _r('accountServerAddressSaved');
+
+  // 套餐购买 —— FluxCloud 微信 Native 扫码购买（见 local://pay-contract.md）
+  String get accountPlanUpgrade => _r('accountPlanUpgrade');
+  String get accountPlanDialogTitle => _r('accountPlanDialogTitle');
+  String get accountPlanPayingTitle => _r('accountPlanPayingTitle');
+  String get accountPlanCurrent => _r('accountPlanCurrent');
+  String get accountPlanBuy => _r('accountPlanBuy');
+  String get accountPlanEmpty => _r('accountPlanEmpty');
+  String get accountPlanScanHint => _r('accountPlanScanHint');
+  String accountPlanExpiresIn(String time) =>
+      _r('accountPlanExpiresIn', {'time': time});
+  String get accountPlanPaidSuccess => _r('accountPlanPaidSuccess');
+  String get accountPlanOrderExpired => _r('accountPlanOrderExpired');
+  String accountPlanLimitedSold(int sold, int quota) =>
+      _r('accountPlanLimitedSold', {'sold': sold, 'quota': quota});
+  String accountPlanCreditApplied(String amount) =>
+      _r('accountPlanCreditApplied', {'amount': amount});
+  String get accountPlanLowerTier => _r('accountPlanLowerTier');
+  String get accountCloudRefresh => _r('accountCloudRefresh');
+  String get accountCloudRefreshDone => _r('accountCloudRefreshDone');
+  String get accountPlanErrorAlreadyOwned =>
+      _r('accountPlanErrorAlreadyOwned');
+  String get accountPlanErrorNotPurchasable =>
+      _r('accountPlanErrorNotPurchasable');
+  String get accountPlanErrorPaymentDisabled =>
+      _r('accountPlanErrorPaymentDisabled');
+  String get accountPlanErrorGateway => _r('accountPlanErrorGateway');
+  String get accountPlanErrorNotUpgrade => _r('accountPlanErrorNotUpgrade');
+  String get accountPlanErrorTierNotHigher =>
+      _r('accountPlanErrorTierNotHigher');
+  String get accountOriginIdEditTooltip => _r('accountOriginIdEditTooltip');
+  String get accountOriginIdEditTitle => _r('accountOriginIdEditTitle');
+  String get accountOriginIdEditDesc => _r('accountOriginIdEditDesc');
+  String get accountOriginIdEditPlaceholder =>
+      _r('accountOriginIdEditPlaceholder');
+  String get accountOriginIdEditRoll => _r('accountOriginIdEditRoll');
+  String get accountOriginIdEditWarning => _r('accountOriginIdEditWarning');
+  String get accountOriginIdEditConfirm => _r('accountOriginIdEditConfirm');
+  String get accountOriginIdEditSuccess => _r('accountOriginIdEditSuccess');
+  String get accountOriginIdInvalid => _r('accountOriginIdInvalid');
+  String get accountOriginIdErrorTaken => _r('accountOriginIdErrorTaken');
+  String get accountOriginIdErrorAlreadyChanged =>
+      _r('accountOriginIdErrorAlreadyChanged');
+  String get accountOriginIdErrorNotAllowed =>
+      _r('accountOriginIdErrorNotAllowed');
 
   // 配置同步 —— FluxCloud 云端设置同步（见 local://sync-contract.md）
   String get cloudSyncTitle => _r('cloudSyncTitle');

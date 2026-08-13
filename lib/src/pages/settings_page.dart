@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import '../widgets/flux_sonner.dart';
 import '../../main.dart';
 import '../bindings/bindings.dart';
@@ -327,14 +328,13 @@ List<SettingsSearchItem> get settingsSearchItems {
       keywords: s.searchKeywordsUiScale,
       icon: LucideIcons.maximize,
     ),
-    if (Platform.isWindows)
-      SettingsSearchItem(
-        category: SettingsCategory.appearance,
-        label: s.appIcon,
-        description: s.appIconDesc,
-        keywords: s.searchKeywordsAppIcon,
-        icon: LucideIcons.image,
-      ),
+    SettingsSearchItem(
+      category: SettingsCategory.appearance,
+      label: s.appIcon,
+      description: s.appIconDesc,
+      keywords: s.searchKeywordsAppIcon,
+      icon: LucideIcons.image,
+    ),
     SettingsSearchItem(
       category: SettingsCategory.download,
       label: s.defaultSaveDir,
@@ -1036,13 +1036,19 @@ class _SettingsSidebarState extends State<_SettingsSidebar> {
                     ),
             )
           else
-            for (final cat in SettingsCategory.values)
-              _SettingsNavItem(
-                icon: cat.icon,
-                label: cat.localizedLabel,
-                isSelected: widget.selected == cat,
-                onTap: () => widget.onSelect(cat),
+            Expanded(
+              child: ListView(
+                children: [
+                  for (final cat in SettingsCategory.values)
+                    _SettingsNavItem(
+                      icon: cat.icon,
+                      label: cat.localizedLabel,
+                      isSelected: widget.selected == cat,
+                      onTap: () => widget.onSelect(cat),
+                    ),
+                ],
               ),
+            ),
         ],
       ),
     );
@@ -1381,25 +1387,26 @@ class _SettingsContentState extends State<_SettingsContent> {
         settingsProvider: settingsProvider,
         downloadController: widget.downloadController,
       ),
-      SettingsCategory.extensions => tabId == _kTabComponents
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: const [
-                _ComponentsContent(
-                  key: ValueKey('component-ffmpeg'),
-                  kind: _ComponentKind.ffmpeg,
-                ),
-                SizedBox(height: 12),
-                _ComponentsContent(
-                  key: ValueKey('component-ytdlp'),
-                  kind: _ComponentKind.ytdlp,
-                ),
-              ],
-            )
-          : PluginListView(
-              provider: widget.pluginProvider,
-              onNavigateToComponents: () => _selectTab(_kTabComponents),
-            ),
+      SettingsCategory.extensions =>
+        tabId == _kTabComponents
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: const [
+                  _ComponentsContent(
+                    key: ValueKey('component-ffmpeg'),
+                    kind: _ComponentKind.ffmpeg,
+                  ),
+                  SizedBox(height: 12),
+                  _ComponentsContent(
+                    key: ValueKey('component-ytdlp'),
+                    kind: _ComponentKind.ytdlp,
+                  ),
+                ],
+              )
+            : PluginListView(
+                provider: widget.pluginProvider,
+                onNavigateToComponents: () => _selectTab(_kTabComponents),
+              ),
       SettingsCategory.doctor => DoctorReportView(
         settingsProvider: settingsProvider,
       ),
@@ -2836,13 +2843,12 @@ class _AppearanceContent extends StatelessWidget {
               vertical: true,
               child: const _UiScaleSelector(),
             ),
-            if (Platform.isWindows)
-              _SettingRow(
-                label: s.appIcon,
-                description: s.appIconDesc,
-                vertical: true,
-                child: const _AppIconSelector(),
-              ),
+            _SettingRow(
+              label: s.appIcon,
+              description: s.appIconDesc,
+              vertical: true,
+              child: const _AppIconSelector(),
+            ),
           ],
         ),
       ],
@@ -2957,7 +2963,7 @@ class _UiScaleChipState extends State<_UiScaleChip> {
 }
 
 // ─────────────────────────────────────────────
-// 应用图标选择器（仅 Windows）
+// 应用图标选择器
 // ─────────────────────────────────────────────
 
 class _AppIconSelector extends StatefulWidget {
@@ -3338,15 +3344,11 @@ class _DownloadContent extends StatelessWidget {
                   label: s.fileMissingAction,
                   description: s.fileMissingActionDesc,
                   child: ShadSelect<String>(
-                    initialValue:
-                        settingsProvider.fileMissingAction == 'delete'
+                    initialValue: settingsProvider.fileMissingAction == 'delete'
                         ? 'delete'
                         : 'keep',
                     options: [
-                      ShadOption(
-                        value: 'keep',
-                        child: Text(s.fileMissingKeep),
-                      ),
+                      ShadOption(value: 'keep', child: Text(s.fileMissingKeep)),
                       ShadOption(
                         value: 'delete',
                         child: Text(s.fileMissingDelete),
@@ -3715,11 +3717,7 @@ class _SiteAuthCredentialListState extends State<_SiteAuthCredentialList> {
                 initialUser: e.value.user,
                 initialPass: e.value.pass,
               ),
-              child: Icon(
-                LucideIcons.pencil,
-                size: 14,
-                color: c.textSecondary,
-              ),
+              child: Icon(LucideIcons.pencil, size: 14, color: c.textSecondary),
             ),
           ),
           ShadTooltip(
@@ -3890,7 +3888,8 @@ class _SiteAuthCredentialDialogState extends State<_SiteAuthCredentialDialog> {
 
   /// 归一化后的站点键；新增模式解析失败/为空时为 null（禁用保存）。
   String? get _resolvedSite =>
-      widget.site ?? _SiteAuthCredentialList._normalizeSite(_siteController.text);
+      widget.site ??
+      _SiteAuthCredentialList._normalizeSite(_siteController.text);
 
   bool get _canSave =>
       _resolvedSite != null && _userController.text.trim().isNotEmpty;
@@ -6434,7 +6433,10 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
                             const SizedBox(height: 2),
                             Text(
                               s.apiServiceLanEnableDesc,
-                              style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: c.textMuted,
+                              ),
                             ),
                           ],
                         ),
@@ -6526,10 +6528,14 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
                                 ),
                                 const SizedBox(width: 4),
                                 ShadTooltip(
-                                  waitDuration: const Duration(milliseconds: 200),
+                                  waitDuration: const Duration(
+                                    milliseconds: 200,
+                                  ),
                                   effects: const [],
                                   builder: (_) => ConstrainedBox(
-                                    constraints: const BoxConstraints(maxWidth: 360),
+                                    constraints: const BoxConstraints(
+                                      maxWidth: 360,
+                                    ),
                                     child: Text(
                                       s.apiServiceCorsAllowAllHelp,
                                       style: const TextStyle(
@@ -6553,7 +6559,10 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
                             const SizedBox(height: 2),
                             Text(
                               s.apiServiceCorsAllowAllDesc,
-                              style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: c.textMuted,
+                              ),
                             ),
                           ],
                         ),
@@ -6648,7 +6657,10 @@ class _NotifyContent extends StatefulWidget {
   final SettingsProvider settingsProvider;
   final DownloadController? downloadController;
 
-  const _NotifyContent({required this.settingsProvider, this.downloadController});
+  const _NotifyContent({
+    required this.settingsProvider,
+    this.downloadController,
+  });
 
   @override
   State<_NotifyContent> createState() => _NotifyContentState();
@@ -6766,7 +6778,11 @@ class _NotifyContentState extends State<_NotifyContent> {
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: Text(
                 s.webhookSemantics,
-                style: TextStyle(fontSize: 10.5, height: 1.6, color: c.textMuted),
+                style: TextStyle(
+                  fontSize: 10.5,
+                  height: 1.6,
+                  color: c.textMuted,
+                ),
               ),
             ),
           ],
@@ -11349,6 +11365,70 @@ class _AccountContentState extends State<_AccountContent> {
       _cloudProfileRefreshedThisSession = true;
       unawaited(_silentRefreshProfile());
     }
+    // 账户头徽标渲染用套餐目录快照：公开无鉴权接口，与登录态无关，页面挂载时
+    // 即拉取一次；不复用购买对话框内部的 _plans（那边按"可购买"过滤掉了免费
+    // 档，这里需要能匹配到当前套餐哪怕是免费档）。
+    unawaited(_loadCatalogPlans());
+  }
+
+  /// 账户头徽标渲染用：套餐目录快照（未过滤）。拉取失败时保持为空列表，由
+  /// [_NicknameRow] 优雅降级为纯文本 pill，不影响页面其余部分。
+  List<CloudPlan> _catalogPlans = const [];
+
+  Future<void> _loadCatalogPlans() async {
+    try {
+      final catalog = await CloudClient.instance.getPlansCatalog();
+      if (!mounted) return;
+      setState(() => _catalogPlans = catalog);
+    } catch (e, stack) {
+      logError(
+        'CloudAuth',
+        'account header plan catalog fetch failed',
+        e,
+        stack,
+      );
+    }
+  }
+
+  /// 按套餐 code 查找目录中的 [CloudPlan]；未加载完成或未匹配到时返回 null。
+  CloudPlan? _planForCode(String code) {
+    for (final p in _catalogPlans) {
+      if (p.code == code) return p;
+    }
+    return null;
+  }
+
+  /// 手动刷新云端全量信息（个人资料/套餐能力/抵扣基数 + 设备名册）。
+  bool _cloudRefreshing = false;
+
+  Future<void> _refreshCloudInfo() async {
+    if (_cloudRefreshing || !CloudAuthService.instance.isLoggedIn) return;
+    setState(() => _cloudRefreshing = true);
+    try {
+      await CloudAuthService.instance.refreshProfile();
+      await CloudAuthService.instance.fetchDevices();
+      if (!mounted) return;
+      FluxSonner.of(context).show(
+        ShadToast(
+          title: Text(LocaleScope.of(context).accountCloudRefreshDone),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      FluxSonner.of(context).show(
+        ShadToast.destructive(
+          title: Text(_cloudErrorText(LocaleScope.of(context), e)),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      FluxSonner.of(
+        context,
+      ).show(ShadToast.destructive(title: Text(e.toString())));
+    } finally {
+      if (mounted) setState(() => _cloudRefreshing = false);
+    }
   }
 
   Future<void> _silentRefreshProfile() async {
@@ -11387,7 +11467,7 @@ class _AccountContentState extends State<_AccountContent> {
                       ? const EdgeInsets.symmetric(horizontal: 20, vertical: 18)
                       : null,
                   child: loggedIn && user != null
-                      ? _profileBody(context, s, c, user)
+                      ? _profileBody(context, s, c, user, auth.entitlements)
                       : _heroBody(context, s, c),
                 ),
                 // 未登录：暴露免账号「本地设备」区（本机配对码 + 已配对名册 +
@@ -11429,7 +11509,8 @@ class _AccountContentState extends State<_AccountContent> {
                       cursor: SystemMouseCursors.click,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onTap: () => _showChangeEmailDialog(context, user.email),
+                        onTap: () =>
+                            _showChangeEmailDialog(context, user.email),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 16,
@@ -11572,11 +11653,21 @@ class _AccountContentState extends State<_AccountContent> {
   /// 已登录：头像 + 两行身份块（第一行 昵称 + 套餐 chip，第二行 Origin ID 胶囊，
   /// 可点复制）+ 右侧退出登录按钮；头像取昵称首字符（无字符回退云图标）。
   /// 邮箱不在此展示——移至下方「账号与安全」分组（见 _AccountContentState.build）。
-  Widget _profileBody(BuildContext context, S s, AppColors c, CloudUser user) {
+  Widget _profileBody(
+    BuildContext context,
+    S s,
+    AppColors c,
+    CloudUser user,
+    Entitlements? entitlements,
+  ) {
     final displayName = user.nickname.isNotEmpty
         ? user.nickname
         : user.email.split('@').first;
     final hasOriginId = user.originId != null;
+    // 自助修改 Origin ID 入口门控：套餐允许（entitlements.originIdEdit）且
+    // 尚未用掉那一次机会（!user.originIdChanged）才展示，见契约 v1.3。
+    final canEditOriginId =
+        (entitlements?.originIdEdit ?? false) && !user.originIdChanged;
     final initial = _avatarInitial(displayName);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
@@ -11608,94 +11699,128 @@ class _AccountContentState extends State<_AccountContent> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
+              _NicknameRow(
+                displayName: displayName,
+                planCode: user.plan,
+                plan: _planForCode(user.plan),
+                membershipOrdinal: user.membershipOrdinal,
+                c: c,
+                s: s,
+                onEdit: () => _showNicknameEditDialog(context, user.nickname),
+              ),
+              const SizedBox(height: 6),
+              // Origin ID 胶囊徽章：类 QQ 号的唯一数字身份，理论上登录态不会为 null
+              // （防御兜底灰色 "#—"，不可点）；中英文显示名统一 "Origin ID"，见契约。
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Flexible(
-                    child: Text(
-                      displayName,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: c.textPrimary,
+                  ShadTooltip(
+                    effects: const [],
+                    builder: (_) => const Text('Origin ID'),
+                    child: MouseRegion(
+                      cursor: hasOriginId
+                          ? SystemMouseCursors.click
+                          : MouseCursor.defer,
+                      child: GestureDetector(
+                        onTap: hasOriginId
+                            ? () => unawaited(
+                                _copyOriginId(context, user.originId!),
+                              )
+                            : null,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: (hasOriginId ? c.accent : c.textMuted)
+                                .withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                hasOriginId ? '#${user.originId}' : '#—',
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w600,
+                                  fontFeatures: const [
+                                    FontFeature.tabularFigures(),
+                                  ],
+                                  color: hasOriginId ? c.accent : c.textMuted,
+                                ),
+                              ),
+                              if (hasOriginId) ...[
+                                const SizedBox(width: 3),
+                                Icon(
+                                  LucideIcons.copy,
+                                  size: 10,
+                                  color: c.accent,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                  if (user.plan.isNotEmpty) ...[
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 7,
-                        vertical: 2,
-                      ),
-                      decoration: BoxDecoration(
-                        color: c.accent.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        user.plan,
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: c.accent,
+                  // 自助修改 Origin ID 入口：仅套餐允许且尚未用掉那一次机会才展示
+                  // （见 canEditOriginId 计算 / 契约 v1.3 originIdEdit + originIdChanged）。
+                  if (canEditOriginId) ...[
+                    const SizedBox(width: 4),
+                    ShadTooltip(
+                      effects: const [],
+                      builder: (_) => Text(s.accountOriginIdEditTooltip),
+                      child: MouseRegion(
+                        cursor: SystemMouseCursors.click,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () =>
+                              _showOriginIdEditDialog(context, user.originId),
+                          child: Icon(
+                            LucideIcons.pencilLine,
+                            size: 12,
+                            color: c.textMuted,
+                          ),
                         ),
                       ),
                     ),
                   ],
                 ],
               ),
-              const SizedBox(height: 6),
-              // Origin ID 胶囊徽章：类 QQ 号的唯一数字身份，理论上登录态不会为 null
-              // （防御兜底灰色 "#—"，不可点）；中英文显示名统一 "Origin ID"，见契约。
-              ShadTooltip(
-                builder: (_) => const Text('Origin ID'),
-                child: MouseRegion(
-                  cursor: hasOriginId
-                      ? SystemMouseCursors.click
-                      : MouseCursor.defer,
-                  child: GestureDetector(
-                    onTap: hasOriginId
-                        ? () =>
-                              unawaited(_copyOriginId(context, user.originId!))
-                        : null,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: (hasOriginId ? c.accent : c.textMuted)
-                            .withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            hasOriginId ? '#${user.originId}' : '#—',
-                            style: TextStyle(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w600,
-                              fontFeatures: const [
-                                FontFeature.tabularFigures(),
-                              ],
-                              color: hasOriginId ? c.accent : c.textMuted,
-                            ),
-                          ),
-                          if (hasOriginId) ...[
-                            const SizedBox(width: 3),
-                            Icon(LucideIcons.copy, size: 10, color: c.accent),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
             ],
           ),
         ),
         const SizedBox(width: 12),
+        // 手动刷新云端全量信息：资料/套餐/能力/抵扣 + 设备名册。
+        ShadTooltip(
+          builder: (_) => Text(s.accountCloudRefresh),
+          child: ShadIconButton.ghost(
+            icon: _cloudRefreshing
+                ? SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 1.5,
+                      color: c.textSecondary,
+                    ),
+                  )
+                : Icon(LucideIcons.refreshCw, size: 14, color: c.textSecondary),
+            onPressed: _cloudRefreshing
+                ? null
+                : () => unawaited(_refreshCloudInfo()),
+          ),
+        ),
+        const SizedBox(width: 4),
+        // 套餐体系与配额随服务端演进，本地无法可靠判断"是否已是最高档"，故始终展示；
+        // 真正的可购性由购买对话框按 catalog 过滤，并把已拥有套餐标"当前套餐"。
+        ShadButton.outline(
+          size: ShadButtonSize.sm,
+          onPressed: () => _showPlanPurchaseDialog(context),
+          child: Text(s.accountPlanUpgrade),
+        ),
+        const SizedBox(width: 8),
         ShadButton.outline(
           size: ShadButtonSize.sm,
           onPressed: () => unawaited(CloudAuthService.instance.logout()),
@@ -11719,6 +11844,135 @@ class _AccountContentState extends State<_AccountContent> {
       ShadToast(
         title: Text(LocaleScope.of(context).accountOriginIdCopied),
         duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+}
+
+/// 昵称 + 套餐徽标行：铅笔默认隐藏，仅在整行悬浮或点击昵称文字后才显示/保持可见，
+/// 避免常态下与徽标挤在一起显得杂乱；真正触发编辑对话框的是点击铅笔本身。
+class _NicknameRow extends StatefulWidget {
+  final String displayName;
+
+  /// 用户当前套餐 code（raw，即 [CloudUser.plan]）：既是"是否展示徽标"的存在性
+  /// 判据，也是 [plan] 匹配失败时的纯文本降级兜底（目录未加载完成/服务端暂无
+  /// 该 code 时不让徽标整个消失）。
+  final String planCode;
+
+  /// [planCode] 对应的套餐配置；null = 未匹配到，降级为旧的纯文本 pill。
+  final CloudPlan? plan;
+
+  /// 当前套餐下的会员编号；仅当 [plan] 非空且 badgeNumbered 时才会被使用。
+  final int? membershipOrdinal;
+  final AppColors c;
+  final S s;
+  final VoidCallback onEdit;
+
+  const _NicknameRow({
+    required this.displayName,
+    required this.planCode,
+    this.plan,
+    this.membershipOrdinal,
+    required this.c,
+    required this.s,
+    required this.onEdit,
+  });
+
+  @override
+  State<_NicknameRow> createState() => _NicknameRowState();
+}
+
+class _NicknameRowState extends State<_NicknameRow> {
+  bool _hovering = false;
+  bool _revealed = false;
+
+  /// 套餐徽标 pill：硬规则——是否渲染徽标唯一由 [CloudPlan.badge] 是否非空决定，
+  /// 为空（服务端未配置，如免费版/专业版）时返回 null，整行完全不出现任何徽标
+  /// （不用 name 兜底、不猜测样式）。[plan] 本身为 null（目录未加载完成/未匹配
+  /// 到该 code，纯数据可用性问题而非"该套餐无徽标"的设计意图）时降级为旧的纯
+  /// 文本 pill，展示原始 planCode，不崩溃。
+  Widget? _planPill() {
+    final plan = widget.plan;
+    if (plan == null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+        decoration: BoxDecoration(
+          color: widget.c.accent.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          widget.planCode,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            color: widget.c.accent,
+          ),
+        ),
+      );
+    }
+    final badge = plan.badge;
+    if (badge == null || badge.isEmpty) return null;
+    final badgeColor = _tryParseHexColor(plan.badgeColor) ?? widget.c.accent;
+    return _PlanTag(
+      text: _withMembershipOrdinal(
+        badge,
+        plan.badgeNumbered ? widget.membershipOrdinal : null,
+        plan.badgeNumberDigits,
+      ),
+      color: badgeColor,
+      background: badgeColor.withValues(alpha: 0.12),
+      style: plan.badgeStyle,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showPencil = _hovering || _revealed;
+    final pill = _planPill();
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: Row(
+        children: [
+          Flexible(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => setState(() => _revealed = !_revealed),
+              child: Text(
+                widget.displayName,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: widget.c.textPrimary,
+                ),
+              ),
+            ),
+          ),
+          if (pill != null) ...[
+            const SizedBox(width: 8),
+            pill,
+          ],
+          if (showPencil) ...[
+            const SizedBox(width: 4),
+            ShadTooltip(
+              effects: const [],
+              builder: (_) => Text(widget.s.accountNicknameEditTooltip),
+              child: MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.onEdit,
+                  child: Icon(
+                    LucideIcons.pencil,
+                    size: 12,
+                    color: widget.c.textMuted,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -11857,7 +12111,11 @@ Widget _configSyncRow(BuildContext context) {
                 color: c.surface2,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Icon(LucideIcons.refreshCw, size: 15, color: c.textSecondary),
+              child: Icon(
+                LucideIcons.refreshCw,
+                size: 15,
+                color: c.textSecondary,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -11991,6 +12249,15 @@ String _cloudErrorText(S s, CloudApiException e) => switch (e.code) {
   'registration_closed' => s.accountErrorRegistrationClosed,
   'registration_incomplete' => s.accountErrorRegistrationIncomplete,
   'device_limit' => s.accountErrorDeviceLimit,
+  'payment_disabled' => s.accountPlanErrorPaymentDisabled,
+  'plan_not_purchasable' => s.accountPlanErrorNotPurchasable,
+  'plan_already_owned' => s.accountPlanErrorAlreadyOwned,
+  'gateway_error' => s.accountPlanErrorGateway,
+  'not_an_upgrade' => s.accountPlanErrorNotUpgrade,
+  'plan_tier_not_higher' => s.accountPlanErrorTierNotHigher,
+  'origin_id_taken' => s.accountOriginIdErrorTaken,
+  'origin_id_already_changed' => s.accountOriginIdErrorAlreadyChanged,
+  'origin_id_change_not_allowed' => s.accountOriginIdErrorNotAllowed,
   'validation_error' =>
     e.message.isNotEmpty ? e.message : s.accountErrorValidation,
   'network_error' => s.accountErrorNetwork,
@@ -12048,6 +12315,956 @@ void _showChangeEmailDialog(BuildContext context, String currentEmail) {
     barrierDismissible: false,
     builder: (_) => _ChangeEmailDialog(currentEmail: currentEmail),
   );
+}
+
+void _showOriginIdEditDialog(BuildContext context, int? currentOriginId) {
+  showShadDialog(
+    context: context,
+    // FluxDown 弹出层无进出场动画（rule: shad-overlay-no-animation）。
+    animateIn: const [],
+    animateOut: const [],
+    builder: (_) => _OriginIdEditDialog(currentOriginId: currentOriginId),
+  );
+}
+
+void _showNicknameEditDialog(BuildContext context, String currentNickname) {
+  showShadDialog(
+    context: context,
+    // FluxDown 弹出层无进出场动画（rule: shad-overlay-no-animation）。
+    animateIn: const [],
+    animateOut: const [],
+    builder: (_) => _NicknameEditDialog(currentNickname: currentNickname),
+  );
+}
+
+// ─────────────────────────────────────────────
+// 套餐购买（微信 Native 扫码，见 local://pay-contract.md）
+// ─────────────────────────────────────────────
+
+void _showPlanPurchaseDialog(BuildContext context) {
+  showShadDialog(
+    context: context,
+    barrierColor: AppColors.of(context).dialogBarrier,
+    animateIn: const [],
+    animateOut: const [],
+    builder: (_) => const _PlanPurchaseDialog(),
+  );
+}
+
+/// 套餐图标名（服务端 icon 字段，语义化名称）→ LucideIcons；未收录时兜底皇冠图标。
+IconData _planIcon(String name) => switch (name) {
+  'crown' => LucideIcons.crown,
+  'rocket' => LucideIcons.rocket,
+  'star' => LucideIcons.star,
+  'gem' => LucideIcons.gem,
+  'diamond' => LucideIcons.diamond,
+  'zap' => LucideIcons.zap,
+  'shield' => LucideIcons.shield,
+  'sparkles' => LucideIcons.sparkles,
+  _ => LucideIcons.crown,
+};
+
+/// "#RRGGBB"/"#AARRGGBB" → Color；格式非法返回 null，调用方自行兜底。
+Color? _tryParseHexColor(String hex) {
+  final h = hex.trim().replaceFirst('#', '');
+  if (h.length != 6 && h.length != 8) return null;
+  final value = int.tryParse(h, radix: 16);
+  if (value == null) return null;
+  return Color(h.length == 6 ? 0xFF000000 | value : value);
+}
+
+/// 编号后缀：`{base} No.{编号补零至 digits 位}`；[ordinal] 为 null 时原样返回
+/// base（契约约定：编号只在能拿到具体编号的场景显示，不猜测/不占位）。
+String _withMembershipOrdinal(String base, int? ordinal, int digits) {
+  if (ordinal == null) return base;
+  final d = digits < 1 ? 1 : (digits > 6 ? 6 : digits);
+  return '$base No.${ordinal.toString().padLeft(d, '0')}';
+}
+
+/// 分 → 元两位小数；CNY 显示 "¥" 前缀，其余货币显示代码前缀（见契约「金额展示」）。
+String _formatMinorAmount(int minor, String currency) {
+  final yuan = (minor / 100).toStringAsFixed(2);
+  return currency.toUpperCase() == 'CNY'
+      ? '¥$yuan'
+      : '${currency.toUpperCase()} $yuan';
+}
+
+/// mm:ss 倒计时文案。
+String _formatCountdown(int seconds) {
+  final clamped = seconds < 0 ? 0 : seconds;
+  final m = (clamped ~/ 60).toString().padLeft(2, '0');
+  final sec = (clamped % 60).toString().padLeft(2, '0');
+  return '$m:$sec';
+}
+
+/// 订单剩余支付秒数；[CloudOrder.expiresAt] 非法或已过期兜底 0。
+int _orderRemainingSeconds(CloudOrder order) {
+  final expires = DateTime.tryParse(order.expiresAt);
+  if (expires == null) return 0;
+  final diff = expires.toLocal().difference(DateTime.now());
+  return diff.isNegative ? 0 : diff.inSeconds;
+}
+
+enum _PlanPurchaseStep { select, paying, success }
+
+/// 购买套餐对话框：选套餐 → 微信扫码支付（2s 轮询订单状态）→ 结果。
+/// 风格同 [_LoginDialogContent]（ShadDialog + 局部 State，不进 CloudAuthService）。
+class _PlanPurchaseDialog extends StatefulWidget {
+  const _PlanPurchaseDialog();
+
+  @override
+  State<_PlanPurchaseDialog> createState() => _PlanPurchaseDialogState();
+}
+
+class _PlanPurchaseDialogState extends State<_PlanPurchaseDialog> {
+  _PlanPurchaseStep _step = _PlanPurchaseStep.select;
+
+  bool _loadingPlans = true;
+  List<CloudPlan> _plans = const [];
+  String? _loadError;
+
+  /// 选套餐步的横幅提示：订单过期/失败回退时展示，重新选套餐后清空。
+  String? _notice;
+
+  CloudPlan? _selected;
+  bool _creatingOrder = false;
+  String? _createError;
+
+  CloudOrder? _order;
+  Timer? _pollTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadPlans());
+    // 抵扣基数来自 /me（purchaseCreditMinor）：打开时刷一次保证升级价新鲜；
+    // 监听 auth service 以便刷新完成后重算各卡片的升级价。
+    CloudAuthService.instance.addListener(_onAuthChanged);
+    unawaited(
+      CloudAuthService.instance.refreshProfile().catchError((_) {
+        // 拉取失败按 0 抵扣展示，服务端下单时仍会按真实抵扣计算。
+      }),
+    );
+  }
+
+  void _onAuthChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    CloudAuthService.instance.removeListener(_onAuthChanged);
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 可能在 initState 里被调用：此时不允许触碰 InheritedWidget（LocaleScope.of），
+  /// 错误文案一律用免 context 的 [currentS] 解析。
+  Future<void> _loadPlans() async {
+    setState(() {
+      _loadingPlans = true;
+      _loadError = null;
+    });
+    try {
+      final catalog = await CloudClient.instance.getPlansCatalog();
+      final purchasable =
+          catalog
+              .where((p) => p.code != 'free' && p.effectivePriceMinor > 0)
+              .toList()
+            ..sort((a, b) => a.sort.compareTo(b.sort));
+      if (!mounted) return;
+      setState(() {
+        _plans = purchasable;
+        _loadingPlans = false;
+      });
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingPlans = false;
+        _loadError = _cloudErrorText(currentS, e);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingPlans = false;
+        _loadError = e.toString();
+      });
+    }
+  }
+
+  Future<void> _purchase() async {
+    final selected = _selected;
+    if (selected == null || _creatingOrder) return;
+    final s = LocaleScope.of(context);
+    setState(() {
+      _creatingOrder = true;
+      _createError = null;
+    });
+    try {
+      final order = await CloudClient.instance.createOrder(
+        selected.code,
+        deviceId: DeviceIdentity.deviceId(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _order = order;
+        _creatingOrder = false;
+        _step = _PlanPurchaseStep.paying;
+      });
+      _startPolling();
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _creatingOrder = false;
+        _createError = _cloudErrorText(s, e);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _creatingOrder = false;
+        _createError = e.toString();
+      });
+    }
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_poll()),
+    );
+  }
+
+  /// 每 2s 查单：paid → 刷新 /me 后进入成功态；expired/failed → 回到选套餐步
+  /// 并提示重新下单；网络抖动静默忽略、下一轮重试，其余 API 异常终止轮询并
+  /// 回退选套餐步展示错误文案。
+  Future<void> _poll() async {
+    final order = _order;
+    if (order == null) return;
+    final s = LocaleScope.of(context);
+    try {
+      final updated = await CloudClient.instance.getOrder(order.orderNo);
+      if (!mounted) return;
+      if (updated.isPaid) {
+        _pollTimer?.cancel();
+        setState(() => _order = updated);
+        try {
+          await CloudAuthService.instance.refreshProfile();
+        } catch (_) {
+          // 刷新失败不阻断成功态展示；plan chip 会在下次拉取时兜底更新。
+        }
+        if (!mounted) return;
+        setState(() => _step = _PlanPurchaseStep.success);
+      } else if (updated.isExpired || updated.isFailed) {
+        _pollTimer?.cancel();
+        setState(() {
+          _order = null;
+          _selected = null;
+          _step = _PlanPurchaseStep.select;
+          _notice = s.accountPlanOrderExpired;
+        });
+      } else {
+        setState(() => _order = updated);
+      }
+    } on CloudApiException catch (e) {
+      _pollTimer?.cancel();
+      if (!mounted) return;
+      setState(() {
+        _order = null;
+        _selected = null;
+        _step = _PlanPurchaseStep.select;
+        _notice = _cloudErrorText(s, e);
+      });
+    } catch (_) {
+      // 网络抖动：静默忽略，下一轮重试（同设备名册刷新的容错策略）。
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    return switch (_step) {
+      _PlanPurchaseStep.select => _buildSelect(s, c),
+      _PlanPurchaseStep.paying => _buildPaying(s, c),
+      _PlanPurchaseStep.success => _buildSuccess(s, c),
+    };
+  }
+
+  Widget _buildSelect(S s, AppColors c) {
+    final currentPlan = CloudAuthService.instance.user?.plan;
+    // 标题与购买按钮分别经 titlePinned / actions(actionsPinned 缺省 true) 钉住，
+    // 只有套餐列表在 ShadDialog 内置滚动区内滚动——套餐再多也不会把按钮挤出视口。
+    return ShadDialog(
+      title: Text(s.accountPlanDialogTitle),
+      constraints: const BoxConstraints(maxWidth: 460, maxHeight: 580),
+      titlePinned: true,
+      actionsAxis: Axis.vertical,
+      actions: [
+        if (_createError != null)
+          SizedBox(
+            width: double.infinity,
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                _createError!,
+                style: TextStyle(fontSize: 11.5, color: c.statusError),
+              ),
+            ),
+          ),
+        ShadButton(
+          width: double.infinity,
+          enabled: _selected != null && !_creatingOrder,
+          onPressed: _purchase,
+          child: _creatingOrder
+              ? SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.5,
+                    color: c.dialogBg,
+                  ),
+                )
+              : Text(s.accountPlanBuy),
+        ),
+      ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 4),
+          if (_notice != null) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: c.statusWarning.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                _notice!,
+                style: TextStyle(fontSize: 11.5, color: c.statusWarning),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+          _buildPlanList(s, c, currentPlan),
+        ],
+      ),
+    );
+  }
+
+  /// 已购套餐（含后台授予）的基准价（分）；[_plans] 未含该 code（如已下架）时按 0
+  /// 处理——与服务端 order.rs 的兜底口径一致，不做客户端主观拦截。
+  int _ownedPlanPriceMinor(String? code) {
+    if (code == null) return 0;
+    for (final plan in _plans) {
+      if (plan.code == code) return plan.priceMinor;
+    }
+    return 0;
+  }
+
+  Widget _buildPlanList(S s, AppColors c, String? currentPlan) {
+    if (_loadingPlans) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 40),
+        child: Center(
+          child: SizedBox(
+            width: 20,
+            height: 20,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        ),
+      );
+    }
+    final loadError = _loadError;
+    if (loadError != null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 24),
+        child: Column(
+          children: [
+            Icon(LucideIcons.circleAlert, size: 22, color: c.statusError),
+            const SizedBox(height: 8),
+            Text(
+              loadError,
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: c.textMuted),
+            ),
+            const SizedBox(height: 10),
+            ShadButton.outline(
+              size: ShadButtonSize.sm,
+              onPressed: () => unawaited(_loadPlans()),
+              child: Text(s.accountDevicesRetry),
+            ),
+          ],
+        ),
+      );
+    }
+    if (_plans.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 40),
+        child: Center(
+          child: Text(
+            s.accountPlanEmpty,
+            style: TextStyle(fontSize: 12.5, color: c.textMuted),
+          ),
+        ),
+      );
+    }
+    final ownedPriceMinor = _ownedPlanPriceMinor(currentPlan);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final plan in _plans) ...[
+          _PlanCard(
+            plan: plan,
+            isCurrent: plan.code == currentPlan,
+            isSelected: _selected?.code == plan.code,
+            creditMinor: CloudAuthService.instance.purchaseCreditMinor,
+            ownedPriceMinor: ownedPriceMinor,
+            membershipOrdinal: CloudAuthService.instance.user?.membershipOrdinal,
+            onTap: () => setState(() {
+              _selected = plan;
+              _notice = null;
+            }),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildPaying(S s, AppColors c) {
+    final order = _order!;
+    final remaining = _orderRemainingSeconds(order);
+    final codeUrl = order.codeUrl;
+    return ShadDialog(
+      title: Text(s.accountPlanPayingTitle),
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 4),
+          // 白底容器：暗色主题下二维码前景/背景对比不足会导致扫码失败，
+          // 强制白底 + 内边距不受外层主题影响。
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: codeUrl != null && codeUrl.isNotEmpty
+                ? QrImageView(
+                    data: codeUrl,
+                    size: 180,
+                    backgroundColor: Colors.white,
+                    padding: EdgeInsets.zero,
+                  )
+                : SizedBox(
+                    width: 180,
+                    height: 180,
+                    child: Center(
+                      child: Icon(
+                        LucideIcons.qrCode,
+                        size: 40,
+                        color: c.textMuted,
+                      ),
+                    ),
+                  ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            _formatMinorAmount(order.amountMinor, order.currency),
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              color: c.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 6),
+          if (order.creditMinor > 0) ...[
+            const SizedBox(height: 4),
+            Text(
+              s.accountPlanCreditApplied(
+                _formatMinorAmount(order.creditMinor, order.currency),
+              ),
+              style: TextStyle(fontSize: 11, color: c.textMuted),
+            ),
+            const SizedBox(height: 2),
+          ],
+          Text(
+            s.accountPlanScanHint,
+            style: TextStyle(fontSize: 12, color: c.textMuted),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            s.accountPlanExpiresIn(_formatCountdown(remaining)),
+            style: TextStyle(
+              fontSize: 11,
+              color: remaining <= 0 ? c.statusError : c.textMuted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSuccess(S s, AppColors c) {
+    return ShadDialog(
+      constraints: const BoxConstraints(maxWidth: 340),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 4),
+          Icon(LucideIcons.circleCheck, size: 40, color: c.statusSuccess),
+          const SizedBox(height: 12),
+          Text(
+            s.accountPlanPaidSuccess,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              color: c.textPrimary,
+            ),
+          ),
+          const SizedBox(height: 16),
+          ShadButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(s.close),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 单个套餐卡片：名称/badge/描述/highlights/价格；有活动时展示活动价+原价划线+
+/// 档位 label + 限量进度；已拥有的套餐标"当前套餐"且不可点选。
+class _PlanCard extends StatelessWidget {
+  final CloudPlan plan;
+  final bool isCurrent;
+  final bool isSelected;
+
+  /// 差价升级抵扣基数（当前套餐等效已付额，分）；0 = 无抵扣。
+  final int creditMinor;
+
+  /// 已购套餐（含后台授予，来源无关）的基准价（分）；0 = 免费/无套餐，不设升级门槛。
+  final int ownedPriceMinor;
+
+  /// 当前用户在其当前套餐下的会员编号；仅当 [isCurrent] 且 plan.badgeNumbered
+  /// 时才会拼进徽标文案（非当前套餐卡片不猜测/不显示编号，见需求约束）。
+  final int? membershipOrdinal;
+  final VoidCallback onTap;
+
+  const _PlanCard({
+    required this.plan,
+    required this.isCurrent,
+    required this.isSelected,
+    required this.creditMinor,
+    required this.ownedPriceMinor,
+    this.membershipOrdinal,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final m = AppMetrics.of(context);
+    final planColor = _tryParseHexColor(plan.color) ?? c.accent;
+    final badgeColor = _tryParseHexColor(plan.badgeColor) ?? c.accent;
+    final campaign = plan.campaign;
+    final stage = campaign?.currentStage;
+    final active = isSelected && !isCurrent;
+    // 买断制「只可升不可降」：已购套餐（不论购买/后台授予）基准价不低于本套餐基准价即
+    // 不可购买——与获得方式无关，服务端 order.rs 同口径拦截（plan_tier_not_higher）。
+    final tierBlocked =
+        !isCurrent && ownedPriceMinor > 0 && plan.priceMinor <= ownedPriceMinor;
+    // 目标价不高于已付额 = 非升级（服务端 not_an_upgrade 同口径），置灰不可选。
+    final creditBlocked =
+        !isCurrent &&
+        creditMinor > 0 &&
+        plan.effectivePriceMinor <= creditMinor;
+    final blocked = tierBlocked || creditBlocked;
+    final disabled = isCurrent || blocked;
+    return Opacity(
+      opacity: disabled ? 0.6 : 1,
+      child: GestureDetector(
+        onTap: disabled ? null : onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: active ? m.soft(c.accent) : c.surface1,
+            borderRadius: m.brCard,
+            border: Border.all(
+              color: active ? c.accent : m.borderFade(c.border),
+              width: active ? 1.5 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 28,
+                    height: 28,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: planColor.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(
+                      _planIcon(plan.icon),
+                      size: 15,
+                      color: planColor,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        Text(
+                          plan.name,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                        if (plan.badge != null && plan.badge!.isNotEmpty)
+                          _PlanTag(
+                            text: _withMembershipOrdinal(
+                              plan.badge!,
+                              isCurrent && plan.badgeNumbered
+                                  ? membershipOrdinal
+                                  : null,
+                              plan.badgeNumberDigits,
+                            ),
+                            color: badgeColor,
+                            background: badgeColor.withValues(alpha: 0.14),
+                            style: plan.badgeStyle,
+                          ),
+                        if (isCurrent)
+                          _PlanTag(
+                            text: s.accountPlanCurrent,
+                            color: c.textMuted,
+                            background: c.surface2,
+                          ),
+                        if (blocked)
+                          _PlanTag(
+                            text: s.accountPlanLowerTier,
+                            color: c.textMuted,
+                            background: c.surface2,
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _PlanPrice(
+                    plan: plan,
+                    stage: stage,
+                    creditMinor: isCurrent || blocked ? 0 : creditMinor,
+                  ),
+                ],
+              ),
+              if (plan.description.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  plan.description,
+                  style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                ),
+              ],
+              if (plan.highlights.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final h in plan.highlights)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: c.surface2,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          h,
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: c.textSecondary,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+              if (campaign != null && stage != null && stage.quota != null) ...[
+                const SizedBox(height: 10),
+                _CampaignProgress(campaign: campaign, stage: stage),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 套餐徽标/状态标签 pill。[style] 仅供"套餐徽标"场景使用（服务端
+/// admin_plans.rs::BADGE_STYLES 白名单：outline | solid | medal | ribbon）；
+/// "当前套餐"/"不可选" 等固定态标签不传该参数，走原有纯色胶囊（默认 'plain'）。
+/// 约束：全部纯色/描边/双色块渲染，不使用任何渐变。
+class _PlanTag extends StatelessWidget {
+  final String text;
+  final Color color;
+  final Color background;
+  final String style;
+
+  const _PlanTag({
+    required this.text,
+    required this.color,
+    required this.background,
+    this.style = 'plain',
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    switch (style) {
+      case 'outline':
+        // 描边胶囊：粗描边 + 图标 + 浅色底（当前默认风格的强化版）。
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+          decoration: BoxDecoration(
+            border: Border.all(color: color, width: 1.3),
+            color: color.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.crown, size: 9, color: color),
+              const SizedBox(width: 3),
+              Text(
+                text,
+                style: TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w600,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+        );
+      case 'solid':
+        // 实心胶囊：底色填充，白字，视觉权重最高，适合小空间一眼可见。
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            text,
+            style: const TextStyle(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+            ),
+          ),
+        );
+      case 'medal':
+        // 双色勋章式：左图标块（实心）+ 右文字块（描边），质感偏认证/勋章。
+        return Container(
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            border: Border.all(color: color, width: 1),
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 5,
+                  vertical: 1.5,
+                ),
+                color: color,
+                child: const Icon(
+                  LucideIcons.crown,
+                  size: 9,
+                  color: Colors.white,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 6,
+                  vertical: 1.5,
+                ),
+                child: Text(
+                  text,
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w600,
+                    color: color,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      case 'ribbon':
+        // 角标丝带本应贴在卡片右上角斜切展示（只适合有边角的卡片容器，不适合
+        // 行内 pill 场景，见需求文档）；此处简化为「实心 + 更粗字重 + 加宽字
+        // 距」近似，与 solid 拉开可辨识差异——这是有意的简化实现，非缺陷。
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            text,
+            style: const TextStyle(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.6,
+              color: Colors.white,
+            ),
+          ),
+        );
+      case 'plain':
+      default:
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+          decoration: BoxDecoration(
+            color: background,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        );
+    }
+  }
+}
+
+/// 价格块：大字实付价（有抵扣时 = 生效价 − 抵扣额），其下依次可见
+/// 划线原价（活动或抵扣时）、档位 label、抵扣说明。
+class _PlanPrice extends StatelessWidget {
+  final CloudPlan plan;
+  final CloudPlanCampaignStage? stage;
+
+  /// 差价升级抵扣额（分）；0 = 全款展示。
+  final int creditMinor;
+
+  const _PlanPrice({required this.plan, this.stage, this.creditMinor = 0});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final hasCampaign = plan.campaign != null;
+    final hasCredit = creditMinor > 0;
+    final payable = plan.effectivePriceMinor - creditMinor;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          _formatMinorAmount(
+            hasCredit ? payable : plan.effectivePriceMinor,
+            plan.currency,
+          ),
+          style: TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w700,
+            color: c.accent,
+          ),
+        ),
+        // 划线价：抵扣时划生效价（活动价），否则活动时划套餐基础价。
+        if (hasCredit)
+          Text(
+            _formatMinorAmount(plan.effectivePriceMinor, plan.currency),
+            style: TextStyle(
+              fontSize: 10.5,
+              color: c.textMuted,
+              decoration: TextDecoration.lineThrough,
+            ),
+          )
+        else if (hasCampaign)
+          Text(
+            _formatMinorAmount(plan.priceMinor, plan.currency),
+            style: TextStyle(
+              fontSize: 10.5,
+              color: c.textMuted,
+              decoration: TextDecoration.lineThrough,
+            ),
+          ),
+        if (hasCampaign && stage != null && stage!.label.isNotEmpty)
+          Text(
+            stage!.label,
+            style: TextStyle(fontSize: 9.5, color: c.textMuted),
+          ),
+        if (hasCredit)
+          Text(
+            s.accountPlanCreditApplied(
+              _formatMinorAmount(creditMinor, plan.currency),
+            ),
+            style: TextStyle(fontSize: 9.5, color: c.textMuted),
+          ),
+      ],
+    );
+  }
+}
+
+/// 活动限量档位进度：进度条 + "已售 x/quota" 文案。
+class _CampaignProgress extends StatelessWidget {
+  final CloudPlanCampaign campaign;
+  final CloudPlanCampaignStage stage;
+
+  const _CampaignProgress({required this.campaign, required this.stage});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final m = AppMetrics.of(context);
+    final quota = stage.quota!;
+    final sold = campaign.currentStageSold;
+    final ratio = quota <= 0 ? 1.0 : (sold / quota).clamp(0.0, 1.0);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ClipRRect(
+          borderRadius: m.brXs,
+          child: LinearProgressIndicator(
+            value: ratio,
+            backgroundColor: c.surface2,
+            valueColor: AlwaysStoppedAnimation<Color>(c.accent),
+            minHeight: 4,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          s.accountPlanLimitedSold(sold, quota),
+          style: TextStyle(fontSize: 10, color: c.textMuted),
+        ),
+      ],
+    );
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -12391,8 +13608,14 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
                   const SizedBox(height: 12),
                   if (code != null && code.isNotEmpty) ...[
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      decoration: BoxDecoration(color: c.surface2, borderRadius: m.brInput),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.surface2,
+                        borderRadius: m.brInput,
+                      ),
                       child: Row(
                         children: [
                           Expanded(
@@ -12403,7 +13626,9 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
                                 fontWeight: FontWeight.w700,
                                 letterSpacing: 2,
                                 color: c.textPrimary,
-                                fontFeatures: const [FontFeature.tabularFigures()],
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
                               ),
                             ),
                           ),
@@ -12422,8 +13647,14 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
                     ),
                   ] else if (_expiredCodeSnapshot != null) ...[
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      decoration: BoxDecoration(color: c.surface2, borderRadius: m.brInput),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.surface2,
+                        borderRadius: m.brInput,
+                      ),
                       child: Text(
                         _expiredCodeSnapshot!.split('').join('  '),
                         style: TextStyle(
@@ -13532,6 +14763,115 @@ class _RenameDeviceDialogState extends State<_RenameDeviceDialog> {
   }
 }
 
+class _NicknameEditDialog extends StatefulWidget {
+  final String currentNickname;
+
+  const _NicknameEditDialog({required this.currentNickname});
+
+  @override
+  State<_NicknameEditDialog> createState() => _NicknameEditDialogState();
+}
+
+class _NicknameEditDialogState extends State<_NicknameEditDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.currentNickname,
+  );
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final s = LocaleScope.of(context);
+    final nickname = _controller.text.trim();
+    if (nickname.isEmpty || nickname.length > 32) {
+      setState(() => _error = s.accountNicknameEditInvalid);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await CloudAuthService.instance.changeNickname(nickname);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      FluxSonner.of(context).show(
+        ShadToast(
+          title: Text(s.accountNicknameEditSuccess),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = _cloudErrorText(s, e);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    return ShadDialog(
+      title: Text(s.accountNicknameEditTitle),
+      constraints: const BoxConstraints(maxWidth: 360),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 8),
+          ShadInput(
+            controller: _controller,
+            enabled: !_busy,
+            autofocus: true,
+            onSubmitted: (_) => _submit(),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 6),
+            Text(
+              _error!,
+              style: TextStyle(fontSize: 11.5, color: c.statusError),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: ShadButton.outline(
+                  enabled: !_busy,
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(s.cancel),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ShadButton(
+                  enabled: !_busy,
+                  onPressed: _submit,
+                  child: Text(s.confirm),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _DeleteDeviceDialog extends StatefulWidget {
   final CloudDevice device;
   final bool isCurrent;
@@ -14008,6 +15348,221 @@ class _ChangeEmailDialogState extends State<_ChangeEmailDialog> {
                           ),
                         )
                       : Text(s.accountEmailChangeSendNewCode),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// Origin ID 自助修改对话框：数字输入 + 骰子随机建议 + 提交前可用性预检，
+// 全局仅可成功一次（见契约 PUT /me/origin-id）。
+// ─────────────────────────────────────────────
+
+class _OriginIdEditDialog extends StatefulWidget {
+  final int? currentOriginId;
+
+  const _OriginIdEditDialog({this.currentOriginId});
+
+  @override
+  State<_OriginIdEditDialog> createState() => _OriginIdEditDialogState();
+}
+
+class _OriginIdEditDialogState extends State<_OriginIdEditDialog> {
+  final _controller = TextEditingController();
+
+  bool _busy = false;
+  bool _rolling = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  /// 骰子按钮：拉取一个随机建议值填入输入框（不锁定，仍需提交时预检+服务端裁决）。
+  Future<void> _rollRandom() async {
+    final s = LocaleScope.of(context);
+    setState(() {
+      _rolling = true;
+      _error = null;
+    });
+    try {
+      final value = await CloudAuthService.instance.randomOriginId();
+      if (!mounted) return;
+      setState(() {
+        _rolling = false;
+        _controller.text = value.toString();
+      });
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _rolling = false;
+        _error = _cloudErrorText(s, e);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _rolling = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  /// 本地校验 → 可用性预检 → 提交；三步任一失败都在对话框内展示错误，不关闭。
+  Future<void> _submit() async {
+    final s = LocaleScope.of(context);
+    final value = int.tryParse(_controller.text.trim());
+    if (value == null || value < 10000) {
+      setState(() => _error = s.accountOriginIdInvalid);
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final check = await CloudAuthService.instance.checkOriginId(value);
+      if (!check.available) {
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _error = check.reason == 'taken'
+              ? s.accountOriginIdErrorTaken
+              : s.accountOriginIdInvalid;
+        });
+        return;
+      }
+      await CloudAuthService.instance.changeOriginId(value);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      FluxSonner.of(context).show(
+        ShadToast(
+          title: Text(s.accountOriginIdEditSuccess),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } on CloudApiException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = _cloudErrorText(s, e);
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final busy = _busy || _rolling;
+    return ShadDialog(
+      title: Text(s.accountOriginIdEditTitle),
+      constraints: const BoxConstraints(maxWidth: 400),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 4),
+          Text(
+            s.accountOriginIdEditDesc,
+            style: TextStyle(fontSize: 12, height: 1.5, color: c.textMuted),
+          ),
+          const SizedBox(height: 14),
+          ShadInput(
+            controller: _controller,
+            placeholder: Text(s.accountOriginIdEditPlaceholder),
+            enabled: !busy,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            trailing: ShadTooltip(
+              effects: const [],
+              builder: (_) => Text(s.accountOriginIdEditRoll),
+              child: MouseRegion(
+                cursor: busy ? MouseCursor.defer : SystemMouseCursors.click,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: busy ? null : () => unawaited(_rollRandom()),
+                  child: _rolling
+                      ? SizedBox(
+                          width: 15,
+                          height: 15,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: c.textMuted,
+                          ),
+                        )
+                      : Icon(LucideIcons.dices, size: 15, color: c.textMuted),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // 仅一次警示条：同设备删除确认弹窗的告警条视觉规范。
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: c.statusError.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(LucideIcons.triangleAlert, size: 14, color: c.statusError),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    s.accountOriginIdEditWarning,
+                    style: TextStyle(fontSize: 11.5, color: c.statusError),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              _error!,
+              style: TextStyle(fontSize: 11.5, color: c.statusError),
+            ),
+          ],
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: ShadButton.outline(
+                  enabled: !busy,
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: Text(s.cancel),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ShadButton(
+                  enabled: !busy,
+                  onPressed: _submit,
+                  child: _busy
+                      ? SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 1.5,
+                            color: c.dialogBg,
+                          ),
+                        )
+                      : Text(s.accountOriginIdEditConfirm),
                 ),
               ),
             ],
@@ -14564,12 +16119,18 @@ class _RegisterDialogContentState extends State<_RegisterDialogContent> {
     }
   }
 
+  static final _emailRe = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+
   Future<void> _submitForm() async {
     final s = LocaleScope.of(context);
     final email = _emailController.text.trim();
     final password = _passwordController.text;
-    if (email.isEmpty || password.length < 8) {
-      setState(() => _error = s.accountErrorValidation);
+    if (!_emailRe.hasMatch(email)) {
+      setState(() => _error = s.accountErrorInvalidEmail);
+      return;
+    }
+    if (password.length < 8) {
+      setState(() => _error = s.accountErrorPasswordTooShort);
       return;
     }
     await _register();

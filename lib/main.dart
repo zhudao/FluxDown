@@ -693,7 +693,7 @@ class _FluxDownAppState extends State<FluxDownApp>
         'FluxDownApp',
         'startMinimizedToTray enabled, hiding main window',
       );
-      windowManager.hide();
+      unawaited(TrayService.instance.hideToTray());
     }
 
     if (_settingsForExternal.loaded) {
@@ -771,8 +771,7 @@ class _FluxDownAppState extends State<FluxDownApp>
       logInfo('FluxDownApp', 'received second-instance args: $args');
 
       // Bring window to foreground.
-      await windowManager.show();
-      await windowManager.focus();
+      await restoreMainWindow();
 
       // 协议 URL（浏览器扩展协议模式 / 网页链接 / ed2k 链接唤起时，
       // 系统启动第二实例，参数经 WM_COPYDATA 转发到本主实例）。
@@ -1054,10 +1053,12 @@ class _FluxDownAppState extends State<FluxDownApp>
                             // 快速淡入替代 Material 默认 300ms 转场，降低动效感知
                             return PageRouteBuilder<T>(
                               settings: settings,
-                              transitionDuration:
-                                  const Duration(milliseconds: 120),
-                              reverseTransitionDuration:
-                                  const Duration(milliseconds: 100),
+                              transitionDuration: const Duration(
+                                milliseconds: 120,
+                              ),
+                              reverseTransitionDuration: const Duration(
+                                milliseconds: 100,
+                              ),
                               pageBuilder: (context, _, _) => builder(context),
                               transitionsBuilder:
                                   (context, animation, _, child) {

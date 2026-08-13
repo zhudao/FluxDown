@@ -49,6 +49,11 @@ class CloudAuthService extends ChangeNotifier {
   Entitlements? _entitlements;
   Entitlements? get entitlements => _entitlements;
 
+  /// 当前套餐的等效已付额（分），差价升级抵扣基数；随 [refreshProfile] 更新，
+  /// 不持久化（仅购买对话框展示用，会话内拉取即可）。
+  int _purchaseCreditMinor = 0;
+  int get purchaseCreditMinor => _purchaseCreditMinor;
+
   /// 当前设备的持久标识，供设备列表 UI 判断"是否当前设备"。
   String get currentDeviceId => DeviceIdentity.deviceId();
 
@@ -197,6 +202,7 @@ class CloudAuthService extends ChangeNotifier {
     final profile = await CloudClient.instance.me();
     _user = profile.user;
     _entitlements = profile.entitlements;
+    _purchaseCreditMinor = profile.purchaseCreditMinor;
     await _persistUser();
     notifyListeners();
   }
@@ -229,6 +235,35 @@ class CloudAuthService extends ChangeNotifier {
     );
     _user = profile.user;
     _entitlements = profile.entitlements;
+    await _persistUser();
+    notifyListeners();
+  }
+
+  // ── Origin ID 自助修改 ───────────────────────────────────────────────
+
+  /// 拉取一个随机建议 Origin ID（不锁定，仅供输入框预填）。
+  Future<int> randomOriginId() => CloudClient.instance.randomOriginId();
+
+  /// 提交前预检：指定 Origin ID 是否可用。
+  Future<OriginIdCheckResult> checkOriginId(int value) =>
+      CloudClient.instance.checkOriginId(value);
+
+  /// 提交新 Origin ID（全局仅可成功一次），成功后刷新本地用户/套餐能力快照。
+  Future<void> changeOriginId(int originId) async {
+    final profile = await CloudClient.instance.changeOriginId(originId);
+    _user = profile.user;
+    _entitlements = profile.entitlements;
+    _purchaseCreditMinor = profile.purchaseCreditMinor;
+    await _persistUser();
+    notifyListeners();
+  }
+
+  /// 提交新昵称，成功后刷新本地用户/套餐能力快照。
+  Future<void> changeNickname(String nickname) async {
+    final profile = await CloudClient.instance.changeNickname(nickname);
+    _user = profile.user;
+    _entitlements = profile.entitlements;
+    _purchaseCreditMinor = profile.purchaseCreditMinor;
     await _persistUser();
     notifyListeners();
   }
@@ -297,6 +332,7 @@ class CloudAuthService extends ChangeNotifier {
   Future<void> _clearSession() async {
     _user = null;
     _entitlements = null;
+    _purchaseCreditMinor = 0;
     _devices = const [];
     _status = CloudAuthStatus.unauthenticated;
     CloudClient.instance.accessToken = null;
