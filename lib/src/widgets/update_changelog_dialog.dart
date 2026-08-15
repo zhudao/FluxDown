@@ -5,6 +5,7 @@ import '../i18n/locale_provider.dart';
 import '../services/update_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_metrics.dart';
+import 'markdown_body.dart';
 
 /// Show the update changelog dialog with a timeline of new releases.
 void showUpdateChangelogDialog(
@@ -139,6 +140,30 @@ class _ChangelogDialogContent extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────
+// Bilingual release body
+// ─────────────────────────────────────────────
+
+/// 双语 release body 的语言标记（由 release 工作流翻译步骤写入），
+/// 与官网 ChangelogSection.tsx 的解析契约一致。
+final _langMarkerRe = RegExp(r'<!--\s*fluxdown:lang:(zh|en)\s*-->');
+
+/// 从双语 release body 中取出当前语言区块。
+/// 无标记（历史版本 / 翻译失败回退）时原样返回全文。
+String pickLocaleBody(String body, String locale) {
+  final matches = _langMarkerRe.allMatches(body).toList();
+  if (matches.isEmpty) return body;
+
+  final sections = <String, String>{};
+  for (var i = 0; i < matches.length; i++) {
+    final start = matches[i].end;
+    final end = i + 1 < matches.length ? matches[i + 1].start : body.length;
+    sections[matches[i].group(1)!] = body.substring(start, end).trim();
+  }
+  final lang = locale.startsWith('zh') ? 'zh' : 'en';
+  return sections[lang] ?? sections['zh'] ?? body;
+}
+
+// ─────────────────────────────────────────────
 // Single release entry
 // ─────────────────────────────────────────────
 
@@ -226,7 +251,9 @@ class _ReleaseEntry extends StatelessWidget {
               const SizedBox(height: 8),
               // Markdown body
               if (release.body.isNotEmpty)
-                _MarkdownBody(markdown: release.body),
+                MarkdownBody(
+                  markdown: pickLocaleBody(release.body, currentLocale),
+                ),
             ],
           ),
         ),
@@ -281,184 +308,5 @@ class _ReleaseEntry extends StatelessWidget {
     } catch (_) {
       return '';
     }
-  }
-}
-
-// ─────────────────────────────────────────────
-// Simple Markdown renderer
-// ─────────────────────────────────────────────
-
-class _MarkdownBody extends StatelessWidget {
-  final String markdown;
-
-  const _MarkdownBody({required this.markdown});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = AppColors.of(context);
-    final lines = markdown.split('\n');
-    final widgets = <Widget>[];
-
-    for (final line in lines) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty) continue;
-
-      if (trimmed.startsWith('## ')) {
-        // H2 heading
-        widgets.add(
-          Padding(
-            padding: const EdgeInsets.only(top: 10, bottom: 4),
-            child: Text(
-              trimmed.substring(3),
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: c.textPrimary,
-              ),
-            ),
-          ),
-        );
-      } else if (trimmed.startsWith('### ')) {
-        // H3 heading
-        widgets.add(
-          Padding(
-            padding: const EdgeInsets.only(top: 8, bottom: 3),
-            child: Text(
-              trimmed.substring(4),
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: c.textPrimary,
-              ),
-            ),
-          ),
-        );
-      } else if (trimmed.startsWith('- ')) {
-        // Bullet list item
-        widgets.add(
-          Padding(
-            padding: const EdgeInsets.only(left: 4, top: 2, bottom: 2),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(top: 5.5),
-                  child: Container(
-                    width: 4,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: c.accent,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: _InlineMarkdown(
-                    text: trimmed.substring(2),
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: c.textSecondary,
-                      height: 1.5,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      } else {
-        // Plain paragraph
-        widgets.add(
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 2),
-            child: _InlineMarkdown(
-              text: trimmed,
-              style: TextStyle(
-                fontSize: 12,
-                color: c.textSecondary,
-                height: 1.5,
-              ),
-            ),
-          ),
-        );
-      }
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: widgets,
-    );
-  }
-}
-
-/// Renders inline markdown: **bold** and `code` spans.
-class _InlineMarkdown extends StatelessWidget {
-  final String text;
-  final TextStyle style;
-
-  const _InlineMarkdown({required this.text, required this.style});
-
-  @override
-  Widget build(BuildContext context) {
-    final c = AppColors.of(context);
-    final m = AppMetrics.of(context);
-    return Text.rich(TextSpan(children: _parse(text, c, m)), style: style);
-  }
-
-  List<InlineSpan> _parse(String input, AppColors c, AppMetrics m) {
-    final spans = <InlineSpan>[];
-    // Pattern: **bold** or `code`
-    final regex = RegExp(r'\*\*(.+?)\*\*|`([^`]+)`');
-    int lastEnd = 0;
-
-    for (final match in regex.allMatches(input)) {
-      // Text before this match
-      if (match.start > lastEnd) {
-        spans.add(TextSpan(text: input.substring(lastEnd, match.start)));
-      }
-
-      if (match.group(1) != null) {
-        // **bold**
-        spans.add(
-          TextSpan(
-            text: match.group(1),
-            style: TextStyle(fontWeight: FontWeight.w600, color: c.textPrimary),
-          ),
-        );
-      } else if (match.group(2) != null) {
-        // `code`
-        spans.add(
-          WidgetSpan(
-            alignment: PlaceholderAlignment.middle,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              decoration: BoxDecoration(
-                color: c.surface3,
-                borderRadius: m.brSm,
-              ),
-              child: Text(
-                match.group(2)!,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                  color: c.accent,
-                ),
-              ),
-            ),
-          ),
-        );
-      }
-
-      lastEnd = match.end;
-    }
-
-    // Remaining text
-    if (lastEnd < input.length) {
-      spans.add(TextSpan(text: input.substring(lastEnd)));
-    }
-
-    return spans;
   }
 }
