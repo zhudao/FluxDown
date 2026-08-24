@@ -29,4 +29,4 @@ toml = "1.1.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "native-tls"] }
 
 [target.'cfg(not(windows))'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "rustls-tls-native-roots", "rustls-tls-webpki-roots"] }

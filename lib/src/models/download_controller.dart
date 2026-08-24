@@ -640,12 +640,12 @@ class DownloadController extends ChangeNotifier {
     _safeNotifyListeners();
   }
 
-  /// Ctrl/Shift 修饰键点击任务行（design 契约 §1/§2）：
-  /// - 仅 Shift：按 [taskSelectionRange] 选中 anchor→[taskId] 在
-  ///   [orderedVisibleIds]（当前可见渲染顺序）中的闭区间；未按 Ctrl 时替换
-  ///   现有选择，按住 Ctrl 时与现有选择取并集；anchor 本身不变。锚点缺失或
-  ///   已不在当前可见顺序中（被过滤/分组折叠）时退化为单选 [taskId] 并把
-  ///   锚点收敛到它。
+  /// Ctrl/Shift 修饰键点击任务行：
+  /// - 仅 Shift：按 [taskSelectionRangeForTap] 选中 anchor→[taskId] 在
+  ///   [orderedVisibleIds]（当前可见渲染顺序）中的闭区间；管理模式尚无锚点
+  ///   时，以普通点击选中的任务为锚点。未按 Ctrl 时替换现有选择，按住 Ctrl
+  ///   时与现有选择取并集；anchor 本身不变。锚点缺失或已不在当前可见顺序中
+  ///   （被过滤/分组折叠）时退化为单选 [taskId] 并把锚点收敛到它。
   /// - 仅 Ctrl：等价 [toggleTaskChecked]（切换勾选 + 锚点收敛到 [taskId]）。
   /// 两者都会先进入管理模式。
   void modifierTapTask(
@@ -656,11 +656,14 @@ class DownloadController extends ChangeNotifier {
   }) {
     _isManageMode = true;
     if (isShift) {
-      final anchor = _rangeAnchorTaskId;
+      final anchor = _rangeAnchorTaskId ?? _selectedTaskId;
       final anchorValid = anchor != null && orderedVisibleIds.contains(anchor);
-      final range = anchorValid
-          ? taskSelectionRange(orderedVisibleIds, anchor, taskId)
-          : [taskId];
+      final range = taskSelectionRangeForTap(
+        orderedVisibleIds,
+        rangeAnchorId: _rangeAnchorTaskId,
+        selectedTaskId: _selectedTaskId,
+        targetId: taskId,
+      );
       if (isCtrl) {
         _checkedTaskIds.addAll(range);
       } else {

@@ -593,6 +593,8 @@ class S {
       _r('accountDeviceVerifySubtitle', {'email': email});
   String get accountDeviceVerifySubtitleGeneric =>
       _r('accountDeviceVerifySubtitleGeneric');
+  String get accountDeviceVerifyReplacementNotice =>
+      _r('accountDeviceVerifyReplacementNotice');
   String get accountRegisterVerifyTitle => _r('accountRegisterVerifyTitle');
   String accountRegisterVerifySubtitle(String email) =>
       _r('accountRegisterVerifySubtitle', {'email': email});
@@ -1779,6 +1781,16 @@ class S {
   String get mobileAllFilesTitle => _r('mobileAllFilesTitle');
   String get mobileAllFilesDesc => _r('mobileAllFilesDesc');
   String get mobileGoGrant => _r('mobileGoGrant');
+
+  String get fgServiceChannelName => _r('fgServiceChannelName');
+  String get fgServiceChannelDesc => _r('fgServiceChannelDesc');
+  String fgServiceActiveTitle(int count) => count == 1
+      ? _r('fgServiceActiveTitleOne', {'count': count})
+      : _r('fgServiceActiveTitleOther', {'count': count});
+  String fgServiceActiveText(String speed) =>
+      _r('fgServiceActiveText', {'speed': speed});
+  String get fgServiceIdleTitle => _r('fgServiceIdleTitle');
+  String get fgServiceIdleText => _r('fgServiceIdleText');
 
   // ─────────────────────────────────────────────
   // 扩展（插件 + 组件）

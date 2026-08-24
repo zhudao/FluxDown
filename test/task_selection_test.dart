@@ -43,4 +43,44 @@ void main() {
       expect(taskSelectionRange(const [], 'a', 'b'), <String>[]);
     });
   });
+
+  group('taskSelectionRangeForTap', () {
+    const ids = ['a', 'b', 'c', 'd'];
+
+    test('尚未进入管理模式时以普通点击选中的任务为 Shift 锚点', () {
+      expect(
+        taskSelectionRangeForTap(
+          ids,
+          rangeAnchorId: null,
+          selectedTaskId: 'a',
+          targetId: 'c',
+        ),
+        ['a', 'b', 'c'],
+      );
+    });
+
+    test('已有管理模式锚点时优先使用该锚点', () {
+      expect(
+        taskSelectionRangeForTap(
+          ids,
+          rangeAnchorId: 'b',
+          selectedTaskId: 'a',
+          targetId: 'd',
+        ),
+        ['b', 'c', 'd'],
+      );
+    });
+
+    test('普通选中任务不在当前可见顺序时退化为目标任务', () {
+      expect(
+        taskSelectionRangeForTap(
+          ids,
+          rangeAnchorId: null,
+          selectedTaskId: 'hidden',
+          targetId: 'c',
+        ),
+        ['c'],
+      );
+    });
+  });
 }
