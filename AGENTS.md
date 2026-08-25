@@ -1,7 +1,7 @@
 # FluxDown — AI 工作契约（核心）
 
 多协议下载管理器（IDM 的免费替代）。官网 <https://fluxdown.zerx.dev>，版本号以 `pubspec.yaml` 为准。
-**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：Flutter 桌面/移动 App、headless Web 服务器、CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API、React Web SPA。FFI 框架 [Rinf 8.10](https://rinf.cunarist.org)（bincode 信号）**仅** App（`hub` crate）用到。
+**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：当前默认 PC/移动 App 是 Flutter；PC 端正迁移到 GPUI 包 `fluxdown_ui_app`。另有 headless Web 服务器、CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API、React Web SPA。FFI 框架 [Rinf 8.10](https://rinf.cunarist.org)（bincode 信号）**仅** Flutter App（`hub` crate）用到。
 
 ---
 
@@ -15,7 +15,7 @@
 | 架构全图、顶层目录树（哪个目录管什么） | `.omp/knowledge/README.md` |
 | 状态码 / DB 表与字段语义、6 种协议、引擎子系统（auto_proxy、RSS、segment_coordinator…）、插件系统、受管组件 | `.omp/knowledge/engine.md` |
 | HTTP API 路由组与鉴权、hub / cli / nmh / updater、headless server env 与扩展路由 | `.omp/knowledge/hosts-and-api.md` |
-| Flutter 前端（主题 token、云同步、widgets 族、移动端、~80 个设置项分类）、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
+| Flutter 与 GPUI 前端（主题 token、云同步、widgets 族、移动端、GPUI 迁移层）、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
 | 日志系统细节、发布流水线矩阵、设计文档实现状态（已实现 vs 仅设计，含命名歧义澄清） | `.omp/knowledge/ops.md` |
 | **「要加 X 改哪里」全表 —— 动手前先查这张** | `.omp/knowledge/extension-points.md` |
 
@@ -125,6 +125,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - `fluxdown_engine`：零 rinf/Dart/axum 依赖，只经 `EventSink`/`HostSelection` 与宿主解耦。协议/分段/DB/队列/组/插件全在这里。
 - `fluxdown_api`：只依赖 `&dyn ApiHost`，定义 wire 契约 + 路径常量 + HTTP 服务器。零 rinf。
 - `hub`：**唯一**碰 rinf FFI 的 crate（crate 名不可改，rinf 硬编码）。只做信号收发与类型转换，不含协议逻辑；`signal_bridge.rs` 是 `engine::model` ↔ `hub::signals` 的孤儿规则边界。
+- `crates/{i18n,theme,components,shell,app}`：GPUI PC 迁移层；`crates/app` 的包名是 `fluxdown_ui_app`。新增页面与 capability 的 crate 边界、目录归属、依赖方向见 `rule://gpui-crate-architecture`；禁止把业务页面回堆进 shell。
 - **feature 门控**：`plugins`、`components`（默认关；desktop/server 开，mobile/CLI 关）。**关插件时下载主链路零行为变化**（注入 no-op `PluginManager`）。
 
 **编译期陷阱**

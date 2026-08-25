@@ -84,7 +84,13 @@ FluxDown/
 │   ├── services/       服务层（含 cloud/ 云同步子系统、win32_toast/）
 │   ├── theme/          双层 token 系统（颜色 + 度量，schema v2）
 │   └── i18n/           翻译（Weblate 管理，assets/i18n/*.json 为源）
-├── native/             Rust workspace（resolver=3，members=native/*）
+├── crates/             GPUI PC 客户端迁移层（同一 Rust workspace，见 `clients.md`「GPUI PC 客户端」）
+│   ├── i18n/           构建期发现并嵌入 Flutter `assets/i18n/*.json`
+│   ├── theme/          完整 gpui-base semantic token + shadcn neutral + 运行时投影
+│   ├── components/     基于 gpui-base 行为原语的主题化应用组件
+│   ├── shell/          窗口、顶层导航、locale/theme 状态
+│   └── app/            `fluxdown-desktop` 薄二进制入口
+├── native/             Rust workspace 引擎/宿主层（根 members=`native/*` + `crates/*`）
 │   ├── engine/         `fluxdown_engine`：下载引擎（零 FFI）——核心，见 `engine.md`「下载引擎」
 │   ├── api/            `fluxdown_api`：ApiHost 契约 + HTTP 面（零 rinf）——见 `hosts-and-api.md`「HTTP API」
 │   ├── server/         `fluxdown_server`：headless Web 服务器——见 `hosts-and-api.md`「Headless 服务器」

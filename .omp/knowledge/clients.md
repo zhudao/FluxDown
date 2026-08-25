@@ -5,6 +5,19 @@
 
 ---
 
+## GPUI PC 客户端（`crates/`，渐进迁移）
+
+依赖方向固定为 `i18n` / `theme` → `components` → `shell` → `app`；下载领域 feature 后续各自成 crate 接进 shell，避免任一 UI crate 膨胀后拖慢增量 debug。
+
+- `i18n`：`build.rs` 自动发现并嵌入既有 `assets/i18n/*.json`；locale 规范化、主语言匹配、英文键级回退、空值回退和 `{name}` 插值与 Flutter `I18nStore` 同契约。
+- `theme`：公开 gpui-base 全量 `SemanticThemeTokens`（17 色/6 圆角/7 间距/排版/3 阴影），默认 shadcn neutral 亮暗主题；应用全局状态额外持有完整 token，因为 gpui-component legacy Theme 不保存自定义 spacing/shadow。
+- `components`：以 gpui-base 无样式行为/无障碍原语为内核，从应用完整 token 装配视觉；feature 禁止绕过它散落颜色/尺寸。
+- `shell`：窗口、顶层导航与 locale/theme 状态；`app` 只有进程入口。gpui-component 初始化已包含 gpui-base 初始化，主题切换后必须重新投影完整 Base token。
+- 自定义标题栏入口必须用 `gpui_platform::application().with_assets(gpui_component_assets::Assets)` 注册控件图标，并以 `TitleBar::window_options()` 为基底；后者同时开启自管拖拽和 macOS 原生红绿灯 `(9,9)`，`TitleBar` 在 macOS 自动留 80px 左 inset。
+- gpui-base 尚未发布，依赖暂走固定 gpui-component git commit；Zed workspace 必须在 `Cargo.lock` 统一为单一提交，否则 `gpui` 类型会分裂。
+
+---
+
 ## Flutter 前端架构（`lib/src`）
 
 **状态管理**：ChangeNotifier + ListenableBuilder（无 Provider/Riverpod/Bloc），`_safeNotifyListeners()` 防已释放。Provider 统一模式：订阅 rinf 信号 + 单向 `sendSignalToRust` 写（`SettingsProvider`/`PluginProvider`/`ComponentController`/`download_controller`/…）。

@@ -18,7 +18,7 @@
  *     logo_on_dark.png (64×64, 暗色主题侧边栏专用: 蓝色箭头 + 透明背景)
  *
  *   windows/runner/resources/
- *     app_icon.ico (16,32,48,64,256 多分辨率 ICO)
+ *     app_icon.ico (16,32,48,64,256 多分辨率 ICO；Flutter 与 GPUI PC 客户端共用)
  *     tray_win_dark.ico (16,32 — 深色模式白色箭头托盘图标)
  *     tray_win_light.ico (16,32 — 浅色模式深蓝色箭头托盘图标)
  *

@@ -1,0 +1,25 @@
+[package]
+name = "fluxdown_ui_app"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "fluxdown-desktop"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fluxdown_ui_downloads = { path = "../downloads" }
+fluxdown_ui_i18n = { path = "../i18n" }
+fluxdown_ui_settings = { path = "../settings" }
+fluxdown_ui_shell = { path = "../shell" }
+fluxdown_ui_theme = { path = "../theme" }
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+gpui_platform.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+winresource.workspace = true

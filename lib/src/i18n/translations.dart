@@ -37,6 +37,8 @@ class S {
   String get settings => _r('settings');
   String get browse => _r('browse');
   String get manage => _r('manage');
+  String get delete => _r('delete');
+  String get stopAll => _r('stopAll');
   String get manageTooltip => 'Ctrl+A';
   String get auto => _r('auto');
 
@@ -68,6 +70,7 @@ class S {
   String get statusDownloading => _r('statusDownloading');
   String get statusPaused => _r('statusPaused');
   String get statusCompleted => _r('statusCompleted');
+  String get statusIncomplete => _r('statusIncomplete');
   String get statusError => _r('statusError');
   String get statusPreparing => _r('statusPreparing');
   String get statusVerifying => _r('statusVerifying');
@@ -1691,9 +1694,12 @@ class S {
   String get trayExit => _r('trayExit');
 
   // ─────────────────────────────────────────────
-  // macOS 应用菜单栏
+  // 应用菜单与桌面标题栏
   // ─────────────────────────────────────────────
   String get menuFile => _r('menuFile');
+  String get menuItemsPending => _r('menuItemsPending');
+  String get menuTasks => _r('menuTasks');
+  String get menuTools => _r('menuTools');
   String get menuNewDownload => _r('menuNewDownload');
   String get menuCloseWindow => _r('menuCloseWindow');
   String get menuEdit => _r('menuEdit');
