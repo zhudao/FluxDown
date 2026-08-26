@@ -16,7 +16,7 @@ import java.lang.ref.WeakReference
 
 /**
  * FluxDown 移动端本地存储能力（SAF 目录选择 / 公共目录写权限 / 应用内更新 /
- * 打开已下载文件）。由 MainActivity 与 ExternalDownloadActivity 通过
+ * 打开已下载文件）。由 FluxdownMainActivity 与 ExternalDownloadActivity 通过
  * [bind] 在各自承载的 FlutterEngine 上登记同一个 channel。
  *
  * 由于同一时刻只有一个 Activity 承载引擎，[pendingResult]（目录选择器结果）以

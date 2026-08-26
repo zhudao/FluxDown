@@ -21,7 +21,7 @@ use crate::{
 actions!(downloads, [SelectAllTasks]);
 
 pub(crate) const TASK_ROW_HEIGHT: f32 = 38.;
-pub(crate) const FOLDER_MOTION_DURATION: Duration = Duration::from_millis(200);
+pub(crate) const SIDEBAR_MOTION_DURATION: Duration = Duration::from_millis(200);
 
 /// 下载能力的顶层页面。
 pub struct DownloadView {
@@ -31,6 +31,8 @@ pub struct DownloadView {
     pub(crate) folder_motion: StatusFolderMotion,
     pub(crate) folder_motion_started_at: Option<Instant>,
     pub(crate) queues_expanded: bool,
+    pub(crate) queue_motion_from: f32,
+    pub(crate) queue_motion_started_at: Option<Instant>,
     pub(crate) table_state: Entity<TableState<DownloadTableDelegate>>,
     resizable_state: Entity<ResizableState>,
     resizable_state_initialized: bool,
@@ -69,6 +71,8 @@ impl DownloadView {
             folder_motion: StatusFolderMotion::settled(Some(DownloadStatusFilter::All)),
             folder_motion_started_at: None,
             queues_expanded: true,
+            queue_motion_from: 1.,
+            queue_motion_started_at: None,
             table_state,
             resizable_state: cx.new(|_| ResizableState::default()),
             resizable_state_initialized: false,

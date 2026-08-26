@@ -7,7 +7,7 @@ mod assets;
 mod strings;
 mod view;
 
-use gpui::{SharedString, WindowOptions, size};
+use gpui::{SharedString, WindowDecorations, WindowOptions, size};
 use gpui_component::TitleBar;
 
 pub use assets::*;
@@ -15,10 +15,10 @@ pub use view::*;
 
 /// 构造 FluxDown 主窗口选项。
 pub fn main_window_options() -> WindowOptions {
-    WindowOptions {
-        window_min_size: Some(size(gpui::px(720.), gpui::px(520.))),
-        ..TitleBar::window_options()
-    }
+    let mut options = TitleBar::window_options();
+    options.window_min_size = Some(size(gpui::px(720.), gpui::px(520.)));
+    options.window_decorations = Some(WindowDecorations::Client);
+    options
 }
 
 /// 构造使用 FluxDown 自定义标题栏的辅助窗口选项。
@@ -28,6 +28,7 @@ pub fn auxiliary_window_options(title: impl Into<SharedString>) -> WindowOptions
         titlebar.title = Some(title.into());
     }
     options.window_min_size = Some(size(gpui::px(720.), gpui::px(520.)));
+    options.window_decorations = Some(WindowDecorations::Client);
     options
 }
 
@@ -57,6 +58,10 @@ mod tests {
             None
         );
         assert_eq!(options.window_min_size, Some(size(px(720.), px(520.))));
+        assert_eq!(
+            options.window_decorations,
+            Some(gpui::WindowDecorations::Client)
+        );
     }
 
     #[test]
@@ -79,5 +84,9 @@ mod tests {
             Some(point(px(9.), px(9.)))
         );
         assert_eq!(options.window_min_size, Some(size(px(720.), px(520.))));
+        assert_eq!(
+            options.window_decorations,
+            Some(gpui::WindowDecorations::Client)
+        );
     }
 }

@@ -2,7 +2,7 @@ use fluxdown_ui_components::sidebar_navigation_button;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div, percentage,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -24,16 +24,12 @@ impl DownloadView {
         id: &'static str,
         label: SharedString,
         section: SidebarSection,
-        expanded: bool,
+        open_amount: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tokens = active_theme(cx).tokens();
         let header_color = tokens.colors.muted_foreground.opacity(0.65);
-        let chevron = if expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        };
+        let chevron_rotation = percentage(open_amount * 0.25);
 
         h_flex()
             .id(id)
@@ -53,12 +49,16 @@ impl DownloadView {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if matches!(section, SidebarSection::Queues) {
-                    this.queues_expanded = !this.queues_expanded;
+                    this.retarget_queue_section(cx);
                 }
                 cx.notify();
             }))
             .child(label)
-            .child(Icon::new(chevron).size(px(12.)))
+            .child(
+                Icon::new(IconName::ChevronRight)
+                    .size(px(12.))
+                    .rotate(chevron_rotation),
+            )
     }
 
     fn nav_item(
@@ -301,13 +301,46 @@ impl DownloadView {
         self.expanded_status = next;
     }
 
-    fn folder_motion_linear_progress(&self) -> f32 {
-        let Some(started_at) = self.folder_motion_started_at else {
+    fn sidebar_motion_linear_progress(started_at: Option<std::time::Instant>) -> f32 {
+        let Some(started_at) = started_at else {
             return 1.;
         };
         (started_at.elapsed().as_secs_f32()
-            / crate::pages::downloads::FOLDER_MOTION_DURATION.as_secs_f32())
+            / crate::pages::downloads::SIDEBAR_MOTION_DURATION.as_secs_f32())
         .clamp(0., 1.)
+    }
+
+    fn folder_motion_linear_progress(&self) -> f32 {
+        Self::sidebar_motion_linear_progress(self.folder_motion_started_at)
+    }
+
+    fn retarget_queue_section(&mut self, cx: &App) {
+        let target = if self.queues_expanded { 1. } else { 0. };
+        let progress = ease_in_out_cubic(Self::sidebar_motion_linear_progress(
+            self.queue_motion_started_at,
+        ));
+        let current = self.queue_motion_from + (target - self.queue_motion_from) * progress;
+        let next = !self.queues_expanded;
+        if cx.reduce_motion() {
+            self.queue_motion_from = if next { 1. } else { 0. };
+            self.queue_motion_started_at = None;
+        } else {
+            self.queue_motion_from = current;
+            self.queue_motion_started_at = Some(std::time::Instant::now());
+        }
+        self.queues_expanded = next;
+    }
+
+    fn queue_open_amount(&self, window: &mut Window, cx: &App) -> f32 {
+        let target = if self.queues_expanded { 1. } else { 0. };
+        if cx.reduce_motion() {
+            return target;
+        }
+        let linear = Self::sidebar_motion_linear_progress(self.queue_motion_started_at);
+        if linear < 1. {
+            window.request_animation_frame();
+        }
+        self.queue_motion_from + (target - self.queue_motion_from) * ease_in_out_cubic(linear)
     }
 
     fn folder_open_amount(
@@ -385,8 +418,9 @@ impl DownloadView {
             ))
     }
 
-    fn render_queue_section(&self, cx: &mut Context<Self>) -> Div {
+    fn render_queue_section(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
+        let open_amount = self.queue_open_amount(window, cx);
         v_flex()
             .mx(tokens.spacing.sm)
             .mt(tokens.spacing.sm)
@@ -399,27 +433,36 @@ impl DownloadView {
                 "download-queue-toggle",
                 self.strings.sidebar_queues.clone(),
                 SidebarSection::Queues,
-                self.queues_expanded,
+                open_amount,
                 cx,
             ))
-            .when(self.queues_expanded, |this| {
-                this.child(self.nav_item(
-                    "download-nav-main-queue",
-                    SidebarSelection::MainQueue,
-                    self.strings.main_queue.clone(),
-                    IconName::GalleryVerticalEnd,
-                    ("5".into(), true),
-                    cx,
-                ))
-                .child(self.nav_item(
-                    "download-nav-later-queue",
-                    SidebarSelection::LaterQueue,
-                    self.strings.later_queue.clone(),
-                    IconName::Pause,
-                    ("0".into(), true),
-                    cx,
-                ))
-            })
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .h(px(32. * 2. * open_amount))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .opacity(open_amount)
+                            .child(self.nav_item(
+                                "download-nav-main-queue",
+                                SidebarSelection::MainQueue,
+                                self.strings.main_queue.clone(),
+                                IconName::GalleryVerticalEnd,
+                                ("5".into(), true),
+                                cx,
+                            ))
+                            .child(self.nav_item(
+                                "download-nav-later-queue",
+                                SidebarSelection::LaterQueue,
+                                self.strings.later_queue.clone(),
+                                IconName::Pause,
+                                ("0".into(), true),
+                                cx,
+                            )),
+                    ),
+            )
     }
 
     pub(crate) fn render_sidebar(
@@ -434,6 +477,6 @@ impl DownloadView {
             .overflow_y_scrollbar()
             .bg(surface)
             .child(self.render_download_tree(window, cx))
-            .child(self.render_queue_section(cx))
+            .child(self.render_queue_section(window, cx))
     }
 }

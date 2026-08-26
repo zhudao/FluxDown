@@ -68,6 +68,37 @@ flowchart TB
 - 客户端捕获有三条并行前端进同一本机 RPC（`:17800/download`）：扩展（webRequest+downloads 全拦截）、用户脚本（页面态 `GM_xmlhttpRequest` 回退）、桌面确认框。
 - **并发模型**: current_thread tokio actor 串行化写；每个下载 spawn 独立 task + CancellationToken；插件 resolve 永不阻塞 actor（off-actor spawn + 通道回流）。
 
+### 下一代本机服务边界（基础 crate 已落盘，运行链路迁移中）
+
+```mermaid
+flowchart TB
+  subgraph ui[官方与第三方客户端]
+    gpui[GPUI Desktop]
+    wasm[GPUI WASM Web]
+    third[CLI / 第三方客户端]
+  end
+  agent[fluxdown-agent<br/>账户/同步/设备/UI Gateway]
+  daemon[fluxdownd<br/>纯下载管理核心]
+  protocol[fluxdown_protocol<br/>传输无关 wire / 版本握手]
+  cloud[FluxCloud]
+  engine[fluxdown_engine]
+  gpui --> agent
+  wasm --> agent
+  third --> agent
+  third -. 纯下载客户端可直连 .-> daemon
+  agent -->|JSON-RPC| daemon
+  agent --> cloud
+  daemon --> engine
+  protocol -. shared contract .-> agent
+  protocol -. shared contract .-> daemon
+  protocol -. shared contract .-> ui
+```
+
+- `native/daemon` 是 aria2c 式纯下载核心目标：下载任务、下载设置、RSS、插件和下载事件归它；账户与云同步永不进入该边界。
+- `native/agent` 是可选但常驻的官方客户端后端：独占 FluxCloud Token、配置同步、设备协同和远程任务状态机；官方 UI 默认只连接 agent。
+- `native/protocol` 是 daemon、agent、GPUI/WASM/CLI 共享的 wire 层；目前已落地服务角色与版本握手，JSON-RPC 方法/事件随实际迁移补充，禁止提前建立第二套 DTO。
+- 当前生产路径仍是 `hub` / `server`；迁移完成前不得把目标图误报为已运行。`native/server` 只保留旧 headless 路径，不接收新架构功能。
+
 ---
 
 ## 仓库结构（顶层坐标）
@@ -93,6 +124,9 @@ FluxDown/
 ├── native/             Rust workspace 引擎/宿主层（根 members=`native/*` + `crates/*`）
 │   ├── engine/         `fluxdown_engine`：下载引擎（零 FFI）——核心，见 `engine.md`「下载引擎」
 │   ├── api/            `fluxdown_api`：ApiHost 契约 + HTTP 面（零 rinf）——见 `hosts-and-api.md`「HTTP API」
+│   ├── protocol/       `fluxdown_protocol`：daemon / agent / 客户端共享的传输无关协议基线
+│   ├── daemon/         `fluxdown_daemon`：纯下载常驻核心边界（运行链路迁移中）
+│   ├── agent/          `fluxdown_agent`：云功能与官方 UI Gateway 边界（运行链路迁移中）
 │   ├── server/         `fluxdown_server`：headless Web 服务器——见 `hosts-and-api.md`「Headless 服务器」
 │   ├── hub/            rinf FFI 适配层（唯一碰 rinf）——见 `hosts-and-api.md`「宿主与客户端 crate」
 │   ├── cli/            `fluxdown_cli`：二进制 `fluxdown`——见 `hosts-and-api.md`「宿主与客户端 crate」

@@ -18,7 +18,7 @@ import org.json.JSONObject
  * `SizedBox.expand()` 隐藏主页、只留新建下载弹窗，于是弹窗下方透出来源应用
  * （浏览器 / 文件管理器）—— 与 InstallerX 的"透明卡片弹窗"一致。
  *
- * 与 [MainActivity] 共享同一个 FlutterEngine（见 [FluxdownEngine]）。share 与
+ * 与 [FluxdownMainActivity] 共享同一个 FlutterEngine（见 [FluxdownEngine]）。share 与
  * storage channel 优先在 [configureFlutterEngine] 绑定，确保 Dart 冷启动拉取分享前
  * handler 已就绪；[onStart] 保留幂等兜底。
  */

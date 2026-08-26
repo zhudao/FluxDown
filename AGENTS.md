@@ -1,7 +1,7 @@
 # FluxDown — AI 工作契约（核心）
 
 多协议下载管理器（IDM 的免费替代）。官网 <https://fluxdown.zerx.dev>，版本号以 `pubspec.yaml` 为准。
-**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：当前默认 PC/移动 App 是 Flutter；PC 端正迁移到 GPUI 包 `fluxdown_ui_app`。另有 headless Web 服务器、CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API、React Web SPA。FFI 框架 [Rinf 8.10](https://rinf.cunarist.org)（bincode 信号）**仅** Flutter App（`hub` crate）用到。
+**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：当前默认 PC/移动 App 是 Flutter；PC 端正迁移到 GPUI 包 `fluxdown_ui_app`。另有 headless Web 服务器、CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API、React Web SPA。FFI 框架 [Rinf 8.10](https://rinf.cunarist.org)（bincode 信号）**仅** Flutter App（`hub` crate）用到。下一代本机架构的基础 crate 已落在 `native/{protocol,daemon,agent}`：下载核心与云端/UI Gateway 分进程，运行链路仍在迁移中。
 
 ---
 
@@ -41,6 +41,7 @@
 | 设置键 | `lib/src/models/settings_provider.dart` 的 load switch + 引擎 `db.rs` 的 `config` 表（**所有设置键都在这张表**） |
 | DB schema | `native/engine/src/db.rs`：`SQLITE_SCHEMA` + `POSTGRES_SCHEMA` + `add_column_if_missing` |
 | HTTP 契约 | `native/api/src/types.rs`（wire，camelCase）+ `routes.rs`（路径常量）；规范文件 `website/public/openapi.json` |
+| 本机服务协议基线 | `native/protocol`：daemon / agent 角色、版本握手与后续 JSON-RPC wire 的唯一共享层 |
 | Rust↔Dart 信号 | `native/hub/src/signals/mod.rs`；Dart 侧 `lib/src/bindings/` 由 `rinf gen` 生成，**勿手改** |
 | headless env / 访问密钥策略 | `native/server/src/config.rs`（`validate_access_key`） |
 | i18n 基线 | `assets/i18n/{en,zh}.json` + `lib/src/i18n/translations.dart` |
@@ -113,7 +114,8 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 | `HostSelection` | `engine/src/selection.rs` | 引擎→宿主（请求决策） | HLS 画质 / BT 文件 / 插件 variant 选择（tristate：用户选/超时默认/无 selector 短路） |
 | `ApiHost` | `native/api/src/service.rs` | 客户端→引擎（HTTP 契约） | REST/aria2/MCP 的能力面；必需方法 + 可默认降级方法 |
 
-- 两个生产宿主：`hub`（App，actor=`download_actor.rs`）、`server`（headless，actor=`actor.rs`）；`fluxdown_api` 只依赖 `&dyn ApiHost`，同一套 HTTP 面服务任意宿主。CLI 双模式：默认 HTTP 连宿主，`add --local` 内嵌引擎。
+- 当前两个生产宿主仍是 `hub`（App，actor=`download_actor.rs`）与 `server`（headless，actor=`actor.rs`）；`fluxdown_api` 只依赖 `&dyn ApiHost`，同一套 HTTP 面服务任意宿主。CLI 双模式：默认 HTTP 连宿主，`add --local` 内嵌引擎。
+- **迁移目标**：`native/daemon` 成为可独立运行的纯下载核心，`native/agent` 常驻承载账户/云同步/设备协同与官方 UI Gateway；两者共享 `native/protocol` 的 JSON-RPC 语义。`native/server` 进入废弃路径，任何新实现不得依赖它。
 - **并发模型**：current_thread tokio actor 串行化写；每个下载 spawn 独立 task + CancellationToken；插件 resolve 永不阻塞 actor（off-actor spawn + 通道回流）。
 - 客户端捕获三条并行前端进同一本机 RPC（`:17800/download`）：扩展、用户脚本、桌面确认框。
 
@@ -125,7 +127,10 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - `fluxdown_engine`：零 rinf/Dart/axum 依赖，只经 `EventSink`/`HostSelection` 与宿主解耦。协议/分段/DB/队列/组/插件全在这里。
 - `fluxdown_api`：只依赖 `&dyn ApiHost`，定义 wire 契约 + 路径常量 + HTTP 服务器。零 rinf。
 - `hub`：**唯一**碰 rinf FFI 的 crate（crate 名不可改，rinf 硬编码）。只做信号收发与类型转换，不含协议逻辑；`signal_bridge.rs` 是 `engine::model` ↔ `hub::signals` 的孤儿规则边界。
-- `crates/{i18n,theme,components,shell,app}`：GPUI PC 迁移层；`crates/app` 的包名是 `fluxdown_ui_app`。新增页面与 capability 的 crate 边界、目录归属、依赖方向见 `rule://gpui-crate-architecture`；禁止把业务页面回堆进 shell。
+- `crates/{i18n,theme,components,shell,downloads,settings,app}`：GPUI PC 迁移层；`crates/app` 的包名是 `fluxdown_ui_app`。新增页面与 capability 的 crate 边界、目录归属、依赖方向见 `rule://gpui-crate-architecture`；禁止把业务页面回堆进 shell。
+- `fluxdown_protocol`：传输无关的本机 wire 层；只能依赖序列化/纯类型能力，不依赖引擎、运行时、数据库、HTTP 或 UI。
+- `fluxdown_daemon`：aria2c 式纯下载核心边界；拥有下载任务与下载设置，不负责账户、云同步或 UI，且不得依赖 `native/server`、`native/agent` 或 `crates/*`。
+- `fluxdown_agent`：官方客户端的账户/云同步/设备协同与 UI Gateway；不得直接执行下载或依赖 `fluxdown_engine`，只经协议调用 daemon。完整边界见 `rule://local-service-architecture`。
 - **feature 门控**：`plugins`、`components`（默认关；desktop/server 开，mobile/CLI 关）。**关插件时下载主链路零行为变化**（注入 no-op `PluginManager`）。
 
 **编译期陷阱**

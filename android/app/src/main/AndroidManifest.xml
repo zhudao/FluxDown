@@ -26,9 +26,23 @@
         android:name="${applicationName}"
         android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher">
+        <!-- 稳定的公开类名：桌面启动转到内部主界面；浏览器显式发来的下载
+             intent 转到透明外部入口。此 Activity 不创建 FlutterEngine。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/RouterTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- 真正的 Flutter 主界面，仅由 MainActivity 在应用内启动。 -->
+        <activity
+            android:name=".FluxdownMainActivity"
+            android:exported="false"
             android:launchMode="singleTask"
             android:taskAffinity=""
             android:theme="@style/MainTheme"
@@ -43,13 +57,9 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/MainTheme"
               />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.LAUNCHER"/>
-            </intent-filter>
         </activity>
         <!-- 外部下载唤起入口：透明主题（ExternalTheme）+ 独立任务栈，在来源应用
-             上方只显示新建下载弹窗。与 MainActivity 共享同一 FlutterEngine。 -->
+             上方只显示新建下载弹窗。与 FluxdownMainActivity 共享同一 FlutterEngine。 -->
         <activity
             android:name=".ExternalDownloadActivity"
             android:exported="true"

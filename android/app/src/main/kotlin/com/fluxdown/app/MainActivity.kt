@@ -1,68 +1,38 @@
 package com.fluxdown.app
 
+import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
-import io.flutter.embedding.android.FlutterActivity
-import io.flutter.embedding.engine.FlutterEngine
 
 /**
- * FluxDown 移动端启动入口 + 本地存储桥宿主。
+ * Android 公开入口兼容路由。
  *
- * 只承担应用 Launcher（不透明主题，见 MainTheme）与 [AppStorage] 本地存储能力；
- * 外部下载唤起由 [ExternalDownloadActivity] 承载（透明窗口弹下载框）。二者共享
- * 同一个 FlutterEngine（见 [FluxdownEngine]），保持单 Dart 会话、下载状态、
- * Rust 桥与前台服务不重复初始化。
- *
- * channel 优先在 [configureFlutterEngine] 中绑定，确保 Dart entrypoint 执行前即可响应；
- * [onStart] 对旧 embedding 或 cached engine 的差异提供幂等兜底。
+ * 一些浏览器会显式启动固定类名 `com.fluxdown.app.MainActivity`，因此该类必须保持
+ * 稳定。下载 intent 转交给透明的 [ExternalDownloadActivity]；普通启动转交给真正的
+ * Flutter 主界面 [FluxdownMainActivity]。路由本身不创建 FlutterEngine。
  */
-class MainActivity : FlutterActivity() {
-    override fun getCachedEngineId(): String? =
-        if (FluxdownEngine.cached != null) FluxdownEngine.ENGINE_ID else null
-
-    override fun shouldDestroyEngineWithHost(): Boolean = false
-
+class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        // 桌面图标再进：部分 ROM 会在已有任务上再叠一个 MAIN/LAUNCHER
-        // Activity，从而尝试重复挂载共享引擎。
-        if (!isTaskRoot &&
-            intent.hasCategory(Intent.CATEGORY_LAUNCHER) &&
-            intent.action == Intent.ACTION_MAIN
-        ) {
-            finish()
-            return
-        }
         super.onCreate(savedInstanceState)
+        forward(intent)
     }
 
-    override fun detachFromFlutterEngine() {
-        super.detachFromFlutterEngine()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        forward(intent)
+    }
+
+    private fun forward(source: Intent) {
+        val target = when (source.action) {
+            Intent.ACTION_SEND,
+            Intent.ACTION_SEND_MULTIPLE,
+            Intent.ACTION_VIEW,
+            -> ExternalDownloadActivity::class.java
+
+            else -> FluxdownMainActivity::class.java
+        }
+        startActivity(Intent(source).setClass(this, target))
         finish()
-    }
-
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
-        FluxdownEngine.cacheIfAbsent(flutterEngine)
-        AppStorage.bind(flutterEngine, this)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        getFlutterEngine()?.let { engine ->
-            FluxdownEngine.cacheIfAbsent(engine)
-            AppStorage.bind(engine, this)
-        }
-    }
-
-    override fun onDestroy() {
-        AppStorage.unbind(this)
-        super.onDestroy()
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        // 目录选择器结果由 AppStorage 处理；其余交给默认行为。
-        if (!AppStorage.onActivityResult(this, requestCode, resultCode, data)) {
-            super.onActivityResult(requestCode, resultCode, data)
-        }
     }
 }

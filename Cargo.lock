@@ -2725,6 +2725,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxdown_agent"
+version = "0.1.0"
+dependencies = [
+ "fluxdown_protocol",
+]
+
+[[package]]
 name = "fluxdown_api"
 version = "0.1.0"
 dependencies = [
@@ -2755,6 +2762,13 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
+name = "fluxdown_daemon"
+version = "0.1.0"
+dependencies = [
+ "fluxdown_protocol",
 ]
 
 [[package]]
@@ -2821,6 +2835,14 @@ dependencies = [
  "serde",
  "serde_json",
  "winresource",
+]
+
+[[package]]
+name = "fluxdown_protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
