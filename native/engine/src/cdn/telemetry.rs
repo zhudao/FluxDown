@@ -121,6 +121,26 @@ pub fn clear() {
     log_info!("[cdn-telemetry] 待上传样本已上报清空");
 }
 
+/// 原子取走当前全部样本；取走后新样本进入新的缓冲。
+pub fn take_all() -> Vec<CdnSample> {
+    match pending().lock() {
+        Ok(mut buffer) => buffer.drain(..).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 租约持久化失败时把样本恢复到新缓冲之前，并保持容量上限。
+pub fn restore_front(samples: Vec<CdnSample>) {
+    if let Ok(mut buffer) = pending().lock() {
+        for sample in samples.into_iter().rev() {
+            buffer.push_front(sample);
+        }
+        while buffer.len() > MAX_PENDING {
+            buffer.pop_back();
+        }
+    }
+}
+
 /// 启动时回读上次进程遗留的待上传样本（合并到缓冲头部）。
 pub(crate) async fn load_pending(db: &Db) {
     let Ok(Some(raw)) = db.get_config(PENDING_KEY).await else {

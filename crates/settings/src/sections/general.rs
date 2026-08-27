@@ -19,19 +19,19 @@ impl SettingsView {
         let tokens = active_theme(cx).tokens().clone();
         let startup_rows = [
             SettingRow {
-                id: "placeholder-auto-startup",
+                id: "setting-auto-startup",
                 title: self.strings.auto_startup.clone(),
                 description: self.strings.auto_startup_desc.clone(),
                 checked: false,
             },
             SettingRow {
-                id: "placeholder-close-to-tray",
+                id: "setting-close-to-tray",
                 title: self.strings.close_to_tray.clone(),
                 description: self.strings.close_to_tray_desc.clone(),
                 checked: true,
             },
             SettingRow {
-                id: "placeholder-start-minimized",
+                id: "setting-start-minimized",
                 title: self.strings.start_minimized.clone(),
                 description: self.strings.start_minimized_desc.clone(),
                 checked: false,
@@ -39,37 +39,37 @@ impl SettingsView {
         ];
         let system_rows = [
             SettingRow {
-                id: "placeholder-floating-ball",
+                id: "setting-floating-ball",
                 title: self.strings.floating_ball.clone(),
                 description: self.strings.floating_ball_desc.clone(),
                 checked: false,
             },
             SettingRow {
-                id: "placeholder-torrent-association",
+                id: "setting-torrent-association",
                 title: self.strings.torrent_association.clone(),
                 description: self.strings.torrent_association_desc.clone(),
                 checked: true,
             },
             SettingRow {
-                id: "placeholder-ed2k-association",
+                id: "setting-ed2k-association",
                 title: self.strings.ed2k_link_association.clone(),
                 description: self.strings.ed2k_link_association_desc.clone(),
                 checked: false,
             },
             SettingRow {
-                id: "placeholder-magnet-association",
+                id: "setting-magnet-association",
                 title: self.strings.magnet_association.clone(),
                 description: self.strings.magnet_association_desc.clone(),
                 checked: false,
             },
             SettingRow {
-                id: "placeholder-keep-awake",
+                id: "setting-keep-awake",
                 title: self.strings.keep_awake.clone(),
                 description: self.strings.keep_awake_desc.clone(),
                 checked: false,
             },
             SettingRow {
-                id: "placeholder-analytics",
+                id: "setting-analytics",
                 title: self.strings.analytics_enabled.clone(),
                 description: self.strings.analytics_enabled_desc.clone(),
                 checked: true,
@@ -77,25 +77,25 @@ impl SettingsView {
         ];
         let titlebar_rows = [
             SettingRow {
-                id: "placeholder-titlebar-pause",
+                id: "setting-titlebar-pause",
                 title: self.strings.show_titlebar_pause.clone(),
                 description: self.strings.show_titlebar_pause_desc.clone(),
                 checked: true,
             },
             SettingRow {
-                id: "placeholder-titlebar-resume",
+                id: "setting-titlebar-resume",
                 title: self.strings.show_titlebar_resume.clone(),
                 description: self.strings.show_titlebar_resume_desc.clone(),
                 checked: true,
             },
             SettingRow {
-                id: "placeholder-titlebar-settings",
+                id: "setting-titlebar-settings",
                 title: self.strings.show_titlebar_settings.clone(),
                 description: self.strings.show_titlebar_settings_desc.clone(),
                 checked: true,
             },
             SettingRow {
-                id: "placeholder-titlebar-theme",
+                id: "setting-titlebar-theme",
                 title: self.strings.show_titlebar_theme.clone(),
                 description: self.strings.show_titlebar_theme_desc.clone(),
                 checked: true,
@@ -177,6 +177,24 @@ impl SettingsView {
 
     fn render_setting_row(&self, row: SettingRow, last: bool, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens();
+        let (key, inverted) = match row.id {
+            "setting-floating-ball" => ("general.floating_ball_enabled".to_owned(), false),
+            "setting-torrent-association" => ("torrent_assoc_user_disabled".to_owned(), true),
+            "setting-ed2k-association" => ("ed2k_assoc_user_disabled".to_owned(), true),
+            "setting-magnet-association" => ("magnet_assoc_user_disabled".to_owned(), true),
+            "setting-keep-awake" => ("download.keep_awake".to_owned(), false),
+            "setting-titlebar-pause" => ("ui.show_titlebar_pause_all".to_owned(), false),
+            "setting-titlebar-resume" => ("ui.show_titlebar_resume_all".to_owned(), false),
+            "setting-titlebar-settings" => ("ui.show_titlebar_settings".to_owned(), false),
+            "setting-titlebar-theme" => ("ui.show_titlebar_theme".to_owned(), false),
+            id => (
+                id.strip_prefix("setting-").unwrap_or(id).replace('-', "_"),
+                false,
+            ),
+        };
+        let checked = self.controller.bool_value(&key, row.checked) ^ inverted;
+        let switch_key = key.clone();
+        let set_inverted = inverted;
         h_flex()
             .min_h(px(64.))
             .w_full()
@@ -206,7 +224,20 @@ impl SettingsView {
                             .child(row.description),
                     ),
             )
-            .child(Switch::new(row.id).checked(row.checked))
+            .child(Switch::new(row.id).checked(checked).on_click(cx.listener(
+                move |this, checked: &bool, _, cx| {
+                    let future = this
+                        .controller
+                        .set_bool(switch_key.clone(), *checked ^ set_inverted);
+                    cx.spawn(async move |this, cx| {
+                        if let Err(error) = future.await {
+                            eprintln!("settings update failed: {:?}", error.code);
+                        }
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    })
+                    .detach();
+                },
+            )))
     }
 
     fn render_category_group(&self, cx: &mut Context<Self>) -> Div {
@@ -236,19 +267,19 @@ impl SettingsView {
                     .justify_end()
                     .gap(tokens.spacing.sm)
                     .child(button(
-                        "placeholder-auto-category-dirs",
+                        "setting-auto-category-dirs",
                         self.strings.auto_category_dirs.clone(),
                         ButtonVariant::Secondary,
                         cx,
                     ))
                     .child(button(
-                        "placeholder-reset-categories",
+                        "setting-reset-categories",
                         self.strings.reset_categories.clone(),
                         ButtonVariant::Secondary,
                         cx,
                     ))
                     .child(button(
-                        "placeholder-add-category",
+                        "setting-add-category",
                         self.strings.add_category.clone(),
                         ButtonVariant::Secondary,
                         cx,

@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value, json};
 
 use crate::service::{LiveSpeed, TaskEventKind};
-use crate::types::{CreateTaskRequest, TaskDto};
+use fluxdown_protocol::daemon::{CreateTaskRequest, TaskDto};
 
 // ---------------------------------------------------------------------------
 // GID：task_id ↔ GID 编解码与反查

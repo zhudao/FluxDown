@@ -49,9 +49,9 @@ fn is_no_launch_action(action: &str) -> bool {
 #[cfg(windows)]
 const PIPE_NAME: &str = r"\\.\pipe\fluxdown";
 
-/// FluxDown App executable name (Windows only).
+/// FluxDown agent executable name (Windows only).
 #[cfg(windows)]
-const APP_EXE_NAME: &str = "flux_down.exe";
+const APP_EXE_NAME: &str = "fluxdown-agent.exe";
 
 /// Maximum time (ms) to wait for the App to start and create its pipe.
 const APP_LAUNCH_TIMEOUT_MS: u64 = 10_000;
@@ -245,10 +245,10 @@ fn home_dir() -> Option<PathBuf> {
 /// call super::home_dir() uniformly on both platforms.
 #[cfg(target_os = "linux")]
 fn home_dir() -> Option<PathBuf> {
-    if let Ok(h) = std::env::var("HOME") {
-        if !h.is_empty() {
-            return Some(PathBuf::from(h));
-        }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
     }
     None
 }
@@ -446,23 +446,16 @@ fn find_app_exe() -> Option<PathBuf> {
         }
     }
 
-    // 2. Flutter build output (development fallback)
+    // 2. Cargo output (development fallback)
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir).parent().and_then(|p| p.parent());
-
-    if let Some(ws) = workspace_root {
-        for arch in &["x64", "arm64"] {
-            for profile in &["Debug", "Release", "Profile"] {
-                let candidate = ws
-                    .join("build")
-                    .join("windows")
-                    .join(arch)
-                    .join("runner")
-                    .join(profile)
-                    .join(APP_EXE_NAME);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
+    let workspace_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|path| path.parent());
+    if let Some(root) = workspace_root {
+        for profile in ["debug", "release"] {
+            let candidate = root.join("target").join(profile).join(APP_EXE_NAME);
+            if candidate.exists() {
+                return Some(candidate);
             }
         }
     }
@@ -472,11 +465,7 @@ fn find_app_exe() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn find_app_exe() -> Option<PathBuf> {
-    // macOS app exe name depends on PRODUCT_NAME in Xcode / AppInfo.xcconfig.
-    // flutter run / flutter build macos uses the display name ("FluxDown"),
-    // while production archives may differ. Search both variants.
-    const APP_EXE_CANDIDATES: &[&str] = &["FluxDown", "flux_down"];
-    const APP_BUNDLE_CANDIDATES: &[&str] = &["FluxDown.app", "flux_down.app"];
+    const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent"];
 
     // 1. Same directory as NMH binary (inside .app bundle: Contents/MacOS/)
     if let Ok(exe) = std::env::current_exe()
@@ -490,30 +479,16 @@ fn find_app_exe() -> Option<PathBuf> {
         }
     }
 
-    // 2. Flutter build output (development — flutter build macos / flutter run)
-    //    build/macos/Build/Products/{Debug,Release,Profile}/<AppName>.app/Contents/MacOS/<AppName>
+    // 2. Cargo output (development fallback)
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir).parent().and_then(|p| p.parent());
-
-    if let Some(ws) = workspace_root {
-        for profile_cap in &["Debug", "Release", "Profile"] {
-            let products = ws
-                .join("build")
-                .join("macos")
-                .join("Build")
-                .join("Products")
-                .join(profile_cap);
-            for bundle in APP_BUNDLE_CANDIDATES {
-                for exe_name in APP_EXE_CANDIDATES {
-                    let candidate = products
-                        .join(bundle)
-                        .join("Contents")
-                        .join("MacOS")
-                        .join(exe_name);
-                    if candidate.exists() {
-                        return Some(candidate);
-                    }
-                }
+    let workspace_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|path| path.parent());
+    if let Some(root) = workspace_root {
+        for profile in ["debug", "release"] {
+            let candidate = root.join("target").join(profile).join("fluxdown-agent");
+            if candidate.exists() {
+                return Some(candidate);
             }
         }
     }
@@ -527,25 +502,20 @@ fn find_app_exe() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("flux_down");
+        let candidate = dir.join("fluxdown-agent");
         if candidate.exists() {
             return Some(candidate);
         }
     }
 
-    // 2. Flutter build output (development — flutter run / flutter build linux)
+    // 2. Cargo output (development fallback)
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir).parent().and_then(|p| p.parent());
-
-    if let Some(ws) = workspace_root {
-        for profile in &["debug", "release", "profile"] {
-            let candidate = ws
-                .join("build")
-                .join("linux")
-                .join("x64")
-                .join(profile)
-                .join("bundle")
-                .join("flux_down");
+    let workspace_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|path| path.parent());
+    if let Some(root) = workspace_root {
+        for profile in ["debug", "release"] {
+            let candidate = root.join("target").join(profile).join("fluxdown-agent");
             if candidate.exists() {
                 return Some(candidate);
             }
@@ -560,12 +530,13 @@ fn find_app_exe() -> Option<PathBuf> {
 fn launch_app(app_exe: &Path) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     std::process::Command::new(app_exe)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .spawn()
         .is_ok()
 }

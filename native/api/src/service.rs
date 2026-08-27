@@ -1,10 +1,7 @@
 //! API 宿主契约 —— [`ApiHost`] trait。
 //!
-//! HTTP 层（`server`/`jsonrpc` 模块）只依赖本 trait，不关心宿主形态：
-//! - 桌面/手机 App（hub）：实现为「命令 + oneshot 回执」桥接到 download_actor
-//! - 未来 headless server：实现为直接调用 `fluxdown_engine::Engine`
-//!
-//! 换宿主不换 HTTP 层，这是「一份 API 契约、多宿主复用」的核心边界。
+//! HTTP 层只依赖本 trait，不关心宿主形态：legacy hub/server 与
+//! `fluxdown-agent` 都在各自边界实现能力，API crate 不依赖下载引擎。
 
 use std::collections::HashMap;
 
@@ -12,7 +9,7 @@ use tokio::sync::broadcast;
 
 use async_trait::async_trait;
 
-use crate::types::{
+use fluxdown_protocol::daemon::{
     CreateGroupRequest, CreateTaskRequest, DownloadRequest, GroupDto, LinkAuth, LinkCodeResponse,
     LinkDeviceInfo, LinkDiscoveredPeer, LinkPairBeginResponse, LinkPairConfirmOutcome,
     LinkPairConfirmRequest, LinkPairHelloRequest, LinkPairHelloResponse, LinkPingInfo,
@@ -216,7 +213,7 @@ pub trait ApiHost: Send + Sync {
     }
 
     /// 按插件声明权限探测缺失的基础组件（如 `"ffmpeg"`/`"ytdlp"`），供安装
-    /// 成功后回填 [`crate::types::InstalledPlugin::missing_components`] 提醒
+    /// 成功后回填 [`fluxdown_protocol::daemon::InstalledPlugin::missing_components`] 提醒
     /// 用户安装依赖。依赖表见引擎 `plugin::dependencies`。默认空（无提醒）。
     async fn plugin_missing_components(&self, identity: &str) -> Vec<String> {
         let _ = identity;

@@ -7871,6 +7871,28 @@ impl DownloadManager {
         }
         self.send_tasks_snapshot().await;
     }
+
+    /// 取消所有在途任务并等待下载 task 与 BT/DHT 持久化退出。
+    pub async fn shutdown(&mut self) {
+        let mut handles = Vec::new();
+        for (_task_id, entry) in self.active_tasks.drain() {
+            entry.token.cancel();
+            if let Some(handle) = entry.handle {
+                handles.push(handle);
+            }
+        }
+        self.pending_queue.clear();
+        for handle in handles {
+            let _ = handle.await;
+        }
+        if let Some(bt) = self.bt_session.take() {
+            let _ = tokio::task::spawn_blocking(move || match Arc::try_unwrap(bt) {
+                Ok(owned) => owned.shutdown(),
+                Err(shared) => shared.shutdown(),
+            })
+            .await;
+        }
+    }
 }
 
 impl Drop for DownloadManager {

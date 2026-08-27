@@ -91,11 +91,14 @@ jobs:
                 web/*)               SERVER=true ;;
                 native/server/*)     SERVER=true ;;
                 native/cli/*)        CLI=true ;;
-                native/api/*)        SERVER=true; CLI=true ;;
+                native/api/*)        APP=true; SERVER=true; CLI=true ;;
+                native/protocol/*)   APP=true; SERVER=true; CLI=true ;;
+                native/engine-protocol/*) APP=true; SERVER=true ;;
+                native/daemon/*|native/agent/*|crates/*) APP=true ;;
                 native/engine/*)     APP=true; SERVER=true; MOBILE=true; CLI=true; ENGINE=true ;;
                 Cargo.toml|Cargo.lock) APP=true; SERVER=true; MOBILE=true; CLI=true; ENGINE=true ;;
                 docker/*)            SERVER=true ;;
-                packaging/*)         SERVER=true ;;
+                packaging/*|installer/*) APP=true; SERVER=true ;;
                 android/*)           MOBILE=true ;;
                 lib/src/mobile/*)    MOBILE=true ;;
                 # 其余共享 Dart 代码（models/i18n/theme/bindings…）同时影响桌面端与移动端
@@ -329,6 +332,17 @@ jobs:
             Rename-Item -Path "build\windows\x64" -NewName "arm64"
             Write-Host "Renamed build\windows\x64 -> build\windows\arm64"
           }
+
+      - name: Build and bundle native desktop services
+        shell: bash
+        run: |
+          cargo build --release --locked \
+            -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon \
+            --features fluxdown_daemon/plugins,fluxdown_daemon/components
+          RELEASE_DIR="build/windows/${{ matrix.arch }}/runner/Release"
+          cp target/release/fluxdown-desktop.exe "$RELEASE_DIR/"
+          cp target/release/fluxdown-agent.exe "$RELEASE_DIR/"
+          cp target/release/fluxdownd.exe "$RELEASE_DIR/"
 
       # ── Bundle MSVC CRT runtime DLLs ──
       # Flutter 的 Windows 构建产物不含 VC 运行库；开发机普遍装有 VCRedist
@@ -828,6 +842,17 @@ jobs:
       - name: Build Flutter Linux app
         run: flutter build linux --release --build-name=${{ steps.version.outputs.CLEAN_VERSION }} --build-number=1 --dart-define=APP_VERSION=${{ steps.version.outputs.VERSION }} --dart-define=ANALYTICS_APP_KEY=${{ secrets.ANALYTICS_APP_KEY }} --dart-define=FLUXCLOUD_BASE_URL=${{ secrets.FLUXCLOUD_BASE_URL }} --dart-define=STATS_FIRST_COMMIT_DATE=${{ steps.stats.outputs.FIRST_COMMIT_DATE }} --dart-define=STATS_RELEASE_COUNT=${{ steps.stats.outputs.RELEASE_COUNT }} --dart-define=STATS_COMMIT_COUNT=${{ steps.stats.outputs.COMMIT_COUNT }}
 
+      - name: Build and bundle native desktop services
+        run: |
+          cargo build --release --locked \
+            -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon \
+            --features fluxdown_daemon/plugins,fluxdown_daemon/components
+          BUNDLE_DIR="build/linux/x64/release/bundle"
+          cp target/release/fluxdown-desktop "$BUNDLE_DIR/"
+          cp target/release/fluxdown-agent "$BUNDLE_DIR/"
+          cp target/release/fluxdownd "$BUNDLE_DIR/"
+          chmod +x "$BUNDLE_DIR/fluxdown-desktop" "$BUNDLE_DIR/fluxdown-agent" "$BUNDLE_DIR/fluxdownd"
+
       # NOTE: fluxdown_nmh and fluxdown_updater are built automatically
       # by CMake custom targets defined in linux/CMakeLists.txt during flutter build.
 
@@ -1142,6 +1167,17 @@ jobs:
             --dart-define=STATS_RELEASE_COUNT=${{ steps.stats.outputs.RELEASE_COUNT }} \
             --dart-define=STATS_COMMIT_COUNT=${{ steps.stats.outputs.COMMIT_COUNT }}
 
+
+      - name: Build and bundle native desktop services
+        run: |
+          cargo build --release --locked \
+            -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon \
+            --features fluxdown_daemon/plugins,fluxdown_daemon/components
+          MACOS_DIR="build/macos/Build/Products/Release/FluxDown.app/Contents/MacOS"
+          cp target/release/fluxdown-desktop "$MACOS_DIR/"
+          cp target/release/fluxdown-agent "$MACOS_DIR/"
+          cp target/release/fluxdownd "$MACOS_DIR/"
+          chmod +x "$MACOS_DIR/fluxdown-desktop" "$MACOS_DIR/fluxdown-agent" "$MACOS_DIR/fluxdownd"
       # NOTE: fluxdown_nmh and fluxdown_updater are built automatically
       # by Xcode shell script build phases defined in macos/Runner.xcodeproj during flutter build.
 

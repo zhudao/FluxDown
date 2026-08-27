@@ -1,16 +1,13 @@
 //! `fluxdown_api` —— FluxDown 本机 HTTP API：契约 + axum 服务器，零 FFI 依赖。
 //!
-//! 本 crate 把「API 契约」从「宿主实现」中拆出：
+//! 本 crate 把 HTTP 传输与宿主实现拆开：
 //!
-//! - [`types`] —— wire JSON 结构体（对外稳定契约，camelCase）
-//! - [`routes`] —— 路径常量（server 与 Rust 客户端共用）
+//! - `fluxdown_protocol` —— 唯一 wire JSON 契约（camelCase）
+//! - [`routes`] —— 路径常量
 //! - [`service`] —— [`ApiHost`](service::ApiHost) trait：宿主能力契约
-//! - [`server`] —— axum 服务器（探活 / 脚本接管 / aria2 兼容含 WS 通知 / 管理 API）
+//! - [`server`] —— axum 服务器（探活 / 脚本接管 / aria2 / 管理 API）
 //!
-//! 宿主（桌面 App 的 hub、未来的 headless server、手机端）各自实现
-//! `ApiHost`，调用 [`server::spawn_api_server`] 即获得完整 API 服务；
-//! MCP server 等 Rust 客户端直接复用 `types` + `routes` 保证请求地址与
-//! 结构体永不漂移。
+//! 宿主各自实现 `ApiHost`；本 crate 不依赖下载引擎。
 //!
 //! # Examples
 //!
@@ -21,7 +18,7 @@
 //! use async_trait::async_trait;
 //! use fluxdown_api::server::{ApiServerConfig, spawn_api_server};
 //! use fluxdown_api::service::{ApiError, ApiHost};
-//! use fluxdown_api::types::{CreateTaskRequest, DownloadRequest, QueueDto, TaskDto};
+//! use fluxdown_protocol::daemon::{CreateTaskRequest, DownloadRequest, QueueDto, TaskDto};
 //!
 //! struct MyHost;
 //!
@@ -62,4 +59,3 @@ mod takeover;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
-pub mod types;

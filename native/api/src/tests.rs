@@ -25,11 +25,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::aria2;
 use crate::routes;
-use crate::server::{self, ApiServerConfig};
+use crate::server::{self, ApiRuntimeSwitches, ApiServerConfig};
 use crate::service::{
     ApiError, ApiHost, LiveSpeed, TaskEvent, TaskEventKind, UNKNOWN_ENDPOINT_MESSAGE,
 };
-use crate::types::{
+use fluxdown_protocol::daemon::{
     CreateGroupRequest, CreateTaskRequest, DownloadRequest, GroupDto, QueueDto,
     ResolvePreviewRequest, ResolvePreviewResponse, TaskDto,
 };
@@ -1825,6 +1825,77 @@ async fn management_disabled_returns_404_for_tasks() {
     // fallback message 是 CLI 区分「管理 API 未启用」与「资源不存在」的依据
     // （CLI 据此给出可操作提示）。锁定该契约，改动 fallback message 会跑挂此测试。
     assert_eq!(resp.json()["message"], UNKNOWN_ENDPOINT_MESSAGE);
+}
+
+#[tokio::test]
+async fn runtime_switches_hot_toggle_routes_and_cors_without_rebinding() {
+    let switches = Arc::new(ApiRuntimeSwitches::new(false, false, false, false, false));
+    let configured = switches.clone();
+    let server = TestServer::start(MockHost::new(), move |config| {
+        config.runtime_switches = Some(configured);
+        config.token.set("dynamic-token");
+    })
+    .await;
+    let disabled = server
+        .send(&request(
+            "POST",
+            routes::DOWNLOAD,
+            &[("X-FluxDown-Client", "userscript")],
+            r#"{"url":"https://example.com/a"}"#,
+        ))
+        .await;
+    assert_eq!(disabled.status, 404);
+    let management_disabled = server
+        .send(&request(
+            "GET",
+            routes::API_TASKS,
+            &[("Authorization", "Bearer dynamic-token")],
+            "",
+        ))
+        .await;
+    assert_eq!(management_disabled.status, 404);
+
+    switches.update(true, true, true, true, true);
+    let enabled = server
+        .send(&request(
+            "POST",
+            routes::DOWNLOAD,
+            &[
+                ("X-FluxDown-Client", "userscript"),
+                ("Origin", "https://example.com"),
+                ("X-FluxDown-Token", "dynamic-token"),
+            ],
+            r#"{"url":"https://example.com/a"}"#,
+        ))
+        .await;
+    assert_eq!(enabled.status, 200);
+    assert_eq!(
+        enabled
+            .headers
+            .get("access-control-allow-origin")
+            .map(String::as_str),
+        Some("*")
+    );
+    let management_enabled = server
+        .send(&request(
+            "GET",
+            routes::API_TASKS,
+            &[("Authorization", "Bearer dynamic-token")],
+            "",
+        ))
+        .await;
+    assert_eq!(management_enabled.status, 200);
+
+    switches.update(false, false, false, false, false);
+    let disabled_again = server
+        .send(&request(
+            "GET",
+            routes::API_TASKS,
+            &[("Authorization", "Bearer dynamic-token")],
+            "",
+        ))
+        .await;
+    assert_eq!(disabled_again.status, 404);
 }
 
 // ---------------------------------------------------------------------------

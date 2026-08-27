@@ -171,6 +171,8 @@ pub struct Engine {
     /// 解析后的数据目录（含 override）。供宿主调用 `components::*` API
     /// （ffmpeg 探测/安装）时传入,与引擎内部使用的目录保持一致。
     pub data_dir: PathBuf,
+    /// 唯一写入者租约；字段顺序保证在数据库句柄之后释放。
+    _write_guard: db::EngineWriteGuard,
 }
 
 impl Engine {
@@ -189,11 +191,11 @@ impl Engine {
         selector: Arc<dyn HostSelection>,
     ) -> Result<Self, EngineError> {
         let data_dir = data_dir::resolve_data_dir(config.data_dir_override.as_deref())?;
-        let db = match &config.database_url {
-            Some(url) => Db::connect(url).await?,
-            None => Db::open(&data_dir).await?,
+        let (db, write_guard) = match &config.database_url {
+            Some(url) => Db::connect_exclusive(url, &data_dir).await?,
+            None => Db::open_exclusive(&data_dir).await?,
         };
-        Self::initialize(config, data_dir, db, sink, selector).await
+        Self::initialize(config, data_dir, db, write_guard, sink, selector).await
     }
 
     /// 使用宿主已打开的数据库连接池构造引擎。
@@ -209,17 +211,19 @@ impl Engine {
     pub async fn from_db(
         config: EngineConfig,
         db: Db,
+        write_guard: db::EngineWriteGuard,
         sink: Arc<dyn EventSink>,
         selector: Arc<dyn HostSelection>,
     ) -> Result<Self, EngineError> {
         let data_dir = data_dir::resolve_data_dir(config.data_dir_override.as_deref())?;
-        Self::initialize(config, data_dir, db, sink, selector).await
+        Self::initialize(config, data_dir, db, write_guard, sink, selector).await
     }
 
     async fn initialize(
         config: EngineConfig,
         data_dir: PathBuf,
         db: Db,
+        write_guard: db::EngineWriteGuard,
         sink: Arc<dyn EventSink>,
         selector: Arc<dyn HostSelection>,
     ) -> Result<Self, EngineError> {
@@ -314,6 +318,7 @@ impl Engine {
         manager.webhook().attach_db(db.clone()).await;
         Ok(Self {
             db,
+            _write_guard: write_guard,
             manager,
             selector,
             data_dir,

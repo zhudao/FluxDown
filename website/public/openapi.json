@@ -2896,7 +2896,7 @@
       },
       "CreateGroupRequest": {
         "type": "object",
-        "description": "创建多文件任务组请求（`POST /api/v1/groups`）。`items` 不可为空\n（空数组 → 400）。\n\n# Examples\n\n```\nuse fluxdown_api::types::CreateGroupRequest;\n\nlet req: CreateGroupRequest = serde_json::from_str(\n    r#\"{\"sourceUrl\":\"https://x/share\",\"groupName\":\"合集\",\"items\":[\n        {\"resolverItem\":\"a\",\"fileName\":\"a.mp4\"}\n    ]}\"#,\n)\n.unwrap();\nassert_eq!(req.group_name, \"合集\");\nassert_eq!(req.items.len(), 1);\nassert!(req.save_dir.is_empty()); // 空 = 使用全局默认保存目录\n```",
+        "description": "创建多文件任务组请求（`POST /api/v1/groups`）。`items` 不可为空\n（空数组 → 400）。\n\n# Examples\n",
         "properties": {
           "cookies": {
             "type": "string"
@@ -2972,7 +2972,7 @@
       },
       "CreateTaskRequest": {
         "type": "object",
-        "description": "创建任务请求（`POST /api/v1/tasks`）。\n\n与外部下载请求 [`DownloadRequest`] 不同：本请求**直接创建任务**，\n不经过快速下载确认弹框（管理 API 的调用方是受信任的自动化客户端）。\n\n# Examples\n\n```\nuse fluxdown_api::types::CreateTaskRequest;\n\nlet req: CreateTaskRequest =\n    serde_json::from_str(r#\"{\"url\":\"https://example.com/f.zip\",\"segments\":8}\"#).unwrap();\nassert_eq!(req.url, \"https://example.com/f.zip\");\nassert_eq!(req.segments, 8);\nassert!(req.save_dir.is_empty()); // 空 = 使用全局默认保存目录\n```",
+        "description": "创建任务请求（`POST /api/v1/tasks`）。\n\n与外部下载请求 [`DownloadRequest`] 不同：本请求**直接创建任务**，\n不经过快速下载确认弹框（管理 API 的调用方是受信任的自动化客户端）。\n\n# Examples\n",
         "required": [
           "url"
         ],
@@ -3096,7 +3096,7 @@
       },
       "DownloadRequest": {
         "type": "object",
-        "description": "外部下载请求载荷（浏览器扩展 / 油猴脚本 / aria2 兼容层）。\n\n由宿主的「外部下载」通道消费：缓存请求事务 → 弹出快速下载确认框 →\n用户确认后创建任务。与管理 API 的 [`CreateTaskRequest`]（直接建任务、\n无确认框）语义不同。\n\n# Examples\n\n```\nuse fluxdown_api::types::DownloadRequest;\n\nlet req: DownloadRequest =\n    serde_json::from_str(r#\"{\"url\":\"https://example.com/f.zip\"}\"#).unwrap();\nassert_eq!(req.url, \"https://example.com/f.zip\");\nassert!(req.filename.is_empty());\n```",
+        "description": "外部下载请求载荷（浏览器扩展 / 油猴脚本 / aria2 兼容层）。\n\n由宿主的「外部下载」通道消费：缓存请求事务 → 弹出快速下载确认框 →\n用户确认后创建任务。与管理 API 的 [`CreateTaskRequest`]（直接建任务、\n无确认框）语义不同。\n\n# Examples\n",
         "required": [
           "url"
         ],
@@ -3173,7 +3173,7 @@
       },
       "GroupDto": {
         "type": "object",
-        "description": "任务组信息（`GET /api/v1/groups` 响应元素）。\n\n# Examples\n\n```\nuse fluxdown_api::types::GroupDto;\nuse fluxdown_engine::model::GroupInfo;\n\nlet info = GroupInfo {\n    group_id: \"g1\".to_string(),\n    name: \"合集\".to_string(),\n    source_url: \"https://example.com/share\".to_string(),\n    save_dir: \"/downloads/合集\".to_string(),\n    created_at: \"1700000000\".to_string(),\n};\nlet dto = GroupDto::from(info);\nassert_eq!(dto.group_id, \"g1\");\nlet json = serde_json::to_string(&dto).unwrap();\nassert!(json.contains(\"\\\"groupId\\\":\\\"g1\\\"\"));\n```",
+        "description": "任务组信息（`GET /api/v1/groups` 响应元素）。\n\n# Examples\n",
         "required": [
           "groupId",
           "name",
@@ -3862,7 +3862,7 @@
       },
       "QueueDto": {
         "type": "object",
-        "description": "命名队列信息（`GET /api/v1/queues` 响应）。\n\n# Examples\n\n```\nuse fluxdown_api::types::QueueDto;\nuse fluxdown_engine::model::QueueInfo;\n\nlet q = QueueInfo {\n    queue_id: \"q1\".to_string(),\n    name: \"工作\".to_string(),\n    speed_limit_kbps: 0,\n    upload_limit_kbps: 0,\n    max_concurrent: 3,\n    default_save_dir: String::new(),\n    position: 0,\n    default_segments: 0,\n    default_user_agent: String::new(),\n    is_running: true,\n    schedule_enabled: false,\n    schedule_start: String::new(),\n    schedule_stop: String::new(),\n    schedule_days: 127,\n};\nlet dto = QueueDto::from(q);\nassert_eq!(dto.queue_id, \"q1\");\n```",
+        "description": "命名队列信息（`GET /api/v1/queues` 响应）。\n\n# Examples\n",
         "required": [
           "queueId",
           "name",
@@ -4021,7 +4021,7 @@
       },
       "ResolvePreviewRequest": {
         "type": "object",
-        "description": "前置预解析请求（`POST /api/v1/resolve/preview`）。只读、不建任务、\n不写库；结果见 [`ResolvePreviewResponse`]。\n\n# Examples\n\n```\nuse fluxdown_api::types::ResolvePreviewRequest;\n\nlet req: ResolvePreviewRequest =\n    serde_json::from_str(r#\"{\"url\":\"https://example.com/share\"}\"#).unwrap();\nassert_eq!(req.url, \"https://example.com/share\");\nassert!(req.cookies.is_empty());\n```",
+        "description": "前置预解析请求（`POST /api/v1/resolve/preview`）。只读、不建任务、\n不写库；结果见 [`ResolvePreviewResponse`]。\n\n# Examples\n",
         "required": [
           "url"
         ],
@@ -4178,7 +4178,7 @@
       },
       "RssSourceDto": {
         "type": "object",
-        "description": "一个 RSS 订阅（`GET/POST /api/v1/rss`、`PUT /api/v1/rss/{id}`）。\n\n写请求复用同一结构：全字段 `#[serde(default)]`，客户端只需给关心的字段；\n运行态字段（`lastFetchAt`/`lastError`/`failCount`/`seeded`/`unreadCount`）\n只读，写入时被引擎忽略。\n\n# Examples\n\n```\nuse fluxdown_api::types::RssSourceDto;\n\nlet req: RssSourceDto =\n    serde_json::from_str(r#\"{\"url\":\"https://mikanani.me/RSS/MyBangumi?token=x\"}\"#).unwrap();\nassert_eq!(req.interval_minutes, 0); // 0 → 引擎归一为默认 30 分钟\nassert!(req.source_id.is_empty());\n```",
+        "description": "一个 RSS 订阅（`GET/POST /api/v1/rss`、`PUT /api/v1/rss/{id}`）。\n\n写请求复用同一结构：全字段 `#[serde(default)]`，客户端只需给关心的字段；\n运行态字段（`lastFetchAt`/`lastError`/`failCount`/`seeded`/`unreadCount`）\n只读，写入时被引擎忽略。\n\n# Examples\n",
         "required": [
           "url"
         ],
@@ -4453,7 +4453,7 @@
       },
       "TaskDto": {
         "type": "object",
-        "description": "任务信息（`GET /api/v1/tasks`、`GET /api/v1/tasks/{id}` 响应）。\n\n# Examples\n\n```\nuse fluxdown_api::types::TaskDto;\nuse fluxdown_engine::model::TaskInfo;\n\nlet info = TaskInfo {\n    task_id: \"t1\".to_string(),\n    url: \"https://example.com/f.zip\".to_string(),\n    file_name: \"f.zip\".to_string(),\n    save_dir: \"/tmp\".to_string(),\n    status: 1,\n    downloaded_bytes: 10,\n    total_bytes: 100,\n    error_message: String::new(),\n    created_at: \"1700000000\".to_string(),\n    proxy_url: String::new(),\n    queue_id: String::new(),\n    checksum: String::new(),\n    ignore_tls_errors: false,\n    file_missing: false,\n    completed_at: String::new(),\n    segments: 0,\n    queue_order: 0,\n    uploaded_bytes: 0,\n    uploaded_at_completion: 0,\n    seeding_status: 0,\n    seeding_message: String::new(),\n    seeding_time_secs: 0,\n    seed_ratio_limit_milli: -2,\n    seed_post_ratio_limit_milli: -2,\n    seed_time_limit_minutes: -2,\n    seed_inactive_time_limit_minutes: -2,\n    seed_upload_limit_bps: 0,\n    referrer: String::new(),\n    group_id: String::new(),\n    rss_source_id: String::new(),\n    origin_url: String::new(),\n    auto_route: String::new(),\n};\nlet dto = TaskDto::from(info);\nassert_eq!(dto.task_id, \"t1\");\nlet json = serde_json::to_string(&dto).unwrap();\nassert!(json.contains(\"\\\"taskId\\\":\\\"t1\\\"\"));\n```",
+        "description": "任务信息（`GET /api/v1/tasks`、`GET /api/v1/tasks/{id}` 响应）。\n\n# Examples\n",
         "required": [
           "taskId",
           "url",

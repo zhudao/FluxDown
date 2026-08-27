@@ -1,7 +1,11 @@
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
+use sqlx::Any;
 use sqlx::any::{AnyPoolOptions, AnyRow};
+use sqlx::pool::PoolConnection;
 use sqlx::{AssertSqlSafe, Row};
 use thiserror::Error;
 
@@ -14,6 +18,23 @@ pub enum DbError {
     Sqlx(#[from] sqlx::Error),
     #[error("unsupported database url: {0}")]
     UnsupportedUrl(String),
+    #[error("database I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("engine writer lease is already held: {0}")]
+    WriterLeaseHeld(String),
+}
+
+/// 原子配置补丁失败。
+#[derive(Error, Debug)]
+pub enum ConfigPatchError {
+    #[error(transparent)]
+    Database(#[from] DbError),
+    #[error("config revision conflict: expected {expected}, current {current}")]
+    RevisionConflict { expected: u64, current: u64 },
+    #[error("config revision overflow")]
+    RevisionOverflow,
+    #[error("stored config revision is invalid: {0}")]
+    InvalidStoredRevision(String),
 }
 
 /// 数据库后端类型，由连接 URL 的 scheme 决定。
@@ -413,6 +434,55 @@ const SQLITE_PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
  PRAGMA temp_store=MEMORY;\
  PRAGMA mmap_size=0;\
  PRAGMA wal_autocheckpoint=1000;";
+const POSTGRES_ENGINE_ADVISORY_LOCK: i64 = 0x464C_5558_444F_574E_i64;
+
+/// 引擎唯一写入者租约。必须与 [`Db`] 一起保留到引擎完全关闭。
+pub struct EngineWriteGuard {
+    file: File,
+    postgres_connection: Option<tokio::sync::Mutex<PoolConnection<Any>>>,
+}
+
+impl std::fmt::Debug for EngineWriteGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EngineWriteGuard")
+            .field("postgres", &self.postgres_connection.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for EngineWriteGuard {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+fn sqlite_url(path: &Path) -> String {
+    format!(
+        "sqlite:{}?mode=rwc",
+        path.to_string_lossy().replace('\\', "/")
+    )
+}
+
+fn acquire_engine_file_lease(data_dir: &Path) -> Result<EngineWriteGuard, DbError> {
+    std::fs::create_dir_all(data_dir)?;
+    let lock_path: PathBuf = data_dir.join("engine.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)?;
+    if let Err(error) = file.try_lock_exclusive() {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(DbError::WriterLeaseHeld(lock_path.display().to_string()));
+        }
+        return Err(DbError::Io(error));
+    }
+    Ok(EngineWriteGuard {
+        file,
+        postgres_connection: None,
+    })
+}
 
 #[derive(Clone)]
 pub struct Db {
@@ -529,27 +599,59 @@ impl Db {
     /// 桌面 App 的默认持久化路径；服务器端可改用 [`Db::connect`] 按 URL
     /// 连接 SQLite 或 PostgreSQL。
     pub async fn open(dir: &Path) -> Result<Self, DbError> {
-        // Windows 绝对路径统一为正斜杠 + 单冒号形式（sqlite:C:/…?mode=rwc）。
         let db_path = dir.join("flux_down.db");
-        let url = format!(
-            "sqlite:{}?mode=rwc",
-            db_path.to_string_lossy().replace('\\', "/")
-        );
+        let url = sqlite_url(&db_path);
         Self::connect(&url).await
+    }
+
+    /// 打开 SQLite 数据库并在任何连接或 schema 变更前获取唯一写入者文件租约。
+    pub async fn open_exclusive(dir: &Path) -> Result<(Self, EngineWriteGuard), DbError> {
+        let guard = acquire_engine_file_lease(dir)?;
+        let db_path = dir.join("flux_down.db");
+        let url = sqlite_url(&db_path);
+        let db = Self::connect_uninitialized(&url).await?;
+        db.init_schema().await?;
+        Ok((db, guard))
     }
 
     /// 按连接 URL 打开数据库。
     ///
     /// - `sqlite:/path/to/db?mode=rwc` / `sqlite::memory:` → SQLite
     /// - `postgres://user:pass@host:5432/db` → PostgreSQL
-    ///
-    /// 其余 scheme 返回 [`DbError::UnsupportedUrl`]。
     pub async fn connect(url: &str) -> Result<Self, DbError> {
-        // 幂等：内部由 Once 保护，可安全多次调用。
+        let db = Self::connect_uninitialized(url).await?;
+        db.init_schema().await?;
+        Ok(db)
+    }
+
+    /// 获取本机文件租约；PostgreSQL 还会在 schema 初始化前获取全局 advisory lock。
+    pub async fn connect_exclusive(
+        url: &str,
+        data_dir: &Path,
+    ) -> Result<(Self, EngineWriteGuard), DbError> {
+        let mut guard = acquire_engine_file_lease(data_dir)?;
+        let db = Self::connect_uninitialized(url).await?;
+        if db.backend == Backend::Postgres {
+            let mut connection = db.pool.acquire().await?;
+            let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+                .bind(POSTGRES_ENGINE_ADVISORY_LOCK)
+                .fetch_one(&mut *connection)
+                .await?;
+            if !acquired {
+                return Err(DbError::WriterLeaseHeld(
+                    "PostgreSQL advisory lock".to_owned(),
+                ));
+            }
+            connection.close_on_drop();
+            guard.postgres_connection = Some(tokio::sync::Mutex::new(connection));
+        }
+        db.init_schema().await?;
+        Ok((db, guard))
+    }
+
+    async fn connect_uninitialized(url: &str) -> Result<Self, DbError> {
         sqlx::any::install_default_drivers();
         let backend = Backend::from_url(url)?;
-        // `sqlite::memory:` 下每个池连接是彼此独立的内存库——必须钳制为
-        // 单连接，否则连接轮换会"丢库"（主要影响测试）。
         let max_connections = if backend == Backend::Sqlite && url.contains(":memory:") {
             1
         } else {
@@ -567,9 +669,7 @@ impl Db {
             })
             .connect(url)
             .await?;
-        let db = Self { pool, backend };
-        db.init_schema().await?;
-        Ok(db)
+        Ok(Self { pool, backend })
     }
 
     async fn init_schema(&self) -> Result<(), DbError> {
@@ -1894,6 +1994,131 @@ impl Db {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// 比较 revision 并在一个事务中提交全部配置值与下一 revision。
+    pub async fn apply_config_patch_atomic(
+        &self,
+        expected_revision: u64,
+        values: &BTreeMap<String, String>,
+    ) -> Result<u64, ConfigPatchError> {
+        let mut transaction = self.pool.begin().await.map_err(DbError::from)?;
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT value FROM config WHERE key = 'daemon_config_revision'")
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(DbError::from)?;
+        let current = stored
+            .as_deref()
+            .unwrap_or("0")
+            .parse::<u64>()
+            .map_err(|error| ConfigPatchError::InvalidStoredRevision(error.to_string()))?;
+        if current != expected_revision {
+            return Err(ConfigPatchError::RevisionConflict {
+                expected: expected_revision,
+                current,
+            });
+        }
+        let next = current
+            .checked_add(1)
+            .ok_or(ConfigPatchError::RevisionOverflow)?;
+        for (key, value) in values {
+            sqlx::query(
+                "INSERT INTO config (key, value) VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(key)
+            .bind(value)
+            .execute(&mut *transaction)
+            .await
+            .map_err(DbError::from)?;
+        }
+        sqlx::query(
+            "INSERT INTO config (key, value) VALUES ('daemon_config_revision', $1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(next.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(DbError::from)?;
+        transaction.commit().await.map_err(DbError::from)?;
+        Ok(next)
+    }
+
+    /// 在一个事务中写入内部配置键，不改变用户配置 revision。
+    pub async fn set_config_batch_atomic(
+        &self,
+        values: &BTreeMap<String, String>,
+    ) -> Result<(), DbError> {
+        let mut transaction = self.pool.begin().await?;
+        for (key, value) in values {
+            sqlx::query(
+                "INSERT INTO config (key, value) VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(key)
+            .bind(value)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// 返回现有 CDN 上传租约，或原子写入新租约并清空旧 pending 快照。
+    pub async fn lease_cdn_reports(&self, lease_json: &str) -> Result<String, DbError> {
+        let mut transaction = self.pool.begin().await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT value FROM config WHERE key = 'cdn_report_lease'")
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if let Some(existing) = existing.filter(|value| !value.trim().is_empty()) {
+            transaction.rollback().await?;
+            return Ok(existing);
+        }
+        sqlx::query(
+            "INSERT INTO config (key, value) VALUES ('cdn_report_lease', $1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(lease_json)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO config (key, value) VALUES ('cdn_pending_reports', '')
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(lease_json.to_owned())
+    }
+
+    /// 只在 batch ID 匹配当前租约时原子清空。
+    pub async fn ack_cdn_report_lease(&self, batch_id: &str) -> Result<bool, DbError> {
+        let mut transaction = self.pool.begin().await?;
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT value FROM config WHERE key = 'cdn_report_lease'")
+                .fetch_optional(&mut *transaction)
+                .await?;
+        let matches = existing
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("batchId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .is_some_and(|stored| stored == batch_id);
+        if !matches {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("UPDATE config SET value = '' WHERE key = 'cdn_report_lease'")
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     /// Delete a config entry by key.
@@ -5660,6 +5885,94 @@ mod tests {
         let y = db.load_task_by_id("y").await.expect("load").expect("row");
         assert_eq!(y.queue_id, MAIN_QUEUE_ID);
         assert_eq!(y.queue_order, 0, "explicit order resets on reassignment");
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn exclusive_open_rejects_second_writer_until_guard_drops() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_writer_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create writer test dir");
+
+        let (first_db, first_guard) = Db::open_exclusive(&dir).await.expect("first writer");
+        let second = Db::open_exclusive(&dir).await;
+        assert!(matches!(second, Err(DbError::WriterLeaseHeld(_))));
+
+        first_db.pool.close().await;
+        drop(first_db);
+        drop(first_guard);
+
+        let (next_db, next_guard) = Db::open_exclusive(&dir)
+            .await
+            .expect("writer after release");
+        next_db.pool.close().await;
+        drop(next_db);
+        drop(next_guard);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn config_patch_is_atomic_and_revision_guarded() {
+        let (db, dir) = open_test_db().await;
+        let values = BTreeMap::from([
+            ("max_concurrent_tasks".to_owned(), "7".to_owned()),
+            ("default_segments".to_owned(), "8".to_owned()),
+        ]);
+        let revision = db
+            .apply_config_patch_atomic(0, &values)
+            .await
+            .expect("first config patch");
+        assert_eq!(revision, 1);
+        assert_eq!(
+            db.get_config("max_concurrent_tasks").await.expect("read"),
+            Some("7".to_owned())
+        );
+
+        let stale = BTreeMap::from([("speed_limit_bytes".to_owned(), "100".to_owned())]);
+        assert!(matches!(
+            db.apply_config_patch_atomic(0, &stale).await,
+            Err(ConfigPatchError::RevisionConflict {
+                expected: 0,
+                current: 1
+            })
+        ));
+        assert_eq!(
+            db.get_config("speed_limit_bytes").await.expect("read"),
+            None
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn cdn_lease_peek_and_ack_preserve_matching_batch() {
+        let (db, dir) = open_test_db().await;
+        let first = r#"{"batchId":"batch-1","samples":[{"ok":true}]}"#;
+        let second = r#"{"batchId":"batch-2","samples":[{"ok":false}]}"#;
+        assert_eq!(
+            db.lease_cdn_reports(first).await.expect("first lease"),
+            first
+        );
+        assert_eq!(
+            db.lease_cdn_reports(second).await.expect("existing lease"),
+            first
+        );
+        assert!(!db.ack_cdn_report_lease("batch-2").await.expect("wrong ack"));
+        assert_eq!(
+            db.get_config("cdn_report_lease").await.expect("read"),
+            Some(first.to_owned())
+        );
+        assert!(
+            db.ack_cdn_report_lease("batch-1")
+                .await
+                .expect("matching ack")
+        );
+        assert_eq!(
+            db.get_config("cdn_report_lease").await.expect("read"),
+            Some(String::new())
+        );
         close_test_db(&db, dir).await;
     }
 }

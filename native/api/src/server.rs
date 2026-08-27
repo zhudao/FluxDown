@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -24,7 +25,6 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header}
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post, put};
-use fluxdown_engine::log_info;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -37,7 +37,7 @@ use crate::mcp::handle_mcp;
 use crate::routes;
 use crate::service::{ApiError, ApiHost, UNKNOWN_ENDPOINT_MESSAGE};
 use crate::takeover::parse_batch;
-use crate::types::{
+use fluxdown_protocol::daemon::{
     CreateGroupRequest, CreateGroupResponse, CreateTaskRequest, CreatedTask, DownloadRequest,
     LinkAuth, LinkDeviceTaskRequest, LinkDevicesResponse, LinkDiscoveredResponse,
     LinkDiscoveryRequest, LinkOkResponse, LinkPairApproveRequest, LinkPairBeginRequest,
@@ -109,8 +109,61 @@ pub struct ApiServerConfig {
     /// 的本地网络访问门禁），等价于 aria2 的 `--rpc-allow-origin-all`——
     /// 把「aria2 RPC 探活」写死成浏览器 `fetch` 的网站需要它才能识别本机服务。
     pub cors_allow_all: bool,
+    /// agent 使用的热切换路由开关；普通宿主为 `None`，维持静态注册行为。
+    pub runtime_switches: Option<Arc<ApiRuntimeSwitches>>,
     /// 宿主应用版本号（`/ping`、`/api/v1/info` 返回）。
     pub app_version: String,
+}
+
+#[derive(Debug)]
+pub struct ApiRuntimeSwitches {
+    takeover: AtomicBool,
+    jsonrpc: AtomicBool,
+    management: AtomicBool,
+    mcp: AtomicBool,
+    cors: AtomicBool,
+}
+
+impl ApiRuntimeSwitches {
+    #[must_use]
+    pub fn new(takeover: bool, jsonrpc: bool, management: bool, mcp: bool, cors: bool) -> Self {
+        Self {
+            takeover: AtomicBool::new(takeover),
+            jsonrpc: AtomicBool::new(jsonrpc),
+            management: AtomicBool::new(management),
+            mcp: AtomicBool::new(mcp),
+            cors: AtomicBool::new(cors),
+        }
+    }
+
+    pub fn update(&self, takeover: bool, jsonrpc: bool, management: bool, mcp: bool, cors: bool) {
+        self.takeover.store(takeover, Ordering::Release);
+        self.jsonrpc.store(jsonrpc, Ordering::Release);
+        self.management.store(management, Ordering::Release);
+        self.mcp.store(mcp, Ordering::Release);
+        self.cors.store(cors, Ordering::Release);
+    }
+
+    fn enabled(&self, group: RouteGroup) -> bool {
+        match group {
+            RouteGroup::Takeover => self.takeover.load(Ordering::Acquire),
+            RouteGroup::JsonRpc => self.jsonrpc.load(Ordering::Acquire),
+            RouteGroup::Management => self.management.load(Ordering::Acquire),
+            RouteGroup::Mcp => self.mcp.load(Ordering::Acquire),
+        }
+    }
+
+    fn cors_enabled(&self) -> bool {
+        self.cors.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RouteGroup {
+    Takeover,
+    JsonRpc,
+    Management,
+    Mcp,
 }
 
 impl ApiServerConfig {
@@ -137,6 +190,7 @@ impl ApiServerConfig {
             mcp_enabled: flag("local_server_mcp_enabled", false),
             lan_enabled: flag("local_server_lan_enabled", false),
             cors_allow_all: flag("local_server_cors_allow_all", false),
+            runtime_switches: None,
             app_version: app_version.to_string(),
         }
     }
@@ -152,6 +206,37 @@ impl ApiServerConfig {
             Ipv4Addr::LOCALHOST
         };
         SocketAddr::from((ip, self.port))
+    }
+
+    #[must_use]
+    pub fn with_runtime_switches(mut self, switches: Arc<ApiRuntimeSwitches>) -> Self {
+        self.runtime_switches = Some(switches);
+        self
+    }
+
+    fn route_registered(&self, group: RouteGroup) -> bool {
+        if self.runtime_switches.is_some() {
+            return true;
+        }
+        match group {
+            RouteGroup::Takeover => self.takeover_enabled,
+            RouteGroup::JsonRpc => self.jsonrpc_enabled,
+            RouteGroup::Management => self.management_enabled,
+            RouteGroup::Mcp => self.mcp_enabled,
+        }
+    }
+
+    fn route_enabled(&self, group: RouteGroup) -> bool {
+        self.runtime_switches.as_ref().map_or_else(
+            || self.route_registered(group),
+            |switches| switches.enabled(group),
+        )
+    }
+
+    fn cors_enabled(&self) -> bool {
+        self.runtime_switches
+            .as_ref()
+            .map_or(self.cors_allow_all, |switches| switches.cors_enabled())
     }
 }
 
@@ -180,7 +265,7 @@ pub fn spawn_api_server(host: Arc<dyn ApiHost>, config: ApiServerConfig) -> ApiS
         cancel: cancel.clone(),
     };
     if !config.enabled {
-        log_info!("[api-server] disabled by config");
+        tracing::info!("local API server disabled by config");
         return handle;
     }
 
@@ -194,8 +279,8 @@ pub fn spawn_api_server(host: Arc<dyn ApiHost>, config: ApiServerConfig) -> ApiS
                     listener = Some(l);
                     break;
                 }
-                Err(e) if attempt + 1 == BIND_RETRIES => {
-                    fluxdown_engine::logger::report_error("local-api", "bind listener", &e);
+                Err(error) if attempt + 1 == BIND_RETRIES => {
+                    tracing::error!(error = %error, "local API failed to bind listener");
                 }
                 Err(_) => tokio::time::sleep(BIND_RETRY_DELAY).await,
             }
@@ -203,12 +288,12 @@ pub fn spawn_api_server(host: Arc<dyn ApiHost>, config: ApiServerConfig) -> ApiS
         let Some(listener) = listener else {
             return;
         };
-        log_info!(
-            "[api-server] listening on http://{} (takeover={}, jsonrpc={}, management={})",
-            addr,
-            config.takeover_enabled,
-            config.jsonrpc_enabled,
-            config.management_enabled
+        tracing::info!(
+            %addr,
+            takeover = config.takeover_enabled,
+            jsonrpc = config.jsonrpc_enabled,
+            management = config.management_enabled,
+            "local API server listening"
         );
         serve_on(listener, host, config, cancel).await;
     });
@@ -234,9 +319,9 @@ pub(crate) async fn serve_on(
     .with_graceful_shutdown(cancel.cancelled_owned())
     .await;
     if let Err(error) = served {
-        fluxdown_engine::logger::report_error("local-api", "serve requests", &error);
+        tracing::error!(error = %error, "local API server failed");
     } else {
-        log_info!("[api-server] stopped");
+        tracing::info!("local API server stopped");
     }
 }
 
@@ -257,15 +342,15 @@ pub(crate) struct AppState {
 fn register_core(state: AppState) -> Router<AppState> {
     let mut router = Router::new().route(routes::PING, get(ping));
 
-    if state.config.takeover_enabled {
+    if state.config.route_registered(RouteGroup::Takeover) {
         router = router
             .route(routes::DOWNLOAD, post(takeover_download))
             .route(routes::DOWNLOAD_BATCH, post(takeover_download_batch));
     }
-    if state.config.jsonrpc_enabled {
+    if state.config.route_registered(RouteGroup::JsonRpc) {
         router = router.route(routes::JSONRPC, post(jsonrpc).get(jsonrpc_ws));
     }
-    if state.config.mcp_enabled {
+    if state.config.route_registered(RouteGroup::Mcp) {
         router = router.route(routes::MCP, post(mcp));
     }
     // P2P 设备互联端点：**无 token 鉴权**（配对由一次性码 + SAS 守卫；数据面由
@@ -274,7 +359,7 @@ fn register_core(state: AppState) -> Router<AppState> {
         .route(routes::API_LINK_PAIR_HELLO, post(api_link_pair_hello))
         .route(routes::API_LINK_PAIR_CONFIRM, post(api_link_pair_confirm))
         .route(routes::API_LINK_TASKS, post(api_link_create_task));
-    if state.config.management_enabled {
+    if state.config.route_registered(RouteGroup::Management) {
         router = router
             .route(routes::API_INFO, get(api_info))
             .route(routes::API_TASKS, get(api_list_tasks).post(api_create_task))
@@ -352,7 +437,7 @@ fn register_core(state: AppState) -> Router<AppState> {
 /// 关闭的路由组不注册（对应端点回 404，与旧行为一致）。
 fn build_router(state: AppState) -> Router {
     let mut router = register_core(state.clone());
-    if state.config.management_enabled {
+    if state.config.route_registered(RouteGroup::Management) {
         // OpenAPI 规范文档（无鉴权——纯接口描述，不含任何用户数据）。
         router = router.route(routes::API_OPENAPI, get(openapi_spec));
     }
@@ -361,6 +446,10 @@ fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             cors_and_preflight,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            route_group_guard,
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state)
@@ -381,6 +470,10 @@ pub fn api_router(host: Arc<dyn ApiHost>, config: ApiServerConfig) -> Router {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             cors_and_preflight,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            route_group_guard,
         ))
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .with_state(state)
@@ -404,7 +497,7 @@ async fn cors_and_preflight(
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let allow_all = state.config.cors_allow_all;
+    let allow_all = state.config.cors_enabled();
     if req.method() == Method::OPTIONS {
         let requested_headers = req
             .headers()
@@ -438,6 +531,34 @@ async fn cors_and_preflight(
     resp
 }
 
+async fn route_group_guard(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path();
+    let group = if path == routes::DOWNLOAD || path == routes::DOWNLOAD_BATCH {
+        Some(RouteGroup::Takeover)
+    } else if path == routes::JSONRPC {
+        Some(RouteGroup::JsonRpc)
+    } else if path == routes::MCP {
+        Some(RouteGroup::Mcp)
+    } else if path.starts_with(routes::API_PREFIX)
+        && !matches!(
+            path,
+            routes::API_LINK_PAIR_HELLO | routes::API_LINK_PAIR_CONFIRM | routes::API_LINK_TASKS
+        )
+    {
+        Some(RouteGroup::Management)
+    } else {
+        None
+    };
+    if group.is_some_and(|group| !state.config.route_enabled(group)) {
+        return unknown_endpoint().await;
+    }
+    next.run(req).await
+}
+
 async fn unknown_endpoint() -> Response {
     result_response(StatusCode::NOT_FOUND, false, UNKNOWN_ENDPOINT_MESSAGE)
 }
@@ -464,10 +585,10 @@ impl IntoResponse for ApiError {
         };
         match &self {
             ApiError::Internal(_) => {
-                fluxdown_engine::logger::report_error("local-api", "serve request", &self);
+                tracing::error!(error = %self, "local API request failed");
             }
             ApiError::Unavailable => {
-                fluxdown_engine::logger::report_warning("local-api", "serve request", &self);
+                tracing::warn!(error = %self, "local API host unavailable");
             }
             ApiError::NotFound
             | ApiError::BadRequest(_)
@@ -517,8 +638,8 @@ pub(crate) async fn ping(State(state): State<AppState>) -> Response {
     description = "配对握手第一步（发起方 → 响应方）。**无 token 鉴权**：由响应方 UI 展示的一次性配对码守卫，重复/过期码拒绝。",
     request_body = LinkPairHelloRequest,
     responses(
-        (status = 200, description = "响应方临时公钥 + SAS 材料", body = crate::types::LinkPairHelloResponse),
-        (status = 400, description = "配对码错误/过期/已用，或载荷非法", body = crate::types::ResultMessage),
+        (status = 200, description = "响应方临时公钥 + SAS 材料", body = fluxdown_protocol::daemon::LinkPairHelloResponse),
+        (status = 400, description = "配对码错误/过期/已用，或载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
     )
 )]
 pub(crate) async fn api_link_pair_hello(
@@ -560,7 +681,7 @@ pub(crate) async fn api_link_pair_hello(
     request_body = LinkPairConfirmRequest,
     responses(
         (status = 200, description = "`{success,paired,reason}`"),
-        (status = 400, description = "会话不存在/已过期，或载荷非法", body = crate::types::ResultMessage),
+        (status = 400, description = "会话不存在/已过期，或载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
     )
 )]
 pub(crate) async fn api_link_pair_confirm(State(state): State<AppState>, body: Bytes) -> Response {
@@ -590,9 +711,9 @@ pub(crate) async fn api_link_pair_confirm(State(state): State<AppState>, body: B
     description = "数据面：已配对设备下发下载任务。**无 management token**，鉴权靠 `X-FluxLink-Device`/`X-FluxLink-Ts`/`X-FluxLink-Nonce`/`X-FluxLink-Auth` 头做每对设备独立密钥的 HMAC 校验。\n\n\
 请求体是对明文 JSON 任务描述做 AEAD 加密后的**二进制密文**（`Content-Type: application/octet-stream`），非普通 JSON；宿主校验鉴权头后解密再反序列化。",
     responses(
-        (status = 200, description = "创建成功", body = crate::types::CreatedTask),
-        (status = 400, description = "载荷非法（含解密失败）", body = crate::types::ResultMessage),
-        (status = 401, description = "缺少/无效链路鉴权头", body = crate::types::ResultMessage),
+        (status = 200, description = "创建成功", body = fluxdown_protocol::daemon::CreatedTask),
+        (status = 400, description = "载荷非法（含解密失败）", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "缺少/无效链路鉴权头", body = fluxdown_protocol::daemon::ResultMessage),
     )
 )]
 pub(crate) async fn api_link_create_task(
@@ -623,8 +744,8 @@ pub(crate) async fn api_link_create_task(
 #[utoipa::path(post, path = "/api/v1/link/code", tag = "link",
     description = "生成一次性配对码，供发起方在 pair/hello 出示。**需 management token**。",
     responses(
-        (status = 200, description = "配对码 + 有效期", body = crate::types::LinkCodeResponse),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "配对码 + 有效期", body = fluxdown_protocol::daemon::LinkCodeResponse),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -646,8 +767,8 @@ pub(crate) async fn api_link_generate_code(
 #[utoipa::path(delete, path = "/api/v1/link/code", tag = "link",
     description = "停止 mDNS 广播（撤销「可被发现」状态）；配对码本身未过期仍可用，只是不再出现在局域网扫描里。**需 management token**。",
     responses(
-        (status = 200, description = "已停止", body = crate::types::LinkOkResponse),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已停止", body = fluxdown_protocol::daemon::LinkOkResponse),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -674,9 +795,9 @@ pub(crate) async fn api_link_stop_advertising(
     description = "本地设备发现开关：`start` 幂等且清空发现快照，`stop` 停止 mDNS 浏览。**需 management token**。",
     request_body = LinkDiscoveryRequest,
     responses(
-        (status = 200, description = "已切换", body = crate::types::LinkOkResponse),
-        (status = 400, description = "action 非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已切换", body = fluxdown_protocol::daemon::LinkOkResponse),
+        (status = 400, description = "action 非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -719,8 +840,8 @@ pub(crate) async fn api_link_discovery(
 #[utoipa::path(get, path = "/api/v1/link/discovered", tag = "link",
     description = "当前发现快照（发起方侧 UI 轮询）。**需 management token**。",
     responses(
-        (status = 200, description = "发现到的对端列表", body = crate::types::LinkDiscoveredResponse),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "发现到的对端列表", body = fluxdown_protocol::daemon::LinkDiscoveredResponse),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -742,10 +863,10 @@ pub(crate) async fn api_link_discovered(
     description = "手动地址探测（mDNS 失效兜底）；结果不入发现快照，直接返回给调用方。**需 management token**。",
     request_body = LinkProbeRequest,
     responses(
-        (status = 200, description = "探测到的对端信息", body = crate::types::LinkDiscoveredPeer),
-        (status = 400, description = "载荷非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 503, description = "对端不可达", body = crate::types::ResultMessage),
+        (status = 200, description = "探测到的对端信息", body = fluxdown_protocol::daemon::LinkDiscoveredPeer),
+        (status = 400, description = "载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 503, description = "对端不可达", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -779,10 +900,10 @@ pub(crate) async fn api_link_probe(
     description = "发起配对：向 `host:port` 发送 hello（带配对码），返回待确认令牌 + SAS，供 UI 展示核对后调用 pair/finish。**需 management token**。",
     request_body = LinkPairBeginRequest,
     responses(
-        (status = 200, description = "待确认令牌 + SAS + 对端信息", body = crate::types::LinkPairBeginResponse),
-        (status = 400, description = "配对码错误，或载荷非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 503, description = "对端不可达，或本机待确认配对已达上限", body = crate::types::ResultMessage),
+        (status = 200, description = "待确认令牌 + SAS + 对端信息", body = fluxdown_protocol::daemon::LinkPairBeginResponse),
+        (status = 400, description = "配对码错误，或载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 503, description = "对端不可达，或本机待确认配对已达上限", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -819,9 +940,9 @@ pub(crate) async fn api_link_pair_begin(
     description = "SAS 核对后确认/拒绝配对（管理面视角，区别于响应方内部 `pair/confirm`）。**需 management token**。",
     request_body = LinkPairFinishRequest,
     responses(
-        (status = 200, description = "`paired=false` 表示对端拒绝，此时 device 省略", body = crate::types::LinkPairFinishResponse),
-        (status = 400, description = "令牌不存在/已过期，或载荷非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "`paired=false` 表示对端拒绝，此时 device 省略", body = fluxdown_protocol::daemon::LinkPairFinishResponse),
+        (status = 400, description = "令牌不存在/已过期，或载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -859,9 +980,9 @@ pub(crate) async fn api_link_pair_finish(
     description = "批准/拒绝一次入站配对核验（响应本机收到的 `IncomingPairing` 通知；区别于发起方视角、核对 SAS 后调用的 pair/finish）。**需 management token**。",
     request_body = LinkPairApproveRequest,
     responses(
-        (status = 200, description = "已处理", body = crate::types::LinkOkResponse),
-        (status = 400, description = "会话不存在/已过期，或载荷非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已处理", body = fluxdown_protocol::daemon::LinkOkResponse),
+        (status = 400, description = "会话不存在/已过期，或载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -897,8 +1018,8 @@ pub(crate) async fn api_link_pair_approve(
 #[utoipa::path(get, path = "/api/v1/link/devices", tag = "link",
     description = "已配对设备列表（含并发在线探测）。**需 management token**。",
     responses(
-        (status = 200, description = "设备列表", body = crate::types::LinkDevicesResponse),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "设备列表", body = fluxdown_protocol::daemon::LinkDevicesResponse),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -920,9 +1041,9 @@ pub(crate) async fn api_link_devices(
     description = "解除配对（删除设备记录及双方链路密钥）。**需 management token**。",
     params(("fingerprint" = String, Path, description = "设备指纹")),
     responses(
-        (status = 200, description = "已解除", body = crate::types::LinkOkResponse),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 404, description = "设备不存在", body = crate::types::ResultMessage),
+        (status = 200, description = "已解除", body = fluxdown_protocol::daemon::LinkOkResponse),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "设备不存在", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -948,9 +1069,9 @@ pub(crate) async fn api_link_remove_device(
     params(("fingerprint" = String, Path, description = "目标设备指纹")),
     request_body = LinkDeviceTaskRequest,
     responses(
-        (status = 200, description = "创建成功", body = crate::types::CreatedTask),
-        (status = 400, description = "载荷非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效，或目标设备不存在/未配对", body = crate::types::ResultMessage),
+        (status = 200, description = "创建成功", body = fluxdown_protocol::daemon::CreatedTask),
+        (status = 400, description = "载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效，或目标设备不存在/未配对", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -997,10 +1118,10 @@ pub(crate) async fn api_link_device_tasks(
 #[utoipa::path(post, path = "/download", tag = "takeover",
     request_body = DownloadRequest,
     responses(
-        (status = 200, description = "已受理，进入快速下载确认流程", body = crate::types::ResultMessage),
-        (status = 400, description = "载荷非法或缺少 url", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 403, description = "缺少 X-FluxDown-Client 头", body = crate::types::ResultMessage),
+        (status = 200, description = "已受理，进入快速下载确认流程", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "载荷非法或缺少 url", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 403, description = "缺少 X-FluxDown-Client 头", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("tokenHeader" = []))
 )]
@@ -1029,8 +1150,8 @@ pub(crate) async fn takeover_download(
 /// 合并为单次确认。鉴权与 `/download` 相同。
 #[utoipa::path(post, path = "/download/batch", tag = "takeover",
     responses(
-        (status = 200, description = "已受理", body = crate::types::ResultMessage),
-        (status = 400, description = "载荷非法", body = crate::types::ResultMessage),
+        (status = 200, description = "已受理", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("tokenHeader" = []))
 )]
@@ -1045,7 +1166,7 @@ pub(crate) async fn takeover_download_batch(
     match parse_batch(&body) {
         Ok(dl) => {
             let count = dl.url.split('\n').filter(|s| !s.trim().is_empty()).count();
-            log_info!("[api-server] /download/batch {} urls", count);
+            tracing::info!(url_count = count, "received external download batch");
             submit_external(&state, dl).await
         }
         Err(e) => result_response(StatusCode::BAD_REQUEST, false, &e),
@@ -1056,7 +1177,7 @@ async fn submit_external(state: &AppState, dl: DownloadRequest) -> Response {
     if dl.url.trim().is_empty() {
         return result_response(StatusCode::BAD_REQUEST, false, "url is required");
     }
-    log_info!("[api-server] external download url={}", dl.url);
+    tracing::info!(url = %dl.url, "received external download");
     match state.host.submit_external(dl).await {
         Ok(()) => result_response(StatusCode::OK, true, "download accepted"),
         Err(e) => e.into_response(),
@@ -1111,8 +1232,8 @@ pub(crate) async fn jsonrpc_ws(State(state): State<AppState>, ws: WebSocketUpgra
     responses(
         (status = 200, description = "JSON-RPC 响应（initialize / tools/list / tools/call / ping）"),
         (status = 202, description = "通知已接受（无响应体）"),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 403, description = "服务端未配置 token", body = crate::types::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 403, description = "服务端未配置 token", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1144,9 +1265,9 @@ fn guard(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
 /// 应用信息（名称与版本号）。
 #[utoipa::path(get, path = "/api/v1/info", tag = "management",
     responses(
-        (status = 200, description = "应用信息", body = crate::types::ApiInfo),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 403, description = "服务端未配置 token", body = crate::types::ResultMessage),
+        (status = 200, description = "应用信息", body = fluxdown_protocol::daemon::ApiInfo),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 403, description = "服务端未配置 token", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1154,7 +1275,7 @@ pub(crate) async fn api_info(State(state): State<AppState>, headers: HeaderMap) 
     if let Err(resp) = guard(&state, &headers) {
         return *resp;
     }
-    Json(crate::types::ApiInfo {
+    Json(fluxdown_protocol::daemon::ApiInfo {
         name: "FluxDown".to_string(),
         version: state.config.app_version.clone(),
     })
@@ -1171,8 +1292,8 @@ pub(crate) struct TaskListQuery {
 #[utoipa::path(get, path = "/api/v1/tasks", tag = "management",
     params(TaskListQuery),
     responses(
-        (status = 200, description = "任务列表", body = Vec<crate::types::TaskDto>),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "任务列表", body = Vec<fluxdown_protocol::daemon::TaskDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1199,10 +1320,10 @@ pub(crate) async fn api_list_tasks(
 #[utoipa::path(post, path = "/api/v1/tasks", tag = "management",
     request_body = CreateTaskRequest,
     responses(
-        (status = 200, description = "创建成功", body = crate::types::CreatedTask),
-        (status = 400, description = "载荷非法或缺少 url", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 503, description = "应用关闭中", body = crate::types::ResultMessage),
+        (status = 200, description = "创建成功", body = fluxdown_protocol::daemon::CreatedTask),
+        (status = 400, description = "载荷非法或缺少 url", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 503, description = "应用关闭中", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1237,9 +1358,9 @@ pub(crate) async fn api_create_task(
 #[utoipa::path(get, path = "/api/v1/tasks/{id}", tag = "management",
     params(("id" = String, Path, description = "任务 ID（UUID）")),
     responses(
-        (status = 200, description = "任务信息", body = crate::types::TaskDto),
-        (status = 404, description = "任务不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "任务信息", body = fluxdown_protocol::daemon::TaskDto),
+        (status = 404, description = "任务不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1270,9 +1391,9 @@ pub(crate) struct DeleteTaskQuery {
 #[utoipa::path(delete, path = "/api/v1/tasks/{id}", tag = "management",
     params(("id" = String, Path, description = "任务 ID（UUID）"), DeleteTaskQuery),
     responses(
-        (status = 200, description = "已删除", body = crate::types::ResultMessage),
-        (status = 404, description = "任务不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已删除", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1292,9 +1413,9 @@ pub(crate) async fn api_delete_task(
 #[utoipa::path(put, path = "/api/v1/tasks/{id}/pause", tag = "management",
     params(("id" = String, Path, description = "任务 ID（UUID）")),
     responses(
-        (status = 200, description = "已暂停", body = crate::types::ResultMessage),
-        (status = 404, description = "任务不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已暂停", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1313,9 +1434,9 @@ pub(crate) async fn api_pause_task(
 #[utoipa::path(put, path = "/api/v1/tasks/{id}/continue", tag = "management",
     params(("id" = String, Path, description = "任务 ID（UUID）")),
     responses(
-        (status = 200, description = "已恢复", body = crate::types::ResultMessage),
-        (status = 404, description = "任务不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已恢复", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1333,13 +1454,13 @@ pub(crate) async fn api_continue_task(
 /// 重命名任务文件。
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/rename", tag = "management",
     params(("id" = String, Path, description = "任务 ID（UUID）")),
-    request_body = crate::types::RenameTaskRequest,
+    request_body = fluxdown_protocol::daemon::RenameTaskRequest,
     responses(
-        (status = 200, description = "已重命名", body = crate::types::ResultMessage),
-        (status = 400, description = "文件名非法（message 为错误码 `invalid-name`）", body = crate::types::ResultMessage),
-        (status = 404, description = "任务不存在", body = crate::types::ResultMessage),
-        (status = 409, description = "业务拒绝（message 为错误码 `task-active` / `bt-unsupported` / `target-exists`）", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已重命名", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "文件名非法（message 为错误码 `invalid-name`）", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 409, description = "业务拒绝（message 为错误码 `task-active` / `bt-unsupported` / `target-exists`）", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1352,7 +1473,7 @@ pub(crate) async fn api_rename_task(
     if let Err(resp) = guard(&state, &headers) {
         return *resp;
     }
-    let req: crate::types::RenameTaskRequest = match serde_json::from_slice(&body) {
+    let req: fluxdown_protocol::daemon::RenameTaskRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return result_response(
@@ -1368,8 +1489,8 @@ pub(crate) async fn api_rename_task(
 /// 暂停全部活跃任务（pending / downloading / preparing）。
 #[utoipa::path(put, path = "/api/v1/tasks/pause", tag = "management",
     responses(
-        (status = 200, description = "已全部暂停", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已全部暂停", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1383,8 +1504,8 @@ pub(crate) async fn api_pause_all(State(state): State<AppState>, headers: Header
 /// 恢复全部已暂停任务。
 #[utoipa::path(put, path = "/api/v1/tasks/continue", tag = "management",
     responses(
-        (status = 200, description = "已全部恢复", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已全部恢复", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1401,8 +1522,8 @@ pub(crate) async fn api_continue_all(
 /// 列出全部命名队列。
 #[utoipa::path(get, path = "/api/v1/queues", tag = "management",
     responses(
-        (status = 200, description = "队列列表", body = Vec<crate::types::QueueDto>),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "队列列表", body = Vec<fluxdown_protocol::daemon::QueueDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1426,9 +1547,9 @@ pub(crate) async fn api_list_queues(State(state): State<AppState>, headers: Head
 #[utoipa::path(post, path = "/api/v1/resolve/preview", tag = "groups",
     request_body = ResolvePreviewRequest,
     responses(
-        (status = 200, description = "预解析结果（items 为空且 error 为空 = 插件未返回清单）", body = crate::types::ResolvePreviewResponse),
-        (status = 400, description = "载荷非法或缺少 url", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "预解析结果（items 为空且 error 为空 = 插件未返回清单）", body = fluxdown_protocol::daemon::ResolvePreviewResponse),
+        (status = 400, description = "载荷非法或缺少 url", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1462,8 +1583,8 @@ pub(crate) async fn api_resolve_preview(
 /// 列出全部任务组。
 #[utoipa::path(get, path = "/api/v1/groups", tag = "groups",
     responses(
-        (status = 200, description = "任务组列表", body = Vec<crate::types::GroupDto>),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "任务组列表", body = Vec<fluxdown_protocol::daemon::GroupDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1482,9 +1603,9 @@ pub(crate) async fn api_list_groups(State(state): State<AppState>, headers: Head
     request_body = CreateGroupRequest,
     responses(
         (status = 200, description = "创建成功", body = CreateGroupResponse),
-        (status = 400, description = "载荷非法或 items 为空", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
-        (status = 503, description = "应用关闭中", body = crate::types::ResultMessage),
+        (status = 400, description = "载荷非法或 items 为空", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 503, description = "应用关闭中", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1527,9 +1648,9 @@ pub(crate) struct DeleteGroupQuery {
 #[utoipa::path(delete, path = "/api/v1/groups/{id}", tag = "groups",
     params(("id" = String, Path, description = "任务组 ID（UUID）"), DeleteGroupQuery),
     responses(
-        (status = 200, description = "已删除", body = crate::types::ResultMessage),
-        (status = 404, description = "任务组不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已删除", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务组不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1549,9 +1670,9 @@ pub(crate) async fn api_delete_group(
 #[utoipa::path(put, path = "/api/v1/groups/{id}/pause", tag = "groups",
     params(("id" = String, Path, description = "任务组 ID（UUID）")),
     responses(
-        (status = 200, description = "已暂停", body = crate::types::ResultMessage),
-        (status = 404, description = "任务组不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已暂停", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务组不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1570,9 +1691,9 @@ pub(crate) async fn api_group_pause(
 #[utoipa::path(put, path = "/api/v1/groups/{id}/continue", tag = "groups",
     params(("id" = String, Path, description = "任务组 ID（UUID）")),
     responses(
-        (status = 200, description = "已恢复", body = crate::types::ResultMessage),
-        (status = 404, description = "任务组不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已恢复", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务组不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1594,8 +1715,8 @@ pub(crate) async fn api_group_continue(
 /// 列出全部 RSS 订阅。
 #[utoipa::path(get, path = "/api/v1/rss", tag = "rss",
     responses(
-        (status = 200, description = "订阅列表", body = Vec<crate::types::RssSourceDto>),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "订阅列表", body = Vec<fluxdown_protocol::daemon::RssSourceDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1617,8 +1738,8 @@ pub(crate) async fn api_list_rss_sources(
     request_body = RssSourceDto,
     responses(
         (status = 200, description = "创建成功，`{sourceId}`"),
-        (status = 400, description = "载荷非法或缺少 url", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 400, description = "载荷非法或缺少 url", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1654,10 +1775,10 @@ pub(crate) async fn api_create_rss_source(
     params(("id" = String, Path, description = "订阅 ID（UUID）")),
     request_body = RssSourceDto,
     responses(
-        (status = 200, description = "已更新", body = crate::types::ResultMessage),
-        (status = 400, description = "载荷非法", body = crate::types::ResultMessage),
-        (status = 404, description = "订阅不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已更新", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "订阅不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1688,9 +1809,9 @@ pub(crate) async fn api_update_rss_source(
 #[utoipa::path(delete, path = "/api/v1/rss/{id}", tag = "rss",
     params(("id" = String, Path, description = "订阅 ID（UUID）")),
     responses(
-        (status = 200, description = "已删除", body = crate::types::ResultMessage),
-        (status = 404, description = "订阅不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已删除", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "订阅不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1710,9 +1831,9 @@ pub(crate) async fn api_delete_rss_source(
 #[utoipa::path(post, path = "/api/v1/rss/{id}/refresh", tag = "rss",
     params(("id" = String, Path, description = "订阅 ID（UUID）")),
     responses(
-        (status = 200, description = "已派发抓取", body = crate::types::ResultMessage),
-        (status = 404, description = "订阅不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已派发抓取", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "订阅不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1731,9 +1852,9 @@ pub(crate) async fn api_refresh_rss_source(
 #[utoipa::path(get, path = "/api/v1/rss/{id}/items", tag = "rss",
     params(("id" = String, Path, description = "订阅 ID（UUID）")),
     responses(
-        (status = 200, description = "条目列表", body = Vec<crate::types::RssItemDto>),
-        (status = 404, description = "订阅不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "条目列表", body = Vec<fluxdown_protocol::daemon::RssItemDto>),
+        (status = 404, description = "订阅不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1757,10 +1878,10 @@ pub(crate) async fn api_list_rss_items(
     params(("id" = String, Path, description = "订阅 ID（UUID）")),
     request_body = RssItemActionRequest,
     responses(
-        (status = 200, description = "已执行", body = crate::types::ResultMessage),
-        (status = 400, description = "载荷非法或 action 未知", body = crate::types::ResultMessage),
-        (status = 404, description = "订阅或条目不存在", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已执行", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "载荷非法或 action 未知", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "订阅或条目不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1791,9 +1912,9 @@ pub(crate) async fn api_rss_item_action(
 #[utoipa::path(post, path = "/api/v1/rss/validate", tag = "rss",
     request_body = RssValidateRequest,
     responses(
-        (status = 200, description = "验证结果（`error` 非空 = 抓取失败）", body = crate::types::RssValidateResponse),
-        (status = 400, description = "载荷非法或缺少 url", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "验证结果（`error` 非空 = 抓取失败）", body = fluxdown_protocol::daemon::RssValidateResponse),
+        (status = 400, description = "载荷非法或缺少 url", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1834,8 +1955,8 @@ const MAX_PLUGIN_ZIP: usize = 10 * 1024 * 1024;
 /// 列出全部已安装插件。
 #[utoipa::path(get, path = "/api/v1/plugins", tag = "plugins",
     responses(
-        (status = 200, description = "插件列表", body = Vec<crate::types::PluginDto>),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "插件列表", body = Vec<fluxdown_protocol::daemon::PluginDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1855,9 +1976,9 @@ pub(crate) async fn api_list_plugins(
 /// 从 zip 安装插件（≤10MB）。
 #[utoipa::path(post, path = "/api/v1/plugins/install", tag = "plugins",
     responses(
-        (status = 200, description = "安装成功", body = crate::types::InstalledPlugin),
-        (status = 400, description = "zip 非法或超限", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "安装成功", body = fluxdown_protocol::daemon::InstalledPlugin),
+        (status = 400, description = "zip 非法或超限", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1884,11 +2005,11 @@ pub(crate) async fn api_install_plugin(
 
 /// dev 安装插件（引用目录，不拷贝）。
 #[utoipa::path(post, path = "/api/v1/plugins/install-dev", tag = "plugins",
-    request_body = crate::types::InstallPluginDevRequest,
+    request_body = fluxdown_protocol::daemon::InstallPluginDevRequest,
     responses(
-        (status = 200, description = "安装成功", body = crate::types::InstalledPlugin),
-        (status = 400, description = "路径非法", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "安装成功", body = fluxdown_protocol::daemon::InstalledPlugin),
+        (status = 400, description = "路径非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1900,16 +2021,17 @@ pub(crate) async fn api_install_plugin_dev(
     if let Err(resp) = guard(&state, &headers) {
         return *resp;
     }
-    let req: crate::types::InstallPluginDevRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return result_response(
-                StatusCode::BAD_REQUEST,
-                false,
-                &format!("invalid payload: {e}"),
-            );
-        }
-    };
+    let req: fluxdown_protocol::daemon::InstallPluginDevRequest =
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return result_response(
+                    StatusCode::BAD_REQUEST,
+                    false,
+                    &format!("invalid payload: {e}"),
+                );
+            }
+        };
     match state.host.install_plugin_dev(req.dir_path).await {
         Ok(identity) => installed_response(&state, identity).await,
         Err(e) => e.into_response(),
@@ -1919,10 +2041,10 @@ pub(crate) async fn api_install_plugin_dev(
 /// 启用/禁用插件。
 #[utoipa::path(put, path = "/api/v1/plugins/{identity}/enabled", tag = "plugins",
     params(("identity" = String, Path, description = "插件 identity")),
-    request_body = crate::types::SetPluginEnabledRequest,
+    request_body = fluxdown_protocol::daemon::SetPluginEnabledRequest,
     responses(
-        (status = 200, description = "已更新", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已更新", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1935,16 +2057,17 @@ pub(crate) async fn api_set_plugin_enabled(
     if let Err(resp) = guard(&state, &headers) {
         return *resp;
     }
-    let req: crate::types::SetPluginEnabledRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return result_response(
-                StatusCode::BAD_REQUEST,
-                false,
-                &format!("invalid payload: {e}"),
-            );
-        }
-    };
+    let req: fluxdown_protocol::daemon::SetPluginEnabledRequest =
+        match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return result_response(
+                    StatusCode::BAD_REQUEST,
+                    false,
+                    &format!("invalid payload: {e}"),
+                );
+            }
+        };
     ack(state.host.set_plugin_enabled(&identity, req.enabled).await)
 }
 
@@ -1952,9 +2075,9 @@ pub(crate) async fn api_set_plugin_enabled(
 #[utoipa::path(put, path = "/api/v1/plugins/{identity}/settings", tag = "plugins",
     params(("identity" = String, Path, description = "插件 identity")),
     responses(
-        (status = 200, description = "已保存", body = crate::types::ResultMessage),
-        (status = 400, description = "设置校验失败", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已保存", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "设置校验失败", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -1984,8 +2107,8 @@ pub(crate) async fn api_update_plugin_settings(
 #[utoipa::path(delete, path = "/api/v1/plugins/{identity}", tag = "plugins",
     params(("identity" = String, Path, description = "插件 identity")),
     responses(
-        (status = 200, description = "已卸载", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已卸载", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -2004,8 +2127,8 @@ pub(crate) async fn api_uninstall_plugin(
 #[utoipa::path(post, path = "/api/v1/tasks/{id}/ignore-plugin-retry", tag = "plugins",
     params(("id" = String, Path, description = "任务 ID")),
     responses(
-        (status = 200, description = "已按原始链接重跑", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "已按原始链接重跑", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -2023,8 +2146,8 @@ pub(crate) async fn api_ignore_plugin_retry(
 /// 拉取去中心化插件市场索引。
 #[utoipa::path(get, path = "/api/v1/market", tag = "plugins",
     responses(
-        (status = 200, description = "市场索引条目", body = Vec<crate::types::MarketEntryDto>),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "市场索引条目", body = Vec<fluxdown_protocol::daemon::MarketEntryDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -2040,11 +2163,11 @@ pub(crate) async fn api_market_list(State(state): State<AppState>, headers: Head
 
 /// 从市场安装某插件最新版。
 #[utoipa::path(post, path = "/api/v1/market/install", tag = "plugins",
-    request_body = crate::types::MarketInstallRequest,
+    request_body = fluxdown_protocol::daemon::MarketInstallRequest,
     responses(
-        (status = 200, description = "安装成功", body = crate::types::InstalledPlugin),
-        (status = 400, description = "下载/校验/安装失败", body = crate::types::ResultMessage),
-        (status = 401, description = "token 无效", body = crate::types::ResultMessage),
+        (status = 200, description = "安装成功", body = fluxdown_protocol::daemon::InstalledPlugin),
+        (status = 400, description = "下载/校验/安装失败", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
     ),
     security(("bearerAuth" = []), ("tokenHeader" = []))
 )]
@@ -2056,7 +2179,7 @@ pub(crate) async fn api_market_install(
     if let Err(resp) = guard(&state, &headers) {
         return *resp;
     }
-    let req: crate::types::MarketInstallRequest = match serde_json::from_slice(&body) {
+    let req: fluxdown_protocol::daemon::MarketInstallRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
             return result_response(
@@ -2073,10 +2196,10 @@ pub(crate) async fn api_market_install(
 }
 
 /// 安装成功统一返回体：回填缺失基础组件列表（提醒式依赖检查，见
-/// [`crate::types::InstalledPlugin`]）。
+/// [`fluxdown_protocol::daemon::InstalledPlugin`]）。
 async fn installed_response(state: &AppState, identity: String) -> Response {
     let missing_components = state.host.plugin_missing_components(&identity).await;
-    Json(crate::types::InstalledPlugin {
+    Json(fluxdown_protocol::daemon::InstalledPlugin {
         identity,
         missing_components,
     })

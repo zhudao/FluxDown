@@ -4,13 +4,13 @@ use std::process::ExitCode as ProcExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use fluxdown_api::types::{CreateTaskRequest, RssSourceDto};
 use fluxdown_cli::client::{ApiClient, ClientError};
 use fluxdown_cli::config::{CliConfig, ConfigError};
 use fluxdown_cli::exit::ExitCode;
 use fluxdown_cli::format::{
     human_bytes, human_time, percent, rss_item_status_name, status_name, truncate,
 };
+use fluxdown_protocol::daemon::{CreateTaskRequest, RssSourceDto};
 
 mod local;
 

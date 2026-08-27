@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::types::DownloadRequest;
+use fluxdown_protocol::daemon::DownloadRequest;
 
 /// 解析批量下载请求体。
 ///

@@ -17,11 +17,22 @@ pub(crate) struct DownloadStrings {
     pub(crate) col_speed: SharedString,
     pub(crate) col_status: SharedString,
     pub(crate) delete: SharedString,
+    pub(crate) confirm: SharedString,
+    pub(crate) cancel: SharedString,
+    pub(crate) disconnected: SharedString,
+    pub(crate) action_failed: SharedString,
+    pub(crate) metadata_loading: SharedString,
+    eta_seconds: SharedString,
+    eta_minutes: SharedString,
+    eta_hours: SharedString,
     pub(crate) later_queue: SharedString,
-    pub(crate) new_download: SharedString,
     pub(crate) pause: SharedString,
     pub(crate) resume: SharedString,
     pub(crate) main_queue: SharedString,
+    pub(crate) new_download: SharedString,
+    pub(crate) url_placeholder: SharedString,
+    pub(crate) open_file: SharedString,
+    pub(crate) open_folder: SharedString,
     pub(crate) sidebar_queues: SharedString,
     pub(crate) status_all: SharedString,
     pub(crate) status_completed: SharedString,
@@ -49,13 +60,24 @@ impl DownloadStrings {
             col_file_name: shared(translator.text(keys::COL_FILE_NAME)),
             col_size: shared(translator.text(keys::COL_SIZE)),
             col_speed: shared(translator.text(keys::COL_SPEED)),
+            confirm: shared(translator.text("confirm")),
+            cancel: shared(translator.text("cancel")),
+            disconnected: shared(translator.text("localServiceDisconnected")),
+            action_failed: shared(translator.text("localServiceActionFailed")),
+            metadata_loading: shared(translator.text("statusPreparing")),
+            eta_seconds: shared(translator.text("etaSeconds")),
+            eta_minutes: shared(translator.text("etaMinutes")),
+            eta_hours: shared(translator.text("etaHours")),
             col_status: shared(translator.text(keys::COL_STATUS)),
             later_queue: shared(translator.text(keys::LATER_QUEUE)),
             delete: shared(translator.text(keys::DELETE)),
             main_queue: shared(translator.text(keys::MAIN_QUEUE)),
-            new_download: shared(translator.text(keys::NEW_DOWNLOAD)),
             pause: shared(translator.text(keys::PAUSE)),
             resume: shared(translator.text(keys::RESUME)),
+            new_download: shared(translator.text(keys::NEW_DOWNLOAD)),
+            url_placeholder: shared(translator.text("urlPlaceholder")),
+            open_file: shared(translator.text("openFile")),
+            open_folder: shared(translator.text("openFolder")),
             sidebar_queues: shared(translator.text(keys::SIDEBAR_QUEUES)),
             status_all: shared(translator.text(keys::TAB_ALL)),
             status_completed: shared(translator.text(keys::STATUS_COMPLETED)),
@@ -67,6 +89,17 @@ impl DownloadStrings {
             view_columns_menu_title: shared(translator.text(keys::VIEW_COLUMNS_MENU_TITLE)),
             view_columns_reset_action: shared(translator.text(keys::VIEW_COLUMNS_RESET_ACTION)),
         }
+    }
+
+    pub(crate) fn format_eta(&self, seconds: u64) -> SharedString {
+        let (template, value) = if seconds < 60 {
+            (&self.eta_seconds, seconds.to_string())
+        } else if seconds < 3600 {
+            (&self.eta_minutes, (seconds / 60).to_string())
+        } else {
+            (&self.eta_hours, format!("{:.1}", seconds as f64 / 3600.0))
+        };
+        SharedString::from(template.replace("{n}", &value))
     }
 }
 

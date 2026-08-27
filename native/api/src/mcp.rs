@@ -28,7 +28,7 @@
 use serde_json::{Value, json};
 
 use crate::service::ApiHost;
-use crate::types::{CreateTaskRequest, RssSourceDto};
+use fluxdown_protocol::daemon::{CreateTaskRequest, RssSourceDto};
 
 /// 服务端声明支持的 MCP 协议版本（初始化时若客户端未指定则回退到此值）。
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -377,8 +377,8 @@ fn rpc_err(id: &Value, code: i64, message: &str) -> Value {
 mod tests {
     use super::*;
     use crate::service::{ApiError, ApiHost};
-    use crate::types::{DownloadRequest, QueueDto, TaskDto};
     use async_trait::async_trait;
+    use fluxdown_protocol::daemon::{DownloadRequest, QueueDto, TaskDto};
     use std::sync::Mutex;
 
     /// 记录调用的假宿主。

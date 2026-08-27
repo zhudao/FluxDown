@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fluxdown_api::service::{ApiHost, LiveSpeed};
-use fluxdown_api::types::{DownloadRequest, TaskDto};
+use fluxdown_protocol::daemon::{DownloadRequest, TaskDto};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 

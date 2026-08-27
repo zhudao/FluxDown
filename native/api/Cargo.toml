@@ -11,19 +11,16 @@ wildcard_imports = "deny"
 [dependencies]
 async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["ws"] }
-fluxdown_engine = { version = "0.1.0", path = "../engine" }
+fluxdown_protocol = { version = "0.1.0", path = "../protocol", features = ["openapi"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt", "net", "macros", "io-util", "sync"] }
 tokio-util = "0.7.18"
+tracing = "0.1"
 utoipa = "5.5.0"
 uuid = { version = "1.23.4", features = ["v4"] }
 
-[features]
-# 启用后 PluginDto 获得 From<engine::plugin::PluginInfo>（需 engine 的 plugins feature）。
-# desktop（hub）与 headless server 均开启；纯客户端（CLI）可不开。
-plugins = ["fluxdown_engine/plugins"]
 
 [dev-dependencies]
 futures-util = { version = "0.3.32", features = ["sink"] }

@@ -351,7 +351,9 @@ async fn load_initial_config(
 }
 
 pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
-    let db = Db::open(&db_dir).await.map_err(ActorError::OpenDatabase)?;
+    let (db, write_guard) = Db::open_exclusive(&db_dir)
+        .await
+        .map_err(ActorError::OpenDatabase)?;
 
     // Initialize default config values in DB (no-op if already set)
     if let Err(e) = db.init_default_config(&default_save_dir()).await {
@@ -444,6 +446,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
             database_url: None,
         },
         db,
+        write_guard,
         sink.clone(),
         selector.clone(),
     )
@@ -767,7 +770,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
     // its request in a one-element Vec); the `native_msg_rx` select! branch
     // below handles both transports with identical logic.
     let (ext_dl_tx, mut native_msg_rx) =
-        mpsc::channel::<Vec<fluxdown_api::types::DownloadRequest>>(64);
+        mpsc::channel::<Vec<fluxdown_protocol::daemon::DownloadRequest>>(64);
 
     // 本机 API 服务器（127.0.0.1）：探活 / 脚本接管 / aria2 兼容 / 管理 API。
     // 写操作经 api_cmd_rx 回到本事件循环串行执行；local_server_* 配置变更时
@@ -943,7 +946,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
     struct ExtRequestCtx {
         headers: HashMap<String, String>,
         method: Option<String>,
-        body: Option<fluxdown_api::types::RequestBody>,
+        body: Option<fluxdown_protocol::daemon::RequestBody>,
         cookies: String,
         referrer: String,
         /// 文件大小提示：>0 已知大小、-1 已确认可下载但大小未知（跳过 probe）、
@@ -2758,7 +2761,9 @@ async fn handle_api_command(
                     ignore_tls_errors: req.ignore_tls_errors,
                     extra_headers: req.headers.unwrap_or_default(),
                     method: req.method,
-                    body: req.body.map(Into::into),
+                    body: req
+                        .body
+                        .map(fluxdown_engine_protocol::request_body_to_engine),
                     audio_url: req.audio_url,
                     start_paused: req.start_paused,
                     http_user: req.http_user,
@@ -3201,7 +3206,7 @@ fn merge_ext_headers(
 /// 用户确认后恢复；信号级 cookies 仅在全批一致时携带（作为表单预填值），
 /// 不一致则留空、避免以偏概全。referrer/save_dir 取首个非空值。
 fn synthesize_batch_request(
-    reqs: &[fluxdown_api::types::DownloadRequest],
+    reqs: &[fluxdown_protocol::daemon::DownloadRequest],
 ) -> ExternalDownloadRequest {
     // 控制字符防注入：filename 来自服务器 Content-Disposition（percent-decode
     // 后 %0A/%0D 会还原成字面 \n/\r），url/filename 若不剥离控制字符，恶意
@@ -3260,10 +3265,10 @@ fn synthesize_batch_request(
 /// 传输无关的 `CapturedRequestBody`——两者字段形状一致，仅类型来源不同
 /// (fluxdown_api 是对外 wire 契约，engine 侧不感知传输层)。
 fn nm_body_to_captured(
-    body: fluxdown_api::types::RequestBody,
+    body: fluxdown_protocol::daemon::RequestBody,
 ) -> fluxdown_engine::downloader::CapturedRequestBody {
-    use fluxdown_api::types::RequestBody;
     use fluxdown_engine::downloader::CapturedRequestBody as Captured;
+    use fluxdown_protocol::daemon::RequestBody;
     match body {
         RequestBody::FormData { fields } => Captured::FormData { fields },
         RequestBody::Urlencoded { raw } => Captured::Urlencoded { raw },
@@ -3508,7 +3513,7 @@ async fn handle_link_command(
 mod tests {
     use super::*;
 
-    fn req(url: &str) -> fluxdown_api::types::DownloadRequest {
+    fn req(url: &str) -> fluxdown_protocol::daemon::DownloadRequest {
         serde_json::from_value(serde_json::json!({ "url": url })).unwrap()
     }
 

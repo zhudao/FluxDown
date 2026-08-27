@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 use crate::aria2;
 use crate::auth::constant_time_eq;
 use crate::service::{ApiError, ApiHost};
-use crate::types::{CreateTaskRequest, TaskDto};
+use fluxdown_protocol::daemon::{CreateTaskRequest, TaskDto};
 
 /// 处理一个 `/jsonrpc` 请求体，返回 JSON-RPC 响应（始终 HTTP 200 包裹）。
 ///
@@ -620,7 +620,7 @@ mod tests {
 
     use super::*;
     use crate::service::{ApiError, LiveSpeed};
-    use crate::types::{CreateTaskRequest, QueueDto};
+    use fluxdown_protocol::daemon::{CreateTaskRequest, QueueDto};
 
     /// 本模块专用的轻量 `ApiHost`：记录调用、按需注入任务/配置/速率快照。
     /// 与 `tests.rs` 的黑盒 HTTP `MockHost`相互独立（镜像 `mcp.rs` 的
@@ -701,7 +701,7 @@ mod tests {
         }
         async fn submit_external(
             &self,
-            _req: crate::types::DownloadRequest,
+            _req: fluxdown_protocol::daemon::DownloadRequest,
         ) -> Result<(), ApiError> {
             Ok(())
         }

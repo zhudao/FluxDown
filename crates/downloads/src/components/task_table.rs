@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashSet};
 
-use fluxdown_ui_components::{primary_icon_button, toolbar_action_button};
+use fluxdown_ui_components::toolbar_action_button;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Div, InteractiveElement as _,
@@ -13,14 +13,17 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
+    input::Input,
     popover::Popover,
+    spinner::Spinner,
     table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
     tooltip::Tooltip,
     v_flex,
 };
 
 use crate::{
-    model::{DownloadFilter, TaskKind, TaskPreview, TaskState},
+    controller::DownloadsCommand,
+    model::{DownloadFilter, DownloadTaskView, TaskKind, TaskSource, TaskState, format_bytes},
     pages::downloads::{DownloadView, SelectAllTasks, TASK_ROW_HEIGHT},
     strings::DownloadStrings,
 };
@@ -137,14 +140,16 @@ impl Render for DraggedColumnMenuItem {
 pub(crate) struct DownloadTableDelegate {
     strings: DownloadStrings,
     columns: Vec<DownloadColumn>,
-    source_items: Vec<TaskPreview>,
-    items: Vec<TaskPreview>,
-    selected_tasks: HashSet<usize>,
-    selection_anchor: Option<usize>,
+    source_items: Vec<DownloadTaskView>,
+    items: Vec<DownloadTaskView>,
+    selected_tasks: HashSet<String>,
+    selection_anchor: Option<String>,
+    filter: DownloadFilter,
+    queue_id: Option<String>,
 }
 
 impl DownloadTableDelegate {
-    pub(crate) fn new(strings: DownloadStrings, items: Vec<TaskPreview>) -> Self {
+    pub(crate) fn new(strings: DownloadStrings, items: Vec<DownloadTaskView>) -> Self {
         Self {
             strings,
             columns: DownloadColumnKind::ALL
@@ -155,6 +160,8 @@ impl DownloadTableDelegate {
             items,
             selected_tasks: HashSet::new(),
             selection_anchor: None,
+            filter: DownloadFilter::ALL,
+            queue_id: None,
         }
     }
 
@@ -162,17 +169,40 @@ impl DownloadTableDelegate {
         self.strings = strings;
     }
 
+    pub(crate) fn set_items(&mut self, items: Vec<DownloadTaskView>) {
+        self.source_items = items;
+        self.apply_filters();
+    }
+
     pub(crate) fn set_filter(&mut self, filter: DownloadFilter) {
+        self.filter = filter;
+        self.queue_id = None;
+        self.apply_filters();
+    }
+
+    pub(crate) fn set_queue_filter(&mut self, queue_id: &str) {
+        self.filter = DownloadFilter::ALL;
+        self.queue_id = Some(queue_id.to_owned());
+        self.apply_filters();
+    }
+
+    fn apply_filters(&mut self) {
         self.items = self
             .source_items
             .iter()
-            .copied()
-            .filter(|task| filter.matches(task))
+            .filter(|task| self.filter.matches(task))
+            .filter(|task| {
+                self.queue_id
+                    .as_ref()
+                    .is_none_or(|queue_id| task.queue_id == *queue_id)
+            })
+            .cloned()
             .collect();
         self.selected_tasks
-            .retain(|task_id| self.items.iter().any(|task| task.id == *task_id));
+            .retain(|task_id| self.items.iter().any(|task| &task.id == task_id));
         self.selection_anchor = self
             .selection_anchor
+            .take()
             .filter(|task_id| self.selected_tasks.contains(task_id));
     }
 
@@ -180,6 +210,13 @@ impl DownloadTableDelegate {
         self.source_items
             .iter()
             .filter(|task| filter.matches(task))
+            .count()
+    }
+
+    pub(crate) fn count_in_queue(&self, queue_id: &str) -> usize {
+        self.source_items
+            .iter()
+            .filter(|task| task.source == TaskSource::Local && task.queue_id == queue_id)
             .count()
     }
 
@@ -255,14 +292,14 @@ impl DownloadTableDelegate {
     fn select_all_tasks(&mut self) {
         self.selected_tasks.clear();
         self.selected_tasks
-            .extend(self.items.iter().map(|task| task.id));
+            .extend(self.items.iter().map(|task| task.id.clone()));
         self.selection_anchor = None;
     }
 
-    fn select_task(&mut self, task_id: usize, modifiers: Modifiers) {
+    fn select_task(&mut self, task_id: String, modifiers: Modifiers) {
         if modifiers.shift
-            && let Some(anchor) = self.selection_anchor
-            && let Some(anchor_index) = self.items.iter().position(|task| task.id == anchor)
+            && let Some(anchor) = self.selection_anchor.as_ref()
+            && let Some(anchor_index) = self.items.iter().position(|task| &task.id == anchor)
             && let Some(task_index) = self.items.iter().position(|task| task.id == task_id)
         {
             let (start, end) = if anchor_index <= task_index {
@@ -272,40 +309,45 @@ impl DownloadTableDelegate {
             };
             self.selected_tasks.clear();
             self.selected_tasks
-                .extend(self.items[start..=end].iter().map(|task| task.id));
+                .extend(self.items[start..=end].iter().map(|task| task.id.clone()));
+            self.selection_anchor = Some(task_id);
             return;
         }
 
         if modifiers.secondary() {
             if !self.selected_tasks.remove(&task_id) {
-                self.selected_tasks.insert(task_id);
+                self.selected_tasks.insert(task_id.clone());
             }
         } else {
             self.selected_tasks.clear();
-            self.selected_tasks.insert(task_id);
+            self.selected_tasks.insert(task_id.clone());
         }
         self.selection_anchor = Some(task_id);
     }
 
-    pub(crate) fn task_id_at(&self, row_ix: usize) -> Option<usize> {
-        self.items.get(row_ix).map(|task| task.id)
+    pub(crate) fn task_id_at(&self, row_ix: usize) -> Option<String> {
+        self.items.get(row_ix).map(|task| task.id.clone())
     }
 
-    pub(crate) fn select_task_for_context_menu(&mut self, task_id: usize) {
+    pub(crate) fn select_task_for_context_menu(&mut self, task_id: String) {
         if !self.selected_tasks.contains(&task_id) {
             self.selected_tasks.clear();
-            self.selected_tasks.insert(task_id);
+            self.selected_tasks.insert(task_id.clone());
         }
         self.selection_anchor = Some(task_id);
+    }
+
+    fn selected_task_ids(&self) -> Vec<String> {
+        self.selected_tasks.iter().cloned().collect()
     }
 
     fn compare_tasks(
         kind: DownloadColumnKind,
-        left: &TaskPreview,
-        right: &TaskPreview,
+        left: &DownloadTaskView,
+        right: &DownloadTaskView,
     ) -> Ordering {
         let ordering = match kind {
-            DownloadColumnKind::FileName => left.name.cmp(right.name),
+            DownloadColumnKind::FileName => left.name.cmp(&right.name),
             DownloadColumnKind::Size => left.size_bytes.cmp(&right.size_bytes),
             DownloadColumnKind::Status => left.state.cmp(&right.state),
             DownloadColumnKind::Speed => left
@@ -314,18 +356,25 @@ impl DownloadTableDelegate {
             DownloadColumnKind::Eta => left.eta_seconds.cmp(&right.eta_seconds),
             DownloadColumnKind::Created => left.created_order.cmp(&right.created_order),
         };
-        ordering.then_with(|| left.id.cmp(&right.id))
+        ordering
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.id.cmp(&right.id))
     }
 
     fn task_visuals(
         &self,
-        task: TaskPreview,
+        task: &DownloadTaskView,
         cx: &App,
     ) -> (SharedString, gpui::Hsla, IconName, gpui::Hsla, SharedString) {
         let tokens = active_theme(cx).tokens();
         let (status, status_color) = match task.state {
             TaskState::Completed => (self.strings.status_completed.clone(), cx.theme().success),
             TaskState::Paused => (self.strings.status_paused.clone(), cx.theme().warning),
+            TaskState::Failed => (self.strings.status_incomplete.clone(), cx.theme().danger),
+            TaskState::Pending | TaskState::Downloading => (
+                self.strings.status_incomplete.clone(),
+                tokens.colors.muted_foreground,
+            ),
         };
         let (file_icon, file_icon_color, category) = match task.kind {
             TaskKind::Application => (
@@ -338,29 +387,66 @@ impl DownloadTableDelegate {
                 tokens.colors.muted_foreground,
                 self.strings.category_program.clone(),
             ),
-            TaskKind::DiskImage => (
+            TaskKind::DiskImage | TaskKind::Archive => (
                 IconName::Inbox,
                 cx.theme().warning,
                 self.strings.category_archive.clone(),
+            ),
+            TaskKind::Video => (
+                IconName::Play,
+                tokens.colors.muted_foreground,
+                self.strings.category_video.clone(),
+            ),
+            TaskKind::Audio => (
+                IconName::File,
+                tokens.colors.muted_foreground,
+                self.strings.category_audio.clone(),
+            ),
+            TaskKind::Document => (
+                IconName::File,
+                tokens.colors.muted_foreground,
+                self.strings.category_document.clone(),
+            ),
+            TaskKind::Image => (
+                IconName::File,
+                tokens.colors.muted_foreground,
+                self.strings.category_image.clone(),
+            ),
+            TaskKind::Other => (
+                IconName::File,
+                tokens.colors.muted_foreground,
+                self.strings.category_other.clone(),
             ),
         };
         (status, status_color, file_icon, file_icon_color, category)
     }
 
-    fn render_file_cell(&self, task: TaskPreview, cx: &App) -> AnyElement {
+    fn render_file_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
         let tokens = active_theme(cx).tokens();
         let (_, _, file_icon, file_icon_color, category) = self.task_visuals(task, cx);
+        let name = if task.metadata_pending {
+            self.strings.metadata_loading.clone()
+        } else {
+            SharedString::from(task.name.clone())
+        };
+        let icon = if task.metadata_pending {
+            Spinner::new()
+                .with_size(px(14.))
+                .icon(IconName::LoaderCircle)
+                .color(tokens.colors.muted_foreground)
+                .into_any_element()
+        } else {
+            Icon::new(file_icon)
+                .size(px(14.))
+                .text_color(file_icon_color)
+                .into_any_element()
+        };
         h_flex()
             .size_full()
             .min_w_0()
             .items_center()
             .gap(tokens.spacing.sm)
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(file_icon_color)
-                    .child(Icon::new(file_icon).size(px(14.))),
-            )
+            .child(div().flex_none().child(icon))
             .child(
                 v_flex()
                     .min_w_0()
@@ -372,20 +458,22 @@ impl DownloadTableDelegate {
                             .text_size(px(12.))
                             .line_height(relative(1.))
                             .font_weight(tokens.typography.sm.weight)
-                            .child(task.name),
+                            .child(name),
                     )
-                    .child(
-                        div()
-                            .text_size(px(8.))
-                            .line_height(relative(1.))
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(category),
-                    ),
+                    .when(!task.metadata_pending, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(8.))
+                                .line_height(relative(1.))
+                                .text_color(tokens.colors.muted_foreground)
+                                .child(category),
+                        )
+                    }),
             )
             .into_any_element()
     }
 
-    fn render_status_cell(&self, task: TaskPreview, cx: &App) -> AnyElement {
+    fn render_status_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
         let tokens = active_theme(cx).tokens();
         let (status, status_color, _, _, _) = self.task_visuals(task, cx);
         v_flex()
@@ -398,7 +486,7 @@ impl DownloadTableDelegate {
                     .text_size(tokens.typography.xs.size)
                     .line_height(relative(1.))
                     .font_weight(tokens.typography.xs.weight)
-                    .child(task.progress_label)
+                    .child(task.progress_label.clone())
                     .child(status),
             )
             .child(
@@ -483,7 +571,7 @@ impl TableDelegate for DownloadTableDelegate {
                             if *checked {
                                 delegate
                                     .selected_tasks
-                                    .extend(delegate.items.iter().map(|task| task.id));
+                                    .extend(delegate.items.iter().map(|task| task.id.clone()));
                             } else {
                                 delegate.selected_tasks.clear();
                             }
@@ -514,15 +602,15 @@ impl TableDelegate for DownloadTableDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let Some(task) = self.items.get(row_ix).copied() else {
+        let Some(task) = self.items.get(row_ix).cloned() else {
             return div().id(("download-task-row", row_ix));
         };
-        let task_id = task.id;
+        let task_id = task.id.clone();
         let selected = self.selected_tasks.contains(&task_id);
         let selected_background = active_theme(cx).tokens().colors.accent;
 
         div()
-            .id(("download-task-row", task_id))
+            .id(format!("download-task-row:{task_id}"))
             .relative()
             .when(selected, |this| {
                 this.child(
@@ -534,7 +622,9 @@ impl TableDelegate for DownloadTableDelegate {
                 )
             })
             .on_click(cx.listener(move |table, event: &ClickEvent, _, cx| {
-                table.delegate_mut().select_task(task_id, event.modifiers());
+                table
+                    .delegate_mut()
+                    .select_task(task_id.clone(), event.modifiers());
                 cx.notify();
             }))
     }
@@ -546,31 +636,31 @@ impl TableDelegate for DownloadTableDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let Some(task) = self.items.get(row_ix).copied() else {
+        let Some(task) = self.items.get(row_ix).cloned() else {
             return div().into_any_element();
         };
         let tokens = active_theme(cx).tokens();
 
         if col_ix == 0 {
-            let task_id = task.id;
+            let task_id = task.id.clone();
             let selected = self.selected_tasks.contains(&task_id);
             return h_flex()
                 .size_full()
                 .justify_center()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(
-                    Checkbox::new(("download-task-multi-select", task_id))
+                    Checkbox::new(format!("download-task-multi-select:{task_id}"))
                         .with_size(Size::XSmall)
                         .checked(selected)
                         .focus_ring(false)
                         .on_click(cx.listener(move |table, checked: &bool, _, cx| {
                             let delegate = table.delegate_mut();
                             if *checked {
-                                delegate.selected_tasks.insert(task_id);
+                                delegate.selected_tasks.insert(task_id.clone());
                             } else {
                                 delegate.selected_tasks.remove(&task_id);
                             }
-                            delegate.selection_anchor = Some(task_id);
+                            delegate.selection_anchor = Some(task_id.clone());
                             cx.notify();
                         })),
                 )
@@ -581,22 +671,45 @@ impl TableDelegate for DownloadTableDelegate {
             return div().into_any_element();
         };
         match kind {
-            DownloadColumnKind::FileName => self.render_file_cell(task, cx),
+            DownloadColumnKind::FileName => self.render_file_cell(&task, cx),
             DownloadColumnKind::Size => h_flex()
                 .size_full()
                 .items_center()
                 .text_size(tokens.typography.xs.size)
                 .text_color(tokens.colors.muted_foreground)
-                .child(task.size)
+                .child(task.size.clone())
                 .into_any_element(),
-            DownloadColumnKind::Status => self.render_status_cell(task, cx),
-            DownloadColumnKind::Speed | DownloadColumnKind::Eta => h_flex()
-                .size_full()
-                .items_center()
-                .text_size(tokens.typography.xs.size)
-                .text_color(tokens.colors.muted_foreground)
-                .child("—")
-                .into_any_element(),
+            DownloadColumnKind::Status => self.render_status_cell(&task, cx),
+            DownloadColumnKind::Speed => {
+                let speed = task
+                    .speed_bytes_per_second
+                    .filter(|speed| *speed > 0)
+                    .map(|speed| format!("{}/s", format_bytes(speed)))
+                    .unwrap_or_else(|| "—".to_owned());
+                h_flex()
+                    .size_full()
+                    .items_center()
+                    .text_size(tokens.typography.xs.size)
+                    .text_color(tokens.colors.muted_foreground)
+                    .child(speed)
+                    .into_any_element()
+            }
+            DownloadColumnKind::Eta => {
+                let eta = task
+                    .eta_seconds
+                    .filter(|seconds| *seconds <= 86_400)
+                    .map_or_else(
+                        || SharedString::from("—"),
+                        |seconds| self.strings.format_eta(seconds),
+                    );
+                h_flex()
+                    .size_full()
+                    .items_center()
+                    .text_size(tokens.typography.xs.size)
+                    .text_color(tokens.colors.muted_foreground)
+                    .child(eta)
+                    .into_any_element()
+            }
             DownloadColumnKind::Created => h_flex()
                 .size_full()
                 .items_center()
@@ -628,7 +741,7 @@ impl TableDelegate for DownloadTableDelegate {
             return;
         };
         match sort {
-            ColumnSort::Default => self.items.sort_by_key(|task| task.id),
+            ColumnSort::Default => self.items.sort_by(|left, right| left.id.cmp(&right.id)),
             ColumnSort::Ascending => self
                 .items
                 .sort_by(|left, right| Self::compare_tasks(kind, left, right)),
@@ -637,6 +750,17 @@ impl TableDelegate for DownloadTableDelegate {
                 .sort_by(|left, right| Self::compare_tasks(kind, right, left)),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ToolbarCommand {
+    Resume,
+    Pause,
+    PauseAll,
+    ResumeAll,
+    Delete,
+    Open,
+    Reveal,
 }
 
 impl DownloadView {
@@ -652,6 +776,10 @@ impl DownloadView {
         });
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "toolbar helper keeps per-button visual and command inputs explicit"
+    )]
     fn toolbar_icon_action(
         &self,
         tooltip_id: &'static str,
@@ -659,6 +787,7 @@ impl DownloadView {
         label: SharedString,
         icon: IconName,
         destructive: bool,
+        action: ToolbarCommand,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tooltip_label = label.clone();
@@ -666,13 +795,89 @@ impl DownloadView {
             .id(tooltip_id)
             .size(px(30.))
             .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
-            .child(toolbar_action_button(
-                button_id,
-                label,
-                Icon::new(icon).size(px(15.)),
-                destructive,
-                cx,
-            ))
+            .child(
+                toolbar_action_button(
+                    button_id,
+                    label,
+                    Icon::new(icon).size(px(15.)),
+                    destructive,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.execute_toolbar(action, cx);
+                })),
+            )
+    }
+
+    fn execute_toolbar(&mut self, action: ToolbarCommand, cx: &mut Context<Self>) {
+        let selected = self.table_state.read(cx).delegate().selected_task_ids();
+        let commands = match action {
+            ToolbarCommand::PauseAll => vec![DownloadsCommand::PauseAll],
+            ToolbarCommand::ResumeAll => vec![DownloadsCommand::ResumeAll],
+            ToolbarCommand::Open | ToolbarCommand::Reveal => selected
+                .into_iter()
+                .filter_map(|id| {
+                    let (source, task_id) = id.split_once(':').unwrap_or(("local", id.as_str()));
+                    (source == "local").then(|| match action {
+                        ToolbarCommand::Open => DownloadsCommand::OpenTask {
+                            task_id: task_id.to_owned(),
+                        },
+                        ToolbarCommand::Reveal => DownloadsCommand::RevealTask {
+                            task_id: task_id.to_owned(),
+                        },
+                        _ => unreachable!(),
+                    })
+                })
+                .collect(),
+            ToolbarCommand::Resume | ToolbarCommand::Pause | ToolbarCommand::Delete => selected
+                .into_iter()
+                .map(|id| {
+                    let (source, task_id) = id.split_once(':').unwrap_or(("local", id.as_str()));
+                    if source == "remote" {
+                        DownloadsCommand::RemoteCommand(serde_json::json!({
+                            "taskId": task_id,
+                            "action": match action {
+                                ToolbarCommand::Resume => "resume",
+                                ToolbarCommand::Pause => "pause",
+                                ToolbarCommand::Delete => "delete",
+                                ToolbarCommand::PauseAll
+                                | ToolbarCommand::ResumeAll
+                                | ToolbarCommand::Open
+                                | ToolbarCommand::Reveal => unreachable!(),
+                            }
+                        }))
+                    } else {
+                        match action {
+                            ToolbarCommand::Resume => DownloadsCommand::Resume {
+                                task_id: task_id.to_owned(),
+                            },
+                            ToolbarCommand::Pause => DownloadsCommand::Pause {
+                                task_id: task_id.to_owned(),
+                            },
+                            ToolbarCommand::Delete => DownloadsCommand::Delete {
+                                task_id: task_id.to_owned(),
+                                delete_files: false,
+                            },
+                            ToolbarCommand::PauseAll
+                            | ToolbarCommand::ResumeAll
+                            | ToolbarCommand::Open
+                            | ToolbarCommand::Reveal => unreachable!(),
+                        }
+                    }
+                })
+                .collect(),
+        };
+        for command in commands {
+            let future = self.controller.execute(command);
+            cx.spawn(async move |this, cx| {
+                let failed = future.await.is_err();
+                let _ = this.update(cx, |this, cx| {
+                    this.last_error = failed.then(|| this.strings.action_failed.clone());
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     fn render_columns_menu(&self, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -814,12 +1019,16 @@ impl DownloadView {
             .px(px(4.))
             .mb(px(4.))
             .gap(tokens.spacing.xxs)
-            .child(primary_icon_button(
-                "download-new",
-                self.strings.new_download.clone(),
-                Icon::new(IconName::Plus).size(px(15.)),
-                cx,
-            ))
+            .child(Input::new(&self.url_input).small().w(px(280.)))
+            .child(
+                Button::new("download-create")
+                    .primary()
+                    .small()
+                    .label(self.strings.new_download.clone())
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.create_download(window, cx);
+                    })),
+            )
             .child(separator())
             .child(self.toolbar_icon_action(
                 "download-resume-tooltip",
@@ -827,6 +1036,7 @@ impl DownloadView {
                 self.strings.resume.clone(),
                 IconName::Play,
                 false,
+                ToolbarCommand::Resume,
                 cx,
             ))
             .child(self.toolbar_icon_action(
@@ -835,6 +1045,7 @@ impl DownloadView {
                 self.strings.pause.clone(),
                 IconName::Pause,
                 false,
+                ToolbarCommand::Pause,
                 cx,
             ))
             .child(separator())
@@ -844,6 +1055,16 @@ impl DownloadView {
                 self.strings.stop_all.clone(),
                 IconName::CircleX,
                 false,
+                ToolbarCommand::PauseAll,
+                cx,
+            ))
+            .child(self.toolbar_icon_action(
+                "download-resume-all-tooltip",
+                "download-resume-all",
+                self.strings.resume.clone(),
+                IconName::Play,
+                false,
+                ToolbarCommand::ResumeAll,
                 cx,
             ))
             .child(separator())
@@ -853,20 +1074,160 @@ impl DownloadView {
                 self.strings.delete.clone(),
                 IconName::Delete,
                 true,
+                ToolbarCommand::Delete,
+                cx,
+            ))
+            .child(self.toolbar_icon_action(
+                "download-open-tooltip",
+                "download-open",
+                self.strings.open_file.clone(),
+                IconName::File,
+                false,
+                ToolbarCommand::Open,
+                cx,
+            ))
+            .child(self.toolbar_icon_action(
+                "download-reveal-tooltip",
+                "download-reveal",
+                self.strings.open_folder.clone(),
+                IconName::FolderOpen,
+                false,
+                ToolbarCommand::Reveal,
                 cx,
             ))
             .child(div().flex_1())
             .child(self.render_columns_menu(cx))
     }
 
-    pub(crate) fn render_main(&self, cx: &mut Context<Self>) -> Div {
+    fn create_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let url = self.url_input.read(cx).value().trim().to_owned();
+        if url.is_empty() || self.controller.is_stale() {
+            return;
+        }
+        self.url_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let request = match serde_json::from_value::<fluxdown_protocol::CreateTaskRequest>(
+            serde_json::json!({"url": url}),
+        ) {
+            Ok(request) => request,
+            Err(_) => return,
+        };
+        let future = self.controller.execute(DownloadsCommand::Create(Box::new(
+            fluxdown_protocol::DaemonCreateTaskParams {
+                request,
+                torrent_blob_id: None,
+                unattended: false,
+            },
+        )));
+        cx.spawn(async move |this, cx| {
+            let failed = future.await.is_err();
+            let _ = this.update(cx, |this, cx| {
+                this.last_error = failed.then(|| this.strings.action_failed.clone());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn resolve_selection(
+        &mut self,
+        request_id: String,
+        outcome: fluxdown_protocol::SelectionOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let future = self.controller.execute(DownloadsCommand::ResolveSelection(
+            fluxdown_protocol::SelectionResolutionDto {
+                request_id,
+                outcome,
+            },
+        ));
+        cx.spawn(async move |this, cx| {
+            let failed = future.await.is_err();
+            let _ = this.update(cx, |this, cx| {
+                this.last_error = failed.then(|| this.strings.action_failed.clone());
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_pending_selection(
+        &self,
+        request: fluxdown_protocol::SelectionRequestDto,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let tokens = active_theme(cx).tokens();
+        let confirm_id = request.request_id.clone();
+        let confirm_outcome = request.default_choice.clone();
+        let cancel_id = request.request_id.clone();
+        let cancellable = !matches!(request.kind, fluxdown_protocol::SelectionKind::Hls { .. });
+        h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(tokens.colors.border)
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .text_sm()
+                    .truncate()
+                    .child(request.task_id),
+            )
+            .child(
+                Button::new(format!("selection-confirm-{confirm_id}"))
+                    .primary()
+                    .small()
+                    .label(self.strings.confirm.clone())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.resolve_selection(confirm_id.clone(), confirm_outcome.clone(), cx);
+                    })),
+            )
+            .when(cancellable, |this| {
+                this.child(
+                    Button::new(format!("selection-cancel-{cancel_id}"))
+                        .outline()
+                        .small()
+                        .label(self.strings.cancel.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.resolve_selection(
+                                cancel_id.clone(),
+                                fluxdown_protocol::SelectionOutcome::Cancelled,
+                                cx,
+                            );
+                        })),
+                )
+            })
+    }
+
+    pub(crate) fn render_main(&self, cx: &mut Context<Self>) -> Div {
+        let tokens = active_theme(cx).tokens().clone();
         v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
             .bg(tokens.colors.surface)
             .child(self.render_toolbar(cx))
+            .when_some(self.last_error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(tokens.colors.border)
+                        .text_sm()
+                        .child(error),
+                )
+            })
+            .when_some(
+                self.controller.pending_selection().cloned(),
+                |this, request| this.child(self.render_pending_selection(request, cx)),
+            )
             .child(
                 div()
                     .id("download-task-table-container")
@@ -903,21 +1264,50 @@ mod tests {
     use fluxdown_ui_i18n::{I18nCatalog, I18nError};
 
     use super::DownloadTableDelegate;
-    use crate::{model::preview_tasks, strings::DownloadStrings};
+    use crate::{model::DownloadTaskView, strings::DownloadStrings};
 
     #[test]
     fn context_menu_selection_preserves_selected_rows_and_replaces_unselected_rows()
     -> Result<(), I18nError> {
         let catalog = Arc::new(I18nCatalog::load_embedded()?);
         let strings = DownloadStrings::from_translator(&catalog.translator("en"));
-        let mut delegate = DownloadTableDelegate::new(strings, preview_tasks());
-        delegate.selected_tasks.extend([0, 1]);
+        let tasks = (0..3)
+            .map(|index| {
+                let task =
+                    serde_json::from_value::<fluxdown_protocol::TaskDto>(serde_json::json!({
+                        "taskId": format!("t{index}"),
+                        "url": "https://example.com/file",
+                        "fileName": format!("f{index}.bin"),
+                        "saveDir": "/tmp",
+                        "status": 2,
+                        "downloadedBytes": 0,
+                        "totalBytes": 1,
+                        "errorMessage": "",
+                        "createdAt": "1",
+                        "proxyUrl": "",
+                        "queueId": "main",
+                        "checksum": ""
+                    }))
+                    .expect("task");
+                DownloadTaskView::local_with_speed(&task, None)
+            })
+            .collect();
+        let mut delegate = DownloadTableDelegate::new(strings, tasks);
+        delegate
+            .selected_tasks
+            .extend(["local:t0".to_owned(), "local:t1".to_owned()]);
 
-        delegate.select_task_for_context_menu(1);
-        assert_eq!(delegate.selected_tasks, HashSet::from([0, 1]));
+        delegate.select_task_for_context_menu("local:t1".to_owned());
+        assert_eq!(
+            delegate.selected_tasks,
+            HashSet::from(["local:t0".to_owned(), "local:t1".to_owned()])
+        );
 
-        delegate.select_task_for_context_menu(2);
-        assert_eq!(delegate.selected_tasks, HashSet::from([2]));
+        delegate.select_task_for_context_menu("local:t2".to_owned());
+        assert_eq!(
+            delegate.selected_tasks,
+            HashSet::from(["local:t2".to_owned()])
+        );
         Ok(())
     }
 }

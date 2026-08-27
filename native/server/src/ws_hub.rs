@@ -34,7 +34,7 @@ use fluxdown_engine::model::{BtFileEntry, HlsQualityOption, ResolveVariantOption
 use fluxdown_engine::selection::{HostSelection, SelectionOutcome};
 use tokio::sync::{broadcast, oneshot};
 
-use crate::wire::{FileMissingUpdateDto, WsServerMsg};
+use fluxdown_protocol::daemon::{FileMissingUpdateDto, WsServerMsg};
 
 /// 无客户端应答时 BT 文件选择的兜底超时（与桌面端常量一致）。
 const BT_SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -252,7 +252,10 @@ impl EventSink for EngineEventSink {
                     self.0.broadcast_task_event(task_id, TaskEventKind::Stop);
                 }
                 WsServerMsg::TasksSnapshot {
-                    tasks: tasks.into_iter().map(Into::into).collect(),
+                    tasks: tasks
+                        .into_iter()
+                        .map(fluxdown_engine_protocol::task_info_to_dto)
+                        .collect(),
                 }
             }
             EngineEvent::SegmentProgress {
@@ -264,7 +267,10 @@ impl EventSink for EngineEventSink {
                 task_id,
                 total_bytes,
                 segment_count,
-                segments: segments.into_iter().map(Into::into).collect(),
+                segments: segments
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::segment_detail_to_dto)
+                    .collect(),
             },
             EngineEvent::TaskMetaProbed {
                 task_id,
@@ -276,10 +282,16 @@ impl EventSink for EngineEventSink {
                 total_bytes,
             },
             EngineEvent::QueuePositionsChanged(positions) => WsServerMsg::QueuePositionsChanged {
-                positions: positions.into_iter().map(Into::into).collect(),
+                positions: positions
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::queue_position_to_dto)
+                    .collect(),
             },
             EngineEvent::QueuesChanged(queues) => WsServerMsg::QueuesChanged {
-                queues: queues.into_iter().map(Into::into).collect(),
+                queues: queues
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::queue_info_to_dto)
+                    .collect(),
             },
             EngineEvent::TaskQueueChanged { task_id, queue_id } => {
                 WsServerMsg::TaskQueueChanged { task_id, queue_id }
@@ -329,7 +341,10 @@ impl EventSink for EngineEventSink {
                 task_id,
                 kind,
                 host,
-                nodes: nodes.into_iter().map(Into::into).collect(),
+                nodes: nodes
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::cdn_node_info_to_dto)
+                    .collect(),
                 ip,
                 reason,
                 candidates,
@@ -372,11 +387,17 @@ impl EventSink for EngineEventSink {
             // 组名/删除/回收需要实时传导给 web 客户端（组进度仍由前端按
             // groupId 对 taskProgress SUM 聚合，本消息不含进度字段）。
             EngineEvent::GroupsChanged(groups) => WsServerMsg::GroupsChanged {
-                groups: groups.into_iter().map(Into::into).collect(),
+                groups: groups
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::group_info_to_dto)
+                    .collect(),
             },
             // RSS 订阅表全量推（增删改 / 抓取状态 / 未读 badge）。
             EngineEvent::RssSourcesChanged(sources) => WsServerMsg::RssSourcesChanged {
-                sources: sources.into_iter().map(Into::into).collect(),
+                sources: sources
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_source_info_to_dto)
+                    .collect(),
             },
             // 条目流快照 + 本轮自动建任务的标题；后者由客户端弹一条合批
             // 通知（headless 无桌面通知通道，通知责任落在 Web 前端）。
@@ -386,7 +407,10 @@ impl EventSink for EngineEventSink {
                 notify_titles,
             } => WsServerMsg::RssItemsChanged {
                 source_id,
-                items: items.into_iter().map(Into::into).collect(),
+                items: items
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_item_info_to_dto)
+                    .collect(),
                 notify_titles,
             },
             // 信号路径的 feed 验证结果（`DownloadManager::validate_rss_feed`）。
@@ -401,13 +425,19 @@ impl EventSink for EngineEventSink {
                 request_id,
                 url,
                 feed_title,
-                items: items.into_iter().map(Into::into).collect(),
+                items: items
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_item_info_to_dto)
+                    .collect(),
                 error,
             },
             // 投递日志变化 → 前端 invalidate 日志查询（面板开着就活着更新）。
             EngineEvent::WebhookDeliveriesChanged(entries) => {
                 WsServerMsg::WebhookDeliveriesChanged {
-                    deliveries: entries.into_iter().map(Into::into).collect(),
+                    deliveries: entries
+                        .into_iter()
+                        .map(fluxdown_engine_protocol::webhook_delivery_to_dto)
+                        .collect(),
                 }
             }
             // 文件跟踪扫描增量：只带本轮变化的 taskId，客户端就地 patch
@@ -452,7 +482,11 @@ impl HostSelection for WsHostSelection {
 
         self.0.broadcast(&WsServerMsg::HlsSelectionRequest {
             task_id: task_id.to_string(),
-            options: options.iter().cloned().map(Into::into).collect(),
+            options: options
+                .iter()
+                .cloned()
+                .map(fluxdown_engine_protocol::hls_quality_option_to_dto)
+                .collect(),
         });
 
         let outcome = match tokio::time::timeout(timeout, rx).await {
@@ -481,7 +515,11 @@ impl HostSelection for WsHostSelection {
 
         self.0.broadcast(&WsServerMsg::BtSelectionRequest {
             task_id: task_id.to_string(),
-            files: files.iter().cloned().map(Into::into).collect(),
+            files: files
+                .iter()
+                .cloned()
+                .map(fluxdown_engine_protocol::bt_file_entry_to_dto)
+                .collect(),
         });
 
         let effective_timeout = timeout.unwrap_or(BT_SELECTION_TIMEOUT);
@@ -513,7 +551,11 @@ impl HostSelection for WsHostSelection {
         self.0.broadcast(&WsServerMsg::ResolveVariantRequest {
             task_id: task_id.to_string(),
             default_index,
-            options: options.iter().cloned().map(Into::into).collect(),
+            options: options
+                .iter()
+                .cloned()
+                .map(fluxdown_engine_protocol::resolve_variant_option_to_dto)
+                .collect(),
         });
 
         let outcome = match tokio::time::timeout(timeout, rx).await {

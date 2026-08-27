@@ -39,6 +39,9 @@ class S {
   String get manage => _r('manage');
   String get delete => _r('delete');
   String get stopAll => _r('stopAll');
+  String get localServiceDisconnected => _r('localServiceDisconnected');
+  String get localServiceConflict => _r('localServiceConflict');
+  String get localServiceActionFailed => _r('localServiceActionFailed');
   String get manageTooltip => 'Ctrl+A';
   String get auto => _r('auto');
 

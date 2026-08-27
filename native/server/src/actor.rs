@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use fluxdown_api::service::ApiError;
-use fluxdown_api::types::CreateTaskRequest;
 use fluxdown_engine::Engine;
 use fluxdown_engine::bt_downloader::{BtConfig, BtMseMode};
 use fluxdown_engine::db::Db;
@@ -20,6 +19,7 @@ use fluxdown_engine::log_info;
 use fluxdown_engine::proxy_config::ProxyConfig;
 use fluxdown_engine::rss::RssValidateOutcome;
 use fluxdown_engine::rss::model::RssSourceInfo;
+use fluxdown_protocol::daemon::CreateTaskRequest;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
@@ -413,7 +413,9 @@ async fn handle_cmd(cmd: ActorCmd, engine: &mut Engine) {
                     ignore_tls_errors: req.ignore_tls_errors,
                     extra_headers: req.headers.unwrap_or_default(),
                     method: req.method,
-                    body: req.body.map(Into::into),
+                    body: req
+                        .body
+                        .map(fluxdown_engine_protocol::request_body_to_engine),
                     audio_url: req.audio_url,
                     start_paused: req.start_paused,
                     http_user: req.http_user,

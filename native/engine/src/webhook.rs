@@ -141,7 +141,7 @@ impl WebhookEventKind {
     }
 }
 
-/// 事件里的任务快照。字段名对齐 `fluxdown_api::types::TaskDto`，不另起一套。
+/// 事件里的任务快照。字段名对齐 `fluxdown_protocol::daemon::TaskDto`。
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebhookTask {

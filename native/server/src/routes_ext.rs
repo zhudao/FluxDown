@@ -27,7 +27,6 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use fluxdown_api::auth::{TokenCell, check_management_auth, constant_time_eq};
 use fluxdown_api::service::ApiError;
-use fluxdown_api::types::{QueueDto, TaskDto};
 use fluxdown_engine::components::{
     ffmpeg_status, install_ffmpeg, install_ytdlp, list_versions, list_ytdlp_versions,
     uninstall_ffmpeg, uninstall_ytdlp, ytdlp_status,
@@ -44,7 +43,8 @@ use utoipa::OpenApi;
 
 use crate::actor::ActorCmd;
 use crate::config::{ACCESS_KEY_MIN_LEN, default_save_dir, validate_access_key};
-use crate::wire::{
+use crate::ws_hub::WsHub;
+use fluxdown_protocol::daemon::{
     ComponentFfmpegStatus, ComponentVersions, ComponentYtdlpStatus, CreateQueueRequest,
     Ed2kServerSubRefreshResponse, FsEntry, FsListResponse, InstallFfmpegRequest, LogFileDto,
     LogsResponse, MoveQueueRequest, ProxyTestRequest, ProxyTestResponse, QueueScheduleRequest,
@@ -52,7 +52,6 @@ use crate::wire::{
     TrackerSubRefreshResponse, UpdateQueueRequest, WebhookDeliveriesResponse,
     WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse, WsClientMsg, WsServerMsg,
 };
-use crate::ws_hub::WsHub;
 
 /// 扩展路由共享状态。
 #[derive(Clone)]
@@ -280,7 +279,10 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState, authorized: bo
     // 连接建立即发送全量快照，客户端无需先发起 REST 轮询。
     if let Ok(tasks) = state.db.load_all_tasks().await {
         let msg = WsServerMsg::TasksSnapshot {
-            tasks: tasks.into_iter().map(TaskDto::from).collect(),
+            tasks: tasks
+                .into_iter()
+                .map(fluxdown_engine_protocol::task_info_to_dto)
+                .collect(),
         };
         if send_msg(&mut socket, &msg).await.is_err() {
             return;
@@ -288,7 +290,10 @@ async fn handle_socket(mut socket: WebSocket, state: ServerState, authorized: bo
     }
     if let Ok(queues) = state.db.load_all_queues().await {
         let msg = WsServerMsg::QueuesChanged {
-            queues: queues.into_iter().map(QueueDto::from).collect(),
+            queues: queues
+                .into_iter()
+                .map(fluxdown_engine_protocol::queue_info_to_dto)
+                .collect(),
         };
         if send_msg(&mut socket, &msg).await.is_err() {
             return;
@@ -971,10 +976,13 @@ async fn webhook_deliveries(State(state): State<ServerState>) -> Result<Response
         .send_cmd(|ack| ActorCmd::WebhookDeliveries { ack })
         .await?;
     Ok(axum::Json(WebhookDeliveriesResponse {
-        deliveries: deliveries.into_iter().map(Into::into).collect(),
+        deliveries: deliveries
+            .into_iter()
+            .map(fluxdown_engine_protocol::webhook_delivery_to_dto)
+            .collect(),
         presets: fluxdown_engine::webhook::preset_catalog()
             .into_iter()
-            .map(Into::into)
+            .map(fluxdown_engine_protocol::webhook_preset_to_dto)
             .collect(),
         variables: fluxdown_engine::webhook::TEMPLATE_VARIABLES
             .iter()
@@ -1136,7 +1144,7 @@ async fn stats(State(state): State<ServerState>) -> Result<Response, ApiError> {
 )]
 async fn component_ffmpeg_status(State(state): State<ServerState>) -> Result<Response, ApiError> {
     let status = ffmpeg_status(&state.db, &state.data_dir).await;
-    Ok(axum::Json(ComponentFfmpegStatus::from(status)).into_response())
+    Ok(axum::Json(fluxdown_engine_protocol::ffmpeg_status_to_dto(status)).into_response())
 }
 
 /// 列出当前平台可安装的 ffmpeg 稳定版本（降序；数据来自 BtbN/FFmpeg-Builds latest Release）。
@@ -1155,7 +1163,7 @@ async fn component_ffmpeg_versions(
     let versions = list_versions(&client)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(axum::Json(ComponentVersions::from(versions)).into_response())
+    Ok(axum::Json(fluxdown_engine_protocol::ffmpeg_versions_to_dto(versions)).into_response())
 }
 
 /// 安装/更新托管 ffmpeg：立即返回 202，实际下载在后台执行——进度经 WS
@@ -1248,7 +1256,7 @@ async fn component_ffmpeg_uninstall(
 )]
 async fn component_ytdlp_status(State(state): State<ServerState>) -> Result<Response, ApiError> {
     let status = ytdlp_status(&state.db, &state.data_dir).await;
-    Ok(axum::Json(ComponentYtdlpStatus::from(status)).into_response())
+    Ok(axum::Json(fluxdown_engine_protocol::ytdlp_status_to_dto(status)).into_response())
 }
 
 /// 列出当前平台可安装的 yt-dlp 稳定版本（降序；数据来自 yt-dlp/yt-dlp latest Release）。
@@ -1265,7 +1273,7 @@ async fn component_ytdlp_versions(State(_state): State<ServerState>) -> Result<R
     let versions = list_ytdlp_versions(&client)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(axum::Json(ComponentVersions::from(versions)).into_response())
+    Ok(axum::Json(fluxdown_engine_protocol::ytdlp_versions_to_dto(versions)).into_response())
 }
 
 /// 安装/更新托管 yt-dlp：立即返回 202，实际下载在后台执行——进度经 WS
@@ -1397,40 +1405,40 @@ async fn component_ytdlp_uninstall(State(state): State<ServerState>) -> Result<R
         webhook_test,
     ),
     components(schemas(
-        crate::wire::WsServerMsg,
-        crate::wire::WsClientMsg,
-        crate::wire::SegmentDetailDto,
-        crate::wire::QueuePositionDto,
-        crate::wire::FileMissingUpdateDto,
-        crate::wire::HlsQualityOptionDto,
-        crate::wire::ResolveVariantOptionDto,
-        crate::wire::BtFileDto,
-        crate::wire::CreateQueueRequest,
-        crate::wire::MoveQueueRequest,
-        crate::wire::QueueScheduleRequest,
-        crate::wire::ReorderQueueRequest,
-        crate::wire::ProxyTestRequest,
-        crate::wire::ProxyTestResponse,
-        crate::wire::SetupStatusResponse,
-        crate::wire::SetupRequest,
-        crate::wire::FsEntry,
-        crate::wire::FsListResponse,
-        crate::wire::StatsResponse,
-        crate::wire::LogsResponse,
-        crate::wire::LogFileDto,
-        crate::wire::TokenResponse,
-        crate::wire::ComponentFfmpegStatus,
-        crate::wire::ComponentYtdlpStatus,
-        crate::wire::ComponentVersions,
-        crate::wire::InstallFfmpegRequest,
-        crate::wire::TrackerSubRefreshResponse,
-        crate::wire::Ed2kServerSubRefreshResponse,
-        crate::wire::WebhookDeliveryDto,
-        crate::wire::WebhookPresetDto,
-        crate::wire::WebhookDeliveriesResponse,
-        crate::wire::WebhookTestRequest,
-        crate::wire::WebhookTestResponse,
-        crate::wire::WebhookSimulateResponse,
+        fluxdown_protocol::daemon::WsServerMsg,
+        fluxdown_protocol::daemon::WsClientMsg,
+        fluxdown_protocol::daemon::SegmentDetailDto,
+        fluxdown_protocol::daemon::QueuePositionDto,
+        fluxdown_protocol::daemon::FileMissingUpdateDto,
+        fluxdown_protocol::daemon::HlsQualityOptionDto,
+        fluxdown_protocol::daemon::ResolveVariantOptionDto,
+        fluxdown_protocol::daemon::BtFileDto,
+        fluxdown_protocol::daemon::CreateQueueRequest,
+        fluxdown_protocol::daemon::MoveQueueRequest,
+        fluxdown_protocol::daemon::QueueScheduleRequest,
+        fluxdown_protocol::daemon::ReorderQueueRequest,
+        fluxdown_protocol::daemon::ProxyTestRequest,
+        fluxdown_protocol::daemon::ProxyTestResponse,
+        fluxdown_protocol::daemon::SetupStatusResponse,
+        fluxdown_protocol::daemon::SetupRequest,
+        fluxdown_protocol::daemon::FsEntry,
+        fluxdown_protocol::daemon::FsListResponse,
+        fluxdown_protocol::daemon::StatsResponse,
+        fluxdown_protocol::daemon::LogsResponse,
+        fluxdown_protocol::daemon::LogFileDto,
+        fluxdown_protocol::daemon::TokenResponse,
+        fluxdown_protocol::daemon::ComponentFfmpegStatus,
+        fluxdown_protocol::daemon::ComponentYtdlpStatus,
+        fluxdown_protocol::daemon::ComponentVersions,
+        fluxdown_protocol::daemon::InstallFfmpegRequest,
+        fluxdown_protocol::daemon::TrackerSubRefreshResponse,
+        fluxdown_protocol::daemon::Ed2kServerSubRefreshResponse,
+        fluxdown_protocol::daemon::WebhookDeliveryDto,
+        fluxdown_protocol::daemon::WebhookPresetDto,
+        fluxdown_protocol::daemon::WebhookDeliveriesResponse,
+        fluxdown_protocol::daemon::WebhookTestRequest,
+        fluxdown_protocol::daemon::WebhookTestResponse,
+        fluxdown_protocol::daemon::WebhookSimulateResponse,
     )),
     tags((name = "server", description = "headless 服务器扩展端点"))
 )]

@@ -13,7 +13,6 @@ mod demo;
 mod host;
 mod routes_ext;
 mod web_assets;
-mod wire;
 mod ws_hub;
 
 use std::net::SocketAddr;
@@ -38,8 +37,8 @@ use crate::actor::{
 use crate::config::{ServerConfig, default_save_dir, ensure_server_config};
 use crate::host::ServerApiHost;
 use crate::routes_ext::{ServerState, extra_router};
-use crate::wire::WsServerMsg;
 use crate::ws_hub::{EngineEventSink, WsHostSelection, WsHub};
+use fluxdown_protocol::daemon::WsServerMsg;
 
 /// 服务器版本。发布流水线在编译期经 `FLUXDOWN_SERVER_VERSION` 注入 git tag
 /// 版本号；本地开发构建（`cargo run` 未注入）时固定显示 `dev`，
@@ -89,9 +88,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // 引导连接：读初始配置 + 首次运行初始化；随后把同一连接池交给引擎，
     // 避免重复打开数据库和再次执行 schema 初始化。
-    let boot_db = match &server_cfg.database_url {
-        Some(url) => Db::connect(url).await?,
-        None => Db::open(&data_dir).await?,
+    let (boot_db, write_guard) = match &server_cfg.database_url {
+        Some(url) => Db::connect_exclusive(url, &data_dir).await?,
+        None => Db::open_exclusive(&data_dir).await?,
     };
     boot_db.init_default_config(&default_save_dir()).await?;
     // 空串 = 尚未设置访问密钥，服务器进入「待设置」状态（见下方横幅）。
@@ -163,6 +162,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             database_url: server_cfg.database_url.clone(),
         },
         boot_db,
+        write_guard,
         sink.clone(),
         selector.clone(),
     )

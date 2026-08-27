@@ -18,7 +18,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fluxdown_api::service::{ApiError, ApiHost, LiveSpeed, TaskEvent};
-use fluxdown_api::types::{
+use fluxdown_engine::db::Db;
+use fluxdown_engine::download_manager::{CreateGroupSpec, GroupItemSpec};
+use fluxdown_engine::link::{DiscoveredPeer, DiscoveryKind, LinkError, LinkManager, WireHello};
+use fluxdown_engine::plugin::{MarketClient, PluginManager};
+use fluxdown_engine::rss::MAX_ITEMS_PER_SOURCE;
+use fluxdown_protocol::daemon::{
     CreateGroupRequest, CreateTaskRequest, DownloadRequest, GroupDto, LinkAuth, LinkCodeResponse,
     LinkDeviceInfo, LinkDiscoveredPeer, LinkPairBeginResponse, LinkPairConfirmOutcome,
     LinkPairConfirmRequest, LinkPairHelloRequest, LinkPairHelloResponse, LinkPingInfo,
@@ -26,18 +31,12 @@ use fluxdown_api::types::{
     ResolvePreviewResponse, RssItemActionRequest, RssItemDto, RssSourceDto, RssValidateRequest,
     RssValidateResponse, TaskDto,
 };
-use fluxdown_engine::db::Db;
-use fluxdown_engine::download_manager::{CreateGroupSpec, GroupItemSpec};
-use fluxdown_engine::link::{DiscoveredPeer, DiscoveryKind, LinkError, LinkManager, WireHello};
-use fluxdown_engine::plugin::{MarketClient, PluginManager};
-use fluxdown_engine::rss::MAX_ITEMS_PER_SOURCE;
-use fluxdown_engine::rss::model::RssSourceInfo;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::actor::ActorCmd;
 use crate::config::default_save_dir;
-use crate::wire::WsServerMsg;
 use crate::ws_hub::WsHub;
+use fluxdown_protocol::daemon::WsServerMsg;
 
 /// headless 服务器的 API 宿主。
 #[derive(Clone)]
@@ -153,7 +152,12 @@ impl ApiHost for ServerApiHost {
         self.db
             .load_all_tasks()
             .await
-            .map(|tasks| tasks.into_iter().map(TaskDto::from).collect())
+            .map(|tasks| {
+                tasks
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::task_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -161,7 +165,7 @@ impl ApiHost for ServerApiHost {
         self.db
             .load_task_by_id(task_id)
             .await
-            .map(|t| t.map(TaskDto::from))
+            .map(|t| t.map(fluxdown_engine_protocol::task_info_to_dto))
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -234,7 +238,11 @@ impl ApiHost for ServerApiHost {
         self.db
             .load_all_queues()
             .await
-            .map(|qs| qs.into_iter().map(QueueDto::from).collect())
+            .map(|qs| {
+                qs.into_iter()
+                    .map(fluxdown_engine_protocol::queue_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -359,7 +367,12 @@ impl ApiHost for ServerApiHost {
     /// 列出全部已安装插件（含设置定义与当前值）。
     async fn list_plugins(&self) -> Result<Vec<PluginDto>, ApiError> {
         let pm = self.plugin_manager()?;
-        Ok(pm.list().await.into_iter().map(PluginDto::from).collect())
+        Ok(pm
+            .list()
+            .await
+            .into_iter()
+            .map(fluxdown_engine_protocol::plugin_info_to_dto)
+            .collect())
     }
 
     /// 手动启用/禁用插件；成功后广播 `pluginsChanged` 通知客户端刷新列表。
@@ -435,7 +448,11 @@ impl ApiHost for ServerApiHost {
             .fetch_index()
             .await
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-        Ok(idx.entries.into_iter().map(MarketEntryDto::from).collect())
+        Ok(idx
+            .entries
+            .into_iter()
+            .map(fluxdown_engine_protocol::market_entry_to_dto)
+            .collect())
     }
 
     /// 从市场安装某插件最新版；成功后广播 `pluginsChanged`。
@@ -553,7 +570,12 @@ impl ApiHost for ServerApiHost {
         self.db
             .load_all_groups()
             .await
-            .map(|groups| groups.into_iter().map(GroupDto::from).collect())
+            .map(|groups| {
+                groups
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::group_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -591,7 +613,12 @@ impl ApiHost for ServerApiHost {
         self.db
             .load_all_rss_sources()
             .await
-            .map(|sources| sources.into_iter().map(RssSourceDto::from).collect())
+            .map(|sources| {
+                sources
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_source_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -599,7 +626,7 @@ impl ApiHost for ServerApiHost {
     /// 内完成；拿不到 ID 只有一种可能——url 为空。
     async fn create_rss_source(&self, req: RssSourceDto) -> Result<String, ApiError> {
         self.send_cmd(|ack| ActorCmd::RssCreate {
-            source: Box::new(req.into()),
+            source: Box::new(fluxdown_engine_protocol::rss_source_dto_to_engine(req)),
             ack,
         })
         .await?
@@ -609,7 +636,7 @@ impl ApiHost for ServerApiHost {
     /// 更新订阅配置。路径段是权威 ID——请求体里的 `sourceId` 一律被它覆盖，
     /// 否则一次笔误就能拿 A 的 URL 覆写 B 的订阅。
     async fn update_rss_source(&self, source_id: &str, req: RssSourceDto) -> Result<(), ApiError> {
-        let mut source = RssSourceInfo::from(req);
+        let mut source = fluxdown_engine_protocol::rss_source_dto_to_engine(req);
         source.source_id = source_id.to_string();
         let ok = self
             .send_cmd(|ack| ActorCmd::RssUpdate {
@@ -649,7 +676,12 @@ impl ApiHost for ServerApiHost {
         self.db
             .load_rss_items(source_id, MAX_ITEMS_PER_SOURCE)
             .await
-            .map(|items| items.into_iter().map(RssItemDto::from).collect())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_item_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -685,7 +717,11 @@ impl ApiHost for ServerApiHost {
         Ok(RssValidateResponse {
             url: outcome.url,
             feed_title: outcome.feed_title,
-            items: outcome.items.into_iter().map(RssItemDto::from).collect(),
+            items: outcome
+                .items
+                .into_iter()
+                .map(fluxdown_engine_protocol::rss_item_info_to_dto)
+                .collect(),
             error: outcome.error,
         })
     }
@@ -972,8 +1008,8 @@ fn link_disabled() -> ApiError {
 /// 转换，见 [`ServerApiHost::resolve_preview`]）。
 fn manifest_item_to_preview_dto(
     item: fluxdown_engine::model::ManifestItemInfo,
-) -> fluxdown_api::types::PreviewItemDto {
-    fluxdown_api::types::PreviewItemDto {
+) -> fluxdown_protocol::daemon::PreviewItemDto {
+    fluxdown_protocol::daemon::PreviewItemDto {
         id: item.id,
         name: item.name,
         path: item.path,
@@ -981,7 +1017,7 @@ fn manifest_item_to_preview_dto(
         variants: item
             .variants
             .into_iter()
-            .map(|v| fluxdown_api::types::PreviewVariantDto {
+            .map(|v| fluxdown_protocol::daemon::PreviewVariantDto {
                 id: v.id,
                 label: v.label,
                 size: v.size,
@@ -994,7 +1030,7 @@ fn manifest_item_to_preview_dto(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use fluxdown_api::types::GroupItemRequest;
+    use fluxdown_protocol::daemon::GroupItemRequest;
 
     const DEMO: &str = "https://example.com/demo.bin";
 
@@ -1431,7 +1467,7 @@ mod tests {
 
         // begin：管理面 handler → ApiHost::link_pair_begin → LinkManager::begin_pairing
         // （内部对响应方发真实 HTTP hello）。
-        let begin: fluxdown_api::types::LinkPairBeginResponse = client
+        let begin: fluxdown_protocol::daemon::LinkPairBeginResponse = client
             .post(format!("{base}/api/v1/link/pair/begin"))
             .bearer_auth(token)
             .json(&serde_json::json!({
@@ -1449,7 +1485,7 @@ mod tests {
         assert!(!begin.sas.is_empty());
 
         // finish：SAS 核对后确认配对。
-        let finish: fluxdown_api::types::LinkPairFinishResponse = client
+        let finish: fluxdown_protocol::daemon::LinkPairFinishResponse = client
             .post(format!("{base}/api/v1/link/pair/finish"))
             .bearer_auth(token)
             .json(&serde_json::json!({ "token": begin.token, "accept": true }))
@@ -1465,7 +1501,7 @@ mod tests {
         let fingerprint = device.fingerprint;
 
         // devices：列表应含刚配对的一台，且在线（响应方服务器真实存活）。
-        let devices: fluxdown_api::types::LinkDevicesResponse = client
+        let devices: fluxdown_protocol::daemon::LinkDevicesResponse = client
             .get(format!("{base}/api/v1/link/devices"))
             .bearer_auth(token)
             .send()
@@ -1494,10 +1530,11 @@ mod tests {
             .await
             .expect("delete request");
         assert_eq!(del.status(), reqwest::StatusCode::OK);
-        let del_body: fluxdown_api::types::LinkOkResponse = del.json().await.expect("delete json");
+        let del_body: fluxdown_protocol::daemon::LinkOkResponse =
+            del.json().await.expect("delete json");
         assert!(del_body.ok);
 
-        let devices_after: fluxdown_api::types::LinkDevicesResponse = client
+        let devices_after: fluxdown_protocol::daemon::LinkDevicesResponse = client
             .get(format!("{base}/api/v1/link/devices"))
             .bearer_auth(token)
             .send()

@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use fluxdown_api::service::{ApiError, ApiHost, LiveSpeed, TaskEvent};
-use fluxdown_api::types::{
+use fluxdown_protocol::daemon::{
     CreateGroupRequest, CreateTaskRequest, DownloadRequest, GroupDto, QueueDto,
     ResolvePreviewRequest, ResolvePreviewResponse, RssItemActionRequest, RssItemDto, RssSourceDto,
     RssValidateRequest, RssValidateResponse, TaskDto,
@@ -37,20 +37,20 @@ use fluxdown_api::types::{
 #[cfg(hub_link)]
 use std::time::Duration;
 
-#[cfg(hub_link)]
-use fluxdown_api::types::{
-    LinkAuth, LinkCodeResponse, LinkDeviceInfo, LinkDiscoveredPeer, LinkPairBeginResponse,
-    LinkPairConfirmOutcome, LinkPairConfirmRequest, LinkPairHelloRequest, LinkPairHelloResponse,
-    LinkPingInfo, LinkTaskRequest,
-};
-#[cfg(hub_plugins)]
-use fluxdown_api::types::{MarketEntryDto, PluginDto};
 use fluxdown_engine::db::Db;
 use fluxdown_engine::download_manager::{CreateGroupSpec, GroupItemSpec, ResolvePreviewOutcome};
 #[cfg(hub_link)]
 use fluxdown_engine::link::{DiscoveredPeer, DiscoveryKind, LinkError, WireHello};
 #[cfg(hub_plugins)]
 use fluxdown_engine::plugin::{MarketClient, PluginManager};
+#[cfg(hub_link)]
+use fluxdown_protocol::daemon::{
+    LinkAuth, LinkCodeResponse, LinkDeviceInfo, LinkDiscoveredPeer, LinkPairBeginResponse,
+    LinkPairConfirmOutcome, LinkPairConfirmRequest, LinkPairHelloRequest, LinkPairHelloResponse,
+    LinkPingInfo, LinkTaskRequest,
+};
+#[cfg(hub_plugins)]
+use fluxdown_protocol::daemon::{MarketEntryDto, PluginDto};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// 任务实时速率表：`task_id → LiveSpeed`。写端见 [`crate::rinf_sink::RinfEventSink`]；
@@ -284,7 +284,12 @@ impl ApiHost for HubApiHost {
         self.db
             .load_all_tasks()
             .await
-            .map(|tasks| tasks.into_iter().map(TaskDto::from).collect())
+            .map(|tasks| {
+                tasks
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::task_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -292,7 +297,7 @@ impl ApiHost for HubApiHost {
         self.db
             .load_task_by_id(task_id)
             .await
-            .map(|t| t.map(TaskDto::from))
+            .map(|t| t.map(fluxdown_engine_protocol::task_info_to_dto))
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -345,7 +350,11 @@ impl ApiHost for HubApiHost {
         self.db
             .load_all_queues()
             .await
-            .map(|qs| qs.into_iter().map(QueueDto::from).collect())
+            .map(|qs| {
+                qs.into_iter()
+                    .map(fluxdown_engine_protocol::queue_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -391,7 +400,12 @@ impl ApiHost for HubApiHost {
         let Some(pm) = &self.plugin_manager else {
             return Ok(Vec::new());
         };
-        Ok(pm.list().await.into_iter().map(PluginDto::from).collect())
+        Ok(pm
+            .list()
+            .await
+            .into_iter()
+            .map(fluxdown_engine_protocol::plugin_info_to_dto)
+            .collect())
     }
 
     #[cfg(hub_plugins)]
@@ -462,7 +476,11 @@ impl ApiHost for HubApiHost {
             .fetch_index()
             .await
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-        Ok(idx.entries.into_iter().map(MarketEntryDto::from).collect())
+        Ok(idx
+            .entries
+            .into_iter()
+            .map(fluxdown_engine_protocol::market_entry_to_dto)
+            .collect())
     }
 
     #[cfg(hub_plugins)]
@@ -579,7 +597,12 @@ impl ApiHost for HubApiHost {
         self.db
             .load_all_groups()
             .await
-            .map(|groups| groups.into_iter().map(GroupDto::from).collect())
+            .map(|groups| {
+                groups
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::group_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -619,13 +642,18 @@ impl ApiHost for HubApiHost {
         self.db
             .load_all_rss_sources()
             .await
-            .map(|sources| sources.into_iter().map(Into::into).collect())
+            .map(|sources| {
+                sources
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_source_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
     async fn create_rss_source(&self, req: RssSourceDto) -> Result<String, ApiError> {
         self.send_cmd(|ack| ApiCommand::RssCreate {
-            source: Box::new(req.into()),
+            source: Box::new(fluxdown_engine_protocol::rss_source_dto_to_engine(req)),
             ack,
         })
         .await?
@@ -635,7 +663,7 @@ impl ApiHost for HubApiHost {
     /// 路径参数是订阅身份的唯一来源：body 里的 `sourceId` 一律以它覆盖，
     /// 避免「改 A 的地址却写进 B」。
     async fn update_rss_source(&self, source_id: &str, req: RssSourceDto) -> Result<(), ApiError> {
-        let mut source: fluxdown_engine::rss::model::RssSourceInfo = req.into();
+        let mut source = fluxdown_engine_protocol::rss_source_dto_to_engine(req);
         source.source_id = source_id.to_string();
         match self
             .send_cmd(|ack| ApiCommand::RssUpdate {
@@ -683,7 +711,12 @@ impl ApiHost for HubApiHost {
         self.db
             .load_rss_items(source_id, fluxdown_engine::rss::MAX_ITEMS_PER_SOURCE)
             .await
-            .map(|items| items.into_iter().map(Into::into).collect())
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(fluxdown_engine_protocol::rss_item_info_to_dto)
+                    .collect()
+            })
             .map_err(|e| ApiError::Internal(e.to_string()))
     }
 
@@ -719,7 +752,11 @@ impl ApiHost for HubApiHost {
         Ok(RssValidateResponse {
             url: outcome.url,
             feed_title: outcome.feed_title,
-            items: outcome.items.into_iter().map(Into::into).collect(),
+            items: outcome
+                .items
+                .into_iter()
+                .map(fluxdown_engine_protocol::rss_item_info_to_dto)
+                .collect(),
             error: outcome.error,
         })
     }
@@ -973,8 +1010,8 @@ fn link_discovered_dto(p: DiscoveredPeer) -> LinkDiscoveredPeer {
 /// 见 [`HubApiHost::resolve_preview`]）。
 fn manifest_item_to_preview_dto(
     item: fluxdown_engine::model::ManifestItemInfo,
-) -> fluxdown_api::types::PreviewItemDto {
-    fluxdown_api::types::PreviewItemDto {
+) -> fluxdown_protocol::daemon::PreviewItemDto {
+    fluxdown_protocol::daemon::PreviewItemDto {
         id: item.id,
         name: item.name,
         path: item.path,
@@ -982,7 +1019,7 @@ fn manifest_item_to_preview_dto(
         variants: item
             .variants
             .into_iter()
-            .map(|v| fluxdown_api::types::PreviewVariantDto {
+            .map(|v| fluxdown_protocol::daemon::PreviewVariantDto {
                 id: v.id,
                 label: v.label,
                 size: v.size,

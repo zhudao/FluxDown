@@ -117,11 +117,29 @@ impl DownloadView {
             return;
         }
         self.selected_item = selection;
-        if let SidebarSelection::Download(filter) = selection {
-            self.table_state.update(cx, |table, cx| {
-                table.delegate_mut().set_filter(filter);
-                table.refresh(cx);
-            });
+        match selection {
+            SidebarSelection::Download(filter) => {
+                self.table_state.update(cx, |table, cx| {
+                    table.delegate_mut().set_filter(filter);
+                    table.refresh(cx);
+                });
+            }
+            SidebarSelection::MainQueue => {
+                self.table_state.update(cx, |table, cx| {
+                    table
+                        .delegate_mut()
+                        .set_queue_filter(fluxdown_protocol::MAIN_QUEUE_ID);
+                    table.refresh(cx);
+                });
+            }
+            SidebarSelection::LaterQueue => {
+                self.table_state.update(cx, |table, cx| {
+                    table
+                        .delegate_mut()
+                        .set_queue_filter(fluxdown_protocol::LATER_QUEUE_ID);
+                    table.refresh(cx);
+                });
+            }
         }
         cx.notify();
     }
@@ -132,6 +150,16 @@ impl DownloadView {
                 .read(cx)
                 .delegate()
                 .count_matching(filter)
+                .to_string(),
+        )
+    }
+
+    fn queue_count(&self, queue_id: &str, cx: &Context<Self>) -> SharedString {
+        SharedString::from(
+            self.table_state
+                .read(cx)
+                .delegate()
+                .count_in_queue(queue_id)
                 .to_string(),
         )
     }
@@ -450,7 +478,7 @@ impl DownloadView {
                                 SidebarSelection::MainQueue,
                                 self.strings.main_queue.clone(),
                                 IconName::GalleryVerticalEnd,
-                                ("5".into(), true),
+                                (self.queue_count(fluxdown_protocol::MAIN_QUEUE_ID, cx), true),
                                 cx,
                             ))
                             .child(self.nav_item(
@@ -458,7 +486,10 @@ impl DownloadView {
                                 SidebarSelection::LaterQueue,
                                 self.strings.later_queue.clone(),
                                 IconName::Pause,
-                                ("0".into(), true),
+                                (
+                                    self.queue_count(fluxdown_protocol::LATER_QUEUE_ID, cx),
+                                    true,
+                                ),
                                 cx,
                             )),
                     ),

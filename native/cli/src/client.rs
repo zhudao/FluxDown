@@ -9,7 +9,7 @@ use std::time::Duration;
 use fluxdown_api::auth::TOKEN_HEADER;
 use fluxdown_api::routes;
 use fluxdown_api::service::UNKNOWN_ENDPOINT_MESSAGE;
-use fluxdown_api::types::{
+use fluxdown_protocol::daemon::{
     ApiInfo, CreateTaskRequest, CreatedTask, QueueDto, RssItemDto, RssSourceDto, TaskDto,
 };
 use reqwest::{Client, Method, StatusCode};

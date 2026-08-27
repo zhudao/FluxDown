@@ -5,9 +5,13 @@
 
 mod assets;
 mod components;
+mod controller;
 mod model;
 mod pages;
 mod strings;
 
 pub use assets::*;
+pub use controller::{
+    DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, PortFuture,
+};
 pub use pages::downloads::*;
