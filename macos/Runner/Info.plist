@@ -28,6 +28,8 @@
 	<string>FluxDown uses notifications to alert you when downloads complete.</string>
 	<key>CFBundleDisplayName</key>
 	<string>FluxDown</string>
+	<key>FLTEnableImpeller</key>
+	<false/>
 	<key>NSMainNibFile</key>
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
