@@ -374,6 +374,16 @@ pub struct GatewayStatusDto {
     pub mcp_enabled: bool,
     pub cors_enabled: bool,
     pub user_token_configured: bool,
+    /// 当前监听端口（只读；由启动环境决定）。
+    #[serde(default = "default_gateway_port")]
+    pub port: u16,
+    /// 是否对局域网开放兼容 API；修改后下次 agent 启动生效。
+    #[serde(default)]
+    pub lan_enabled: bool,
+}
+
+fn default_gateway_port() -> u16 {
+    17800
 }
 
 /// 原子修改 agent 托管的兼容网关开关与用户 token。
@@ -386,8 +396,12 @@ pub struct GatewayPatchParams {
     pub api_enabled: Option<bool>,
     pub mcp_enabled: Option<bool>,
     pub cors_enabled: Option<bool>,
+    pub lan_enabled: Option<bool>,
     /// `Some("")` 清除用户 token；省略则保持。
     pub user_token: Option<String>,
+    /// `true` 生成新的随机用户 token（优先于 `user_token`）。
+    #[serde(default)]
+    pub regenerate_user_token: bool,
 }
 
 /// agent 配置同步状态投影。
@@ -420,4 +434,167 @@ pub struct PendingCaptureDto {
     #[serde(default)]
     pub file_name: String,
     pub created_at_unix_ms: i64,
+}
+
+/// 桌面系统集成状态（开机自启、`.torrent` 关联、URL scheme 注册）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformIntegrationDto {
+    pub autostart_supported: bool,
+    pub autostart_enabled: bool,
+    pub file_association_supported: bool,
+    pub torrent_associated: bool,
+    pub url_protocol_supported: bool,
+    /// scheme → 是否已注册到 FluxDown（`magnet` / `ed2k` / `fluxdown`）。
+    pub url_protocols: BTreeMap<String, bool>,
+    /// 注册目标可执行文件；空表示未找到桌面程序。
+    pub desktop_executable: String,
+}
+
+/// `agent.platform.setAutostart` 参数。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformToggleParams {
+    pub enabled: bool,
+}
+
+/// `agent.platform.setUrlProtocol` 参数。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformUrlProtocolParams {
+    pub scheme: String,
+    pub enabled: bool,
+}
+
+/// `agent.platform.openPath` 参数。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformOpenPathParams {
+    pub path: String,
+    /// `true` 在文件管理器中定位而非直接打开。
+    #[serde(default)]
+    pub reveal: bool,
+}
+
+/// Doctor 检查项级别。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum DiagnosticLevel {
+    #[default]
+    Info,
+    Ok,
+    Warn,
+    Error,
+}
+
+/// 单条 Doctor 检查结果。`id` 稳定，UI 据此选择标题文案与修复动作。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticCheckDto {
+    pub id: String,
+    /// 同一 `id` 下的子目标（如浏览器名、scheme）；无则为空。
+    #[serde(default)]
+    pub target: String,
+    pub level: DiagnosticLevel,
+    pub detail: String,
+    /// 既有 hint code（如 `HINT_CHECK_DISK`）；无则为空。
+    #[serde(default)]
+    pub hint: String,
+    /// 可用的就地修复动作（`agent.diagnostics.repair` 的 `action`）；无则为 None。
+    #[serde(default)]
+    pub repair: Option<DiagnosticRepairParams>,
+}
+
+/// `agent.diagnostics.repair` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticRepairParams {
+    pub action: String,
+    #[serde(default)]
+    pub target: String,
+}
+
+/// `agent.diagnostics.run` 结果。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsReportDto {
+    pub generated_at_unix_ms: i64,
+    pub app_version: String,
+    pub platform: String,
+    pub agent_data_dir: String,
+    pub daemon_connected: bool,
+    pub checks: Vec<DiagnosticCheckDto>,
+}
+
+/// `agent.diagnostics.exportLogs` 参数：目标文件路径（`.zip`）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LogExportParams {
+    pub target_path: String,
+}
+
+/// `agent.diagnostics.exportLogs` 结果。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LogExportResult {
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// 日志目录信息（`agent.diagnostics.logPaths`）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LogPathsDto {
+    pub agent_log_dir: String,
+    pub daemon_log_dir: String,
+}
+
+/// `agent.update.check` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckParams {
+    /// `stable` | `frontier`；省略取偏好 `general.update_channel`。
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
+/// 单个版本的更新说明。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ReleaseNoteDto {
+    pub version: String,
+    #[serde(default)]
+    pub published_at: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+/// `agent.update.check` 结果。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResultDto {
+    pub channel: String,
+    pub current_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+    #[serde(default)]
+    pub download_url: String,
+    #[serde(default)]
+    pub release_page_url: String,
+    #[serde(default)]
+    pub notes: Vec<ReleaseNoteDto>,
 }

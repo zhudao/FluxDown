@@ -4,7 +4,7 @@ use fluxdown_ui_components::activity_button as activity_bar_button;
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, AnyView, App, Context, Div, Entity, Img, InteractiveElement as _, IntoElement,
     MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
     Window, div, img, px,
 };
@@ -150,10 +150,11 @@ impl AuxiliaryWindowView {
 }
 
 impl Render for AuxiliaryWindowView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = active_theme(cx).tokens().colors;
         v_flex()
             .size_full()
+            .relative()
             .bg(colors.background)
             .text_color(colors.foreground)
             .child(self.render_title_bar(cx))
@@ -164,6 +165,9 @@ impl Render for AuxiliaryWindowView {
                     .min_h_0()
                     .child(self.content.clone()),
             )
+            .children(gpui_component::Root::render_sheet_layer(window, cx))
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
+            .children(gpui_component::Root::render_notification_layer(window, cx))
     }
 }
 
@@ -212,9 +216,14 @@ impl ShellView {
             ("title-menu-help", self.strings.menu_help.clone()),
         ];
         let menu_placeholder = self.strings.menu_items_pending.clone();
+        let logo = img(APP_LOGO_PATH).size(px(16.));
         let title_bar = TitleBar::new();
         #[cfg(not(target_os = "macos"))]
         let title_bar = title_bar.pl(spacing.sm);
+        #[cfg(target_os = "macos")]
+        let (leading_logo, trailing_logo): (Option<Img>, Option<Img>) = (None, Some(logo));
+        #[cfg(not(target_os = "macos"))]
+        let (leading_logo, trailing_logo): (Option<Img>, Option<Img>) = (Some(logo), None);
 
         title_bar
             .h(TITLE_BAR_HEIGHT)
@@ -228,7 +237,7 @@ impl ShellView {
                     .gap(spacing.sm)
                     .pl(spacing.xxs)
                     .pr(spacing.md)
-                    .child(img(APP_LOGO_PATH).size(px(16.)))
+                    .children(leading_logo)
                     .child(
                         h_flex()
                             .h_full()
@@ -251,7 +260,8 @@ impl ShellView {
                                     })
                             })),
                     )
-                    .child(div().flex_1()),
+                    .child(div().flex_1())
+                    .children(trailing_logo),
             )
     }
 
@@ -350,10 +360,11 @@ impl ShellView {
 }
 
 impl Render for ShellView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = active_theme(cx).tokens().colors;
         v_flex()
             .size_full()
+            .relative()
             .bg(colors.background)
             .text_color(colors.foreground)
             .child(self.render_title_bar(cx))
@@ -372,5 +383,8 @@ impl Render for ShellView {
                             .child(self.active_content()),
                     ),
             )
+            .children(gpui_component::Root::render_sheet_layer(window, cx))
+            .children(gpui_component::Root::render_dialog_layer(window, cx))
+            .children(gpui_component::Root::render_notification_layer(window, cx))
     }
 }

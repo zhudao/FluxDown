@@ -13,7 +13,6 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
-    input::Input,
     popover::Popover,
     spinner::Spinner,
     table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
@@ -1019,14 +1018,16 @@ impl DownloadView {
             .px(px(4.))
             .mb(px(4.))
             .gap(tokens.spacing.xxs)
-            .child(Input::new(&self.url_input).small().w(px(280.)))
             .child(
                 Button::new("download-create")
                     .primary()
                     .small()
                     .label(self.strings.new_download.clone())
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.create_download(window, cx);
+                        if let Some(opener) = this.new_download_opener.clone() {
+                            let context = this.new_download_context();
+                            opener(context, window, cx);
+                        }
                     })),
             )
             .child(separator())
@@ -1097,36 +1098,6 @@ impl DownloadView {
             ))
             .child(div().flex_1())
             .child(self.render_columns_menu(cx))
-    }
-
-    fn create_download(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.url_input.read(cx).value().trim().to_owned();
-        if url.is_empty() || self.controller.is_stale() {
-            return;
-        }
-        self.url_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
-        let request = match serde_json::from_value::<fluxdown_protocol::CreateTaskRequest>(
-            serde_json::json!({"url": url}),
-        ) {
-            Ok(request) => request,
-            Err(_) => return,
-        };
-        let future = self.controller.execute(DownloadsCommand::Create(Box::new(
-            fluxdown_protocol::DaemonCreateTaskParams {
-                request,
-                torrent_blob_id: None,
-                unattended: false,
-            },
-        )));
-        cx.spawn(async move |this, cx| {
-            let failed = future.await.is_err();
-            let _ = this.update(cx, |this, cx| {
-                this.last_error = failed.then(|| this.strings.action_failed.clone());
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn resolve_selection(

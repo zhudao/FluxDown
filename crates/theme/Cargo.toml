@@ -11,6 +11,4 @@ gpui.workspace = true
 gpui-base.workspace = true
 gpui-component.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true

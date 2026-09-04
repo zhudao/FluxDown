@@ -37,6 +37,11 @@ pub const DAEMON_GROUP_DELETE: &str = "daemon.group.delete";
 pub const DAEMON_CONFIG_GET: &str = "daemon.config.get";
 pub const DAEMON_CONFIG_PATCH: &str = "daemon.config.patch";
 pub const DAEMON_CONFIG_PROXY_TEST: &str = "daemon.config.proxyTest";
+pub const DAEMON_CONFIG_CONN_POLICY: &str = "daemon.config.connPolicy";
+pub const DAEMON_CONFIG_CLEAR_CONN_POLICY: &str = "daemon.config.clearConnPolicy";
+pub const DAEMON_SITE_AUTH_LIST: &str = "daemon.siteAuth.list";
+pub const DAEMON_SITE_AUTH_DELETE: &str = "daemon.siteAuth.delete";
+pub const DAEMON_SITE_AUTH_CLEAR: &str = "daemon.siteAuth.clear";
 pub const DAEMON_RUNTIME_STATS: &str = "daemon.runtime.stats";
 pub const DAEMON_FS_LIST: &str = "daemon.fs.list";
 
@@ -103,6 +108,8 @@ pub const AGENT_PROFILE_CHANGE_NICKNAME: &str = "agent.profile.changeNickname";
 
 pub const AGENT_GATEWAY_GET: &str = "agent.gateway.get";
 pub const AGENT_GATEWAY_PATCH: &str = "agent.gateway.patch";
+/// 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。
+pub const AGENT_GATEWAY_REVEAL_TOKEN: &str = "agent.gateway.revealToken";
 pub const AGENT_DEVICE_LIST: &str = "agent.device.list";
 pub const AGENT_DEVICE_RENAME: &str = "agent.device.rename";
 pub const AGENT_DEVICE_DELETE: &str = "agent.device.delete";
@@ -128,11 +135,23 @@ pub const AGENT_REFERRAL_VALIDATE: &str = "agent.referral.validate";
 
 pub const AGENT_PLATFORM_OPEN_TASK: &str = "agent.platform.openTask";
 pub const AGENT_PLATFORM_REVEAL_TASK: &str = "agent.platform.revealTask";
+pub const AGENT_PLATFORM_OPEN_PATH: &str = "agent.platform.openPath";
+pub const AGENT_PLATFORM_INTEGRATION_GET: &str = "agent.platform.integrationGet";
+pub const AGENT_PLATFORM_SET_AUTOSTART: &str = "agent.platform.setAutostart";
+pub const AGENT_PLATFORM_SET_FILE_ASSOCIATION: &str = "agent.platform.setFileAssociation";
+pub const AGENT_PLATFORM_SET_URL_PROTOCOL: &str = "agent.platform.setUrlProtocol";
 pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
+/// 从本机 `.torrent` 文件建任务：agent 读文件、上传 daemon blob 后调用 `daemon.task.create`。
+pub const AGENT_CAPTURE_SUBMIT_TORRENT_FILE: &str = "agent.capture.submitTorrentFile";
 pub const AGENT_CAPTURE_LIST: &str = "agent.capture.list";
 pub const AGENT_CAPTURE_RESOLVE: &str = "agent.capture.resolve";
+/// 从本机插件包安装：agent 读文件、上传 daemon blob 后调用 `daemon.plugin.install`。
+pub const AGENT_PLUGIN_INSTALL_FILE: &str = "agent.plugin.installFile";
 pub const AGENT_DIAGNOSTICS_RUN: &str = "agent.diagnostics.run";
 pub const AGENT_DIAGNOSTICS_REPAIR: &str = "agent.diagnostics.repair";
+pub const AGENT_DIAGNOSTICS_LOG_PATHS: &str = "agent.diagnostics.logPaths";
+pub const AGENT_DIAGNOSTICS_EXPORT_LOGS: &str = "agent.diagnostics.exportLogs";
+pub const AGENT_UPDATE_CHECK: &str = "agent.update.check";
 
 pub const SERVICE_EVENT: &str = "service.event";
 
@@ -191,6 +210,11 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_CONFIG_GET,
     DAEMON_CONFIG_PATCH,
     DAEMON_CONFIG_PROXY_TEST,
+    DAEMON_CONFIG_CONN_POLICY,
+    DAEMON_CONFIG_CLEAR_CONN_POLICY,
+    DAEMON_SITE_AUTH_LIST,
+    DAEMON_SITE_AUTH_DELETE,
+    DAEMON_SITE_AUTH_CLEAR,
     DAEMON_RUNTIME_STATS,
     DAEMON_FS_LIST,
     DAEMON_RSS_LIST_SOURCES,
@@ -250,6 +274,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PROFILE_CHANGE_NICKNAME,
     AGENT_GATEWAY_GET,
     AGENT_GATEWAY_PATCH,
+    AGENT_GATEWAY_REVEAL_TOKEN,
     AGENT_DEVICE_LIST,
     AGENT_DEVICE_RENAME,
     AGENT_DEVICE_DELETE,
@@ -273,11 +298,21 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_REFERRAL_VALIDATE,
     AGENT_PLATFORM_OPEN_TASK,
     AGENT_PLATFORM_REVEAL_TASK,
+    AGENT_PLATFORM_OPEN_PATH,
+    AGENT_PLATFORM_INTEGRATION_GET,
+    AGENT_PLATFORM_SET_AUTOSTART,
+    AGENT_PLATFORM_SET_FILE_ASSOCIATION,
+    AGENT_PLATFORM_SET_URL_PROTOCOL,
     AGENT_CAPTURE_SUBMIT,
+    AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
     AGENT_CAPTURE_LIST,
     AGENT_CAPTURE_RESOLVE,
+    AGENT_PLUGIN_INSTALL_FILE,
     AGENT_DIAGNOSTICS_RUN,
     AGENT_DIAGNOSTICS_REPAIR,
+    AGENT_DIAGNOSTICS_LOG_PATHS,
+    AGENT_DIAGNOSTICS_EXPORT_LOGS,
+    AGENT_UPDATE_CHECK,
     SERVICE_EVENT,
 ];
 

@@ -1,10 +1,21 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 
 use fluxdown_protocol::{
-    AgentEvent, AgentSnapshot, DaemonEvent, RemoteTaskDto, ServiceEvent, TaskDto, WsServerMsg,
+    AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, QueueDto, RemoteTaskDto, ServiceEvent,
+    TaskDto, WsServerMsg,
 };
 
 use crate::model::DownloadTaskView;
+
+/// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
+pub const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
+/// 偏好：新建下载默认沿用上次保存目录。
+pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
 
 pub type PortFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, fluxdown_protocol::RpcErrorData>> + Send + 'static>>;
@@ -44,6 +55,14 @@ pub enum DownloadsCommand {
     RevealTask {
         task_id: String,
     },
+    /// 本机 `.torrent` 文件：agent 读取、上传 blob 后按捕获路径建任务。
+    SubmitTorrentFile {
+        path: String,
+    },
+    /// 记录本次保存目录到 [`LAST_SAVE_DIR_PREF`]（设备本地偏好）。
+    RememberSaveDir {
+        save_dir: String,
+    },
 }
 
 pub enum DownloadsResult {
@@ -62,6 +81,10 @@ pub struct DownloadsController {
     tasks: Vec<DownloadTaskView>,
     live_speeds: HashMap<String, i64>,
     pending_selections: Vec<fluxdown_protocol::SelectionRequestDto>,
+    queues: Vec<QueueDto>,
+    config: BTreeMap<String, String>,
+    runtime_save_dir: String,
+    preferences: BTreeMap<String, serde_json::Value>,
     stale: bool,
 }
 
@@ -75,6 +98,10 @@ impl DownloadsController {
             tasks: Vec::new(),
             live_speeds: HashMap::new(),
             pending_selections: Vec::new(),
+            queues: Vec::new(),
+            config: BTreeMap::new(),
+            runtime_save_dir: String::new(),
+            preferences: BTreeMap::new(),
             stale: true,
         }
     }
@@ -85,6 +112,8 @@ impl DownloadsController {
         self.remote.clone_from(&snapshot.remote_tasks);
         self.pending_selections
             .clone_from(&snapshot.daemon.pending_selections);
+        self.absorb_daemon_context(&snapshot.daemon);
+        self.preferences.clone_from(&snapshot.preferences.values);
         self.stale = false;
         self.rebuild();
     }
@@ -97,10 +126,15 @@ impl DownloadsController {
             AgentEvent::DaemonSnapshotReplaced(snapshot) => {
                 self.live_speeds.clear();
                 self.local.clone_from(&snapshot.tasks);
+                self.absorb_daemon_context(snapshot);
                 self.stale = false;
             }
             AgentEvent::DaemonConnectionChanged(connected) => self.stale = !connected,
             AgentEvent::RemoteTasksChanged(tasks) => self.remote.clone_from(tasks),
+            AgentEvent::PreferencesChanged(preferences) => {
+                self.preferences.clone_from(&preferences.values);
+                return;
+            }
             AgentEvent::Daemon(event) => self.apply_daemon_event(event),
             _ => return,
         }
@@ -124,6 +158,39 @@ impl DownloadsController {
         &self.tasks
     }
 
+    /// daemon 队列清单（快照顺序）。
+    #[must_use]
+    pub(crate) fn queues(&self) -> &[QueueDto] {
+        &self.queues
+    }
+
+    /// daemon 公开配置（字符串编码）。
+    #[must_use]
+    pub(crate) fn config(&self) -> &BTreeMap<String, String> {
+        &self.config
+    }
+
+    /// 配置值（缺省为空串），已去首尾空白。
+    #[must_use]
+    pub(crate) fn config_str(&self, key: &str) -> &str {
+        self.config.get(key).map_or("", |value| value.trim())
+    }
+
+    /// 当前生效的保存目录：配置 `default_save_dir`，为空时回退 daemon 运行时目录。
+    #[must_use]
+    pub(crate) fn effective_save_dir(&self) -> &str {
+        match self.config_str("default_save_dir") {
+            "" => &self.runtime_save_dir,
+            configured => configured,
+        }
+    }
+
+    /// agent 偏好值。
+    #[must_use]
+    pub(crate) fn preference(&self, key: &str) -> Option<&serde_json::Value> {
+        self.preferences.get(key)
+    }
+
     pub fn execute(&self, command: DownloadsCommand) -> PortFuture<DownloadsResult> {
         if self.stale {
             return Box::pin(async {
@@ -136,11 +203,24 @@ impl DownloadsController {
         self.port.execute(command)
     }
 
+    fn absorb_daemon_context(&mut self, snapshot: &DaemonSnapshot) {
+        self.queues.clone_from(&snapshot.queues);
+        self.config.clone_from(&snapshot.config.values);
+        self.runtime_save_dir
+            .clone_from(&snapshot.runtime_stats.save_dir);
+    }
+
     fn apply_daemon_event(&mut self, event: &DaemonEvent) {
         match event {
             DaemonEvent::SnapshotReplaced(snapshot) => {
                 self.live_speeds.clear();
                 self.local.clone_from(&snapshot.tasks);
+                self.absorb_daemon_context(snapshot);
+            }
+            DaemonEvent::QueuesChanged(queues) => self.queues.clone_from(queues),
+            DaemonEvent::ConfigChanged(config) => self.config.clone_from(&config.values),
+            DaemonEvent::RuntimeStatsChanged(stats) => {
+                self.runtime_save_dir.clone_from(&stats.save_dir);
             }
             DaemonEvent::TaskChanged(task) => upsert(&mut self.local, task.clone()),
             DaemonEvent::TaskDeleted { task_id } => {

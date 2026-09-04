@@ -327,6 +327,7 @@
   "importTxtFile": "导入 TXT 文件",
   "importTxtNoUrls": "未在文件中找到有效链接",
   "importTxtFound": "已导入 {count} 个链接",
+  "newDownloadNoValidUrl": "未识别到有效链接：每行一个 HTTP / FTP / 磁力 / ed2k 链接，且需位于行首。",
   "btFileSelectTitle": "选择要下载的文件",
   "btFileSelectDescSingle": "该种子包含 1 个文件，确认后开始下载。",
   "btFileSelectDesc": "该种子包含 {count} 个文件，请选择要下载的文件。",
@@ -1705,5 +1706,19 @@
   "doctorListenerRestartOk": "本机监听已重启，可在浏览器扩展里重连",
   "doctorListenerRestartFailed": "重启失败 · {error}",
   "doctorRunDoneHealthy": "诊断完成，全部检查通过",
-  "doctorRunDoneIssues": "诊断完成，发现 {n} 项待处理问题"
+  "doctorRunDoneIssues": "诊断完成，发现 {n} 项待处理问题",
+  "autoResumeOnStart": "启动时继续未完成的下载",
+  "autoResumeOnStartDesc": "自动继续上次关闭时仍在下载的任务",
+  "localServiceInvalidArgument": "本机服务拒绝了该值",
+  "apiServiceLanRestartHint": "下次本机服务启动后生效",
+  "settingsUnsupportedOnPlatform": "当前平台不可用",
+  "btMseMode": "协议加密（MSE）",
+  "btMseModeDesc": "关闭：仅明文 · 启用：优先加密，兼容明文 · 强制：只连接加密节点",
+  "btMseModeDisabled": "关闭",
+  "btMseModeEnabled": "启用",
+  "btMseModeForced": "强制",
+  "btSeedTimeLimitUnit": "做种时长单位",
+  "btSeedInactiveTimeLimitUnit": "无活动做种时长单位",
+  "settingsSiteAuthClearAll": "全部清除",
+  "doctorCheckDaemon": "下载守护进程"
 }

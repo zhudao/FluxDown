@@ -48,6 +48,13 @@ aria2c 风格。命令：ping/info/add(get)/list(ls)/status(stat)/pause/resume/r
 ### `native/fluxdown_updater`（**新**独立 helper）
 依赖极简（zip/flate2/tar/windows-sys/libc，无 engine/api 依赖）。由 `hub/updater.rs` 在 App 退出前拉起 → 等父 PID 死 → 应用更新 + 重启。Action：PortableZip/Setup(NSIS 静默)/AppImage/tarball/deb/arch(pkexec)。用原生 helper 而非 PS/bat/sh 规避 MOTW/执行策略/引号问题。
 
+
+### `native/daemon` + `native/agent`：设置面 JSON-RPC（GPUI 客户端唯一入口）
+方法名、DTO 与错误码全在 `native/protocol`（`method.rs` / `daemon.rs` / `agent.rs` / `daemon_config.rs`）；GPUI 设置页只经 agent `ws://127.0.0.1:17800/rpc`，`daemon.*` 由 agent 透明转发。
+- **daemon 配置键目录 = `fluxdown_protocol::DAEMON_CONFIG_FIELDS`**（键、类型、范围、枚举、默认值、只读）。daemon `config.rs::validate_config_patch` 直接用 `normalize_daemon_config_patch` 校验；`public_config_values` 按 `is_public_daemon_config_key` 投影（含只读键 `domain_conn_caps`、`bt_tracker_sub_cache/updated_at`、`ed2k_server_sub_cache/updated_at`）。新增 daemon 设置 = 在目录加一行 + `actor.rs::apply_live_config` 按需 live-apply。`bt_seed_enabled`/`bt_auto_reseed` 落库前转 `"1"/"0"`（引擎按 `!= "0"` 读）。
+- daemon 设置相关方法：`daemon.config.get/patch/proxyTest`、`daemon.config.connPolicy`（`domain_conn_caps` 有效条目数）/`clearConnPolicy`、`daemon.siteAuth.list/delete/clear`（`site_auth_credentials`，永不回传密码）、`daemon.webhook.get/test/simulate/clearDeliveries`、`daemon.bt.trackerSubscription.refresh`、`daemon.ed2k.serverSubscription.refresh`、`daemon.component.*`、`daemon.plugin.*`、`daemon.diagnostics.describe`（含 `logDir`）。`default_queue_id` 在 `daemon.task.create`/`group.create` 请求无队列时生效。
+- agent 设置相关方法：`agent.preferences.patch {values, sync?}`（云同步目录键 `sync=true` 走同步链路——daemon 键也由 agent 转写 daemon；设备本地键 `sync=false`）、`agent.gateway.get/patch`（功能开关 + `lanEnabled`（下次启动生效）+ `regenerateUserToken`；`port` 只读）、`agent.platform.integrationGet/setAutostart/setFileAssociation/setUrlProtocol/openPath`（注册目标 = 同级 `fluxdown-desktop`，macOS 需在 `.app` 内）、`agent.diagnostics.run/repair/logPaths/exportLogs`（结构化 Doctor：check id / hint / repair 稳定字符串，UI 映射 `doctorCheck*/doctorHint*/doctorAction*` 文案）、`agent.update.check`、`agent.capture.submitTorrentFile {path}` 与 `agent.plugin.installFile {path}`（agent 读文件 → daemon `/blobs/*` → 建任务/装插件；GPUI 不直连 daemon HTTP）。
+- 桌面 `fluxdown-desktop`：`--minimized` 自启；`magnet:/ed2k:/fluxdown:/http(s)` 参数与 `.torrent` 路径交 agent 建任务；单实例锁 `desktop.lock`（agent 数据目录同级），次实例转发后退出。
 ---
 
 ## Headless 服务器（`native/server`）

@@ -312,6 +312,20 @@ fn parse_conn_caps(raw: &str) -> HashMap<String, ConnPolicyEntry> {
     map
 }
 
+/// 统计持久化域名连接策略文本中未过期的条目数（设置页「已学习的服务器
+/// 策略」计数；宿主不得复制存储格式）。版本不匹配 / 空串 → 0。
+#[must_use]
+pub fn count_domain_conn_policies(raw: &str) -> usize {
+    let now = now_unix_secs();
+    parse_conn_caps(raw)
+        .into_values()
+        .filter(|entry| {
+            let mut entry = *entry;
+            !prune_stale_faces(&mut entry, now)
+        })
+        .count()
+}
+
 /// Engine 启动时从 config 表读回持久化的域名连接策略（过期观察面丢弃；
 /// 与内存中已有条目按面合并：cap 取更低、hint 取更高，语义分别与
 /// [`record_domain_conn_cap`] / [`record_domain_conn_hint`] 一致）。
@@ -6309,6 +6323,20 @@ mod tests {
         assert!(
             !evidence.can_learn_conn_cap(true),
             "成功响应结束后不能用旧证据污染后续 URL"
+        );
+    }
+
+    #[test]
+    fn count_domain_conn_policies_skips_stale_and_foreign_versions() {
+        use super::{count_domain_conn_policies, now_unix_secs};
+        let now = now_unix_secs();
+        let stale = now.saturating_sub(48 * 3600);
+        let raw = format!("v3\nfresh.example\t1\t{now}\t0\t0\nold.example\t1\t{stale}\t0\t0\nhinted.example\t0\t0\t8\t{now}\nbroken\tx\n");
+        assert_eq!(count_domain_conn_policies(&raw), 2);
+        assert_eq!(count_domain_conn_policies(""), 0);
+        assert_eq!(
+            count_domain_conn_policies(&format!("v1\nfresh.example\t1\t{now}")),
+            0
         );
     }
 

@@ -474,6 +474,7 @@ class S {
   String get importTxtFile => _r('importTxtFile');
   String get importTxtNoUrls => _r('importTxtNoUrls');
   String importTxtFound(int count) => _r('importTxtFound', {'count': count});
+  String get newDownloadNoValidUrl => _r('newDownloadNoValidUrl');
 
   // ─────────────────────────────────────────────
   // BT File Selection Dialog

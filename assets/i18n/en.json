@@ -327,6 +327,7 @@
   "importTxtFile": "Import TXT file",
   "importTxtNoUrls": "No valid URLs found in file",
   "importTxtFound": "Imported {count} URLs",
+  "newDownloadNoValidUrl": "No valid URL found. Enter one HTTP / FTP / magnet / ed2k link per line, starting at the beginning of the line.",
   "btFileSelectTitle": "Select Files to Download",
   "btFileSelectDescSingle": "This torrent contains 1 file. Confirm to start downloading.",
   "btFileSelectDesc": "This torrent contains {count} files. Select which files to download.",
@@ -1705,5 +1706,19 @@
   "doctorListenerRestartOk": "Local listener restarted — reconnect from the browser extension",
   "doctorListenerRestartFailed": "Restart failed · {error}",
   "doctorRunDoneHealthy": "Diagnostics complete — everything checks out",
-  "doctorRunDoneIssues": "Diagnostics complete — {n} issue(s) need attention"
+  "doctorRunDoneIssues": "Diagnostics complete — {n} issue(s) need attention",
+  "autoResumeOnStart": "Resume unfinished downloads on startup",
+  "autoResumeOnStartDesc": "Automatically continue tasks that were downloading when the app was last closed",
+  "localServiceInvalidArgument": "The value was rejected by the local service",
+  "apiServiceLanRestartHint": "Takes effect the next time the local service starts",
+  "settingsUnsupportedOnPlatform": "Not available on this platform",
+  "btMseMode": "Protocol encryption (MSE)",
+  "btMseModeDesc": "Disabled: plaintext only · Enabled: prefer encrypted, accept plaintext · Forced: encrypted peers only",
+  "btMseModeDisabled": "Disabled",
+  "btMseModeEnabled": "Enabled",
+  "btMseModeForced": "Forced",
+  "btSeedTimeLimitUnit": "Seeding time unit",
+  "btSeedInactiveTimeLimitUnit": "Inactive seeding time unit",
+  "settingsSiteAuthClearAll": "Clear all",
+  "doctorCheckDaemon": "Download daemon"
 }

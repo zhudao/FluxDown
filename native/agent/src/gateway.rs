@@ -22,13 +22,18 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::api_host::AgentApiHost;
-use crate::capture::{CaptureError, CaptureService};
+use crate::capture::{BlobError, BlobKind, CaptureError, CaptureService, DaemonBlobClient};
 use crate::cloud::{CloudApi, CloudAuthService, CloudError};
 use crate::daemon_client::DaemonClient;
 use crate::diagnostics::{DiagnosticsError, DiagnosticsService};
 use crate::event_hub::AgentEventHub;
+use crate::platform::PlatformError;
 use crate::remote::{RemoteError, RemoteTaskService};
 use crate::sync::SyncService;
+use crate::update::{UpdateError, UpdateService};
+
+/// daemon `/blobs/*` 请求体上限（与 `fluxdown_daemon::http::REQUEST_BODY_LIMIT` 一致）。
+const BLOB_UPLOAD_LIMIT: u64 = 4 * 1024 * 1024;
 
 pub struct GatewayService {
     daemon: Arc<DaemonClient>,
@@ -38,7 +43,9 @@ pub struct GatewayService {
     sync: Arc<SyncService>,
     remote: Arc<RemoteTaskService>,
     capture: Arc<CaptureService>,
+    blobs: Arc<DaemonBlobClient>,
     diagnostics: Arc<DiagnosticsService>,
+    update: Arc<UpdateService>,
     state: Arc<tokio::sync::Mutex<crate::state::AgentState>>,
     store: Arc<crate::state::StateStore>,
     api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
@@ -61,7 +68,9 @@ impl GatewayService {
         sync: Arc<SyncService>,
         remote: Arc<RemoteTaskService>,
         capture: Arc<CaptureService>,
+        blobs: Arc<DaemonBlobClient>,
         diagnostics: Arc<DiagnosticsService>,
+        update: Arc<UpdateService>,
         state: Arc<tokio::sync::Mutex<crate::state::AgentState>>,
         store: Arc<crate::state::StateStore>,
         api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
@@ -75,7 +84,9 @@ impl GatewayService {
             sync,
             remote,
             capture,
+            blobs,
             diagnostics,
+            update,
             state,
             store,
             api_switches,
@@ -99,7 +110,16 @@ impl GatewayService {
 
     async fn call(&self, request: RpcRequest) -> RpcResponse {
         let id = request.id.clone();
-        let result = match request.method.as_str() {
+        match self.dispatch(request).await {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(data) => {
+                RpcResponse::failure(id, RpcErrorObject::application("agent RPC failed", data))
+            }
+        }
+    }
+
+    async fn dispatch(&self, request: RpcRequest) -> Result<serde_json::Value, RpcErrorData> {
+        match request.method.as_str() {
             method::SYSTEM_PING => Ok(serde_json::json!({ "ok": true })),
             method::SYSTEM_SNAPSHOT => serde_json::to_value(self.events.snapshot())
                 .map_err(|_| RpcErrorData::new(ApplicationErrorCode::Internal, false)),
@@ -123,6 +143,10 @@ impl GatewayService {
             }
             method::AGENT_GATEWAY_PATCH => {
                 self.gateway_patch(params_or_empty(request.params)).await
+            }
+            method::AGENT_GATEWAY_REVEAL_TOKEN => {
+                let token = self.state.lock().await.gateway_user_token.clone();
+                Ok(serde_json::json!({ "userToken": token }))
             }
             method::AGENT_AUTH_LOGIN => {
                 cloud_value(self.auth.login(&params_or_empty(request.params)).await)
@@ -278,10 +302,18 @@ impl GatewayService {
             method::AGENT_CAPTURE_SUBMIT => {
                 self.capture_submit(params_or_empty(request.params)).await
             }
+            method::AGENT_CAPTURE_SUBMIT_TORRENT_FILE => {
+                self.capture_submit_torrent_file(params_or_empty(request.params))
+                    .await
+            }
             method::AGENT_CAPTURE_LIST => serde_json::to_value(self.capture.list().await)
                 .map_err(|_| RpcErrorData::new(ApplicationErrorCode::Internal, false)),
             method::AGENT_CAPTURE_RESOLVE => {
                 self.capture_resolve(params_or_empty(request.params)).await
+            }
+            method::AGENT_PLUGIN_INSTALL_FILE => {
+                self.plugin_install_file(params_or_empty(request.params))
+                    .await
             }
             method::AGENT_PLATFORM_OPEN_TASK => {
                 self.platform_task(params_or_empty(request.params), false)
@@ -291,27 +323,62 @@ impl GatewayService {
                 self.platform_task(params_or_empty(request.params), true)
                     .await
             }
-            method::AGENT_DIAGNOSTICS_RUN => diagnostics_value(self.diagnostics.run().await),
-            method::AGENT_DIAGNOSTICS_REPAIR => {
-                let params = params_or_empty(request.params);
-                let action = params
-                    .get("action")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                diagnostics_value(self.diagnostics.repair(action).await)
+            method::AGENT_PLATFORM_OPEN_PATH => {
+                let params =
+                    parse_params::<fluxdown_protocol::PlatformOpenPathParams>(request.params)?;
+                platform_blocking(move || {
+                    crate::platform::open_path(Path::new(&params.path), params.reveal)
+                })
+                .await
+                .map(|()| serde_json::json!({ "ok": true }))
             }
+            method::AGENT_PLATFORM_INTEGRATION_GET => {
+                platform_blocking(|| Ok(crate::platform::integration_status()))
+                    .await
+                    .and_then(to_value)
+            }
+            method::AGENT_PLATFORM_SET_AUTOSTART => {
+                let params =
+                    parse_params::<fluxdown_protocol::PlatformToggleParams>(request.params)?;
+                platform_integration_apply(move || crate::platform::set_autostart(params.enabled))
+                    .await
+            }
+            method::AGENT_PLATFORM_SET_FILE_ASSOCIATION => {
+                let params =
+                    parse_params::<fluxdown_protocol::PlatformToggleParams>(request.params)?;
+                platform_integration_apply(move || {
+                    crate::platform::set_file_association(params.enabled)
+                })
+                .await
+            }
+            method::AGENT_PLATFORM_SET_URL_PROTOCOL => {
+                let params =
+                    parse_params::<fluxdown_protocol::PlatformUrlProtocolParams>(request.params)?;
+                platform_integration_apply(move || {
+                    crate::platform::set_url_protocol(&params.scheme, params.enabled)
+                })
+                .await
+            }
+            method::AGENT_DIAGNOSTICS_RUN => {
+                diagnostics_value(self.diagnostics.run().await).and_then(to_value)
+            }
+            method::AGENT_DIAGNOSTICS_REPAIR => {
+                let params =
+                    parse_params::<fluxdown_protocol::DiagnosticRepairParams>(request.params)?;
+                diagnostics_value(self.diagnostics.repair(&params).await)
+            }
+            method::AGENT_DIAGNOSTICS_LOG_PATHS => to_value(self.diagnostics.log_paths().await),
+            method::AGENT_DIAGNOSTICS_EXPORT_LOGS => {
+                let params = parse_params::<fluxdown_protocol::LogExportParams>(request.params)?;
+                diagnostics_value(self.diagnostics.export_logs(&params).await).and_then(to_value)
+            }
+            method::AGENT_UPDATE_CHECK => self.update_check(params_or_empty(request.params)).await,
             name if name.starts_with("daemon.") => {
                 self.daemon
                     .call::<serde_json::Value, serde_json::Value>(name, request.params)
                     .await
             }
             _ => Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false)),
-        };
-        match result {
-            Ok(value) => RpcResponse::success(id, value),
-            Err(data) => {
-                RpcResponse::failure(id, RpcErrorObject::application("agent RPC failed", data))
-            }
         }
     }
 
@@ -345,8 +412,7 @@ impl GatewayService {
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
-        let patch = serde_json::from_value::<fluxdown_protocol::GatewayPatchParams>(params)
-            .map_err(|_| RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false))?;
+        let patch = parse_params::<fluxdown_protocol::GatewayPatchParams>(Some(params))?;
         let mut state = self.state.lock().await;
         if let Some(value) = patch.takeover_enabled {
             state.gateway.takeover_enabled = value;
@@ -363,7 +429,13 @@ impl GatewayService {
         if let Some(value) = patch.cors_enabled {
             state.gateway.cors_enabled = value;
         }
-        if let Some(token) = patch.user_token {
+        if let Some(value) = patch.lan_enabled {
+            state.gateway.lan_enabled = value;
+        }
+        if patch.regenerate_user_token {
+            state.gateway_user_token = generate_user_token();
+            state.gateway.user_token_configured = true;
+        } else if let Some(token) = patch.user_token {
             state.gateway_user_token = token;
             state.gateway.user_token_configured = !state.gateway_user_token.trim().is_empty();
         }
@@ -575,6 +647,88 @@ impl GatewayService {
         capture_value(self.capture.resolve(&transaction_id, accepted).await)
     }
 
+    /// 读取本机 `.torrent`，上传 daemon blob 后走捕获路径建任务。
+    async fn capture_submit_torrent_file(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let path = PathBuf::from(required_string(&params, "path")?);
+        let silent = params
+            .get("silent")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let bytes = read_upload_file(&path).await?;
+        let blob_id = blob_value(self.blobs.upload(BlobKind::Torrent, bytes).await)?;
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let filename = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let request = fluxdown_protocol::DownloadRequest {
+            url: format!("torrent-file://{file_name}"),
+            filename,
+            save_dir: String::new(),
+            referrer: String::new(),
+            cookies: String::new(),
+            headers: None,
+            file_size: None,
+            mime_type: None,
+            method: None,
+            body: None,
+            audio_url: None,
+        };
+        capture_value(self.capture.create_torrent(request, blob_id, silent).await)
+    }
+
+    /// 读取本机插件包，上传 daemon blob 后转 `daemon.plugin.install`。
+    async fn plugin_install_file(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let path = PathBuf::from(required_string(&params, "path")?);
+        let bytes = read_upload_file(&path).await?;
+        let blob_id = blob_value(self.blobs.upload(BlobKind::Plugin, bytes).await)?;
+        self.daemon
+            .call::<serde_json::Value, serde_json::Value>(
+                method::DAEMON_PLUGIN_INSTALL,
+                Some(serde_json::json!({ "blobId": blob_id })),
+            )
+            .await
+    }
+
+    async fn update_check(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let params = parse_params::<fluxdown_protocol::UpdateCheckParams>(Some(params))?;
+        let channel = match params.channel {
+            Some(channel) => channel,
+            None => self
+                .state
+                .lock()
+                .await
+                .preferences
+                .values
+                .get("general.update_channel")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("stable")
+                .to_owned(),
+        };
+        match self.update.check(&channel).await {
+            Ok(result) => to_value(result),
+            Err(UpdateError::InvalidChannel(_)) => Err(invalid_field("channel")),
+            Err(UpdateError::Http(_) | UpdateError::Status(_)) => {
+                Err(RpcErrorData::new(ApplicationErrorCode::Unavailable, true))
+            }
+            Err(UpdateError::Decode(_)) => {
+                Err(RpcErrorData::new(ApplicationErrorCode::Internal, false))
+            }
+        }
+    }
+
     async fn platform_task(
         &self,
         params: serde_json::Value,
@@ -774,20 +928,96 @@ fn capture_value<T: serde::Serialize>(
     }
 }
 
-fn diagnostics_value(
-    result: Result<serde_json::Value, DiagnosticsError>,
+fn diagnostics_value<T>(result: Result<T, DiagnosticsError>) -> Result<T, RpcErrorData> {
+    result.map_err(|error| match error {
+        DiagnosticsError::InvalidAction(_) => {
+            RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)
+        }
+        DiagnosticsError::Platform(error) => platform_error_data(error),
+        DiagnosticsError::Daemon(error) => error,
+        DiagnosticsError::State(_) | DiagnosticsError::Io(_) | DiagnosticsError::Export(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Internal, false)
+        }
+    })
+}
+
+fn parse_params<T: serde::de::DeserializeOwned>(
+    params: Option<serde_json::Value>,
+) -> Result<T, RpcErrorData> {
+    serde_json::from_value(params_or_empty(params))
+        .map_err(|_| RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false))
+}
+
+fn to_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, RpcErrorData> {
+    serde_json::to_value(value)
+        .map_err(|_| RpcErrorData::new(ApplicationErrorCode::Internal, false))
+}
+
+/// 在阻塞线程上执行同步 OS 集成调用。
+async fn platform_blocking<T: Send + 'static>(
+    action: impl FnOnce() -> Result<T, PlatformError> + Send + 'static,
+) -> Result<T, RpcErrorData> {
+    tokio::task::spawn_blocking(action)
+        .await
+        .map_err(|_| RpcErrorData::new(ApplicationErrorCode::Internal, false))?
+        .map_err(platform_error_data)
+}
+
+/// 应用系统集成变更后返回最新 `PlatformIntegrationDto`。
+async fn platform_integration_apply(
+    action: impl FnOnce() -> Result<(), PlatformError> + Send + 'static,
 ) -> Result<serde_json::Value, RpcErrorData> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(DiagnosticsError::InvalidAction(_)) => Err(RpcErrorData::new(
-            ApplicationErrorCode::InvalidArgument,
-            false,
-        )),
-        Err(DiagnosticsError::Daemon(error)) => Err(error),
-        Err(DiagnosticsError::State(_)) => {
-            Err(RpcErrorData::new(ApplicationErrorCode::Internal, false))
+    platform_blocking(move || {
+        action()?;
+        Ok(crate::platform::integration_status())
+    })
+    .await
+    .and_then(to_value)
+}
+
+fn platform_error_data(error: PlatformError) -> RpcErrorData {
+    match error {
+        PlatformError::InvalidScheme(_) => invalid_field("scheme"),
+        PlatformError::Unsupported(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Unsupported, false)
+        }
+        PlatformError::Io(_) | PlatformError::Failed(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Internal, false)
         }
     }
+}
+
+/// 读取待上传的本机文件；必须是存在的普通文件且不超过 daemon 请求体上限。
+async fn read_upload_file(path: &Path) -> Result<Vec<u8>, RpcErrorData> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| invalid_field("path"))?;
+    if !metadata.is_file() || metadata.len() > BLOB_UPLOAD_LIMIT {
+        return Err(invalid_field("path"));
+    }
+    tokio::fs::read(path)
+        .await
+        .map_err(|_| RpcErrorData::new(ApplicationErrorCode::Internal, false))
+}
+
+fn blob_value(result: Result<String, BlobError>) -> Result<String, RpcErrorData> {
+    result.map_err(|error| match error {
+        BlobError::Status(401 | 403) => {
+            RpcErrorData::new(ApplicationErrorCode::Unauthorized, false)
+        }
+        BlobError::Status(413) => invalid_field("path"),
+        BlobError::Http(_) | BlobError::Status(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+        }
+        BlobError::Url(_) | BlobError::Decode => {
+            RpcErrorData::new(ApplicationErrorCode::Internal, false)
+        }
+    })
+}
+
+/// 32 字节随机用户 token 的十六进制表示。
+fn generate_user_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 fn remote_value<T: serde::Serialize>(
@@ -1107,70 +1337,210 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    struct TestGateway {
+        service: GatewayService,
+        state: Arc<tokio::sync::Mutex<crate::state::AgentState>>,
+        store: Arc<crate::state::StateStore>,
+        dir: std::path::PathBuf,
+    }
+
+    impl TestGateway {
+        async fn new(label: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "fluxdown_agent_{label}_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let store = Arc::new(
+                crate::state::StateStore::open(dir.clone())
+                    .await
+                    .expect("open agent test store"),
+            );
+            let state = Arc::new(tokio::sync::Mutex::new(crate::state::AgentState::default()));
+            let events = crate::event_hub::AgentEventHub::new(AgentSnapshot::default());
+            let daemon = Arc::new(crate::daemon_client::DaemonClient::disconnected());
+            let cloud_client = crate::cloud::CloudClient::new(
+                "http://127.0.0.1:9".to_owned(),
+                state.clone(),
+                store.clone(),
+            )
+            .expect("build agent test cloud client");
+            let cloud_api = crate::cloud::CloudApi::new(cloud_client.clone());
+            let auth = Arc::new(crate::cloud::CloudAuthService::new(
+                cloud_client,
+                events.clone(),
+            ));
+            let sync = Arc::new(crate::sync::SyncService::new(
+                cloud_api.clone(),
+                daemon.clone(),
+                events.clone(),
+                state.clone(),
+                store.clone(),
+            ));
+            let remote = Arc::new(crate::remote::RemoteTaskService::new(
+                cloud_api.clone(),
+                daemon.clone(),
+                events.clone(),
+                state.clone(),
+                store.clone(),
+            ));
+            let capture = Arc::new(crate::capture::CaptureService::new(
+                daemon.clone(),
+                events.clone(),
+            ));
+            let daemon_config = crate::daemon_client::DaemonClientConfig {
+                rpc_url: "ws://127.0.0.1:9/rpc".to_owned(),
+                bearer: String::new(),
+            };
+            let blobs = Arc::new(
+                crate::capture::DaemonBlobClient::new(&daemon_config).expect("blob client"),
+            );
+            let api_switches = Arc::new(fluxdown_api::server::ApiRuntimeSwitches::new(
+                false, false, false, false, false,
+            ));
+            let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
+                daemon.clone(),
+                daemon_config,
+                events.clone(),
+                state.clone(),
+                store.clone(),
+                api_switches.clone(),
+            ));
+            let update = Arc::new(
+                crate::update::UpdateService::new(env!("CARGO_PKG_VERSION"))
+                    .expect("update service"),
+            );
+            let service = GatewayService::new(
+                daemon,
+                events,
+                auth,
+                Arc::new(cloud_api),
+                sync,
+                remote,
+                capture,
+                blobs,
+                diagnostics,
+                update,
+                state.clone(),
+                store.clone(),
+                api_switches,
+                fluxdown_api::auth::TokenCell::new(""),
+            );
+            Self {
+                service,
+                state,
+                store,
+                dir,
+            }
+        }
+
+        async fn call(&self, method_name: &str, params: serde_json::Value) -> RpcResponse {
+            self.service
+                .call(RpcRequest::new(
+                    RequestId::Integer(1),
+                    method_name,
+                    Some(params),
+                ))
+                .await
+        }
+
+        async fn finish(self) {
+            let Self {
+                service,
+                state,
+                store,
+                dir,
+            } = self;
+            drop(service);
+            drop(state);
+            drop(store);
+            let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_patch_persists_lan_flag_and_regenerates_token() {
+        let harness = TestGateway::new("gateway_patch").await;
+        let response = harness
+            .call(
+                fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                serde_json::json!({ "lanEnabled": true, "regenerateUserToken": true }),
+            )
+            .await;
+        let RpcResponse::Success(success) = response else {
+            panic!("gateway patch failed: {response:?}");
+        };
+        assert_eq!(success.result["lanEnabled"], serde_json::json!(true));
+        assert_eq!(
+            success.result["userTokenConfigured"],
+            serde_json::json!(true)
+        );
+        assert!(success.result.get("userToken").is_none());
+
+        let first_token = harness.state.lock().await.gateway_user_token.clone();
+        assert_eq!(first_token.len(), 64);
+        assert!(first_token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        let persisted = harness.store.load().await.expect("reload state");
+        assert!(persisted.gateway.lan_enabled);
+        assert_eq!(persisted.gateway_user_token, first_token);
+
+        let response = harness
+            .call(
+                fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                serde_json::json!({ "regenerateUserToken": true, "userToken": "ignored" }),
+            )
+            .await;
+        assert!(matches!(response, RpcResponse::Success(_)));
+        let second_token = harness.state.lock().await.gateway_user_token.clone();
+        assert_ne!(second_token, first_token);
+        assert_ne!(second_token, "ignored");
+
+        let response = harness
+            .call(
+                fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                serde_json::json!({ "userToken": "", "lanEnabled": false }),
+            )
+            .await;
+        let RpcResponse::Success(success) = response else {
+            panic!("gateway patch failed: {response:?}");
+        };
+        assert_eq!(
+            success.result["userTokenConfigured"],
+            serde_json::json!(false)
+        );
+        assert_eq!(success.result["lanEnabled"], serde_json::json!(false));
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn file_backed_methods_reject_missing_or_non_regular_paths() {
+        let harness = TestGateway::new("file_paths").await;
+        for method_name in [
+            fluxdown_protocol::method::AGENT_PLUGIN_INSTALL_FILE,
+            fluxdown_protocol::method::AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
+        ] {
+            for path in [
+                harness.dir.join("missing.bin").display().to_string(),
+                harness.dir.display().to_string(),
+            ] {
+                let response = harness
+                    .call(method_name, serde_json::json!({ "path": path }))
+                    .await;
+                let RpcResponse::Failure(failure) = response else {
+                    panic!("{method_name} accepted {path}");
+                };
+                let data = failure.error.data.expect("error data");
+                assert_eq!(data.code, ApplicationErrorCode::InvalidArgument);
+                assert_eq!(data.field.as_deref(), Some("path"));
+            }
+        }
+        harness.finish().await;
+    }
+
     #[tokio::test]
     async fn every_canonical_agent_method_reaches_a_real_dispatch_branch() {
-        let dir = std::env::temp_dir().join(format!(
-            "fluxdown_agent_dispatch_{}_{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        let store = Arc::new(
-            crate::state::StateStore::open(dir.clone())
-                .await
-                .expect("open agent dispatch store"),
-        );
-        let state = Arc::new(tokio::sync::Mutex::new(crate::state::AgentState::default()));
-        let events = crate::event_hub::AgentEventHub::new(AgentSnapshot::default());
-        let daemon = Arc::new(crate::daemon_client::DaemonClient::disconnected());
-        let cloud_client = crate::cloud::CloudClient::new(
-            "http://127.0.0.1:9".to_owned(),
-            state.clone(),
-            store.clone(),
-        )
-        .expect("build agent dispatch cloud client");
-        let cloud_api = crate::cloud::CloudApi::new(cloud_client.clone());
-        let auth = Arc::new(crate::cloud::CloudAuthService::new(
-            cloud_client,
-            events.clone(),
-        ));
-        let sync = Arc::new(crate::sync::SyncService::new(
-            cloud_api.clone(),
-            daemon.clone(),
-            events.clone(),
-            state.clone(),
-            store.clone(),
-        ));
-        let remote = Arc::new(crate::remote::RemoteTaskService::new(
-            cloud_api.clone(),
-            daemon.clone(),
-            events.clone(),
-            state.clone(),
-            store.clone(),
-        ));
-        let capture = Arc::new(crate::capture::CaptureService::new(
-            daemon.clone(),
-            events.clone(),
-        ));
-        let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
-            daemon.clone(),
-            store.clone(),
-        ));
-        let service = GatewayService::new(
-            daemon,
-            events,
-            auth,
-            Arc::new(cloud_api),
-            sync,
-            remote,
-            capture,
-            diagnostics,
-            state,
-            store.clone(),
-            Arc::new(fluxdown_api::server::ApiRuntimeSwitches::new(
-                false, false, false, false, false,
-            )),
-            fluxdown_api::auth::TokenCell::new(""),
-        );
+        let harness = TestGateway::new("dispatch").await;
+        let service = &harness.service;
 
         for (index, method_name) in fluxdown_protocol::method::ALL_METHODS
             .iter()
@@ -1178,12 +1548,18 @@ mod tests {
             .filter(|name| name.starts_with("agent."))
             .enumerate()
         {
+            // 版本检查会真的访问官方站点；用非法渠道让它在触网前返回 InvalidArgument。
+            let params = if method_name == fluxdown_protocol::method::AGENT_UPDATE_CHECK {
+                serde_json::json!({ "channel": "offline-test" })
+            } else {
+                serde_json::json!({})
+            };
             let response = tokio::time::timeout(
                 Duration::from_secs(2),
                 service.call(RpcRequest::new(
                     RequestId::Integer(i64::try_from(index).unwrap_or(i64::MAX)),
                     method_name,
-                    Some(serde_json::json!({})),
+                    Some(params),
                 )),
             )
             .await
@@ -1195,8 +1571,6 @@ mod tests {
                 panic!("{method_name} fell through agent dispatch");
             }
         }
-        drop(service);
-        drop(store);
-        let _ = tokio::fs::remove_dir_all(dir).await;
+        harness.finish().await;
     }
 }

@@ -1,18 +1,29 @@
-//! 插件、市场、受管组件与 Webhook capability。
+//! 插件、插件市场与受管组件（ffmpeg / yt-dlp）capability。
+
+mod components;
+mod controller;
+mod pages;
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
+use fluxdown_protocol::{AgentSnapshot, ApplicationErrorCode, RpcErrorData, ServiceEvent};
 use fluxdown_ui_i18n::Translator;
 use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    Disableable as _, Sizable as _, StyledExt as _, button::Button, h_flex, switch::Switch, v_flex,
+    ActiveTheme as _, WindowExt as _,
+    notification::Notification,
+    tab::{Tab, TabBar},
+    v_flex,
 };
 
-pub type PortFuture<T> =
-    Pin<Box<dyn Future<Output = Result<T, fluxdown_protocol::RpcErrorData>> + Send + 'static>>;
+use controller::{COMPONENT_KINDS, component_slot};
+pub use controller::{ExtensionsController, ExtensionsSignal};
+use pages::{managed_components::ComponentUi, plugins::PluginsUi};
+
+pub type PortFuture<T> = Pin<Box<dyn Future<Output = Result<T, RpcErrorData>> + Send + 'static>>;
 
 pub trait ExtensionsPort: Send + Sync {
     fn call(
@@ -22,118 +33,33 @@ pub trait ExtensionsPort: Send + Sync {
     ) -> PortFuture<serde_json::Value>;
 }
 
-pub struct ExtensionsController {
-    port: Arc<dyn ExtensionsPort>,
-    plugins: Vec<fluxdown_protocol::PluginDto>,
-    components: Vec<fluxdown_protocol::ComponentStatusDto>,
-    stale: bool,
+/// 扩展分类的子页（与 Flutter `extensions→[plugins, components]` 一致）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtensionsTab {
+    Plugins,
+    Components,
 }
 
-impl ExtensionsController {
-    pub fn new(port: Arc<dyn ExtensionsPort>) -> Self {
-        Self {
-            port,
-            plugins: Vec::new(),
-            components: Vec::new(),
-            stale: true,
-        }
-    }
-    pub fn replace_snapshot(&mut self, snapshot: &fluxdown_protocol::AgentSnapshot) {
-        self.plugins.clone_from(&snapshot.daemon.plugins);
-        self.components.clone_from(&snapshot.daemon.components);
-        self.stale = false;
-    }
-    pub fn apply_event(&mut self, event: &fluxdown_protocol::ServiceEvent) {
-        let fluxdown_protocol::ServiceEvent::Agent(event) = event else {
-            return;
-        };
-        match event {
-            fluxdown_protocol::AgentEvent::DaemonSnapshotReplaced(snapshot) => {
-                self.plugins.clone_from(&snapshot.plugins);
-                self.components.clone_from(&snapshot.components);
-                self.stale = false;
-            }
-            fluxdown_protocol::AgentEvent::DaemonConnectionChanged(connected) => {
-                self.stale = !connected;
-            }
-            fluxdown_protocol::AgentEvent::Daemon(
-                fluxdown_protocol::DaemonEvent::PluginsChanged(plugins),
-            ) => self.plugins.clone_from(plugins),
-            fluxdown_protocol::AgentEvent::Daemon(
-                fluxdown_protocol::DaemonEvent::ComponentsChanged(components),
-            ) => self.components.clone_from(components),
-            _ => {}
-        }
-    }
-    pub fn mark_stale(&mut self) {
-        self.stale = true;
-    }
-    pub fn plugins(&self) -> &[fluxdown_protocol::PluginDto] {
-        &self.plugins
-    }
-    pub fn components(&self) -> &[fluxdown_protocol::ComponentStatusDto] {
-        &self.components
-    }
-    pub fn is_stale(&self) -> bool {
-        self.stale
-    }
-    pub fn install_component(
-        &self,
-        component: fluxdown_protocol::ComponentKind,
-    ) -> PortFuture<serde_json::Value> {
-        if self.stale {
-            return unavailable();
-        }
-        self.port.call(
-            fluxdown_protocol::method::DAEMON_COMPONENT_INSTALL,
-            serde_json::json!({"component": component, "version": null}),
-        )
-    }
-    pub fn uninstall_component(
-        &self,
-        component: fluxdown_protocol::ComponentKind,
-    ) -> PortFuture<serde_json::Value> {
-        if self.stale {
-            return unavailable();
-        }
-        self.port.call(
-            fluxdown_protocol::method::DAEMON_COMPONENT_UNINSTALL,
-            serde_json::json!({"component": component}),
-        )
-    }
-    pub fn set_plugin_enabled(
-        &self,
-        identity: String,
-        enabled: bool,
-    ) -> PortFuture<serde_json::Value> {
-        if self.stale {
-            return Box::pin(async {
-                Err(fluxdown_protocol::RpcErrorData::new(
-                    fluxdown_protocol::ApplicationErrorCode::Unavailable,
-                    true,
-                ))
-            });
-        }
-        self.port.call(
-            fluxdown_protocol::method::DAEMON_PLUGIN_SET_ENABLED,
-            serde_json::json!({"identity": identity, "enabled": enabled}),
-        )
-    }
-}
+impl ExtensionsTab {
+    const ALL: [Self; 2] = [Self::Plugins, Self::Components];
 
-fn unavailable() -> PortFuture<serde_json::Value> {
-    Box::pin(async {
-        Err(fluxdown_protocol::RpcErrorData::new(
-            fluxdown_protocol::ApplicationErrorCode::Unavailable,
-            true,
-        ))
-    })
+    fn index(self) -> usize {
+        match self {
+            Self::Plugins => 0,
+            Self::Components => 1,
+        }
+    }
 }
 
 pub struct ExtensionsView {
     translator: Entity<Translator>,
     controller: ExtensionsController,
+    tab: ExtensionsTab,
     last_error: Option<String>,
+    /// 事件回调没有窗口，提示在下一帧渲染时经 `Window::defer` 投递。
+    pending_notices: Vec<String>,
+    plugins: PluginsUi,
+    components: [ComponentUi; 2],
 }
 
 impl ExtensionsView {
@@ -146,22 +72,55 @@ impl ExtensionsView {
         Self {
             translator,
             controller: ExtensionsController::new(port),
+            tab: ExtensionsTab::Plugins,
             last_error: None,
+            pending_notices: Vec::new(),
+            plugins: PluginsUi::default(),
+            components: [ComponentUi::default(), ComponentUi::default()],
         }
     }
-    pub fn replace_snapshot(
-        &mut self,
-        snapshot: &fluxdown_protocol::AgentSnapshot,
-        cx: &mut Context<Self>,
-    ) {
+
+    pub fn replace_snapshot(&mut self, snapshot: &AgentSnapshot, cx: &mut Context<Self>) {
         self.last_error = None;
         self.controller.replace_snapshot(snapshot);
         cx.notify();
     }
-    pub fn apply_event(&mut self, event: &fluxdown_protocol::ServiceEvent, cx: &mut Context<Self>) {
-        self.controller.apply_event(event);
+
+    pub fn apply_event(&mut self, event: &ServiceEvent, cx: &mut Context<Self>) {
+        match self.controller.apply_event(event) {
+            Some(ExtensionsSignal::ComponentProgress {
+                kind,
+                downloaded_bytes,
+                total_bytes,
+            }) => {
+                let ui = &mut self.components[component_slot(kind)];
+                ui.installing = true;
+                ui.downloaded_bytes = downloaded_bytes;
+                ui.total_bytes = total_bytes;
+            }
+            Some(ExtensionsSignal::ComponentResult { kind, ok, message }) => {
+                let ui = &mut self.components[component_slot(kind)];
+                ui.last_result = Some((ok, message));
+                // 非本视图发起的安装（如 Web UI）：结果到达即结束进度展示。
+                if !ui.install_pending {
+                    ui.installing = false;
+                }
+            }
+            Some(ExtensionsSignal::PluginAutoDisabled { name }) => {
+                let notice = self
+                    .translator
+                    .read(cx)
+                    .text_with("pluginAutoDisabledToast", &[("name", &name)]);
+                self.pending_notices.push(notice);
+            }
+            None => {}
+        }
+        if !self.controller.is_stale() {
+            self.last_error = None;
+        }
         cx.notify();
     }
+
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
         self.last_error = Some(
             self.translator
@@ -173,129 +132,87 @@ impl ExtensionsView {
         cx.notify();
     }
 
-    fn spawn_action(&mut self, future: PortFuture<serde_json::Value>, cx: &mut Context<Self>) {
-        self.last_error = None;
-        cx.spawn(async move |this, cx| {
-            let failed = future.await.is_err();
-            let _ = this.update(cx, |this, cx| {
-                this.last_error = failed.then(|| {
-                    this.translator
-                        .read(cx)
-                        .text("localServiceActionFailed")
-                        .to_owned()
-                });
-                cx.notify();
-            });
-        })
-        .detach();
+    pub(crate) fn show_tab(&mut self, tab: ExtensionsTab, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.tab = tab;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn toast_success(
+        &self,
+        message: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.push_notification(Notification::success(message), cx);
+    }
+
+    pub(crate) fn toast_error(&self, message: String, window: &mut Window, cx: &mut Context<Self>) {
+        window.push_notification(Notification::error(message).autohide(false), cx);
     }
 }
 
+/// agent 端口只回传错误码（服务端 message 不透传），按码映射通用文案。
+pub(crate) fn error_text(translator: &Translator, error: &RpcErrorData) -> String {
+    let key = match error.code {
+        ApplicationErrorCode::Unavailable | ApplicationErrorCode::Timeout => {
+            "localServiceDisconnected"
+        }
+        ApplicationErrorCode::InvalidArgument | ApplicationErrorCode::NotFound => {
+            "localServiceInvalidArgument"
+        }
+        ApplicationErrorCode::Conflict => "localServiceConflict",
+        ApplicationErrorCode::Unsupported => "settingsUnsupportedOnPlatform",
+        ApplicationErrorCode::ProtocolIncompatible
+        | ApplicationErrorCode::Unauthorized
+        | ApplicationErrorCode::Cancelled
+        | ApplicationErrorCode::Internal => "localServiceActionFailed",
+    };
+    translator.text(key).to_owned()
+}
+
 impl Render for ExtensionsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = self.tab;
+        if !self.pending_notices.is_empty() {
+            let notices = std::mem::take(&mut self.pending_notices);
+            window.defer(cx, move |window, cx| {
+                for notice in notices {
+                    window.push_notification(Notification::warning(notice), cx);
+                }
+            });
+        }
+        let body = match tab {
+            ExtensionsTab::Plugins => self.render_plugins(window, cx).into_any_element(),
+            ExtensionsTab::Components => self.render_components(window, cx).into_any_element(),
+        };
         let translator = self.translator.read(cx);
-        let title = translator.text("settingsCatExtensions").to_owned();
-        let components_title = translator.text("componentsTitle").to_owned();
-        let install = translator.text("componentsInstallButton").to_owned();
-        let uninstall = translator.text("componentsUninstallButton").to_owned();
-        let stale = self.controller.is_stale();
-        let plugins = self.controller.plugins().to_vec();
-        let components = self
-            .controller
-            .components()
-            .iter()
-            .map(|status| match status {
-                fluxdown_protocol::ComponentStatusDto::Ffmpeg(status) => (
-                    fluxdown_protocol::ComponentKind::Ffmpeg,
-                    "FFmpeg",
-                    status.version.clone(),
-                    !status.managed_version.is_empty(),
-                    status.managed_supported,
-                ),
-                fluxdown_protocol::ComponentStatusDto::Ytdlp(status) => (
-                    fluxdown_protocol::ComponentKind::Ytdlp,
-                    "yt-dlp",
-                    status.version.clone(),
-                    !status.managed_version.is_empty(),
-                    status.managed_supported,
-                ),
-            })
-            .collect::<Vec<_>>();
+        let labels = [
+            translator.text("settingsCatPlugins").to_owned(),
+            translator.text("settingsCatComponents").to_owned(),
+        ];
+        let danger = cx.theme().danger;
         v_flex()
-            .size_full()
-            .gap_3()
-            .p_4()
-            .child(div().text_lg().font_semibold().child(title))
+            .w_full()
+            .gap_4()
             .when_some(self.last_error.clone(), |this, error| {
-                this.child(div().text_sm().child(error))
+                this.child(div().text_sm().text_color(danger).child(error))
             })
-            .children(plugins.into_iter().enumerate().map(|(index, plugin)| {
-                let identity = plugin.identity.clone();
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .py_2()
-                    .border_b_1()
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .child(div().text_sm().font_semibold().child(plugin.name))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .child(format!("{} · {}", plugin.version, plugin.description)),
-                            ),
-                    )
-                    .child(
-                        Switch::new(("plugin-enabled", index))
-                            .checked(plugin.enabled)
-                            .disabled(stale)
-                            .on_click(cx.listener(move |this, checked, _, cx| {
-                                let future = this
-                                    .controller
-                                    .set_plugin_enabled(identity.clone(), *checked);
-                                this.spawn_action(future, cx);
-                            })),
-                    )
-            }))
-            .child(div().text_sm().font_semibold().child(components_title))
-            .children(components.into_iter().enumerate().map(
-                |(index, (kind, name, version, installed, supported))| {
-                    let action_kind = kind;
-                    h_flex()
-                        .w_full()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .py_2()
-                        .child(
-                            v_flex()
-                                .child(div().text_sm().font_semibold().child(name))
-                                .child(div().text_xs().child(version)),
-                        )
-                        .child(
-                            Button::new(("component-action", index))
-                                .small()
-                                .outline()
-                                .label(if installed {
-                                    uninstall.clone()
-                                } else {
-                                    install.clone()
-                                })
-                                .disabled(stale || (!installed && !supported))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let future = if installed {
-                                        this.controller.uninstall_component(action_kind)
-                                    } else {
-                                        this.controller.install_component(action_kind)
-                                    };
-                                    this.spawn_action(future, cx);
-                                })),
-                        )
-                },
-            ))
+            .child(
+                TabBar::new("extensions-tabs")
+                    .underline()
+                    .selected_index(tab.index())
+                    .on_click(cx.listener(|this, index: &usize, _, cx| {
+                        if let Some(tab) = ExtensionsTab::ALL.get(*index) {
+                            this.show_tab(*tab, cx);
+                        }
+                    }))
+                    .children(labels.into_iter().map(|label| Tab::new().label(label))),
+            )
+            .child(body)
     }
 }
+
+/// 组件 UI 状态数组的固定顺序与 [`COMPONENT_KINDS`] 对齐。
+const _: () = assert!(COMPONENT_KINDS.len() == 2);

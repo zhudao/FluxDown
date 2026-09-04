@@ -110,6 +110,11 @@ pub enum ActorOperation {
         expected_revision: u64,
         values: BTreeMap<String, String>,
     },
+    ClearConnPolicy,
+    SiteAuthDelete {
+        site: String,
+    },
+    SiteAuthClear,
     CdnReportsPeek,
     CdnReportsAck {
         batch_id: String,
@@ -187,6 +192,8 @@ pub enum ActorResult {
     Boolean(bool),
     ProxyLatency(i64),
     Config(fluxdown_protocol::DaemonConfigSnapshot),
+    ConnPolicy(fluxdown_protocol::ConnPolicySummaryDto),
+    SiteAuth(Vec<fluxdown_protocol::SiteAuthEntryDto>),
     CdnLease(Option<fluxdown_protocol::CdnReportLeaseDto>),
     TrackerRefresh(fluxdown_protocol::TrackerSubRefreshResponse),
     Ed2kRefresh(fluxdown_protocol::Ed2kServerSubRefreshResponse),
@@ -582,6 +589,7 @@ async fn execute_operation(
             if save_dir.trim().is_empty() {
                 save_dir = fluxdown_engine::user_dirs::download_dir_or_cwd();
             }
+            let queue_id = resolve_queue_id(&engine.db, request.queue_id).await?;
             let task_id = engine
                 .manager
                 .create_task(NewTaskSpec {
@@ -595,7 +603,7 @@ async fn execute_operation(
                     torrent_file_bytes,
                     proxy_url: request.proxy_url,
                     user_agent: request.user_agent,
-                    queue_id: request.queue_id,
+                    queue_id,
                     checksum: request.checksum,
                     ignore_tls_errors: request.ignore_tls_errors,
                     extra_headers: request.headers.unwrap_or_default(),
@@ -746,6 +754,21 @@ async fn execute_operation(
             let snapshot = patch_config(engine, events, expected_revision, values).await?;
             return Ok(ActorResult::Config(snapshot));
         }
+        ActorOperation::ClearConnPolicy => {
+            return Ok(ActorResult::ConnPolicy(
+                clear_conn_policy(engine, events).await?,
+            ));
+        }
+        ActorOperation::SiteAuthDelete { site } => {
+            return Ok(ActorResult::SiteAuth(
+                delete_site_auth(&engine.db, &site).await?,
+            ));
+        }
+        ActorOperation::SiteAuthClear => {
+            return Ok(ActorResult::SiteAuth(
+                save_site_auth(&engine.db, &BTreeMap::new()).await?,
+            ));
+        }
         ActorOperation::CdnReportsPeek => return cdn_reports_peek(engine).await,
         ActorOperation::CdnReportsAck { batch_id } => {
             let acknowledged = engine
@@ -775,9 +798,11 @@ async fn execute_operation(
             migration_ack(engine, "daemon_migration_gateway_acked", revision).await?;
         }
         ActorOperation::CreateGroup { spec } => {
+            let mut spec = *spec;
+            spec.queue_id = resolve_queue_id(&engine.db, spec.queue_id).await?;
             let group_id = engine
                 .manager
-                .create_task_group(*spec)
+                .create_task_group(spec)
                 .await
                 .ok_or_else(|| ActorError::Operation("failed to persist group".to_owned()))?;
             return Ok(ActorResult::Created(group_id));
@@ -1191,6 +1216,116 @@ async fn patch_config(
     Ok(snapshot)
 }
 
+/// 清空引擎学习的域名连接策略（内存 + 持久化，与 hub 收到空
+/// `domain_conn_caps` 时的处理同态），并以刷新后的公开配置广播
+/// `ConfigChanged`（该只读键随快照可见）。用户配置 revision 不变。
+async fn clear_conn_policy(
+    engine: &mut Engine,
+    events: &crate::event_hub::DaemonEventHub,
+) -> Result<fluxdown_protocol::ConnPolicySummaryDto, ActorError> {
+    engine.manager.clear_domain_conn_caps();
+    engine
+        .db
+        .set_config(DOMAIN_CONN_CAPS_KEY, "")
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+    let mut all = engine
+        .db
+        .get_all_config()
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+    // 引擎的落盘是 fire-and-forget，快照以刚写入的空值为准。
+    all.insert(DOMAIN_CONN_CAPS_KEY.to_owned(), String::new());
+    events.publish(fluxdown_protocol::DaemonEvent::ConfigChanged(
+        fluxdown_protocol::DaemonConfigSnapshot {
+            revision: all
+                .get("daemon_config_revision")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0),
+            values: crate::config::public_config_values(&all),
+        },
+    ));
+    Ok(fluxdown_protocol::ConnPolicySummaryDto { domain_count: 0 })
+}
+
+/// 引擎持久化域名连接策略的 config 键（引擎侧 `segment_coordinator` 私有常量）。
+const DOMAIN_CONN_CAPS_KEY: &str = "domain_conn_caps";
+
+/// 删除单个站点凭据；站点不存在返回 [`ActorError::NotFound`]。
+async fn delete_site_auth(
+    db: &fluxdown_engine::db::Db,
+    site: &str,
+) -> Result<Vec<fluxdown_protocol::SiteAuthEntryDto>, ActorError> {
+    let json = db
+        .get_config(fluxdown_engine::site_auth::SITE_AUTH_CONFIG_KEY)
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?
+        .unwrap_or_default();
+    let mut store = fluxdown_engine::site_auth::parse_store(&json);
+    if store.remove(site).is_none() {
+        return Err(ActorError::NotFound);
+    }
+    save_site_auth(db, &store).await
+}
+
+/// 写回站点凭据表（与引擎 `apply_site_auth` 同一 `set_config` 路径：该键
+/// 不属用户配置目录，不触碰 revision），返回脱敏后的列表。
+async fn save_site_auth(
+    db: &fluxdown_engine::db::Db,
+    store: &BTreeMap<String, fluxdown_engine::site_auth::SiteCredential>,
+) -> Result<Vec<fluxdown_protocol::SiteAuthEntryDto>, ActorError> {
+    db.set_config(
+        fluxdown_engine::site_auth::SITE_AUTH_CONFIG_KEY,
+        &fluxdown_engine::site_auth::serialize_store(store),
+    )
+    .await
+    .map_err(|error| ActorError::Operation(format!("{error:#}")))?;
+    Ok(site_auth_entries(store))
+}
+
+/// 站点凭据表的脱敏投影（只含站点键与用户名，密码永不出 daemon）。
+pub fn site_auth_entries(
+    store: &BTreeMap<String, fluxdown_engine::site_auth::SiteCredential>,
+) -> Vec<fluxdown_protocol::SiteAuthEntryDto> {
+    store
+        .iter()
+        .map(|(site, credential)| fluxdown_protocol::SiteAuthEntryDto {
+            site: site.clone(),
+            user: credential.user.clone(),
+        })
+        .collect()
+}
+
+/// 请求未指定队列时套用设置项 `default_queue_id`（与 Flutter 新建对话框
+/// 预选默认队列同义）；默认队列为空或已被删除时保持空串，由引擎归入
+/// 内置主队列。
+async fn resolve_queue_id(
+    db: &fluxdown_engine::db::Db,
+    requested: String,
+) -> Result<String, ActorError> {
+    if !requested.is_empty() {
+        return Ok(requested);
+    }
+    let Some(preferred) = db
+        .get_config("default_queue_id")
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(requested);
+    };
+    if fluxdown_engine::model::is_builtin_queue(&preferred) {
+        return Ok(preferred);
+    }
+    let exists = db
+        .load_all_queues()
+        .await
+        .map_err(|error| ActorError::Operation(format!("{error:#}")))?
+        .iter()
+        .any(|queue| queue.queue_id == preferred);
+    Ok(if exists { preferred } else { requested })
+}
+
 async fn apply_live_config<'a>(
     engine: &mut Engine,
     all: &HashMap<String, String>,
@@ -1355,5 +1490,129 @@ async fn receive_rss_event(
     match receiver {
         Some(receiver) => receiver.recv().await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use fluxdown_engine::site_auth::{SITE_AUTH_CONFIG_KEY, SiteCredential, serialize_store};
+
+    use super::{ActorError, delete_site_auth, resolve_queue_id, save_site_auth};
+
+    async fn open_db() -> (fluxdown_engine::db::Db, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_daemon_actor_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create actor test dir");
+        let db = fluxdown_engine::db::Db::open(&dir)
+            .await
+            .expect("open actor test db");
+        (db, dir)
+    }
+
+    #[tokio::test]
+    async fn default_queue_applies_only_to_unspecified_and_existing_queues() {
+        let (db, dir) = open_db().await;
+        db.init_default_config("/tmp").await.expect("seed config");
+        db.seed_builtin_queues().await.expect("seed queues");
+
+        assert_eq!(
+            resolve_queue_id(&db, "explicit".to_owned())
+                .await
+                .expect("explicit passthrough"),
+            "explicit"
+        );
+        assert_eq!(
+            resolve_queue_id(&db, String::new())
+                .await
+                .expect("builtin default"),
+            fluxdown_engine::model::MAIN_QUEUE_ID
+        );
+
+        db.insert_queue("custom", "Custom", 0, 0, 0, "", 5, 0, "")
+            .await
+            .expect("insert queue");
+        db.set_config("default_queue_id", "custom")
+            .await
+            .expect("set default queue");
+        assert_eq!(
+            resolve_queue_id(&db, String::new())
+                .await
+                .expect("existing named default"),
+            "custom"
+        );
+
+        db.set_config("default_queue_id", "deleted")
+            .await
+            .expect("set stale default");
+        assert_eq!(
+            resolve_queue_id(&db, String::new())
+                .await
+                .expect("stale default falls back"),
+            "",
+            "engine maps '' to the builtin main queue"
+        );
+
+        drop(db);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn site_auth_delete_and_clear_never_expose_passwords() {
+        let (db, dir) = open_db().await;
+        let store = BTreeMap::from([
+            (
+                "a.example".to_owned(),
+                SiteCredential {
+                    user: "alice".to_owned(),
+                    pass: "s3cret".to_owned(),
+                },
+            ),
+            (
+                "b.example:8443".to_owned(),
+                SiteCredential {
+                    user: "bob".to_owned(),
+                    pass: "hunter2".to_owned(),
+                },
+            ),
+        ]);
+        db.set_config(SITE_AUTH_CONFIG_KEY, &serialize_store(&store))
+            .await
+            .expect("seed credentials");
+
+        let after_delete = delete_site_auth(&db, "a.example")
+            .await
+            .expect("delete known site");
+        assert_eq!(after_delete.len(), 1);
+        assert_eq!(after_delete[0].site, "b.example:8443");
+        assert_eq!(after_delete[0].user, "bob");
+        let json = serde_json::to_string(&after_delete).expect("serialize dto");
+        assert!(!json.contains("hunter2"), "password must not leak: {json}");
+
+        assert!(matches!(
+            delete_site_auth(&db, "a.example").await,
+            Err(ActorError::NotFound)
+        ));
+
+        let cleared = save_site_auth(&db, &BTreeMap::new())
+            .await
+            .expect("clear store");
+        assert!(cleared.is_empty());
+        assert_eq!(
+            db.get_config(SITE_AUTH_CONFIG_KEY)
+                .await
+                .expect("read store")
+                .as_deref(),
+            Some("{}")
+        );
+
+        drop(db);
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }

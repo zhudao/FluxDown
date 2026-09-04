@@ -14,7 +14,7 @@ use fluxdown_protocol::{
     ApplicationErrorCode, CdnConfigApplyParams, CdnReportAckParams, CreateGroupRequest,
     CreateQueueRequest, DaemonConfigPatch, DaemonCreateTaskParams, MigrationAckParams,
     RpcErrorData, RpcErrorObject, RpcRequest, RpcResponse, SelectionResolutionDto, ServiceHello,
-    SnapshotBody,
+    SiteAuthDeleteParams, SnapshotBody,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -373,6 +373,48 @@ impl DaemonService {
                     Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
                     Err(error) => Err(actor_error(error)),
                 }
+            }
+            method::DAEMON_CONFIG_CONN_POLICY => {
+                let raw = self
+                    .db
+                    .get_config("domain_conn_caps")
+                    .await
+                    .map_err(|error| internal_error(format!("{error:#}")))?
+                    .unwrap_or_default();
+                let count = fluxdown_engine::segment_coordinator::count_domain_conn_policies(&raw);
+                to_value(fluxdown_protocol::ConnPolicySummaryDto {
+                    domain_count: u64::try_from(count).unwrap_or(u64::MAX),
+                })
+            }
+            method::DAEMON_CONFIG_CLEAR_CONN_POLICY => {
+                match self.actor.execute(ActorOperation::ClearConnPolicy).await {
+                    Ok(ActorResult::ConnPolicy(summary)) => to_value(summary),
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
+            method::DAEMON_SITE_AUTH_LIST => {
+                let json = self
+                    .db
+                    .get_config(fluxdown_engine::site_auth::SITE_AUTH_CONFIG_KEY)
+                    .await
+                    .map_err(|error| internal_error(format!("{error:#}")))?
+                    .unwrap_or_default();
+                to_value(crate::actor::site_auth_entries(
+                    &fluxdown_engine::site_auth::parse_store(&json),
+                ))
+            }
+            method::DAEMON_SITE_AUTH_DELETE => {
+                let params = parse_params::<SiteAuthDeleteParams>(params)?;
+                if params.site.trim().is_empty() {
+                    return Err(invalid_argument("site", "site is required"));
+                }
+                self.site_auth_operation(ActorOperation::SiteAuthDelete { site: params.site })
+                    .await
+            }
+            method::DAEMON_SITE_AUTH_CLEAR => {
+                self.site_auth_operation(ActorOperation::SiteAuthClear)
+                    .await
             }
             method::DAEMON_RSS_LIST_SOURCES => {
                 let sources = self
@@ -773,6 +815,7 @@ impl DaemonService {
                     "queues": snapshot.queues.len(),
                     "groups": snapshot.groups.len(),
                     "configRevision": snapshot.config.revision,
+                    "logDir": fluxdown_engine::logger::log_dir().display().to_string(),
                     "components": snapshot.components,
                 }))
             }
@@ -910,6 +953,18 @@ impl DaemonService {
     async fn execute_unit(&self, operation: ActorOperation) -> Result<Value, RpcErrorObject> {
         match self.actor.execute(operation).await {
             Ok(ActorResult::Unit) => Ok(json!({ "ok": true })),
+            Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+            Err(error) => Err(actor_error(error)),
+        }
+    }
+
+    /// 站点凭据表写操作：返回更新后的脱敏列表。
+    async fn site_auth_operation(
+        &self,
+        operation: ActorOperation,
+    ) -> Result<Value, RpcErrorObject> {
+        match self.actor.execute(operation).await {
+            Ok(ActorResult::SiteAuth(entries)) => to_value(entries),
             Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
             Err(error) => Err(actor_error(error)),
         }

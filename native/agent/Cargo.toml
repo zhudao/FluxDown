@@ -38,3 +38,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 uuid = { version = "1.23.4", features = ["v4", "serde"] }
 x25519-dalek = { version = "3", features = ["static_secrets", "zeroize"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"

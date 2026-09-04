@@ -6,6 +6,7 @@ mod app;
 mod assets;
 mod capability_ports;
 mod downloads_port;
+mod launch;
 mod service_bootstrap;
 mod settings_port;
 

@@ -2799,6 +2799,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "winreg",
  "x25519-dalek",
 ]
 
@@ -3071,6 +3072,7 @@ dependencies = [
  "fluxdown_ui_theme",
  "gpui",
  "gpui-component",
+ "serde",
  "serde_json",
 ]
 

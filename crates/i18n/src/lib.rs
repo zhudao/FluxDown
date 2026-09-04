@@ -244,6 +244,19 @@ impl Translator {
     pub fn native_name(&self) -> &str {
         self.catalog.native_name(&self.locale)
     }
+
+    /// 目录中的全部可用 locale。
+    pub fn available_locales(&self) -> &[String] {
+        self.catalog.available_locales()
+    }
+
+    /// 任一可用 locale 的自称。
+    pub fn native_name_of<'translator>(
+        &'translator self,
+        locale: &'translator str,
+    ) -> &'translator str {
+        self.catalog.native_name(locale)
+    }
 }
 
 fn normalize_locale(locale: &str) -> String {

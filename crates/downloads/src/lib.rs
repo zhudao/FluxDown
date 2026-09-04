@@ -12,6 +12,8 @@ mod strings;
 
 pub use assets::*;
 pub use controller::{
-    DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, PortFuture,
+    DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, LAST_SAVE_DIR_PREF,
+    PortFuture, REMEMBER_LAST_SAVE_DIR_PREF,
 };
 pub use pages::downloads::*;
+pub use pages::new_download::*;

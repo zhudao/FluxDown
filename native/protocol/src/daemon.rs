@@ -1632,6 +1632,32 @@ pub struct ProxyTestResponse {
     pub latency_ms: i64,
 }
 
+/// 已保存的站点 HTTP Basic 凭据（`daemon.siteAuth.list`）；不携带密码。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SiteAuthEntryDto {
+    /// `host` 或 `host:port`。
+    pub site: String,
+    pub user: String,
+}
+
+/// `daemon.siteAuth.delete` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SiteAuthDeleteParams {
+    pub site: String,
+}
+
+/// 引擎学习到的按域连接上限摘要（`daemon.config.connPolicy`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ConnPolicySummaryDto {
+    pub domain_count: u64,
+}
+
 /// Tracker 订阅刷新结果（`POST /api/v1/bt/tracker-sub/refresh`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

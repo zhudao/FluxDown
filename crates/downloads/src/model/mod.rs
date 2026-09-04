@@ -1,3 +1,5 @@
+pub(crate) mod new_download;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DownloadStatusFilter {
     All,

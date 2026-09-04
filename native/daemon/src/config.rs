@@ -4,6 +4,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 
+use fluxdown_protocol::{
+    DaemonConfigError, is_public_daemon_config_key, normalize_daemon_config_patch,
+};
+
 /// daemon 默认控制端口。
 pub const DEFAULT_DAEMON_BIND: &str = "127.0.0.1:17801";
 
@@ -25,6 +29,8 @@ pub enum ConfigError {
     NonLoopback(IpAddr),
     #[error("unknown or daemon-private config field: {0}")]
     UnknownField(String),
+    #[error("config field is read-only: {0}")]
+    ReadOnlyField(String),
     #[error("invalid config value for {field}: {message}")]
     InvalidValue { field: String, message: String },
 }
@@ -51,142 +57,51 @@ impl DaemonConfig {
     }
 }
 
-/// 校验并规范化客户端可写的 daemon 设置。
+/// 校验并规范化客户端可写的 daemon 设置（键表与值域唯一来源：
+/// [`fluxdown_protocol::DAEMON_CONFIG_FIELDS`]）。
+///
+/// 规范化后的布尔值再按引擎落库编码转写：`bt_seed_enabled` /
+/// `bt_auto_reseed` 在引擎侧按 `"0"` 判定关闭（Flutter 也写 `'1'`/`'0'`），
+/// 若原样写入 `"false"` 引擎会视为开启。
 pub fn validate_config_patch(
     values: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, ConfigError> {
-    values
-        .iter()
-        .map(|(key, value)| {
-            let normalized = match key.as_str() {
-                "max_concurrent_tasks" => normalize_integer(key, value, 1, 1024)?,
-                "speed_limit_bytes" | "upload_limit_bytes" => {
-                    normalize_integer(key, value, 0, i64::MAX)?
-                }
-                "default_segments" => normalize_integer(key, value, 0, 64)?,
-                "auto_max_connections" => normalize_integer(key, value, 0, 128)?,
-                "cdn_max_nodes" => normalize_integer(key, value, 0, 8)?,
-                "max_auto_retries" => normalize_integer(key, value, -1, 20)?,
-                "auto_retry_delay_secs" => normalize_integer(key, value, 0, 86_400)?,
-                "bt_port_start" | "bt_port_end" => normalize_integer(key, value, 1, 65_535)?,
-                "bt_seed_time_limit_minutes"
-                | "bt_seed_inactive_time_limit_minutes"
-                | "bt_seed_max_active" => normalize_integer(key, value, 0, i64::MAX)?,
-                "bt_seed_ratio_limit" | "bt_seed_post_ratio_limit" => {
-                    normalize_float(key, value, 0.0)?
-                }
-                "cdn_multi_enabled"
-                | "auto_resume_on_start"
-                | "use_server_time"
-                | "bt_enable_dht"
-                | "bt_enable_upnp"
-                | "bt_tracker_sub_enabled"
-                | "ed2k_server_sub_enabled"
-                | "ed2k_enable_kad"
-                | "ed2k_enable_upnp" => normalize_boolean(key, value)?,
-                "file_exists_behavior" => normalize_enum(key, value, &["rename", "overwrite"])?,
-                "file_missing_action" => normalize_enum(key, value, &["keep", "delete"])?,
-                "bt_seed_limit_operator" => normalize_enum(key, value, &["or", "and"])?,
-                "bt_seed_then_action" => {
-                    normalize_enum(key, value, &["stop", "delete", "delete_files"])?
-                }
-                "bt_mse_mode" => normalize_enum(key, value, &["disabled", "enabled", "forced"])?,
-                "proxy_mode"
-                | "proxy_type"
-                | "proxy_host"
-                | "proxy_port"
-                | "proxy_username"
-                | "proxy_password"
-                | "proxy_no_list"
-                | "default_save_dir"
-                | "global_user_agent"
-                | "bt_custom_trackers"
-                | "bt_tracker_sub_urls"
-                | "ed2k_server_sub_urls"
-                | "ed2k_server_list"
-                | "ed2k_nodes_dat_url"
-                | "webhook.endpoints" => value.trim().to_owned(),
-                _ => return Err(ConfigError::UnknownField(key.clone())),
-            };
-            Ok((key.clone(), normalized))
-        })
-        .collect()
-}
-
-fn normalize_integer(
-    field: &str,
-    value: &str,
-    minimum: i64,
-    maximum: i64,
-) -> Result<String, ConfigError> {
-    let parsed = value
-        .trim()
-        .parse::<i64>()
-        .map_err(|error| invalid_value(field, error.to_string()))?;
-    if !(minimum..=maximum).contains(&parsed) {
-        return Err(invalid_value(
-            field,
-            format!("must be between {minimum} and {maximum}"),
-        ));
+    let mut normalized = normalize_daemon_config_patch(values).map_err(|error| match error {
+        DaemonConfigError::UnknownField(key) => ConfigError::UnknownField(key),
+        DaemonConfigError::ReadOnly(key) => ConfigError::ReadOnlyField(key),
+        DaemonConfigError::InvalidValue { field, message } => {
+            ConfigError::InvalidValue { field, message }
+        }
+    })?;
+    for key in ENGINE_NUMERIC_BOOL_KEYS {
+        if let Some(value) = normalized.get_mut(*key) {
+            *value = if value == "true" { "1" } else { "0" }.to_owned();
+        }
     }
-    Ok(parsed.to_string())
+    Ok(normalized)
 }
 
-fn normalize_float(field: &str, value: &str, minimum: f64) -> Result<String, ConfigError> {
-    let parsed = value
-        .trim()
-        .parse::<f64>()
-        .map_err(|error| invalid_value(field, error.to_string()))?;
-    if !parsed.is_finite() || parsed < minimum {
-        return Err(invalid_value(
-            field,
-            format!("must be finite and >= {minimum}"),
-        ));
-    }
-    Ok(parsed.to_string())
-}
+/// 引擎以 `"1"`/`"0"` 读取的布尔键（见 `bt_downloader` / `download_manager`
+/// 中的 `get_config` 判定）。
+const ENGINE_NUMERIC_BOOL_KEYS: &[&str] = &["bt_seed_enabled", "bt_auto_reseed"];
 
-fn normalize_boolean(field: &str, value: &str) -> Result<String, ConfigError> {
-    match value.trim() {
-        "true" | "1" => Ok("true".to_owned()),
-        "false" | "0" => Ok("false".to_owned()),
-        _ => Err(invalid_value(field, "must be true or false".to_owned())),
-    }
-}
-
-fn normalize_enum(field: &str, value: &str, allowed: &[&str]) -> Result<String, ConfigError> {
-    let normalized = value.trim().to_ascii_lowercase();
-    if allowed.contains(&normalized.as_str()) {
-        Ok(normalized)
-    } else {
-        Err(invalid_value(
-            field,
-            format!("must be one of {}", allowed.join(", ")),
-        ))
-    }
-}
-
-fn invalid_value(field: &str, message: String) -> ConfigError {
-    ConfigError::InvalidValue {
-        field: field.to_owned(),
-        message,
-    }
-}
-
-/// 从完整 engine config 中只投影 daemon UI 可见且非敏感的键。
+/// 从完整 engine config 中只投影 daemon UI 可见的键（含只读键，如
+/// `bt_tracker_sub_cache` / `domain_conn_caps`；daemon 私有键与凭据表不投影）。
 #[must_use]
 pub fn public_config_values(all: &HashMap<String, String>) -> BTreeMap<String, String> {
     all.iter()
-        .filter_map(|(key, value)| {
-            let single = BTreeMap::from([(key.clone(), value.clone())]);
-            validate_config_patch(&single)
-                .ok()
-                .map(|_| (key.clone(), value.clone()))
-        })
+        .filter(|(key, _)| is_public_daemon_config_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
 
 /// 从持久化配置构建完整 BT 运行配置。
+///
+/// `bt_seed_time_limit_minutes` / `bt_seed_inactive_time_limit_minutes` 落库
+/// 时已是分钟；`*_unit` 键仅记录设置页的展示单位（Flutter / hub 同义），
+/// 引擎 [`fluxdown_engine::bt_downloader::BtConfig`] 直接取分钟值。
+/// `bt_seed_enabled` / `bt_auto_reseed` 不在 `BtConfig` 内：引擎在完成 /
+/// 启动时实时读库，落库即生效。
 #[must_use]
 pub fn bt_config_from_map(
     cfg: &HashMap<String, String>,
@@ -265,10 +180,10 @@ pub fn bt_config_from_map(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use super::validate_config_patch;
+    use super::{ConfigError, public_config_values, validate_config_patch};
 
     #[test]
     fn loopback_predicate_rejects_public_bind() {
@@ -291,5 +206,79 @@ mod tests {
         ]);
         let normalized = validate_config_patch(&values).expect("valid synced config");
         assert_eq!(normalized, values);
+    }
+
+    #[test]
+    fn catalog_keys_new_to_daemon_are_accepted_and_engine_encoded() {
+        let values = BTreeMap::from([
+            ("bt_seed_enabled".to_owned(), "false".to_owned()),
+            ("bt_auto_reseed".to_owned(), "1".to_owned()),
+            ("bt_seed_time_limit_unit".to_owned(), "hours".to_owned()),
+            (
+                "bt_seed_inactive_time_limit_unit".to_owned(),
+                "days".to_owned(),
+            ),
+            ("ed2k_listen_port".to_owned(), " 4662 ".to_owned()),
+            ("default_queue_id".to_owned(), "later".to_owned()),
+        ]);
+        let normalized = validate_config_patch(&values).expect("catalog keys accepted");
+        assert_eq!(
+            normalized["bt_seed_enabled"], "0",
+            "engine reads `!= \"0\"`"
+        );
+        assert_eq!(normalized["bt_auto_reseed"], "1");
+        assert_eq!(normalized["bt_seed_time_limit_unit"], "hours");
+        assert_eq!(normalized["bt_seed_inactive_time_limit_unit"], "days");
+        assert_eq!(normalized["ed2k_listen_port"], "4662");
+        assert_eq!(normalized["default_queue_id"], "later");
+    }
+
+    #[test]
+    fn read_only_and_unknown_keys_are_rejected_on_patch() {
+        for key in [
+            "domain_conn_caps",
+            "bt_tracker_sub_cache",
+            "bt_tracker_sub_updated_at",
+            "ed2k_server_sub_cache",
+        ] {
+            let patch = BTreeMap::from([(key.to_owned(), String::new())]);
+            assert!(
+                matches!(validate_config_patch(&patch), Err(ConfigError::ReadOnlyField(k)) if k == key),
+                "{key} must be rejected as read-only"
+            );
+        }
+        for key in ["site_auth_credentials", "daemon_config_revision", "nope"] {
+            let patch = BTreeMap::from([(key.to_owned(), "x".to_owned())]);
+            assert!(
+                matches!(validate_config_patch(&patch), Err(ConfigError::UnknownField(k)) if k == key),
+                "{key} must be rejected as unknown"
+            );
+        }
+        let bad = BTreeMap::from([("ed2k_listen_port".to_owned(), "70000".to_owned())]);
+        assert!(matches!(
+            validate_config_patch(&bad),
+            Err(ConfigError::InvalidValue { field, .. }) if field == "ed2k_listen_port"
+        ));
+    }
+
+    #[test]
+    fn public_projection_keeps_read_only_keys_and_hides_private_ones() {
+        let all = HashMap::from([
+            ("max_concurrent_tasks".to_owned(), "5".to_owned()),
+            ("bt_tracker_sub_cache".to_owned(), "udp://t".to_owned()),
+            ("domain_conn_caps".to_owned(), "v3".to_owned()),
+            ("proxy_password".to_owned(), "secret".to_owned()),
+            ("site_auth_credentials".to_owned(), "{}".to_owned()),
+            ("daemon_config_revision".to_owned(), "7".to_owned()),
+            ("daemon_migration_link_acked".to_owned(), "1".to_owned()),
+        ]);
+        let public = public_config_values(&all);
+        assert_eq!(public["max_concurrent_tasks"], "5");
+        assert_eq!(public["bt_tracker_sub_cache"], "udp://t");
+        assert_eq!(public["domain_conn_caps"], "v3");
+        assert_eq!(public["proxy_password"], "secret");
+        assert!(!public.contains_key("site_auth_credentials"));
+        assert!(!public.contains_key("daemon_config_revision"));
+        assert!(!public.contains_key("daemon_migration_link_acked"));
     }
 }

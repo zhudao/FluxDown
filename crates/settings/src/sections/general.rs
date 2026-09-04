@@ -1,385 +1,249 @@
-use fluxdown_ui_components::{ButtonVariant, button, card};
-use fluxdown_ui_theme::active_theme;
-use gpui::{
-    Context, Div, ParentElement, SharedString, Styled, div, prelude::FluentBuilder as _, px,
+//! 通用：启动与托盘、系统集成、界面可见性、自定义分类。
+
+use gpui::App;
+use gpui_component::{
+    Icon, IconName,
+    setting::{SettingField, SettingGroup, SettingPage},
 };
-use gpui_component::{Icon, IconName, h_flex, switch::Switch, v_flex};
 
-use crate::view::SettingsView;
+use super::{SectionContext, categories};
 
-struct SettingRow {
-    id: &'static str,
-    title: SharedString,
-    description: SharedString,
-    checked: bool,
+pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingPage {
+    // 首次进入拉取系统集成状态（自启 / 文件关联 / URL scheme）。
+    if ctx.store.read(cx).integration().is_none() && !ctx.store.read(cx).is_busy("integration") {
+        ctx.store.update(cx, |store, cx| store.load_integration(cx));
+    }
+
+    SettingPage::new(ctx.t("settingsCatGeneral"))
+        .icon(Icon::new(IconName::Settings2))
+        .description(ctx.t("settingsCatGeneralDesc"))
+        .group(startup_group(ctx, cx))
+        .group(system_group(ctx, cx))
+        .group(sidebar_group(ctx))
+        .group(titlebar_group(ctx))
+        .group(categories::group(ctx, cx))
 }
 
-impl SettingsView {
-    pub(crate) fn render_general_content(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        let startup_rows = [
-            SettingRow {
-                id: "setting-auto-startup",
-                title: self.strings.auto_startup.clone(),
-                description: self.strings.auto_startup_desc.clone(),
-                checked: false,
-            },
-            SettingRow {
-                id: "setting-close-to-tray",
-                title: self.strings.close_to_tray.clone(),
-                description: self.strings.close_to_tray_desc.clone(),
-                checked: true,
-            },
-            SettingRow {
-                id: "setting-start-minimized",
-                title: self.strings.start_minimized.clone(),
-                description: self.strings.start_minimized_desc.clone(),
-                checked: false,
-            },
-        ];
-        let system_rows = [
-            SettingRow {
-                id: "setting-floating-ball",
-                title: self.strings.floating_ball.clone(),
-                description: self.strings.floating_ball_desc.clone(),
-                checked: false,
-            },
-            SettingRow {
-                id: "setting-torrent-association",
-                title: self.strings.torrent_association.clone(),
-                description: self.strings.torrent_association_desc.clone(),
-                checked: true,
-            },
-            SettingRow {
-                id: "setting-ed2k-association",
-                title: self.strings.ed2k_link_association.clone(),
-                description: self.strings.ed2k_link_association_desc.clone(),
-                checked: false,
-            },
-            SettingRow {
-                id: "setting-magnet-association",
-                title: self.strings.magnet_association.clone(),
-                description: self.strings.magnet_association_desc.clone(),
-                checked: false,
-            },
-            SettingRow {
-                id: "setting-keep-awake",
-                title: self.strings.keep_awake.clone(),
-                description: self.strings.keep_awake_desc.clone(),
-                checked: false,
-            },
-            SettingRow {
-                id: "setting-analytics",
-                title: self.strings.analytics_enabled.clone(),
-                description: self.strings.analytics_enabled_desc.clone(),
-                checked: true,
-            },
-        ];
-        let titlebar_rows = [
-            SettingRow {
-                id: "setting-titlebar-pause",
-                title: self.strings.show_titlebar_pause.clone(),
-                description: self.strings.show_titlebar_pause_desc.clone(),
-                checked: true,
-            },
-            SettingRow {
-                id: "setting-titlebar-resume",
-                title: self.strings.show_titlebar_resume.clone(),
-                description: self.strings.show_titlebar_resume_desc.clone(),
-                checked: true,
-            },
-            SettingRow {
-                id: "setting-titlebar-settings",
-                title: self.strings.show_titlebar_settings.clone(),
-                description: self.strings.show_titlebar_settings_desc.clone(),
-                checked: true,
-            },
-            SettingRow {
-                id: "setting-titlebar-theme",
-                title: self.strings.show_titlebar_theme.clone(),
-                description: self.strings.show_titlebar_theme_desc.clone(),
-                checked: true,
-            },
-        ];
+fn startup_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
+    SettingGroup::new()
+        .title(ctx.t("settingsGroupStartupTray"))
+        .item(
+            ctx.item(
+                "autoStartup",
+                Some("autoStartupDesc"),
+                integration_switch(ctx, IntegrationKind::Autostart),
+            )
+            .disabled(!integration_supported(ctx, IntegrationKind::Autostart, cx)),
+        )
+        .item(ctx.item(
+            "closeToTray",
+            Some("closeToTrayDesc"),
+            ctx.pref_switch("close_to_tray", true),
+        ))
+        .item(ctx.item(
+            "startMinimizedToTray",
+            Some("startMinimizedToTrayDesc"),
+            ctx.pref_switch("start_minimized_to_tray", false),
+        ))
+}
 
-        h_flex()
-            .w_full()
-            .items_start()
-            .gap(tokens.spacing.lg)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(320.))
-                    .gap(tokens.spacing.lg)
-                    .child(self.render_setting_group(
-                        self.strings.group_startup_tray.clone(),
-                        None,
-                        startup_rows,
-                        cx,
-                    ))
-                    .child(self.render_setting_group(
-                        self.strings.group_system.clone(),
-                        None,
-                        system_rows,
-                        cx,
-                    )),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w(px(320.))
-                    .gap(tokens.spacing.lg)
-                    .child(self.render_setting_group(
-                        self.strings.titlebar_buttons.clone(),
-                        Some(self.strings.titlebar_buttons_desc.clone()),
-                        titlebar_rows,
-                        cx,
-                    ))
-                    .child(self.render_category_group(cx)),
-            )
+fn system_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
+    let floating_ball = ctx
+        .store
+        .read(cx)
+        .pref_bool("general.floating_ball_enabled", false);
+    let mut group = SettingGroup::new()
+        .title(ctx.t("settingsGroupSystem"))
+        .item(ctx.item(
+            "floatingBall",
+            Some("floatingBallDesc"),
+            ctx.pref_switch("general.floating_ball_enabled", false),
+        ));
+    if floating_ball {
+        group = group.item(ctx.item(
+            "floatingBallActiveOnly",
+            Some("floatingBallActiveOnlyDesc"),
+            ctx.pref_switch("general.floating_ball_active_only", false),
+        ));
     }
-
-    fn render_setting_group<const N: usize>(
-        &self,
-        title: SharedString,
-        description: Option<SharedString>,
-        rows: [SettingRow; N],
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let tokens = active_theme(cx).tokens();
-        v_flex()
-            .w_full()
-            .gap(tokens.spacing.sm)
-            .child(
-                v_flex()
-                    .gap(tokens.spacing.xxs)
-                    .child(
-                        div()
-                            .text_size(tokens.typography.sm.size)
-                            .font_weight(tokens.typography.sm.weight)
-                            .child(title),
-                    )
-                    .children(description.map(|description| {
-                        div()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(description)
-                    })),
-            )
-            .child(
-                card(cx).w_full().overflow_hidden().children(
-                    rows.into_iter()
-                        .enumerate()
-                        .map(|(index, row)| self.render_setting_row(row, index + 1 == N, cx)),
-                ),
-            )
+    if cfg!(target_os = "linux") {
+        group = group.item(ctx.item(
+            "clipboardWatch",
+            Some("clipboardWatchDesc"),
+            ctx.pref_switch("general.clipboard_watch", false),
+        ));
     }
+    group
+        .item(
+            ctx.item(
+                "torrentFileAssociation",
+                Some("torrentFileAssociationDesc"),
+                integration_switch(ctx, IntegrationKind::Torrent),
+            )
+            .disabled(!integration_supported(ctx, IntegrationKind::Torrent, cx)),
+        )
+        .item(
+            ctx.item(
+                "magnetLinkAssociation",
+                Some("magnetLinkAssociationDesc"),
+                integration_switch(ctx, IntegrationKind::Scheme("magnet")),
+            )
+            .disabled(!integration_supported(
+                ctx,
+                IntegrationKind::Scheme("magnet"),
+                cx,
+            )),
+        )
+        .item(
+            ctx.item(
+                "ed2kLinkAssociation",
+                Some("ed2kLinkAssociationDesc"),
+                integration_switch(ctx, IntegrationKind::Scheme("ed2k")),
+            )
+            .disabled(!integration_supported(
+                ctx,
+                IntegrationKind::Scheme("ed2k"),
+                cx,
+            )),
+        )
+        .item(ctx.item(
+            "keepAwakeWhileDownloading",
+            Some("keepAwakeWhileDownloadingDesc"),
+            ctx.pref_switch("download.keep_awake", false),
+        ))
+        .item(ctx.item(
+            "analyticsEnabled",
+            Some("analyticsEnabledDesc"),
+            ctx.pref_switch("analytics_enabled", true),
+        ))
+}
 
-    fn render_setting_row(&self, row: SettingRow, last: bool, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens();
-        let (key, inverted) = match row.id {
-            "setting-floating-ball" => ("general.floating_ball_enabled".to_owned(), false),
-            "setting-torrent-association" => ("torrent_assoc_user_disabled".to_owned(), true),
-            "setting-ed2k-association" => ("ed2k_assoc_user_disabled".to_owned(), true),
-            "setting-magnet-association" => ("magnet_assoc_user_disabled".to_owned(), true),
-            "setting-keep-awake" => ("download.keep_awake".to_owned(), false),
-            "setting-titlebar-pause" => ("ui.show_titlebar_pause_all".to_owned(), false),
-            "setting-titlebar-resume" => ("ui.show_titlebar_resume_all".to_owned(), false),
-            "setting-titlebar-settings" => ("ui.show_titlebar_settings".to_owned(), false),
-            "setting-titlebar-theme" => ("ui.show_titlebar_theme".to_owned(), false),
-            id => (
-                id.strip_prefix("setting-").unwrap_or(id).replace('-', "_"),
-                false,
-            ),
-        };
-        let checked = self.controller.bool_value(&key, row.checked) ^ inverted;
-        let switch_key = key.clone();
-        let set_inverted = inverted;
-        h_flex()
-            .min_h(px(64.))
-            .w_full()
-            .items_center()
-            .justify_between()
-            .gap(tokens.spacing.lg)
-            .px(tokens.spacing.md)
-            .py(tokens.spacing.sm)
-            .when(!last, |this| {
-                this.border_b_1().border_color(tokens.colors.border)
+fn sidebar_group(ctx: &SectionContext) -> SettingGroup {
+    SettingGroup::new()
+        .title(ctx.t("sidebarVisibility"))
+        .description(ctx.t("sidebarVisibilityDesc"))
+        .item(ctx.item(
+            "showSidebarStatus",
+            Some("showSidebarStatusDesc"),
+            ctx.pref_switch("ui.show_sidebar_status", true),
+        ))
+        .item(ctx.item(
+            "showSidebarQueues",
+            Some("showSidebarQueuesDesc"),
+            ctx.pref_switch("ui.show_sidebar_queues", true),
+        ))
+        .item(ctx.item(
+            "showSidebarRss",
+            Some("showSidebarRssDesc"),
+            ctx.pref_switch("ui.show_sidebar_rss", true),
+        ))
+        .item(ctx.item(
+            "showSidebarCategory",
+            Some("showSidebarCategoryDesc"),
+            ctx.pref_switch("ui.show_sidebar_category", true),
+        ))
+        .item(ctx.item(
+            "showSidebarDevice",
+            Some("showSidebarDeviceDesc"),
+            show_sidebar_device_field(ctx),
+        ))
+}
+
+/// `show_sidebar_device` 三态：未设置 = 登录后自动显示。开关显示有效值。
+fn show_sidebar_device_field(ctx: &SectionContext) -> SettingField<bool> {
+    let get = ctx.store();
+    let set = ctx.store();
+    SettingField::switch(
+        move |cx: &App| {
+            let store = get.read(cx);
+            store
+                .pref("show_sidebar_device")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| store.session().is_some())
+        },
+        move |value, cx: &mut App| {
+            set.update(cx, |store, cx| {
+                store.set_pref_bool("show_sidebar_device", value, cx)
+            });
+        },
+    )
+}
+
+fn titlebar_group(ctx: &SectionContext) -> SettingGroup {
+    SettingGroup::new()
+        .title(ctx.t("titlebarButtons"))
+        .description(ctx.t("titlebarButtonsDesc"))
+        .item(ctx.item(
+            "showTitlebarPauseAll",
+            Some("showTitlebarPauseAllDesc"),
+            ctx.pref_switch("ui.show_titlebar_pause_all", true),
+        ))
+        .item(ctx.item(
+            "showTitlebarResumeAll",
+            Some("showTitlebarResumeAllDesc"),
+            ctx.pref_switch("ui.show_titlebar_resume_all", true),
+        ))
+        .item(ctx.item(
+            "showTitlebarSettings",
+            Some("showTitlebarSettingsDesc"),
+            ctx.pref_switch("ui.show_titlebar_settings", true),
+        ))
+        .item(ctx.item(
+            "showTitlebarTheme",
+            Some("showTitlebarThemeDesc"),
+            ctx.pref_switch("ui.show_titlebar_theme", true),
+        ))
+}
+
+#[derive(Clone, Copy)]
+enum IntegrationKind {
+    Autostart,
+    Torrent,
+    Scheme(&'static str),
+}
+
+fn integration_supported(ctx: &SectionContext, kind: IntegrationKind, cx: &App) -> bool {
+    let store = ctx.store.read(cx);
+    if store.is_read_only() {
+        return false;
+    }
+    store.integration().is_some_and(|dto| match kind {
+        IntegrationKind::Autostart => dto.autostart_supported,
+        IntegrationKind::Torrent => dto.file_association_supported,
+        IntegrationKind::Scheme(_) => dto.url_protocol_supported,
+    })
+}
+
+/// 系统集成开关：值来自 agent 探测结果，切换即调用 agent 注册/注销。
+fn integration_switch(ctx: &SectionContext, kind: IntegrationKind) -> SettingField<bool> {
+    let get = ctx.store();
+    let set = ctx.store();
+    SettingField::switch(
+        move |cx: &App| {
+            get.read(cx).integration().is_some_and(|dto| match kind {
+                IntegrationKind::Autostart => dto.autostart_enabled,
+                IntegrationKind::Torrent => dto.torrent_associated,
+                IntegrationKind::Scheme(scheme) => {
+                    dto.url_protocols.get(scheme).copied().unwrap_or(false)
+                }
             })
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(tokens.spacing.xxs)
-                    .child(
-                        div()
-                            .text_size(tokens.typography.sm.size)
-                            .font_weight(tokens.typography.sm.weight)
-                            .child(row.title),
-                    )
-                    .child(
-                        div()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(row.description),
-                    ),
-            )
-            .child(Switch::new(row.id).checked(checked).on_click(cx.listener(
-                move |this, checked: &bool, _, cx| {
-                    let future = this
-                        .controller
-                        .set_bool(switch_key.clone(), *checked ^ set_inverted);
-                    cx.spawn(async move |this, cx| {
-                        if let Err(error) = future.await {
-                            eprintln!("settings update failed: {:?}", error.code);
-                        }
-                        let _ = this.update(cx, |_, cx| cx.notify());
-                    })
-                    .detach();
-                },
-            )))
-    }
-
-    fn render_category_group(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens();
-        v_flex()
-            .w_full()
-            .gap(tokens.spacing.sm)
-            .child(
-                v_flex()
-                    .gap(tokens.spacing.xxs)
-                    .child(
-                        div()
-                            .text_size(tokens.typography.sm.size)
-                            .font_weight(tokens.typography.sm.weight)
-                            .child(self.strings.custom_categories.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(self.strings.category_priority_note.clone()),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .gap(tokens.spacing.sm)
-                    .child(button(
-                        "setting-auto-category-dirs",
-                        self.strings.auto_category_dirs.clone(),
-                        ButtonVariant::Secondary,
-                        cx,
-                    ))
-                    .child(button(
-                        "setting-reset-categories",
-                        self.strings.reset_categories.clone(),
-                        ButtonVariant::Secondary,
-                        cx,
-                    ))
-                    .child(button(
-                        "setting-add-category",
-                        self.strings.add_category.clone(),
-                        ButtonVariant::Secondary,
-                        cx,
-                    )),
-            )
-            .child(
-                v_flex()
-                    .gap(tokens.spacing.xs)
-                    .child(self.render_category_card(
-                        self.strings.category_all.clone(),
-                        self.strings.builtin_category.clone(),
-                        IconName::Folder,
-                        cx,
-                    ))
-                    .child(self.render_category_card(
-                        self.strings.category_video.clone(),
-                        ".mp4, .mkv, .avi, .mov, .wmv, .webm, .m4v",
-                        IconName::GalleryVerticalEnd,
-                        cx,
-                    ))
-                    .child(self.render_category_card(
-                        self.strings.category_audio.clone(),
-                        ".mp3, .flac, .wav, .aac, .ogg, .m4a, .opus",
-                        IconName::File,
-                        cx,
-                    ))
-                    .child(self.render_category_card(
-                        self.strings.category_document.clone(),
-                        ".pdf, .doc, .docx, .xls, .xlsx, .ppt, .txt",
-                        IconName::File,
-                        cx,
-                    )),
-            )
-    }
-
-    fn render_category_card(
-        &self,
-        label: SharedString,
-        details: impl Into<SharedString>,
-        icon: IconName,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let tokens = active_theme(cx).tokens();
-        let builtin = self.strings.builtin_category.clone();
-        card(cx)
-            .min_h(px(58.))
-            .w_full()
-            .px(tokens.spacing.md)
-            .py(tokens.spacing.sm)
-            .child(
-                h_flex()
-                    .size_full()
-                    .items_center()
-                    .gap(tokens.spacing.sm)
-                    .child(
-                        v_flex()
-                            .gap(tokens.spacing.xxs)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(Icon::new(IconName::ChevronUp).size(px(10.)))
-                            .child(Icon::new(IconName::ChevronDown).size(px(10.))),
-                    )
-                    .child(
-                        Icon::new(icon)
-                            .size(px(15.))
-                            .text_color(tokens.colors.accent_foreground),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(tokens.spacing.xxs)
-                            .child(
-                                h_flex()
-                                    .gap(tokens.spacing.sm)
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .text_size(tokens.typography.sm.size)
-                                            .font_weight(tokens.typography.sm.weight)
-                                            .child(label),
-                                    )
-                                    .child(
-                                        div()
-                                            .px(tokens.spacing.xs)
-                                            .py(px(1.))
-                                            .rounded(tokens.radius.sm)
-                                            .bg(tokens.colors.accent)
-                                            .text_color(tokens.colors.accent_foreground)
-                                            .text_size(px(9.))
-                                            .child(builtin),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(tokens.typography.xs.size)
-                                    .text_color(tokens.colors.muted_foreground)
-                                    .child(details.into()),
-                            ),
-                    ),
-            )
-    }
+        },
+        move |value, cx: &mut App| {
+            set.update(cx, |store, cx| match kind {
+                IntegrationKind::Autostart => store.set_autostart(value, cx),
+                IntegrationKind::Torrent => {
+                    store.set_pref_bool("torrent_assoc_user_disabled", !value, cx);
+                    store.set_file_association(value, cx);
+                }
+                IntegrationKind::Scheme(scheme) => {
+                    let key: &'static str = match scheme {
+                        "magnet" => "magnet_assoc_user_disabled",
+                        _ => "ed2k_assoc_user_disabled",
+                    };
+                    store.set_pref_bool(key, !value, cx);
+                    store.set_url_protocol(scheme, value, cx);
+                }
+            });
+        },
+    )
 }

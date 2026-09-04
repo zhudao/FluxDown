@@ -74,6 +74,17 @@ impl DownloadsPort for AgentDownloadsPort {
                     fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK.to_owned(),
                     json!({ "taskId": task_id }),
                 ),
+                DownloadsCommand::SubmitTorrentFile { path } => (
+                    fluxdown_protocol::method::AGENT_CAPTURE_SUBMIT_TORRENT_FILE.to_owned(),
+                    json!({ "path": path, "silent": true }),
+                ),
+                DownloadsCommand::RememberSaveDir { save_dir } => (
+                    fluxdown_protocol::method::AGENT_PREFERENCES_PATCH.to_owned(),
+                    json!({
+                        "values": { fluxdown_ui_downloads::LAST_SAVE_DIR_PREF: save_dir },
+                        "sync": false,
+                    }),
+                ),
             };
             let value: Value = client.call(&method, Some(params)).await?;
             Ok(if value == json!({ "ok": true }) {

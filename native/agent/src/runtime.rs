@@ -24,15 +24,27 @@ pub async fn run(
     let mut state = store.load().await?;
     initialize_device_identity(&mut state, &store).await?;
 
+    // 先绑定 UI Gateway：实际端口进入状态与快照，后续 Doctor/兼容 API 都据此探测。
+    let override_bind = std::env::var("FLUXDOWN_AGENT_BIND").ok();
+    let listener = TcpListener::bind(gateway_bind_address(
+        state.gateway.lan_enabled,
+        override_bind.as_deref(),
+    )?)
+    .await?;
+    let bound = listener.local_addr()?;
+    if state.gateway.port != bound.port() {
+        state.gateway.port = bound.port();
+        store.save(&state).await?;
+    }
+    tracing::info!(address = %bound, "fluxdown-agent gateway listening");
+
     let supervisor = Arc::new(DaemonSupervisor::new());
     let daemon_bearer = load_daemon_bearer(&paths, &supervisor).await?;
-    let (daemon, mut daemon_events) = DaemonClient::start(
-        DaemonClientConfig {
-            rpc_url: paths.daemon_rpc_url.clone(),
-            bearer: daemon_bearer,
-        },
-        supervisor,
-    )?;
+    let daemon_config = DaemonClientConfig {
+        rpc_url: paths.daemon_rpc_url.clone(),
+        bearer: daemon_bearer,
+    };
+    let (daemon, mut daemon_events) = DaemonClient::start(daemon_config.clone(), supervisor)?;
     let daemon = Arc::new(daemon);
     daemon
         .wait_ready(Duration::from_secs(30))
@@ -125,13 +137,21 @@ pub async fn run(
         daemon.clone(),
         events.clone(),
     ));
+    let blobs = Arc::new(crate::capture::DaemonBlobClient::new(&daemon_config)?);
     let mut nmh_task = tokio::spawn(
         crate::nmh::NmhService::new(daemon.clone(), capture.clone()).run(cancel.clone()),
     );
     let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
         daemon.clone(),
+        daemon_config,
+        events.clone(),
+        shared_state.clone(),
         store.clone(),
+        api_switches.clone(),
     ));
+    let update = Arc::new(crate::update::UpdateService::new(env!(
+        "CARGO_PKG_VERSION"
+    ))?);
     let cloud = Arc::new(cloud_api);
     let gateway_service = Arc::new(GatewayService::new(
         daemon.clone(),
@@ -141,7 +161,9 @@ pub async fn run(
         sync,
         remote,
         capture.clone(),
+        blobs,
         diagnostics,
+        update,
         shared_state,
         store.clone(),
         api_switches,
@@ -155,8 +177,6 @@ pub async fn run(
             .map(Path::new),
     )
     .await?;
-    let listener = TcpListener::bind(paths.agent_bind).await?;
-    tracing::info!(address = %paths.agent_bind, "fluxdown-agent gateway listening");
     let (result, nmh_completed): (Result<(), Box<dyn std::error::Error + Send + Sync>>, bool) = tokio::select! {
         gateway = crate::gateway::serve(
             listener,
@@ -304,7 +324,7 @@ async fn load_daemon_bearer(
 }
 
 fn compatibility_api_config(state: &AgentState) -> fluxdown_api::server::ApiServerConfig {
-    let mut config = HashMap::from([
+    let config = HashMap::from([
         ("local_server_enabled".to_owned(), "true".to_owned()),
         (
             "local_server_takeover_enabled".to_owned(),
@@ -322,7 +342,10 @@ fn compatibility_api_config(state: &AgentState) -> fluxdown_api::server::ApiServ
             "local_server_mcp_enabled".to_owned(),
             state.gateway.mcp_enabled.to_string(),
         ),
-        ("local_server_lan_enabled".to_owned(), "false".to_owned()),
+        (
+            "local_server_lan_enabled".to_owned(),
+            state.gateway.lan_enabled.to_string(),
+        ),
         (
             "local_server_cors_allow_all".to_owned(),
             state.gateway.cors_enabled.to_string(),
@@ -331,16 +354,41 @@ fn compatibility_api_config(state: &AgentState) -> fluxdown_api::server::ApiServ
             "local_server_token".to_owned(),
             state.gateway_user_token.clone(),
         ),
+        (
+            "local_server_port".to_owned(),
+            state.gateway.port.to_string(),
+        ),
     ]);
-    config.insert("local_server_port".to_owned(), "17800".to_owned());
     fluxdown_api::server::ApiServerConfig::from_config_map(&config, env!("CARGO_PKG_VERSION"))
 }
+
+/// UI Gateway 监听地址：`FLUXDOWN_AGENT_BIND` 覆盖时必须是回环；否则按持久化的
+/// `lan_enabled` 选择 `0.0.0.0` / `127.0.0.1`，端口固定 17800。
+fn gateway_bind_address(
+    lan_enabled: bool,
+    override_bind: Option<&str>,
+) -> Result<std::net::SocketAddr, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(value) = override_bind {
+        let bind = value.parse::<std::net::SocketAddr>()?;
+        if !bind.ip().is_loopback() {
+            return Err("FLUXDOWN_AGENT_BIND must be loopback".into());
+        }
+        return Ok(bind);
+    }
+    let ip = if lan_enabled {
+        std::net::Ipv4Addr::UNSPECIFIED
+    } else {
+        std::net::Ipv4Addr::LOCALHOST
+    };
+    Ok(std::net::SocketAddr::new(ip.into(), DEFAULT_GATEWAY_PORT))
+}
+
+const DEFAULT_GATEWAY_PORT: u16 = 17800;
 
 struct AgentPaths {
     agent_data_dir: PathBuf,
     daemon_token_file: PathBuf,
     daemon_rpc_url: String,
-    agent_bind: std::net::SocketAddr,
 }
 
 impl AgentPaths {
@@ -353,23 +401,66 @@ impl AgentPaths {
         let agent_data_dir = std::env::var_os("FLUXDOWN_AGENT_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("agent"));
+        // daemon 的 bearer 落在 engine 数据目录（`fluxdown_engine::data_dir::resolve_data_dir`），
+        // 与 agent 自己的 ProjectDirs 根不同；未显式指定时必须按同一规则推导，否则永远等不到 token。
         let daemon_token_file = std::env::var_os("FLUXDOWN_DAEMON_TOKEN_FILE")
             .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("daemon.token"));
+            .unwrap_or_else(|| {
+                std::env::var_os("FLUXDOWN_DATA_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(engine_data_dir)
+                    .join("daemon.token")
+            });
         let daemon_rpc_url = std::env::var("FLUXDOWN_DAEMON_URL")
             .unwrap_or_else(|_| "ws://127.0.0.1:17801/rpc".to_owned());
-        let agent_bind = std::env::var("FLUXDOWN_AGENT_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:17800".to_owned())
-            .parse::<std::net::SocketAddr>()?;
-        if !agent_bind.ip().is_loopback() {
-            return Err("FLUXDOWN_AGENT_BIND must be loopback".into());
-        }
         Ok(Self {
             agent_data_dir,
             daemon_token_file,
             daemon_rpc_url,
-            agent_bind,
         })
+    }
+}
+
+/// 镜像 `fluxdown_engine::data_dir::resolve_data_dir_inner` 的默认目录（agent 不依赖 engine）。
+fn engine_data_dir() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+                PathBuf::from(home).join(".local").join("share")
+            });
+        base.join("fluxdown")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+        PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("fluxdown")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."));
+        if exe_dir.join("portable").exists() {
+            return exe_dir.join("portable_data");
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local).join("FluxDown");
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("FluxDown");
+        }
+        exe_dir
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        PathBuf::from(".")
     }
 }
 
@@ -383,4 +474,37 @@ fn daemon_socket_address(
         return Err("daemon URL must be loopback".into());
     }
     Ok(std::net::SocketAddr::new(ip, url.port().unwrap_or(80)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compatibility_api_config, gateway_bind_address};
+    use crate::state::AgentState;
+
+    #[test]
+    fn lan_flag_selects_interface_without_env_override() {
+        let loopback = gateway_bind_address(false, None).expect("loopback bind");
+        assert_eq!(loopback.to_string(), "127.0.0.1:17800");
+        let lan = gateway_bind_address(true, None).expect("lan bind");
+        assert_eq!(lan.to_string(), "0.0.0.0:17800");
+    }
+
+    #[test]
+    fn env_override_wins_but_must_stay_loopback() {
+        let bound = gateway_bind_address(true, Some("127.0.0.1:0")).expect("override bind");
+        assert_eq!(bound.to_string(), "127.0.0.1:0");
+        assert!(gateway_bind_address(false, Some("0.0.0.0:17800")).is_err());
+        assert!(gateway_bind_address(false, Some("not-an-address")).is_err());
+    }
+
+    #[test]
+    fn compatibility_config_mirrors_gateway_state() {
+        let mut state = AgentState::default();
+        state.gateway.lan_enabled = true;
+        state.gateway.port = 17999;
+        let config = compatibility_api_config(&state);
+        assert!(config.lan_enabled);
+        assert_eq!(config.port, 17999);
+        assert_eq!(config.bind_addr().to_string(), "0.0.0.0:17999");
+    }
 }

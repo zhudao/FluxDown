@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod event_hub;
 pub mod gateway;
 pub mod link;
+pub mod log_export;
 pub mod nmh;
 pub mod platform;
 pub mod remote;
@@ -21,6 +22,7 @@ pub mod runtime;
 pub mod state;
 pub mod supervisor;
 pub mod sync;
+pub mod update;
 
 use fluxdown_protocol::{ServiceHello, ServiceRole};
 

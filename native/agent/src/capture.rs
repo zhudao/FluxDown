@@ -43,7 +43,7 @@ impl CaptureService {
         silent: bool,
     ) -> Result<Value, CaptureError> {
         if silent {
-            return self.create(request, true).await;
+            return self.create(request, None, true).await;
         }
         let public = PendingCaptureDto {
             transaction_id: Uuid::new_v4().to_string(),
@@ -68,6 +68,18 @@ impl CaptureService {
             tracing::warn!(error = %error, "could not launch desktop for pending capture");
         }
         Ok(json!({ "transactionId": public.transaction_id }))
+    }
+
+    /// 用户选定的本机 `.torrent`（已上传为 daemon blob）直接建任务；
+    /// `unattended` 为 true 时全选文件不弹选择框。
+    pub async fn create_torrent(
+        &self,
+        request: DownloadRequest,
+        torrent_blob_id: String,
+        unattended: bool,
+    ) -> Result<Value, CaptureError> {
+        self.create(request, Some(torrent_blob_id), unattended)
+            .await
     }
 
     pub async fn list(&self) -> Vec<PendingCaptureDto> {
@@ -95,7 +107,7 @@ impl CaptureService {
         };
         self.publish().await;
         if accepted {
-            self.create(transaction.request, false).await
+            self.create(transaction.request, None, false).await
         } else {
             Ok(json!({ "accepted": false }))
         }
@@ -104,6 +116,7 @@ impl CaptureService {
     async fn create(
         &self,
         request: DownloadRequest,
+        torrent_blob_id: Option<String>,
         unattended: bool,
     ) -> Result<Value, CaptureError> {
         let create = serde_json::from_value::<CreateTaskRequest>(json!({
@@ -122,7 +135,7 @@ impl CaptureService {
                 fluxdown_protocol::method::DAEMON_TASK_CREATE,
                 Some(DaemonCreateTaskParams {
                     request: create,
-                    torrent_blob_id: None,
+                    torrent_blob_id,
                     unattended,
                 }),
             )
@@ -156,4 +169,94 @@ pub enum CaptureError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Platform(#[from] crate::platform::PlatformError),
+}
+
+/// daemon 专用二进制上传端点（`POST /blobs/{torrents|plugins}`）的客户端。
+///
+/// 与 RPC 共用 daemon 的 bearer；base URL 由 RPC URL 换成 http(s) 并去掉路径。
+pub struct DaemonBlobClient {
+    base_url: reqwest::Url,
+    bearer: String,
+    http: reqwest::Client,
+}
+
+/// 上传的 blob 类型，对应 daemon 端点路径段。
+#[derive(Clone, Copy, Debug)]
+pub enum BlobKind {
+    Torrent,
+    Plugin,
+}
+
+impl BlobKind {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Torrent => "/blobs/torrents",
+            Self::Plugin => "/blobs/plugins",
+        }
+    }
+}
+
+impl DaemonBlobClient {
+    pub fn new(config: &crate::daemon_client::DaemonClientConfig) -> Result<Self, BlobError> {
+        let mut base_url = reqwest::Url::parse(&config.rpc_url)
+            .map_err(|error| BlobError::Url(error.to_string()))?;
+        let scheme = match base_url.scheme() {
+            "ws" | "http" => "http",
+            "wss" | "https" => "https",
+            other => return Err(BlobError::Url(format!("unsupported scheme {other}"))),
+        };
+        base_url
+            .set_scheme(scheme)
+            .map_err(|()| BlobError::Url("scheme is not settable".to_owned()))?;
+        base_url.set_path("");
+        base_url.set_query(None);
+        base_url.set_fragment(None);
+        let http = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()?;
+        Ok(Self {
+            base_url,
+            bearer: config.bearer.clone(),
+            http,
+        })
+    }
+
+    /// 上传字节并返回 daemon 分配的 `blobId`。
+    pub async fn upload(&self, kind: BlobKind, bytes: Vec<u8>) -> Result<String, BlobError> {
+        let url = self
+            .base_url
+            .join(kind.path())
+            .map_err(|error| BlobError::Url(error.to_string()))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BlobError::Status(status.as_u16()));
+        }
+        let body = response.json::<Value>().await?;
+        body.get("blobId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or(BlobError::Decode)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BlobError {
+    #[error("daemon URL is invalid: {0}")]
+    Url(String),
+    #[error("daemon blob upload transport failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("daemon blob upload rejected with HTTP {0}")]
+    Status(u16),
+    #[error("daemon blob upload response has no blobId")]
+    Decode,
 }
