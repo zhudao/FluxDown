@@ -344,18 +344,18 @@ final Map<TaskColumnId, TaskColumnDef> kTaskColumns = {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
-            if (hasDown)
+            if (hasUp)
               Text(
-                '↓ ${DownloadTask.formatBytes(down)}/s',
+                '↑ ${DownloadTask.formatBytes(up)}/s',
                 style: TextStyle(
                   fontSize: 11,
                   color: AppColors.green,
                   fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
-            if (hasUp)
+            if (hasDown)
               Text(
-                '↑ ${DownloadTask.formatBytes(up)}/s',
+                '↓ ${DownloadTask.formatBytes(down)}/s',
                 style: TextStyle(
                   fontSize: 11,
                   color: AppColors.green,

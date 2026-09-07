@@ -2623,9 +2623,11 @@ bucketFunctionTable(List<DownloadQueue> queues) => {
 };
 
 /// 「智能」排序比较器：状态优先级（下载中0 < 准备/恢复中1 < 排队2 <
-/// 暂停3 < 失败4 < 完成5）→ 排队内按队列位置 → 其余按创建时间升序，
-/// 固定升序稳定、忽略 [SortDir]（design-proto-spec §3 `smart` 语义，对齐
-/// 现状 `_compareActiveTasks` 并推广到全部状态，保证默认视图零感知）。
+/// 暂停3 < 失败4 < 完成5）→ 排队内按队列位置 → 活跃层（下载中/准备/恢复中）
+/// 按创建时间升序、顺序稳定不抖动（对齐现状 `_compareActiveTasks`）；
+/// 其余非活跃层（排队外的暂停/失败/完成/取消）按创建时间降序，最新任务
+/// 靠前，符合用户预期（#429）。固定忽略 [SortDir]（design-proto-spec §3
+/// `smart` 语义）。
 int compareEntitiesSmart(ListEntity a, ListEntity b) {
   int tier(TaskStatus s) => switch (s) {
     TaskStatus.downloading => 0,
@@ -2637,14 +2639,20 @@ int compareEntitiesSmart(ListEntity a, ListEntity b) {
     TaskStatus.completed => 5,
     TaskStatus.canceled => 6,
   };
-  final diff = tier(a.statusBucket) - tier(b.statusBucket);
+  final aTier = tier(a.statusBucket);
+  final diff = aTier - tier(b.statusBucket);
   if (diff != 0) return diff;
   if (a.statusBucket == TaskStatus.pending &&
       a is TaskEntity &&
       b is TaskEntity) {
     return a.task.queuePosition.compareTo(b.task.queuePosition);
   }
-  return a.createdAt.compareTo(b.createdAt);
+  if (aTier <= 1) {
+    // 活跃任务：按创建时间升序，顺序稳定不抖动。
+    return a.createdAt.compareTo(b.createdAt);
+  }
+  // 非活跃任务：按创建时间降序，最新在前。
+  return b.createdAt.compareTo(a.createdAt);
 }
 
 /// 6 键排序比较器表（`smart` 忽略 [dir]；其余按 [dir] 升/降序，

@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 
+import '../i18n/framework_localizations.dart';
 import '../i18n/locale_provider.dart';
 import '../services/bt_file_selection_service.dart';
 import '../services/hls_quality_service.dart';
@@ -68,6 +69,7 @@ class _FluxDownMobileAppState extends State<FluxDownMobileApp> {
   Widget build(BuildContext context) {
     final FluxThemeTokens tokens = widget.themeProvider.activeTokens(context);
     final theme = buildThemeFromTokens(tokens);
+    final fl = frameworkLocale(widget.localeNotifier.s.locale);
 
     // Android 系统栏图标按当前主题反色；亮色主题用深色图标，暗色主题反之。
     final iconBrightness = tokens.appearance == Brightness.dark
@@ -105,6 +107,9 @@ class _FluxDownMobileAppState extends State<FluxDownMobileApp> {
                       navigatorKey: _navigatorKey,
                       color: theme.colorScheme.primary,
                       debugShowCheckedModeBanner: false,
+                      locale: fl,
+                      supportedLocales: [fl],
+                      localizationsDelegates: frameworkLocalizationDelegates,
                       home: WithForegroundTask(
                         child: MobileShell(
                           themeProvider: widget.themeProvider,

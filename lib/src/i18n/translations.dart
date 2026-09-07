@@ -969,6 +969,8 @@ class S {
   // 标题栏按钮
   String get titlebarButtons => _r('titlebarButtons');
   String get titlebarButtonsDesc => _r('titlebarButtonsDesc');
+  String get showTitlebarNewDownload => _r('showTitlebarNewDownload');
+  String get showTitlebarNewDownloadDesc => _r('showTitlebarNewDownloadDesc');
   String get showTitlebarPauseAll => _r('showTitlebarPauseAll');
   String get showTitlebarPauseAllDesc => _r('showTitlebarPauseAllDesc');
   String get showTitlebarResumeAll => _r('showTitlebarResumeAll');

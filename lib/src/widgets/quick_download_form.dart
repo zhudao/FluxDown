@@ -13,10 +13,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart'
     show
-        AdaptiveTextSelectionToolbar,
         CircularProgressIndicator,
         Colors,
-        DefaultMaterialLocalizations,
         InputDecoration,
         Material,
         MaterialType,
@@ -736,59 +734,40 @@ class _QuickDownloadFormState extends State<QuickDownloadForm> {
           const SizedBox(height: 6),
           // 自适应高度：默认 2 行紧凑，随内容增高到 6 行后内部滚动，
           // 避免单条链接时大片留白（小窗高度跟随内容，同步收窄）
-          Localizations(
-            locale: const Locale('en'),
-            delegates: const [
-              DefaultWidgetsLocalizations.delegate,
-              DefaultMaterialLocalizations.delegate,
-            ],
-            child: Material(
-              type: MaterialType.transparency,
-              child: TextSelectionTheme(
-                data: TextSelectionThemeData(
-                  selectionColor: m.textSelection(c.accent),
-                  cursorColor: c.accent,
-                  selectionHandleColor: c.accent,
-                ),
-                child: TextField(
-                  controller: _urlController,
-                  focusNode: _urlFocusNode,
-                  minLines: 2,
-                  maxLines: 6,
-                  cursorColor: c.accent,
-                  style: TextStyle(fontSize: 13, color: c.textPrimary),
-                  contextMenuBuilder: (context, editableTextState) {
-                    return Localizations(
-                      locale: const Locale('en'),
-                      delegates: const [
-                        DefaultWidgetsLocalizations.delegate,
-                        DefaultMaterialLocalizations.delegate,
-                      ],
-                      child: AdaptiveTextSelectionToolbar.editableText(
-                        editableTextState: editableTextState,
-                      ),
-                    );
-                  },
-                  decoration: InputDecoration(
-                    hintText: s.batchUrlPlaceholder,
-                    hintStyle: TextStyle(fontSize: 12.5, color: c.textMuted),
-                    hintMaxLines: 5,
-                    contentPadding: const EdgeInsets.all(10),
-                    filled: true,
-                    fillColor: c.inputBg,
-                    hoverColor: Colors.transparent,
-                    border: OutlineInputBorder(
-                      borderRadius: m.brInput,
-                      borderSide: BorderSide(color: c.inputBorder),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: m.brInput,
-                      borderSide: BorderSide(color: c.inputBorder),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: m.brInput,
-                      borderSide: BorderSide(color: c.inputFocusBorder),
-                    ),
+          Material(
+            type: MaterialType.transparency,
+            child: TextSelectionTheme(
+              data: TextSelectionThemeData(
+                selectionColor: m.textSelection(c.accent),
+                cursorColor: c.accent,
+                selectionHandleColor: c.accent,
+              ),
+              child: TextField(
+                controller: _urlController,
+                focusNode: _urlFocusNode,
+                minLines: 2,
+                maxLines: 6,
+                cursorColor: c.accent,
+                style: TextStyle(fontSize: 13, color: c.textPrimary),
+                decoration: InputDecoration(
+                  hintText: s.batchUrlPlaceholder,
+                  hintStyle: TextStyle(fontSize: 12.5, color: c.textMuted),
+                  hintMaxLines: 5,
+                  contentPadding: const EdgeInsets.all(10),
+                  filled: true,
+                  fillColor: c.inputBg,
+                  hoverColor: Colors.transparent,
+                  border: OutlineInputBorder(
+                    borderRadius: m.brInput,
+                    borderSide: BorderSide(color: c.inputBorder),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: m.brInput,
+                    borderSide: BorderSide(color: c.inputBorder),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: m.brInput,
+                    borderSide: BorderSide(color: c.inputFocusBorder),
                   ),
                 ),
               ),

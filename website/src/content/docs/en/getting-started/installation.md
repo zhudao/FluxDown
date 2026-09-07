@@ -26,14 +26,14 @@ The build isn't code-signed, so Windows SmartScreen may flag it as coming from a
 
 ### Scoop
 
-If you use the [Scoop](https://scoop.sh) package manager, install FluxDown from the FluxDown bucket:
+If you use the [Scoop](https://scoop.sh) package manager, FluxDown is available in the official Extras bucket:
 
 ```powershell
-scoop bucket add fluxdown https://github.com/zerx-lab/FluxDown
-scoop install fluxdown/fluxdown
+scoop bucket add extras
+scoop install extras/fluxdown
 ```
 
-This installs the portable build and keeps your `settings.json` across upgrades. Update anytime with `scoop update fluxdown`.
+This installs the portable build and keeps your `settings.json` across upgrades. New releases land in Extras automatically; update anytime with `scoop update fluxdown`.
 
 ## macOS
 

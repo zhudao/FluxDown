@@ -277,30 +277,7 @@ class HeaderBarState extends State<HeaderBar> {
         ),
         child: Row(
           children: [
-            // New download button
-            ShadButton(
-              onPressed: widget.onNewDownload,
-              height: 30,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              backgroundColor: c.accent,
-              hoverBackgroundColor: c.accentHover,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(LucideIcons.plus, size: 14, color: Colors.white),
-                  const SizedBox(width: 6),
-                  Text(
-                    s.newDownload,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: Colors.white,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
+            _buildNewDownloadButton(context, c, s),
             // Search with overlay dropdown
             Flexible(
               child: ConstrainedBox(
@@ -357,7 +334,7 @@ class HeaderBarState extends State<HeaderBar> {
                               border: Border.all(color: c.border, width: 1),
                             ),
                             child: Text(
-                              'Ctrl+F',
+                              Platform.isMacOS ? '⌘F' : 'Ctrl+F',
                               style: TextStyle(
                                 fontSize: 10,
                                 color: c.textMuted,
@@ -389,6 +366,58 @@ class HeaderBarState extends State<HeaderBar> {
           ],
         ),
       ),
+    );
+  }
+
+  /// 新建下载按钮：可在设置中关闭，隐藏后仍可通过任务列表右键菜单、
+  /// 应用菜单或快捷键新建下载；右键此按钮可直接隐藏。
+  Widget _buildNewDownloadButton(BuildContext context, AppColors c, S s) {
+    Widget buildButton(SettingsProvider? settings) {
+      if (!(settings?.showTitlebarNewDownload ?? true)) {
+        return const SizedBox.shrink();
+      }
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ShadButton(
+            onPressed: widget.onNewDownload,
+            height: 30,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            backgroundColor: c.accent,
+            hoverBackgroundColor: c.accentHover,
+            onSecondaryTapUp: settings == null
+                ? null
+                : (d) => _showHideButtonMenu(
+                    context,
+                    d.globalPosition,
+                    () => settings.setShowTitlebarNewDownload(false),
+                  ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(LucideIcons.plus, size: 14, color: Colors.white),
+                const SizedBox(width: 6),
+                Text(
+                  s.newDownload,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+        ],
+      );
+    }
+
+    final settings = SettingsProvider.globalInstance;
+    if (settings == null) return buildButton(null);
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) => buildButton(settings),
     );
   }
 
@@ -768,6 +797,27 @@ class _WindowButtonState extends State<_WindowButton> {
   }
 }
 
+/// 标题栏按钮的「隐藏」右键菜单，供各标题栏按钮组件复用。
+void _showHideButtonMenu(
+  BuildContext context,
+  Offset position,
+  VoidCallback onHide,
+) {
+  final c = AppColors.of(context);
+  showContextMenu(
+    context,
+    position,
+    items: [
+      ContextMenuItem(
+        icon: LucideIcons.eyeOff,
+        label: LocaleScope.of(context).hideButton,
+        color: c.textSecondary,
+        action: onHide,
+      ),
+    ],
+  );
+}
+
 /// 标题栏工具按钮组（全部暂停/全部恢复/设置/主题切换）。
 ///
 /// 每个按钮可在「设置 → 通用 → 标题栏按钮」中开关显示，
@@ -793,26 +843,6 @@ class _TitlebarToolButtons extends StatelessWidget {
     );
   }
 
-  void _showHideMenu(
-    BuildContext context,
-    Offset position,
-    VoidCallback onHide,
-  ) {
-    final c = AppColors.of(context);
-    showContextMenu(
-      context,
-      position,
-      items: [
-        ContextMenuItem(
-          icon: LucideIcons.eyeOff,
-          label: LocaleScope.of(context).hideButton,
-          color: c.textSecondary,
-          action: onHide,
-        ),
-      ],
-    );
-  }
-
   Widget _buildRow(BuildContext context, SettingsProvider? settings) {
     final s = LocaleScope.of(context);
     final themeProvider = FluxDownApp.of(context);
@@ -831,7 +861,7 @@ class _TitlebarToolButtons extends StatelessWidget {
             iconSize: 16,
             onSecondaryTapUp: settings == null
                 ? null
-                : (d) => _showHideMenu(
+                : (d) => _showHideButtonMenu(
                     context,
                     d.globalPosition,
                     () => settings.setShowTitlebarPauseAll(false),
@@ -845,7 +875,7 @@ class _TitlebarToolButtons extends StatelessWidget {
             iconSize: 16,
             onSecondaryTapUp: settings == null
                 ? null
-                : (d) => _showHideMenu(
+                : (d) => _showHideButtonMenu(
                     context,
                     d.globalPosition,
                     () => settings.setShowTitlebarResumeAll(false),
@@ -860,7 +890,7 @@ class _TitlebarToolButtons extends StatelessWidget {
             isActive: isSettingsActive,
             onSecondaryTapUp: settings == null
                 ? null
-                : (d) => _showHideMenu(
+                : (d) => _showHideButtonMenu(
                     context,
                     d.globalPosition,
                     () => settings.setShowTitlebarSettings(false),
@@ -878,7 +908,7 @@ class _TitlebarToolButtons extends StatelessWidget {
             iconSize: 15,
             onSecondaryTapUp: settings == null
                 ? null
-                : (d) => _showHideMenu(
+                : (d) => _showHideButtonMenu(
                     context,
                     d.globalPosition,
                     () => settings.setShowTitlebarTheme(false),

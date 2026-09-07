@@ -18,6 +18,7 @@ import 'package:flutter/widgets.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 
 import '../bindings/bindings.dart' show ResolvePreviewResult;
+import '../i18n/framework_localizations.dart';
 import '../i18n/locale_provider.dart';
 import '../models/download_queue.dart' show kMainQueueId;
 import '../services/file_picker_service.dart';
@@ -86,6 +87,13 @@ class _QuickPopupAppState extends State<QuickPopupApp> {
         // 同步全局 locale（currentS 供表单内无 context 场景使用）
         currentLocale = payload.locale;
         currentS = S.of(payload.locale);
+        // 弹窗每次新载荷都用 ValueKey(_epoch) 重建整棵 WidgetsApp（全新挂载
+        // 的 Localizations），非英文 shadcn 本地化走异步 deferred import；
+        // 在 setState 前预热缓存，令新树的 AppShadLocalizationsDelegate.load
+        // 同步命中，避免一帧空白。
+        await AppShadLocalizationsDelegate.warmUp(
+          frameworkLocale(payload.locale),
+        );
         setState(() {
           _payload = payload;
           _epoch++;
@@ -115,6 +123,7 @@ class _QuickPopupAppState extends State<QuickPopupApp> {
     // 与 main.dart 主窗口根组件同构：手动组合 ShadTheme + WidgetsApp
     final tokens = FluxThemeTokens.fromJson(payload.tokensJson);
     final theme = buildThemeFromTokens(tokens);
+    final fl = frameworkLocale(payload.locale);
     return LocaleScope(
       s: S.of(payload.locale),
       child: FluxThemeScope(
@@ -136,6 +145,9 @@ class _QuickPopupAppState extends State<QuickPopupApp> {
                       key: ValueKey(_epoch),
                       color: theme.colorScheme.primary,
                       debugShowCheckedModeBanner: false,
+                      locale: fl,
+                      supportedLocales: [fl],
+                      localizationsDelegates: frameworkLocalizationDelegates,
                       home: _PopupShell(
                         payload: payload,
                         formController: _formController,

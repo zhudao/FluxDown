@@ -273,6 +273,7 @@
   "topbar.speedLimitOn": "Download limit: {speed}",
   "topbar.speedLimitOff": "Download limit: off",
   "topbar.goSettings": "{label} (adjust in Settings)",
+  "topbar.toggleTheme": "Toggle light/dark theme",
   "tabs.all": "All",
   "tabs.downloading": "Downloading",
   "tabs.completed": "Completed",

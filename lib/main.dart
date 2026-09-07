@@ -34,6 +34,7 @@ import 'src/services/notification_service.dart';
 import 'src/services/power_service.dart';
 import 'src/services/tray_service.dart';
 import 'src/i18n/locale_provider.dart';
+import 'src/i18n/framework_localizations.dart';
 import 'src/services/update_service.dart';
 import 'src/theme/app_theme.dart';
 import 'src/theme/flux_theme_tokens.dart';
@@ -108,6 +109,10 @@ Future<void> main(List<String> args) async {
   ]);
   localeNotifier = LocaleNotifier();
   await _runStartupStep('locale init', () => localeNotifier.init());
+  await _runStartupStep(
+    'shad l10n warmup',
+    () => AppShadLocalizationsDelegate.warmUp(frameworkLocale(currentLocale)),
+  );
 
   // 注：已移除 desktop_multi_window 子窗口入口。
   // 下载完成通知现在通过主窗口内 OverlayEntry 实现，
@@ -1028,6 +1033,7 @@ class _FluxDownAppState extends State<FluxDownApp>
     // - materialTheme() 每帧重建 ThemeData + applyGoogleFontToTextTheme
     final tokens = _resolveTokens(context);
     final theme = buildThemeFromTokens(tokens);
+    final fl = frameworkLocale(_localeNotifier.s.locale);
     WidgetsBinding.instance.addPostFrameCallback(
       (_) => _syncMacOsWindowBackground(tokens),
     );
@@ -1051,6 +1057,9 @@ class _FluxDownAppState extends State<FluxDownApp>
                       navigatorKey: _navigatorKey,
                       color: theme.colorScheme.primary,
                       debugShowCheckedModeBanner: false,
+                      locale: fl,
+                      supportedLocales: [fl],
+                      localizationsDelegates: frameworkLocalizationDelegates,
                       home: HomePage(settingsProvider: _settingsForExternal),
                       builder: (context, child) {
                         final scale = themeProvider.uiScale;

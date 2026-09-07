@@ -11,8 +11,12 @@
 //!
 //! Each key's default value points to a JSON manifest file that describes the NMH.
 //!
-//! These keys and the two manifest JSON files (written next to the NMH exe)
-//! sit outside the Windows installer's [Registry]/[Files] tracking, so
+//! The two manifest JSON files live in `<data_dir>\nmh\` (installed:
+//! `%LOCALAPPDATA%\FluxDown\nmh\`; portable: `<exe_dir>\portable_data\nmh\`),
+//! never next to the exe: an all-users install under `Program Files` is not
+//! writable by the unelevated app, so writing there fails before any registry
+//! key is created and the extension can never connect. Keys and manifests sit
+//! outside the Windows installer's [Registry]/[Files] tracking, so
 //! `installer/windows/setup.iss` removes them explicitly on uninstall
 //! (`CurUninstallStepChanged` + `[UninstallDelete]`) — keep both in sync.
 
@@ -174,16 +178,36 @@ mod inner {
         ))
     }
 
-    /// Write two NMH manifest JSON files next to the NMH executable:
+    /// Per-user, always-writable directory holding the manifest JSON files.
+    ///
+    /// `%LOCALAPPDATA%\FluxDown\nmh` for installed builds, `<exe_dir>\portable_data\nmh`
+    /// for portable ones (`fluxdown_engine::data_dir` decides). The install directory
+    /// is deliberately not used: an all-users install lands in `Program Files`, which
+    /// the unelevated app cannot write.
+    fn manifest_dir() -> Result<PathBuf, io::Error> {
+        fluxdown_engine::data_dir::resolve_data_dir(None)
+            .map(|d| d.join("nmh"))
+            .map_err(|e| io::Error::other(format!("data dir unavailable: {e:#}")))
+    }
+
+    /// Expected (UNC-stripped) manifest paths `(chromium, firefox)` for the current user.
+    fn expected_manifest_paths() -> Result<(String, String), io::Error> {
+        let dir = manifest_dir()?;
+        Ok((
+            strip_unc_prefix(&dir.join(MANIFEST_FILENAME_CHROMIUM).to_string_lossy()),
+            strip_unc_prefix(&dir.join(MANIFEST_FILENAME_FIREFOX).to_string_lossy()),
+        ))
+    }
+
+    /// Write two NMH manifest JSON files into [`manifest_dir`]:
     /// - Chromium manifest (Chrome/Edge): contains `allowed_origins`
     /// - Firefox manifest: contains `allowed_extensions` ONLY (no `allowed_origins`)
     ///
     /// Returns `(chromium_manifest_path, firefox_manifest_path)`.
     fn write_manifests(nmh_exe: &Path) -> Result<(PathBuf, PathBuf), io::Error> {
         let nmh_path_str = strip_unc_prefix(&nmh_exe.to_string_lossy());
-        let dir = nmh_exe
-            .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no parent dir"))?;
+        let dir = manifest_dir()?;
+        std::fs::create_dir_all(&dir)?;
 
         // Chromium manifest (Chrome + Edge)
         let chromium = NmhManifestChromium {
@@ -267,6 +291,11 @@ mod inner {
         // 清单由 serde_json 写出，路径中的 `\` 被转义为 `\\`；
         // 用转义后的形式做内容匹配，否则 Windows 上永远不匹配、每次启动都重注册。
         let expected_exe_json = strip_unc_prefix(&nmh_exe.to_string_lossy()).replace('\\', "\\\\");
+        // 注册表值必须精确指向当前用户数据目录下的清单：旧版本写在 exe 旁边
+        // （全局安装时不可写），命中即强制迁移。
+        let Ok((expected_chromium, expected_firefox)) = expected_manifest_paths() else {
+            return true;
+        };
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
         // --- 版本切换检测 ---
@@ -319,8 +348,8 @@ mod inner {
             let Ok(manifest_str): Result<String, _> = key.get_value("") else {
                 return true;
             };
-            if !manifest_str.ends_with(MANIFEST_FILENAME_CHROMIUM) {
-                return true; // pointing to wrong manifest
+            if !manifest_str.eq_ignore_ascii_case(&expected_chromium) {
+                return true; // wrong manifest, or legacy location next to the exe
             }
             if !Path::new(&manifest_str).exists() {
                 return true;
@@ -349,8 +378,8 @@ mod inner {
                 let Ok(manifest_str): Result<String, _> = key.get_value("") else {
                     return true;
                 };
-                if !manifest_str.ends_with(MANIFEST_FILENAME_FIREFOX) {
-                    return true; // still pointing to old shared manifest
+                if !manifest_str.eq_ignore_ascii_case(&expected_firefox) {
+                    return true; // old shared manifest or legacy install-dir location
                 }
                 if !Path::new(&manifest_str).exists() {
                     return true;
@@ -386,7 +415,7 @@ mod inner {
     fn diagnose_registry(
         hkcu: &RegKey,
         reg_path: &str,
-        manifest_filename: &str,
+        expected_manifest: &str,
         expected_exe_json: &str,
         require_edge_origin: bool,
     ) -> String {
@@ -397,7 +426,7 @@ mod inner {
         let Ok(manifest_str): Result<String, _> = key.get_value("") else {
             return format!("registry default value unreadable: HKCU\\{}", full_path);
         };
-        if !manifest_str.ends_with(manifest_filename) {
+        if !manifest_str.eq_ignore_ascii_case(expected_manifest) {
             return format!("registry points to unexpected manifest: {}", manifest_str);
         }
         if !Path::new(&manifest_str).exists() {
@@ -432,11 +461,15 @@ mod inner {
             }
         };
         diag.exe_path = strip_unc_prefix(&nmh_exe.to_string_lossy());
-        if let Some(dir) = nmh_exe.parent() {
-            diag.chromium_manifest =
-                strip_unc_prefix(&dir.join(MANIFEST_FILENAME_CHROMIUM).to_string_lossy());
-            diag.firefox_manifest =
-                strip_unc_prefix(&dir.join(MANIFEST_FILENAME_FIREFOX).to_string_lossy());
+        match expected_manifest_paths() {
+            Ok((chromium, firefox)) => {
+                diag.chromium_manifest = chromium;
+                diag.firefox_manifest = firefox;
+            }
+            Err(e) => {
+                diag.exe_error = format!("{e:#}");
+                return diag;
+            }
         }
 
         // 与 needs_update() 同口径：清单由 serde_json 写出，路径里的 `\` 被转义为 `\\`。
@@ -456,7 +489,7 @@ mod inner {
             let issue = diagnose_registry(
                 &hkcu,
                 reg_path,
-                MANIFEST_FILENAME_CHROMIUM,
+                &diag.chromium_manifest,
                 &expected_exe_json,
                 true,
             );
@@ -473,7 +506,7 @@ mod inner {
         let issue = diagnose_registry(
             &hkcu,
             firefox_reg,
-            MANIFEST_FILENAME_FIREFOX,
+            &diag.firefox_manifest,
             &expected_exe_json,
             false,
         );
@@ -502,6 +535,7 @@ mod inner {
         let firefox_str = strip_unc_prefix(&firefox_path.to_string_lossy());
         let nmh_str = strip_unc_prefix(&nmh_exe.to_string_lossy());
         register_registry(&chromium_str, &firefox_str)?;
+        remove_legacy_manifests(&nmh_exe);
         log_info!(
             "[nmh_registry] NMH registered: exe={}, chromium_manifest={}, firefox_manifest={}",
             nmh_str,
@@ -509,6 +543,17 @@ mod inner {
             firefox_str,
         );
         Ok(())
+    }
+
+    /// Older releases wrote the manifests next to the NMH exe; delete them so a
+    /// stale copy in the install directory cannot mislead anyone debugging the
+    /// registration. Best-effort: on an all-users install this directory is
+    /// read-only and the files simply stay (uninstall removes them).
+    fn remove_legacy_manifests(nmh_exe: &Path) {
+        if let Some(dir) = nmh_exe.parent() {
+            let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_CHROMIUM));
+            let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_FIREFOX));
+        }
     }
 
     /// Remove NMH registration for all browsers and delete manifest files.
@@ -532,10 +577,8 @@ mod inner {
             let _ = parent.delete_subkey(NMH_NAME);
         }
 
-        // Remove both manifest files if NMH exe is found.
-        if let Ok(nmh_exe) = find_nmh_exe()
-            && let Some(dir) = nmh_exe.parent()
-        {
+        // Remove both manifest files (best-effort; dir may never have been created).
+        if let Ok(dir) = manifest_dir() {
             let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_CHROMIUM));
             let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_FIREFOX));
         }
@@ -1169,10 +1212,10 @@ mod inner {
     /// so that the correct path is returned even when the process is launched
     /// by a system service (launchd) that may not set `$HOME`.
     fn home_dir() -> Option<PathBuf> {
-        if let Ok(h) = std::env::var("HOME") {
-            if !h.is_empty() {
-                return Some(PathBuf::from(h));
-            }
+        if let Ok(h) = std::env::var("HOME")
+            && !h.is_empty()
+        {
+            return Some(PathBuf::from(h));
         }
         use std::ffi::CStr;
         let uid = unsafe { libc::getuid() };
@@ -1198,10 +1241,10 @@ mod inner {
             let pwd = unsafe { pwd.assume_init() };
             if !pwd.pw_dir.is_null() {
                 let cstr = unsafe { CStr::from_ptr(pwd.pw_dir) };
-                if let Ok(s) = cstr.to_str() {
-                    if !s.is_empty() {
-                        return Some(PathBuf::from(s));
-                    }
+                if let Ok(s) = cstr.to_str()
+                    && !s.is_empty()
+                {
+                    return Some(PathBuf::from(s));
                 }
             }
         }

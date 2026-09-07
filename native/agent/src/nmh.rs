@@ -939,7 +939,7 @@ pub mod registry {
         }
     }
 
-    /// Windows：HKCU 注册表键指向写在中继旁边的两份清单（Chromium / Firefox 各一份）。
+    /// Windows：HKCU 注册表键指向 `<data_dir>\nmh\` 下的两份清单（Chromium / Firefox 各一份）。
     #[cfg(windows)]
     mod windows {
         use std::io;
@@ -974,11 +974,27 @@ pub mod registry {
             path.is_dir()
         }
 
+        /// 每用户可写的清单目录：`<engine data dir>\nmh`（安装版 `%LOCALAPPDATA%\FluxDown\nmh`，
+        /// 便携版 `<exe_dir>\portable_data\nmh`）。不能写在中继旁边：全局安装落在
+        /// `Program Files`，未提权进程写入直接 access denied，注册表键永远写不出来。
+        fn manifest_dir() -> PathBuf {
+            crate::runtime::engine_data_dir().join("nmh")
+        }
+
+        /// 期望的（去 UNC 前缀）清单路径 `(chromium, firefox)`。
+        fn expected_manifest_paths() -> (String, String) {
+            let dir = manifest_dir();
+            (
+                strip_unc_prefix(&dir.join(MANIFEST_FILENAME_CHROMIUM).to_string_lossy()),
+                strip_unc_prefix(&dir.join(MANIFEST_FILENAME_FIREFOX).to_string_lossy()),
+            )
+        }
+
         /// 只读检查单个注册表键，返回失败原因；全部匹配时为空串。
         fn diagnose_registry(
             hkcu: &RegKey,
             reg_path: &str,
-            manifest_filename: &str,
+            expected_manifest: &str,
             expected_exe_json: &str,
             require_edge_origin: bool,
         ) -> String {
@@ -989,7 +1005,7 @@ pub mod registry {
             let Ok(manifest_str) = key.get_value::<String, _>("") else {
                 return format!("registry default value unreadable: HKCU\\{full_path}");
             };
-            if !manifest_str.ends_with(manifest_filename) {
+            if !manifest_str.eq_ignore_ascii_case(expected_manifest) {
                 return format!("registry points to unexpected manifest: {manifest_str}");
             }
             if !Path::new(&manifest_str).exists() {
@@ -1020,12 +1036,9 @@ pub mod registry {
                 }
             };
             diagnosis.exe_path = strip_unc_prefix(&nmh_exe.to_string_lossy());
-            if let Some(dir) = nmh_exe.parent() {
-                diagnosis.chromium_manifest =
-                    strip_unc_prefix(&dir.join(MANIFEST_FILENAME_CHROMIUM).to_string_lossy());
-                diagnosis.firefox_manifest =
-                    strip_unc_prefix(&dir.join(MANIFEST_FILENAME_FIREFOX).to_string_lossy());
-            }
+            let (chromium_manifest, firefox_manifest) = expected_manifest_paths();
+            diagnosis.chromium_manifest = chromium_manifest;
+            diagnosis.firefox_manifest = firefox_manifest;
             // 清单由 serde_json 写出，路径中的 `\` 被转义为 `\\`，内容匹配必须用转义形式。
             let expected_exe_json = diagnosis.exe_path.replace('\\', "\\\\");
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -1038,7 +1051,7 @@ pub mod registry {
                 let issue = diagnose_registry(
                     &hkcu,
                     reg_path,
-                    MANIFEST_FILENAME_CHROMIUM,
+                    &diagnosis.chromium_manifest,
                     &expected_exe_json,
                     true,
                 );
@@ -1053,7 +1066,7 @@ pub mod registry {
             let issue = diagnose_registry(
                 &hkcu,
                 FIREFOX_REG_PATH,
-                MANIFEST_FILENAME_FIREFOX,
+                &diagnosis.firefox_manifest,
                 &expected_exe_json,
                 false,
             );
@@ -1071,9 +1084,8 @@ pub mod registry {
         pub fn register() -> Result<(), io::Error> {
             let nmh_exe = super::find_nmh_exe()?;
             let nmh_path = strip_unc_prefix(&nmh_exe.to_string_lossy());
-            let dir = nmh_exe
-                .parent()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no parent dir"))?;
+            let dir = manifest_dir();
+            std::fs::create_dir_all(&dir)?;
             let chromium_path = dir.join(MANIFEST_FILENAME_CHROMIUM);
             std::fs::write(&chromium_path, super::chromium_manifest_json(&nmh_path)?)?;
             let firefox_path = dir.join(MANIFEST_FILENAME_FIREFOX);

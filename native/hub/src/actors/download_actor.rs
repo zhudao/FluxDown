@@ -350,10 +350,43 @@ async fn load_initial_config(
     )
 }
 
+/// 写租约重试窗口：同进程二次 isolate（Android Activity 重建 / rinf 热重启）时，
+/// 旧 runtime 还在 drop 途中仍握着 `engine.lock`；短暂等待即可接手，
+/// 超时则说明确有另一个引擎进程（fluxdownd / headless server / CLI --local）在写同一目录。
+const LEASE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const LEASE_RETRY_ATTEMPTS: u32 = 20;
+
+async fn open_db_with_lease_retry(
+    db_dir: &std::path::Path,
+) -> Result<(Db, fluxdown_engine::db::EngineWriteGuard), ActorError> {
+    let mut attempt = 0;
+    loop {
+        match Db::open_exclusive(db_dir).await {
+            Err(DbError::WriterLeaseHeld(lock_path)) if attempt < LEASE_RETRY_ATTEMPTS => {
+                attempt += 1;
+                if attempt == 1 {
+                    log_info!(
+                        "[actor] engine write lease held ({lock_path}); waiting for previous holder"
+                    );
+                }
+                tokio::time::sleep(LEASE_RETRY_INTERVAL).await;
+            }
+            Err(DbError::WriterLeaseHeld(lock_path)) => {
+                log_info!(
+                    "[actor] engine write lease still held after {}ms ({lock_path}); another FluxDown engine (fluxdownd / server / cli --local) is using this data dir",
+                    LEASE_RETRY_INTERVAL.as_millis() * u128::from(LEASE_RETRY_ATTEMPTS)
+                );
+                return Err(ActorError::OpenDatabase(DbError::WriterLeaseHeld(
+                    lock_path,
+                )));
+            }
+            other => return other.map_err(ActorError::OpenDatabase),
+        }
+    }
+}
+
 pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
-    let (db, write_guard) = Db::open_exclusive(&db_dir)
-        .await
-        .map_err(ActorError::OpenDatabase)?;
+    let (db, write_guard) = open_db_with_lease_retry(&db_dir).await?;
 
     // Initialize default config values in DB (no-op if already set)
     if let Err(e) = db.init_default_config(&default_save_dir()).await {
@@ -3529,6 +3562,37 @@ mod tests {
         );
         assert!(signal.filename.is_empty());
         assert_eq!(signal.file_size, 0);
+    }
+
+    /// 同进程二次 isolate：旧 runtime 释放 `engine.lock` 稍晚于新 actor 启动，
+    /// 新 actor 必须在重试窗口内接手，而不是把 `WriterLeaseHeld` 当致命错误。
+    #[tokio::test]
+    async fn lease_retry_takes_over_after_previous_holder_releases() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown-hub-lease-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (_first_db, first_guard) = Db::open_exclusive(&dir).await.unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(LEASE_RETRY_INTERVAL * 2).await;
+            drop(first_guard);
+        });
+
+        let second = open_db_with_lease_retry(&dir).await;
+        release.await.unwrap();
+        assert!(
+            second.is_ok(),
+            "expected takeover, got {:?}",
+            second.as_ref().err()
+        );
+        drop(second);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

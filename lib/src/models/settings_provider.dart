@@ -69,6 +69,9 @@ class SettingsProvider extends ChangeNotifier {
   bool? _showSidebarDevice;
 
   // 标题栏工具按钮显示设置
+  // 本地设置，不进入云同步目录：同步键目录 v1 已冻结（三方契约），
+  // 新增键需三方契约 v2。
+  bool _showTitlebarNewDownload = true; // 新建下载按钮
   bool _showTitlebarPauseAll = true; // 全部暂停按钮
   bool _showTitlebarResumeAll = true; // 全部恢复按钮
   bool _showTitlebarSettings = true; // 设置按钮
@@ -315,6 +318,7 @@ class SettingsProvider extends ChangeNotifier {
       _showSidebarDevice ?? hasAnyDevice;
 
   // 标题栏工具按钮 Getters
+  bool get showTitlebarNewDownload => _showTitlebarNewDownload;
   bool get showTitlebarPauseAll => _showTitlebarPauseAll;
   bool get showTitlebarResumeAll => _showTitlebarResumeAll;
   bool get showTitlebarSettings => _showTitlebarSettings;
@@ -809,6 +813,13 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   // 标题栏工具按钮 Setters
+
+  void setShowTitlebarNewDownload(bool value) {
+    if (_showTitlebarNewDownload == value) return;
+    _showTitlebarNewDownload = value;
+    notifyListeners();
+    _saveToRust('show_titlebar_new_download', value.toString());
+  }
 
   void setShowTitlebarPauseAll(bool value) {
     if (_showTitlebarPauseAll == value) return;
@@ -2095,6 +2106,8 @@ class SettingsProvider extends ChangeNotifier {
               : entry.value == 'false'
               ? false
               : null;
+        case 'show_titlebar_new_download':
+          _showTitlebarNewDownload = entry.value != 'false';
         case 'show_titlebar_pause_all':
           _showTitlebarPauseAll = entry.value != 'false';
         case 'show_titlebar_resume_all':

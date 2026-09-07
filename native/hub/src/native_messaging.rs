@@ -677,10 +677,10 @@ mod server {
     /// by a system service (launchd on macOS) that may not set `$HOME`.
     #[cfg(target_os = "macos")]
     fn home_dir() -> Option<std::path::PathBuf> {
-        if let Ok(h) = std::env::var("HOME") {
-            if !h.is_empty() {
-                return Some(std::path::PathBuf::from(h));
-            }
+        if let Ok(h) = std::env::var("HOME")
+            && !h.is_empty()
+        {
+            return Some(std::path::PathBuf::from(h));
         }
         use std::ffi::CStr;
         let uid = unsafe { libc::getuid() };
@@ -706,10 +706,10 @@ mod server {
             let pwd = unsafe { pwd.assume_init() };
             if !pwd.pw_dir.is_null() {
                 let cstr = unsafe { CStr::from_ptr(pwd.pw_dir) };
-                if let Ok(s) = cstr.to_str() {
-                    if !s.is_empty() {
-                        return Some(std::path::PathBuf::from(s));
-                    }
+                if let Ok(s) = cstr.to_str()
+                    && !s.is_empty()
+                {
+                    return Some(std::path::PathBuf::from(s));
                 }
             }
         }

@@ -273,6 +273,7 @@
   "topbar.speedLimitOn": "下载限速：{speed}",
   "topbar.speedLimitOff": "下载限速：未开启",
   "topbar.goSettings": "{label}（前往设置调整）",
+  "topbar.toggleTheme": "切换浅色 / 深色主题",
   "tabs.all": "全部",
   "tabs.downloading": "下载中",
   "tabs.completed": "已完成",

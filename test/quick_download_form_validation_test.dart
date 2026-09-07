@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 
+import 'package:flux_down/src/i18n/framework_localizations.dart';
 import 'package:flux_down/src/i18n/locale_provider.dart';
 import 'package:flux_down/src/theme/app_theme.dart';
 import 'package:flux_down/src/theme/flux_theme_tokens.dart';
@@ -49,6 +50,7 @@ Widget _wrapForm(QuickDownloadForm form) {
               child: WidgetsApp(
                 color: theme.colorScheme.primary,
                 debugShowCheckedModeBanner: false,
+                localizationsDelegates: frameworkLocalizationDelegates,
                 home: form,
                 pageRouteBuilder:
                     <T>(RouteSettings settings, WidgetBuilder builder) {

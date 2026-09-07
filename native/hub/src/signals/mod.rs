@@ -745,6 +745,9 @@ pub struct CheckFileAssociation {}
 /// Windows-only — see `shortcut_icon.rs`; no-op elsewhere.
 #[derive(Deserialize, DartSignal)]
 pub struct UpdateShortcutIcons {
+    /// Only consumed by the Windows shortcut rewriter; the wire field must stay
+    /// on every platform so Dart's generated encoder is identical.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub icon_path: String,
 }
 

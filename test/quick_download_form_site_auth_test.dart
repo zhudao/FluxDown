@@ -10,6 +10,7 @@
 import 'package:flutter/material.dart' show TextField;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flux_down/src/i18n/framework_localizations.dart';
 import 'package:flux_down/src/theme/app_theme.dart';
 import 'package:flux_down/src/theme/flux_theme_tokens.dart';
 import 'package:flux_down/src/widgets/quick_download_form.dart';
@@ -59,6 +60,7 @@ Widget _wrapForm(QuickDownloadForm form) {
               child: WidgetsApp(
                 color: theme.colorScheme.primary,
                 debugShowCheckedModeBanner: false,
+                localizationsDelegates: frameworkLocalizationDelegates,
                 home: SingleChildScrollView(child: form),
                 pageRouteBuilder: <T>(
                   RouteSettings settings,

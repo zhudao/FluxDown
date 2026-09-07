@@ -2300,6 +2300,15 @@ class _GeneralContent extends StatelessWidget {
               subtitle: s.titlebarButtonsDesc,
               children: [
                 _SettingRow(
+                  label: s.showTitlebarNewDownload,
+                  description: s.showTitlebarNewDownloadDesc,
+                  child: ShadSwitch(
+                    value: settingsProvider.showTitlebarNewDownload,
+                    onChanged: (v) =>
+                        settingsProvider.setShowTitlebarNewDownload(v),
+                  ),
+                ),
+                _SettingRow(
                   label: s.showTitlebarPauseAll,
                   description: s.showTitlebarPauseAllDesc,
                   child: ShadSwitch(
@@ -2363,27 +2372,8 @@ class _CustomCategoryManager extends StatelessWidget {
 
   const _CustomCategoryManager({required this.settingsProvider});
 
-  /// 内置分类的 i18n 名称。这些文案不只是标签：「一键分类目录」拿它当目录名
-  /// （`categoryDirUnder`），Web 侧 `web/src/lib/categories.ts` 的 BUILTIN_LABEL
-  /// 必须逐字一致，否则两端会在同一台机器上建出两套目录。
-  static String _builtinLabel(S s, String? builtinType) =>
-      switch (builtinType) {
-        'all' => s.categoryAll,
-        'video' => s.categoryVideo,
-        'audio' => s.categoryAudio,
-        'document' => s.categoryDocument,
-        'image' => s.categoryImage,
-        'program' => s.categoryProgram,
-        'archive' => s.categoryArchive,
-        'other' => s.categoryOther,
-        _ => '',
-      };
-
   /// 获取分类显示名称（内置用 i18n，自定义用用户设置的名称）
-  static String displayName(S s, CustomCategory cat) {
-    if (cat.isBuiltin) return _builtinLabel(s, cat.builtinType);
-    return cat.name;
-  }
+  static String displayName(S s, CustomCategory cat) => cat.displayName(s);
 
   @override
   Widget build(BuildContext context) {
@@ -8241,55 +8231,48 @@ class _BtTrackerEditorState extends State<_BtTrackerEditor> {
           const SizedBox(height: 8),
           SizedBox(
             height: 240,
-            child: Localizations(
-              locale: const Locale('en'),
-              delegates: const [
-                DefaultWidgetsLocalizations.delegate,
-                DefaultMaterialLocalizations.delegate,
-              ],
-              child: Material(
-                type: MaterialType.transparency,
-                child: TextSelectionTheme(
-                  data: TextSelectionThemeData(
-                    selectionColor: m.textSelection(c.accent),
-                    cursorColor: c.accent,
-                    selectionHandleColor: c.accent,
+            child: Material(
+              type: MaterialType.transparency,
+              child: TextSelectionTheme(
+                data: TextSelectionThemeData(
+                  selectionColor: m.textSelection(c.accent),
+                  cursorColor: c.accent,
+                  selectionHandleColor: c.accent,
+                ),
+                child: TextField(
+                  controller: _controller,
+                  maxLines: null,
+                  expands: true,
+                  textAlignVertical: TextAlignVertical.top,
+                  cursorColor: c.accent,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: c.textPrimary,
+                    fontFamily: 'monospace',
+                    height: 1.5,
                   ),
-                  child: TextField(
-                    controller: _controller,
-                    maxLines: null,
-                    expands: true,
-                    textAlignVertical: TextAlignVertical.top,
-                    cursorColor: c.accent,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: c.textPrimary,
-                      fontFamily: 'monospace',
-                      height: 1.5,
+                  decoration: InputDecoration(
+                    hintText: s.btTrackerPlaceholder,
+                    hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
+                    hintMaxLines: 5,
+                    contentPadding: const EdgeInsets.all(10),
+                    filled: true,
+                    fillColor: c.inputBg,
+                    hoverColor: Colors.transparent,
+                    border: OutlineInputBorder(
+                      borderRadius: m.brInput,
+                      borderSide: BorderSide(color: c.inputBorder),
                     ),
-                    decoration: InputDecoration(
-                      hintText: s.btTrackerPlaceholder,
-                      hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
-                      hintMaxLines: 5,
-                      contentPadding: const EdgeInsets.all(10),
-                      filled: true,
-                      fillColor: c.inputBg,
-                      hoverColor: Colors.transparent,
-                      border: OutlineInputBorder(
-                        borderRadius: m.brInput,
-                        borderSide: BorderSide(color: c.inputBorder),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: m.brInput,
-                        borderSide: BorderSide(color: c.inputBorder),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: m.brInput,
-                        borderSide: BorderSide(color: c.inputFocusBorder),
-                      ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: m.brInput,
+                      borderSide: BorderSide(color: c.inputBorder),
                     ),
-                    onChanged: (_) => setState(() {}),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: m.brInput,
+                      borderSide: BorderSide(color: c.inputFocusBorder),
+                    ),
                   ),
+                  onChanged: (_) => setState(() {}),
                 ),
               ),
             ),
@@ -8528,52 +8511,45 @@ class _BtTrackerSubEditorState extends State<_BtTrackerSubEditor> {
             const SizedBox(height: 8),
             SizedBox(
               height: 100,
-              child: Localizations(
-                locale: const Locale('en'),
-                delegates: const [
-                  DefaultWidgetsLocalizations.delegate,
-                  DefaultMaterialLocalizations.delegate,
-                ],
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: TextSelectionTheme(
-                    data: TextSelectionThemeData(
-                      selectionColor: m.textSelection(c.accent),
-                      cursorColor: c.accent,
-                      selectionHandleColor: c.accent,
+              child: Material(
+                type: MaterialType.transparency,
+                child: TextSelectionTheme(
+                  data: TextSelectionThemeData(
+                    selectionColor: m.textSelection(c.accent),
+                    cursorColor: c.accent,
+                    selectionHandleColor: c.accent,
+                  ),
+                  child: TextField(
+                    controller: _controller,
+                    maxLines: null,
+                    expands: true,
+                    textAlignVertical: TextAlignVertical.top,
+                    cursorColor: c.accent,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: c.textPrimary,
+                      fontFamily: 'monospace',
+                      height: 1.5,
                     ),
-                    child: TextField(
-                      controller: _controller,
-                      maxLines: null,
-                      expands: true,
-                      textAlignVertical: TextAlignVertical.top,
-                      cursorColor: c.accent,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: c.textPrimary,
-                        fontFamily: 'monospace',
-                        height: 1.5,
+                    decoration: InputDecoration(
+                      hintText: s.btTrackerSubPlaceholder,
+                      hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
+                      hintMaxLines: 3,
+                      contentPadding: const EdgeInsets.all(10),
+                      filled: true,
+                      fillColor: c.inputBg,
+                      hoverColor: Colors.transparent,
+                      border: OutlineInputBorder(
+                        borderRadius: m.brInput,
+                        borderSide: BorderSide(color: c.inputBorder),
                       ),
-                      decoration: InputDecoration(
-                        hintText: s.btTrackerSubPlaceholder,
-                        hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
-                        hintMaxLines: 3,
-                        contentPadding: const EdgeInsets.all(10),
-                        filled: true,
-                        fillColor: c.inputBg,
-                        hoverColor: Colors.transparent,
-                        border: OutlineInputBorder(
-                          borderRadius: m.brInput,
-                          borderSide: BorderSide(color: c.inputBorder),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: m.brInput,
-                          borderSide: BorderSide(color: c.inputBorder),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: m.brInput,
-                          borderSide: BorderSide(color: c.inputFocusBorder),
-                        ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: m.brInput,
+                        borderSide: BorderSide(color: c.inputBorder),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: m.brInput,
+                        borderSide: BorderSide(color: c.inputFocusBorder),
                       ),
                     ),
                   ),
@@ -8794,55 +8770,48 @@ class _Ed2kServerEditorState extends State<_Ed2kServerEditor> {
           const SizedBox(height: 8),
           SizedBox(
             height: 200,
-            child: Localizations(
-              locale: const Locale('en'),
-              delegates: const [
-                DefaultWidgetsLocalizations.delegate,
-                DefaultMaterialLocalizations.delegate,
-              ],
-              child: Material(
-                type: MaterialType.transparency,
-                child: TextSelectionTheme(
-                  data: TextSelectionThemeData(
-                    selectionColor: m.textSelection(c.accent),
-                    cursorColor: c.accent,
-                    selectionHandleColor: c.accent,
+            child: Material(
+              type: MaterialType.transparency,
+              child: TextSelectionTheme(
+                data: TextSelectionThemeData(
+                  selectionColor: m.textSelection(c.accent),
+                  cursorColor: c.accent,
+                  selectionHandleColor: c.accent,
+                ),
+                child: TextField(
+                  controller: _controller,
+                  maxLines: null,
+                  expands: true,
+                  textAlignVertical: TextAlignVertical.top,
+                  cursorColor: c.accent,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: c.textPrimary,
+                    fontFamily: 'monospace',
+                    height: 1.5,
                   ),
-                  child: TextField(
-                    controller: _controller,
-                    maxLines: null,
-                    expands: true,
-                    textAlignVertical: TextAlignVertical.top,
-                    cursorColor: c.accent,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: c.textPrimary,
-                      fontFamily: 'monospace',
-                      height: 1.5,
+                  decoration: InputDecoration(
+                    hintText: s.ed2kServerPlaceholder,
+                    hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
+                    hintMaxLines: 3,
+                    contentPadding: const EdgeInsets.all(10),
+                    filled: true,
+                    fillColor: c.inputBg,
+                    hoverColor: Colors.transparent,
+                    border: OutlineInputBorder(
+                      borderRadius: m.brInput,
+                      borderSide: BorderSide(color: c.inputBorder),
                     ),
-                    decoration: InputDecoration(
-                      hintText: s.ed2kServerPlaceholder,
-                      hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
-                      hintMaxLines: 3,
-                      contentPadding: const EdgeInsets.all(10),
-                      filled: true,
-                      fillColor: c.inputBg,
-                      hoverColor: Colors.transparent,
-                      border: OutlineInputBorder(
-                        borderRadius: m.brInput,
-                        borderSide: BorderSide(color: c.inputBorder),
-                      ),
-                      enabledBorder: OutlineInputBorder(
-                        borderRadius: m.brInput,
-                        borderSide: BorderSide(color: c.inputBorder),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: m.brInput,
-                        borderSide: BorderSide(color: c.inputFocusBorder),
-                      ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: m.brInput,
+                      borderSide: BorderSide(color: c.inputBorder),
                     ),
-                    onChanged: (_) => setState(() {}),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: m.brInput,
+                      borderSide: BorderSide(color: c.inputFocusBorder),
+                    ),
                   ),
+                  onChanged: (_) => setState(() {}),
                 ),
               ),
             ),
@@ -9062,52 +9031,45 @@ class _Ed2kServerSubEditorState extends State<_Ed2kServerSubEditor> {
             const SizedBox(height: 8),
             SizedBox(
               height: 100,
-              child: Localizations(
-                locale: const Locale('en'),
-                delegates: const [
-                  DefaultWidgetsLocalizations.delegate,
-                  DefaultMaterialLocalizations.delegate,
-                ],
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: TextSelectionTheme(
-                    data: TextSelectionThemeData(
-                      selectionColor: m.textSelection(c.accent),
-                      cursorColor: c.accent,
-                      selectionHandleColor: c.accent,
+              child: Material(
+                type: MaterialType.transparency,
+                child: TextSelectionTheme(
+                  data: TextSelectionThemeData(
+                    selectionColor: m.textSelection(c.accent),
+                    cursorColor: c.accent,
+                    selectionHandleColor: c.accent,
+                  ),
+                  child: TextField(
+                    controller: _controller,
+                    maxLines: null,
+                    expands: true,
+                    textAlignVertical: TextAlignVertical.top,
+                    cursorColor: c.accent,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: c.textPrimary,
+                      fontFamily: 'monospace',
+                      height: 1.5,
                     ),
-                    child: TextField(
-                      controller: _controller,
-                      maxLines: null,
-                      expands: true,
-                      textAlignVertical: TextAlignVertical.top,
-                      cursorColor: c.accent,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: c.textPrimary,
-                        fontFamily: 'monospace',
-                        height: 1.5,
+                    decoration: InputDecoration(
+                      hintText: s.ed2kServerSubPlaceholder,
+                      hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
+                      hintMaxLines: 3,
+                      contentPadding: const EdgeInsets.all(10),
+                      filled: true,
+                      fillColor: c.inputBg,
+                      hoverColor: Colors.transparent,
+                      border: OutlineInputBorder(
+                        borderRadius: m.brInput,
+                        borderSide: BorderSide(color: c.inputBorder),
                       ),
-                      decoration: InputDecoration(
-                        hintText: s.ed2kServerSubPlaceholder,
-                        hintStyle: TextStyle(fontSize: 12, color: c.textMuted),
-                        hintMaxLines: 3,
-                        contentPadding: const EdgeInsets.all(10),
-                        filled: true,
-                        fillColor: c.inputBg,
-                        hoverColor: Colors.transparent,
-                        border: OutlineInputBorder(
-                          borderRadius: m.brInput,
-                          borderSide: BorderSide(color: c.inputBorder),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: m.brInput,
-                          borderSide: BorderSide(color: c.inputBorder),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: m.brInput,
-                          borderSide: BorderSide(color: c.inputFocusBorder),
-                        ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: m.brInput,
+                        borderSide: BorderSide(color: c.inputBorder),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: m.brInput,
+                        borderSide: BorderSide(color: c.inputFocusBorder),
                       ),
                     ),
                   ),

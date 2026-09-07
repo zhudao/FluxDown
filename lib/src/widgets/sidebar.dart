@@ -446,8 +446,7 @@ class _SidebarState extends State<Sidebar> {
               onRefresh: () => rss.refresh(source.sourceId),
               onManage: () =>
                   showRssManagerDialog(context, rss, ctrl, source.sourceId),
-              onDelete: () =>
-                  _showDeleteRssDialog(context, rss, s, c, source),
+              onDelete: () => _showDeleteRssDialog(context, rss, s, c, source),
             ),
         ],
       ],
@@ -530,7 +529,6 @@ class _SidebarState extends State<Sidebar> {
     ).then((_) => nameCtrl.dispose());
   }
 
-
   // 删除队列确认对话框
   void _showDeleteQueueDialog(
     BuildContext context,
@@ -568,20 +566,6 @@ class _SidebarState extends State<Sidebar> {
   // 分类区块（可折叠）
   // ─────────────────────────────────────────────
 
-  /// 内置分类的 i18n 名称映射
-  static String _builtinCategoryLabel(S s, String? builtinType) =>
-      switch (builtinType) {
-        'all' => s.categoryAll,
-        'video' => s.categoryVideo,
-        'audio' => s.categoryAudio,
-        'document' => s.categoryDocument,
-        'image' => s.categoryImage,
-        'program' => s.categoryProgram,
-        'archive' => s.categoryArchive,
-        'other' => s.categoryOther,
-        _ => '',
-      };
-
   Widget _buildCategorySection(DownloadController ctrl, S s, AppColors c) {
     final customFilter = _rssActive ? null : ctrl.customCategoryFilter;
     final visibleCategories = widget.settingsProvider.visibleCategories;
@@ -618,9 +602,7 @@ class _SidebarState extends State<Sidebar> {
               ),
               child: _NavItem(
                 icon: categoryIconData(cat.icon),
-                label: cat.isBuiltin
-                    ? _builtinCategoryLabel(s, cat.builtinType)
-                    : cat.name,
+                label: cat.displayName(s),
                 count: ctrl.countForUnifiedCategory(cat, visibleCategories),
                 isSelected: customFilter?.id == cat.id,
                 onTap: () => _selectTaskView(
@@ -913,6 +895,7 @@ class _NavItem extends StatefulWidget {
   final int? count;
   final bool isSelected;
   final bool showActivityDot;
+
   /// 设备在线态圆点（null=不显示；true=实心绿/在线；false=空心灰/离线）。
   final bool? isOnline;
   final VoidCallback onTap;

@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Ban, Download, ListOrdered, Pencil, Trash2, X, Zap } from 'lucide-react'
+import { Ban, Download, FileX, ListOrdered, Pencil, Trash2, X, Zap } from 'lucide-react'
 import { api, taskFileUrl } from '../../lib/api'
 import { CopyButton } from '../CopyButton'
 import { cn } from '../../lib/cn'
@@ -252,6 +252,17 @@ function GeneralTab({ t, queues, groups }: { t: ViewTask; queues: QueueDto[]; gr
         >
           <Trash2 size={15} />
           {tr('task.delete')}
+        </button>
+        <button
+          type="button"
+          className="btn danger sm"
+          onClick={async () => {
+            if (await confirmDialog({ title: tr('task.deleteTitle'), message: tr('task.deleteWithFilesMsg'), danger: true }))
+              deleteMut.mutate(true)
+          }}
+        >
+          <FileX size={15} />
+          {tr('task.deleteWithFiles')}
         </button>
       </div>
     </>

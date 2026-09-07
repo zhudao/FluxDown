@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../i18n/translations.dart';
+
 /// 目录名里必须剔除的字符：路径分隔符、Windows 保留符号与控制字符。
 final RegExp _invalidDirNameChars = RegExp(r'[\\/:*?"<>|\x00-\x1f]');
 final RegExp _dirNameWhitespace = RegExp(r'\s+');
@@ -119,6 +121,26 @@ class CustomCategory {
     this.builtinType,
     this.saveDir = '',
   });
+
+  /// 分类显示名：内置分类用 i18n 文案，自定义分类用用户设置的名称。
+  ///
+  /// 内置文案不只是标签：「一键分类目录」拿它当目录名（[categoryDirUnder]），
+  /// Web 侧 `web/src/lib/categories.ts` 的 BUILTIN_LABEL 必须逐字一致，
+  /// 否则两端会在同一台机器上建出两套目录。
+  String displayName(S s) {
+    if (!isBuiltin) return name;
+    return switch (builtinType) {
+      'all' => s.categoryAll,
+      'video' => s.categoryVideo,
+      'audio' => s.categoryAudio,
+      'document' => s.categoryDocument,
+      'image' => s.categoryImage,
+      'program' => s.categoryProgram,
+      'archive' => s.categoryArchive,
+      'other' => s.categoryOther,
+      _ => '',
+    };
+  }
 
   /// 检测文件名是否匹配此分类
   bool matches(String fileName) {

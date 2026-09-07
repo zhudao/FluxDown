@@ -49,9 +49,16 @@ fn is_no_launch_action(action: &str) -> bool {
 #[cfg(windows)]
 const PIPE_NAME: &str = r"\\.\pipe\fluxdown";
 
-/// FluxDown agent executable name (Windows only).
+/// Cold-launch candidates, in priority order, searched next to the NMH
+/// binary. The Flutter app comes first because it is the shipped default
+/// client; `fluxdown-agent` (GPUI stack) is only a fallback for installs
+/// without the Flutter executable. Both may sit in the same bundle directory.
 #[cfg(windows)]
-const APP_EXE_NAME: &str = "fluxdown-agent.exe";
+const APP_EXE_CANDIDATES: &[&str] = &["flux_down.exe", "fluxdown-agent.exe"];
+#[cfg(target_os = "macos")]
+const APP_EXE_CANDIDATES: &[&str] = &["FluxDown", "flux_down", "fluxdown-agent"];
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const APP_EXE_CANDIDATES: &[&str] = &["flux_down", "fluxdown-agent"];
 
 /// Maximum time (ms) to wait for the App to start and create its pipe.
 const APP_LAUNCH_TIMEOUT_MS: u64 = 10_000;
@@ -192,10 +199,10 @@ fn chrono_free_timestamp() -> String {
 #[cfg(target_os = "macos")]
 fn home_dir() -> Option<PathBuf> {
     // Fast path: $HOME is set (terminal / direct invocation).
-    if let Ok(h) = std::env::var("HOME") {
-        if !h.is_empty() {
-            return Some(PathBuf::from(h));
-        }
+    if let Ok(h) = std::env::var("HOME")
+        && !h.is_empty()
+    {
+        return Some(PathBuf::from(h));
     }
 
     // Slow path: query the passwd database. Safe to call from any thread
@@ -226,10 +233,10 @@ fn home_dir() -> Option<PathBuf> {
         let pwd = unsafe { pwd.assume_init() };
         if !pwd.pw_dir.is_null() {
             let cstr = unsafe { CStr::from_ptr(pwd.pw_dir) };
-            if let Ok(s) = cstr.to_str() {
-                if !s.is_empty() {
-                    return Some(PathBuf::from(s));
-                }
+            if let Ok(s) = cstr.to_str()
+                && !s.is_empty()
+            {
+                return Some(PathBuf::from(s));
             }
         }
     }
@@ -432,97 +439,86 @@ mod pipe {
 /// Find the FluxDown App executable.
 ///
 /// Search order:
-/// 1. Same directory as NMH exe (production + CMake-embedded dev builds)
+/// 1. Same directory as the NMH binary, following [`APP_EXE_CANDIDATES`]
+///    (production bundle + CMake/Xcode-embedded dev builds)
 /// 2. Flutter build output (development fallback)
+/// 3. Cargo output for `fluxdown-agent` (development fallback)
+fn find_app_exe() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && let Some(found) = first_existing(dir, APP_EXE_CANDIDATES)
+    {
+        return Some(found);
+    }
+
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|path| path.parent())?;
+
+    if let Some(found) = find_flutter_dev_exe(workspace_root) {
+        return Some(found);
+    }
+
+    ["debug", "release"].iter().find_map(|profile| {
+        let dir = workspace_root.join("target").join(profile);
+        first_existing(&dir, APP_EXE_CANDIDATES)
+    })
+}
+
+/// First `names` entry that exists inside `dir`.
+fn first_existing(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    names.iter().map(|name| dir.join(name)).find(|p| p.exists())
+}
+
+/// Flutter build output: `build/windows/<arch>/runner/<Profile>/flux_down.exe`.
 #[cfg(windows)]
-fn find_app_exe() -> Option<PathBuf> {
-    // 1. Same directory as NMH exe
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join(APP_EXE_NAME);
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    // 2. Cargo output (development fallback)
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|path| path.parent());
-    if let Some(root) = workspace_root {
-        for profile in ["debug", "release"] {
-            let candidate = root.join("target").join(profile).join(APP_EXE_NAME);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    None
+fn find_flutter_dev_exe(workspace_root: &Path) -> Option<PathBuf> {
+    ["x64", "arm64"].iter().find_map(|arch| {
+        ["Debug", "Release", "Profile"].iter().find_map(|profile| {
+            let dir = workspace_root
+                .join("build")
+                .join("windows")
+                .join(arch)
+                .join("runner")
+                .join(profile);
+            first_existing(&dir, &["flux_down.exe"])
+        })
+    })
 }
 
+/// Flutter build output:
+/// `build/macos/Build/Products/<Profile>/<App>.app/Contents/MacOS/<App>`.
+/// The bundle/executable name follows `PRODUCT_NAME`, so both spellings are tried.
 #[cfg(target_os = "macos")]
-fn find_app_exe() -> Option<PathBuf> {
-    const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent"];
-
-    // 1. Same directory as NMH binary (inside .app bundle: Contents/MacOS/)
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        for name in APP_EXE_CANDIDATES {
-            let candidate = dir.join(name);
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    // 2. Cargo output (development fallback)
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|path| path.parent());
-    if let Some(root) = workspace_root {
-        for profile in ["debug", "release"] {
-            let candidate = root.join("target").join(profile).join("fluxdown-agent");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    None
+fn find_flutter_dev_exe(workspace_root: &Path) -> Option<PathBuf> {
+    const BUNDLES: &[&str] = &["FluxDown.app", "flux_down.app"];
+    ["Debug", "Release", "Profile"].iter().find_map(|profile| {
+        let products = workspace_root
+            .join("build")
+            .join("macos")
+            .join("Build")
+            .join("Products")
+            .join(profile);
+        BUNDLES.iter().find_map(|bundle| {
+            let dir = products.join(bundle).join("Contents").join("MacOS");
+            first_existing(&dir, &["FluxDown", "flux_down"])
+        })
+    })
 }
 
+/// Flutter build output: `build/linux/x64/<profile>/bundle/flux_down`.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn find_app_exe() -> Option<PathBuf> {
-    // 1. Same directory as NMH binary (production deployment)
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("fluxdown-agent");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    // 2. Cargo output (development fallback)
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir)
-        .parent()
-        .and_then(|path| path.parent());
-    if let Some(root) = workspace_root {
-        for profile in ["debug", "release"] {
-            let candidate = root.join("target").join(profile).join("fluxdown-agent");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-    }
-
-    None
+fn find_flutter_dev_exe(workspace_root: &Path) -> Option<PathBuf> {
+    ["debug", "release", "profile"].iter().find_map(|profile| {
+        let dir = workspace_root
+            .join("build")
+            .join("linux")
+            .join("x64")
+            .join(profile)
+            .join("bundle");
+        first_existing(&dir, &["flux_down"])
+    })
 }
 
 /// Launch the FluxDown App as a detached process.
@@ -793,6 +789,7 @@ fn main() {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -845,5 +842,38 @@ mod tests {
             classify_cli_invocation(&["/path/to/com.fluxdown.nmh.json", "fluxdown@zerx.dev"]),
             None
         );
+    }
+
+    /// The Flutter app and `fluxdown-agent` ship side by side in one bundle;
+    /// cold launch must pick the Flutter app while it exists and only fall
+    /// back to the agent when it does not.
+    #[test]
+    fn cold_launch_prefers_flutter_app_over_agent() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown-nmh-launch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let agent = APP_EXE_CANDIDATES[APP_EXE_CANDIDATES.len() - 1];
+        let flutter = APP_EXE_CANDIDATES[0];
+        assert!(agent.starts_with("fluxdown-agent"));
+
+        std::fs::write(dir.join(agent), b"").expect("agent stub");
+        assert_eq!(
+            first_existing(&dir, APP_EXE_CANDIDATES),
+            Some(dir.join(agent))
+        );
+
+        std::fs::write(dir.join(flutter), b"").expect("flutter stub");
+        assert_eq!(
+            first_existing(&dir, APP_EXE_CANDIDATES),
+            Some(dir.join(flutter))
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

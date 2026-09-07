@@ -184,7 +184,7 @@ void main() {
   group('compareEntities (6 keys x direction)', () {
     final base = DateTime(2026, 1, 1);
 
-    test('smart: status tier then createdAt ascending, direction ignored', () {
+    test('smart: active tasks createdAt ascending, non-active descending, direction ignored', () {
       final active = TaskEntity(_task(id: 'a', status: TaskStatus.downloading, createdAt: base));
       final pending = TaskEntity(_task(id: 'b', status: TaskStatus.pending, createdAt: base));
       expect(compareEntities(ViewSortKey.smart, SortDir.asc, active, pending), lessThan(0));
@@ -196,7 +196,9 @@ void main() {
       final newer = TaskEntity(
         _task(id: 'd', status: TaskStatus.completed, createdAt: base.add(const Duration(days: 1))),
       );
-      expect(compareEntities(ViewSortKey.smart, SortDir.desc, older, newer), lessThan(0));
+      // 非活跃（已完成）任务按创建时间降序：更新的排在前面。
+      expect(compareEntities(ViewSortKey.smart, SortDir.desc, older, newer), greaterThan(0));
+      expect(compareEntities(ViewSortKey.smart, SortDir.asc, older, newer), greaterThan(0));
     });
 
     test('smart: pending entities tie-break by queue position', () {

@@ -2,7 +2,6 @@ import 'package:flutter/material.dart'
     show
         CircularProgressIndicator,
         Colors,
-        DefaultMaterialLocalizations,
         InputDecoration,
         Material,
         MaterialType,
@@ -405,51 +404,44 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
     required AppMetrics m,
     int? maxLength,
   }) {
-    return Localizations(
-      locale: const Locale('en'),
-      delegates: const [
-        DefaultWidgetsLocalizations.delegate,
-        DefaultMaterialLocalizations.delegate,
-      ],
-      child: Material(
-        type: MaterialType.transparency,
-        child: TextSelectionTheme(
-          data: TextSelectionThemeData(
-            cursorColor: c.accent,
-            selectionColor: m.textSelection(c.accent),
-            selectionHandleColor: c.accent,
-          ),
-          child: TextField(
-            controller: controller,
-            maxLines: maxLines,
-            maxLength: maxLength,
-            buildCounter:
-                (_, {required currentLength, required isFocused, maxLength}) =>
-                    null,
-            onChanged: (_) => setState(() {}),
-            style: TextStyle(fontSize: 13, color: c.textPrimary),
-            cursorColor: c.accent,
-            decoration: InputDecoration(
-              hintText: placeholder,
-              hintStyle: TextStyle(fontSize: 13, color: c.textMuted),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 10,
-              ),
-              filled: true,
-              fillColor: c.inputBg,
-              border: OutlineInputBorder(
-                borderRadius: m.brInput,
-                borderSide: BorderSide(color: c.inputBorder),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: m.brInput,
-                borderSide: BorderSide(color: c.inputBorder),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: m.brInput,
-                borderSide: BorderSide(color: c.inputFocusBorder, width: 1.5),
-              ),
+    return Material(
+      type: MaterialType.transparency,
+      child: TextSelectionTheme(
+        data: TextSelectionThemeData(
+          cursorColor: c.accent,
+          selectionColor: m.textSelection(c.accent),
+          selectionHandleColor: c.accent,
+        ),
+        child: TextField(
+          controller: controller,
+          maxLines: maxLines,
+          maxLength: maxLength,
+          buildCounter:
+              (_, {required currentLength, required isFocused, maxLength}) =>
+                  null,
+          onChanged: (_) => setState(() {}),
+          style: TextStyle(fontSize: 13, color: c.textPrimary),
+          cursorColor: c.accent,
+          decoration: InputDecoration(
+            hintText: placeholder,
+            hintStyle: TextStyle(fontSize: 13, color: c.textMuted),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 10,
+            ),
+            filled: true,
+            fillColor: c.inputBg,
+            border: OutlineInputBorder(
+              borderRadius: m.brInput,
+              borderSide: BorderSide(color: c.inputBorder),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: m.brInput,
+              borderSide: BorderSide(color: c.inputBorder),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: m.brInput,
+              borderSide: BorderSide(color: c.inputFocusBorder, width: 1.5),
             ),
           ),
         ),

@@ -663,7 +663,13 @@ pub fn unsupported_content_encoding(headers: &reqwest::header::HeaderMap) -> Opt
             // 表达"未压缩"（等价于省略该头或写 identity）。按未知编码处理会把
             // 明确声明"无压缩"的响应误判为不可解码的压缩层，导致下载被永久拒绝
             // （BUG-HTTP-NONE-ENCODING-FALSE-POSITIVE）。
-            "identity" | "none" | "" => {}
+            //
+            // "utf-8"/"utf8" 同理不是压缩编码，而是字符集 token——个别 CDN
+            // （如 OPPO/一加 OTA 域名 gauss-compotaauto-c-cn.allawnfs.com）把
+            // 字符编码错填进 Content-Encoding 头，响应体实际未压缩。按未知
+            // 编码拒绝会把这类误写永久挡在下载之外（#413），故与 "none" 一样
+            // 按 no-op 放行。
+            "identity" | "none" | "" | "utf-8" | "utf8" => {}
             "gzip" | "x-gzip" | "br" | "brotli" | "deflate" | "zstd" => layers.push(lower),
             other => {
                 has_unknown = true;
@@ -5417,6 +5423,19 @@ mod tests {
             reqwest::header::HeaderValue::from_static("none"),
         );
         assert!(super::unsupported_content_encoding(&headers).is_none());
+    }
+
+    #[test]
+    fn content_encoding_utf8_charset_is_noop() {
+        // #413: OPPO/一加 OTA CDN 把字符集误写进 Content-Encoding，响应体实际
+        // 未压缩——须与 "none" 同样按 no-op 放行，而非当作未知压缩层拒绝下载。
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("UTF-8"),
+        );
+        assert!(super::unsupported_content_encoding(&headers).is_none());
+        assert!(super::detect_content_encoding(&headers).is_none());
     }
 
     #[test]

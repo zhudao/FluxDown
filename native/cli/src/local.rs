@@ -15,11 +15,11 @@ use fluxdown_cli::client::ClientError;
 use fluxdown_cli::exit::ExitCode;
 use fluxdown_engine::bt_downloader::BtConfig;
 use fluxdown_engine::data_dir::resolve_data_dir;
-use fluxdown_engine::db::Db;
+use fluxdown_engine::db::{Db, DbError};
 use fluxdown_engine::download_manager::{NewTaskSpec, progress_reporter};
 use fluxdown_engine::events::EventSink;
 use fluxdown_engine::proxy_config::ProxyConfig;
-use fluxdown_engine::{Engine, EngineConfig, NoopSelection, NoopSink};
+use fluxdown_engine::{Engine, EngineConfig, EngineError, NoopSelection, NoopSink};
 
 use crate::AddArgs;
 
@@ -72,7 +72,16 @@ pub async fn run_add_local(args: AddArgs, json: bool) -> Result<(), ClientError>
     };
     let mut engine = Engine::new(cfg, sink.clone(), Arc::new(NoopSelection))
         .await
-        .map_err(|e| ClientError::new(e.to_string(), ExitCode::Unknown))?;
+        .map_err(|e| match e {
+            EngineError::Db(DbError::WriterLeaseHeld(lock_path)) => ClientError::new(
+                format!(
+                    "data dir is in use by another FluxDown engine (lock: {lock_path}). \
+                     Quit the running app / daemon / server first, or drop --local to talk to it over HTTP."
+                ),
+                ExitCode::BadRequest,
+            ),
+            other => ClientError::new(other.to_string(), ExitCode::Unknown),
+        })?;
 
     // 排空进度通道：段协调器每 ~200ms 阻塞 send，通道满（容量 8192）会卡死下载。
     // 复刻 server/hub 的 progress_reporter 接线（顺带把 downloaded_bytes 落 DB）。

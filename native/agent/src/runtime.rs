@@ -422,7 +422,8 @@ impl AgentPaths {
 }
 
 /// 镜像 `fluxdown_engine::data_dir::resolve_data_dir_inner` 的默认目录（agent 不依赖 engine）。
-fn engine_data_dir() -> PathBuf {
+/// Windows NMH 清单目录（`nmh::registry`）也从这里派生。
+pub(crate) fn engine_data_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
         let base = std::env::var_os("XDG_DATA_HOME")

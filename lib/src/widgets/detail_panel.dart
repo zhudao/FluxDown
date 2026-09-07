@@ -1472,33 +1472,46 @@ class _DetailPanelState extends State<DetailPanel> {
   Widget _buildErrorRow(AppColors c, String message) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 60,
-            child: Text(
-              currentS.infoError,
-              style: TextStyle(fontSize: 11, color: c.textMuted),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              message,
-              style: TextStyle(
-                fontSize: 11,
-                color: c.textSecondary,
-                fontFeatures: const [FontFeature.tabularFigures()],
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: AppColors.red.withValues(alpha: 0.06),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: AppColors.red.withValues(alpha: 0.25)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 60,
+              child: Text(
+                currentS.infoError,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppColors.red,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 4),
-          _CopyValueButton(
-            value: message,
-            color: c.textMuted,
-            toastText: currentS.errorCopied,
-          ),
-        ],
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppColors.red,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            _CopyValueButton(
+              value: message,
+              color: AppColors.red,
+              toastText: currentS.errorCopied,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1745,12 +1758,17 @@ class _DetailPanelState extends State<DetailPanel> {
     String text, {
     bool isError = false,
   }) {
-    final textWidget = Text(
-      text,
-      style: TextStyle(
-        fontSize: 11,
-        fontFamily: 'monospace',
-        color: isError ? AppColors.red : c.textSecondary,
+    final m = AppMetrics.of(context);
+    final textWidget = DefaultSelectionStyle(
+      selectionColor: m.soft(c.accent),
+      cursorColor: c.accent,
+      child: SelectableText(
+        text,
+        style: TextStyle(
+          fontSize: 11,
+          fontFamily: 'monospace',
+          color: isError ? AppColors.red : c.textSecondary,
+        ),
       ),
     );
     if (time == null) {

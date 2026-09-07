@@ -733,14 +733,7 @@ pub async fn finalize_and_verify(
     if blob.len() as u64 != part_count * 16 {
         return Err(DownloadError::Ed2k("hashset blob length mismatch".into()));
     }
-    let db_hashes: Vec<[u8; 16]> = blob
-        .chunks_exact(16)
-        .map(|c| {
-            let mut h = [0u8; 16];
-            h.copy_from_slice(c);
-            h
-        })
-        .collect();
+    let db_hashes: Vec<[u8; 16]> = blob.as_chunks::<16>().0.to_vec();
 
     let mut bad = false;
     for (i, (disk, expected)) in disk_hashes.iter().zip(db_hashes.iter()).enumerate() {

@@ -44,7 +44,10 @@ RUN case "$TARGETARCH" in \
       *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
     esac
 COPY Cargo.toml Cargo.lock ./
+# 根 workspace members = native/* + crates/*：cargo 解析 workspace 时要读全部成员的
+# manifest，缺 crates/ 会直接 "failed to load manifest for workspace member"。
 COPY native/ native/
+COPY crates/ crates/
 # Web SPA 在编译期由 native/server/build.rs 嵌入二进制（单文件分发，运行时层
 # 不再有 web/ 目录，也无需 FLUXDOWN_WEBROOT）。
 COPY --from=web /src/web/dist /webroot

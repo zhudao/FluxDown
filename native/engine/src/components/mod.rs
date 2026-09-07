@@ -66,19 +66,38 @@ pub enum ComponentError {
     Verify(String),
 }
 
+/// macOS/Linux 上 Homebrew（及部分发行版自装软件）常见的固定安装目录。
+/// GUI 应用进程继承的 PATH 往往不含这些目录（Finder/启动台启动时 shell
+/// 登录脚本未执行），仅在 PATH 扫描失败后作为兜底，不改变 PATH 内的优先级。
+#[cfg(target_os = "macos")]
+const FALLBACK_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin"];
+#[cfg(all(unix, not(target_os = "macos")))]
+const FALLBACK_DIRS: &[&str] = &["/usr/local/bin"];
+#[cfg(not(unix))]
+const FALLBACK_DIRS: &[&str] = &[];
+
 /// 扫描系统 PATH 寻找指定可执行文件（含 Windows 的 `.exe` 后缀由调用方带入）。
+///
+/// PATH 扫描失败时，在类 Unix 平台回退探测 [`FALLBACK_DIRS`]（Homebrew 等
+/// 固定安装目录），不改变 PATH 内目录的优先级。
 pub fn find_in_path(binary_name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        let candidate = dir.join(binary_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    let path_var = std::env::var_os("PATH");
+    let path_dirs = path_var
+        .as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten();
+    let fallback = FALLBACK_DIRS.iter().map(PathBuf::from);
+    find_in_dirs(path_dirs.chain(fallback), binary_name)
+}
+
+/// 按给定顺序在目录列表中查找第一个存在的 `dir/binary_name` 常规文件；
+/// 空目录项跳过。纯函数，不读环境变量，便于测试。
+fn find_in_dirs(dirs: impl IntoIterator<Item = PathBuf>, binary_name: &str) -> Option<PathBuf> {
+    dirs.into_iter()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(binary_name))
+        .find(|candidate| candidate.is_file())
 }
 
 /// GitHub Release API JSON 拉取（带 `User-Agent`/`Accept` 头）。ffmpeg / yt-dlp
@@ -179,6 +198,8 @@ pub(crate) async fn download_to_file(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::ComponentSource;
 
     #[test]
@@ -187,5 +208,37 @@ mod tests {
         assert_eq!(ComponentSource::Managed.as_str(), "managed");
         assert_eq!(ComponentSource::System.as_str(), "system");
         assert_eq!(ComponentSource::None.as_str(), "none");
+    }
+
+    /// 目录顺序即优先级：前面的目录命中即返回，空目录项被跳过，缺失目录
+    /// 不影响后续（模拟 PATH 未命中后回退到 Homebrew 目录）。
+    #[test]
+    fn find_in_dirs_respects_order_and_skips_empty_or_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdown-find-in-dirs-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let name = "fluxdown-test-binary";
+        std::fs::write(second.join(name), b"").unwrap();
+        // `first` 里只有同名目录，不是文件，不应命中。
+        std::fs::create_dir_all(first.join(name)).unwrap();
+
+        let dirs = vec![
+            PathBuf::new(),
+            root.join("missing"),
+            first.clone(),
+            second.clone(),
+        ];
+        let found = super::find_in_dirs(dirs, name);
+        let none = super::find_in_dirs([first, second], "fluxdown-definitely-not-installed");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(found, Some(root.join("second").join(name)));
+        assert_eq!(none, None);
     }
 }

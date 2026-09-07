@@ -6331,7 +6331,9 @@ mod tests {
         use super::{count_domain_conn_policies, now_unix_secs};
         let now = now_unix_secs();
         let stale = now.saturating_sub(48 * 3600);
-        let raw = format!("v3\nfresh.example\t1\t{now}\t0\t0\nold.example\t1\t{stale}\t0\t0\nhinted.example\t0\t0\t8\t{now}\nbroken\tx\n");
+        let raw = format!(
+            "v3\nfresh.example\t1\t{now}\t0\t0\nold.example\t1\t{stale}\t0\t0\nhinted.example\t0\t0\t8\t{now}\nbroken\tx\n"
+        );
         assert_eq!(count_domain_conn_policies(&raw), 2);
         assert_eq!(count_domain_conn_policies(""), 0);
         assert_eq!(

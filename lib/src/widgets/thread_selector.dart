@@ -5,13 +5,7 @@
 library;
 
 import 'package:flutter/material.dart'
-    show
-        DefaultMaterialLocalizations,
-        InputBorder,
-        InputDecoration,
-        Material,
-        MaterialType,
-        TextField;
+    show InputBorder, InputDecoration, Material, MaterialType, TextField;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
@@ -214,36 +208,29 @@ class _ThreadSelectorState extends State<ThreadSelector> {
           children: [
             // 可编辑输入区
             Expanded(
-              child: Localizations(
-                locale: const Locale('en'),
-                delegates: const [
-                  DefaultWidgetsLocalizations.delegate,
-                  DefaultMaterialLocalizations.delegate,
-                ],
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: TextField(
-                    controller: _ctrl,
-                    focusNode: _focusNode,
-                    style: TextStyle(fontSize: 14, color: c.textPrimary),
-                    decoration: InputDecoration(
-                      border: InputBorder.none,
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 9,
-                      ),
-                      hintText: s.customThreadsHint,
-                      hintStyle: TextStyle(fontSize: 14, color: c.textMuted),
+              child: Material(
+                type: MaterialType.transparency,
+                child: TextField(
+                  controller: _ctrl,
+                  focusNode: _focusNode,
+                  style: TextStyle(fontSize: 14, color: c.textPrimary),
+                  decoration: InputDecoration(
+                    border: InputBorder.none,
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 9,
                     ),
-                    inputFormatters: [
-                      FilteringTextInputFormatter.digitsOnly,
-                      LengthLimitingTextInputFormatter(3),
-                    ],
-                    textInputAction: TextInputAction.done,
-                    onChanged: _onInputChanged,
-                    onSubmitted: (_) => _focusNode.unfocus(),
+                    hintText: s.customThreadsHint,
+                    hintStyle: TextStyle(fontSize: 14, color: c.textMuted),
                   ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(3),
+                  ],
+                  textInputAction: TextInputAction.done,
+                  onChanged: _onInputChanged,
+                  onSubmitted: (_) => _focusNode.unfocus(),
                 ),
               ),
             ),

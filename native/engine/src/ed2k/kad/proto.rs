@@ -589,10 +589,9 @@ pub fn parse_nodes_dat(bytes: &[u8]) -> Vec<Contact> {
 
     let mut version: u32 = 0;
     let mut bootstrap_edition: u32 = 0;
-    let num_contacts: u32;
 
-    if first != 0 {
-        num_contacts = first;
+    let num_contacts = if first != 0 {
+        first
     } else {
         let Some(v) = r.u32_le() else {
             return Vec::new();
@@ -610,8 +609,8 @@ pub fn parse_nodes_dat(bytes: &[u8]) -> Vec<Contact> {
         let Some(n) = r.u32_le() else {
             return Vec::new();
         };
-        num_contacts = n;
-    }
+        n
+    };
 
     let extra = if version >= 2 && bootstrap_edition == 0 {
         9 // KadUDPKey(8) + verified(1)

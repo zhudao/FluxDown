@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Gauge, ListChecks, Menu, Pause, Play, Plus, Search, Settings } from 'lucide-react'
+import { Gauge, ListChecks, Menu, Moon, Pause, Play, Plus, Search, Settings, Sun } from 'lucide-react'
 import { api } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { openNewDownload } from '../../lib/dialogs'
@@ -12,6 +12,7 @@ import { fmtSpeed } from '../../lib/format'
 import { useI18n } from '../../lib/i18n'
 import { GROUP_BY_CYCLE, SORT_KEY_CYCLE, SORT_KEY_DEFAULT_DIR, updateViewPrefs } from '../../lib/view-prefs'
 import { useConfigQuery } from '../../lib/config'
+import { useTheme } from '../../lib/theme'
 import { useTasksUi } from './context'
 import { useViewTasks } from './useViewTasks'
 import { ViewOptionsPanelButton } from './ViewOptionsPanel'
@@ -19,6 +20,7 @@ import { ViewOptionsPanelButton } from './ViewOptionsPanel'
 export function TopBar() {
   const { t } = useI18n()
   const navigate = useNavigate()
+  const { mode, setMode } = useTheme()
   const { search, setSearch, manageMode, setManageMode, setSidebarOpen, statusTab } = useTasksUi()
   const tasks = useViewTasks()
   const qc = useQueryClient()
@@ -75,6 +77,7 @@ export function TopBar() {
   }, [statusTab])
 
   const hasActive = tasks.some((t) => t.status === 0 || t.status === 1 || t.status === 5)
+  const isDark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
   const invalidate = () => qc.invalidateQueries({ queryKey: ['tasks'] })
   const pauseAll = useMutation({ mutationFn: api.pauseAll, onSuccess: invalidate })
   const continueAll = useMutation({ mutationFn: api.continueAll, onSuccess: invalidate })
@@ -118,6 +121,14 @@ export function TopBar() {
         <button type="button" className="btn primary" onClick={openNewDownload}>
           <Plus size={15} />
           <span className="btn-label">{t('topbar.newDownload')}</span>
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          title={t('topbar.toggleTheme')}
+          onClick={() => setMode(isDark ? 'light' : 'dark')}
+        >
+          {isDark ? <Sun size={17} /> : <Moon size={17} />}
         </button>
         <button type="button" className="icon-btn" title={t('common.settings')} onClick={() => navigate({ to: '/settings' })}>
           <Settings size={17} />
