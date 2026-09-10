@@ -2,39 +2,36 @@
 
 use fluxdown_protocol::{DiagnosticLevel, DiagnosticRepairParams, method};
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{App, ClipboardItem, IntoElement as _, ParentElement, SharedString, Styled, div};
-use gpui_component::{
-    Icon, IconName, h_flex,
-    setting::{SettingGroup, SettingItem, SettingPage},
-    v_flex,
-};
+use gpui_component::{IconName, h_flex, v_flex};
 use serde_json::json;
 
 use super::{SectionContext, camel};
+use crate::ui::{SettingsPage, SettingsRow, SettingsSection};
 
-pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingPage {
-    SettingPage::new(ctx.t("settingsCatDoctor"))
-        .icon(Icon::new(IconName::Info))
-        .description(ctx.t("settingsCatDoctorDesc"))
-        .resettable(false)
-        .group(
-            SettingGroup::new()
-                .title(ctx.t("doctorTitle"))
-                .description(ctx.t("doctorDesc"))
-                .item(toolbar_item(ctx))
-                .item(report_item(ctx)),
-        )
+pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
+    SettingsPage::new(
+        "doctor",
+        ctx.t("settingsCatDoctor"),
+        ctx.t("settingsCatDoctorDesc"),
+        IconName::Info,
+    )
+    .sections([SettingsSection::new()
+        .title(ctx.t("doctorTitle"))
+        .subtitle(ctx.t("doctorDesc"))
+        .row(toolbar_item(ctx))
+        .row(report_item(ctx))])
 }
 
-fn toolbar_item(ctx: &SectionContext) -> SettingItem {
+fn toolbar_item(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
     let translator = ctx.translator.clone();
     let run = ctx.t("doctorRun");
     let running = ctx.t("doctorRunning");
     let copy = ctx.t("doctorCopyReport");
     let never = ctx.t("doctorNeverRun");
-    SettingItem::render(move |options, _, cx: &mut App| {
+    SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let busy = store.read(cx).is_busy("diagnostics");
         let report = store.read(cx).diagnostics().cloned();
@@ -74,7 +71,8 @@ fn toolbar_item(ctx: &SectionContext) -> SettingItem {
                     .gap(tokens.spacing.sm)
                     .child(
                         button("doctor-copy", copy.clone(), ButtonVariant::Secondary, cx)
-                            .disabled(options.is_disabled() || copy_report.is_none())
+                            .h(CONTROL_HEIGHT)
+                            .disabled(disabled || copy_report.is_none())
                             .on_click(move |_, _, cx| {
                                 if let Some(report) = &copy_report {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
@@ -90,7 +88,8 @@ fn toolbar_item(ctx: &SectionContext) -> SettingItem {
                             ButtonVariant::Primary,
                             cx,
                         )
-                        .disabled(options.is_disabled() || busy)
+                        .h(CONTROL_HEIGHT)
+                        .disabled(disabled || busy)
                         .on_click(move |_, _, cx| {
                             run_store.update(cx, |store, cx| store.run_diagnostics(cx));
                         }),
@@ -101,10 +100,10 @@ fn toolbar_item(ctx: &SectionContext) -> SettingItem {
     .keywords([ctx.t("doctorRun"), ctx.t("doctorCopyReport")])
 }
 
-fn report_item(ctx: &SectionContext) -> SettingItem {
+fn report_item(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
     let translator = ctx.translator.clone();
-    SettingItem::render(move |options, _, cx: &mut App| {
+    SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let Some(report) = store.read(cx).diagnostics().cloned() else {
             return div().into_any_element();
@@ -182,7 +181,8 @@ fn report_item(ctx: &SectionContext) -> SettingItem {
                         ButtonVariant::Secondary,
                         cx,
                     )
-                    .disabled(options.is_disabled() || busy)
+                    .h(CONTROL_HEIGHT)
+                    .disabled(disabled || busy)
                     .on_click(move |_, _, cx| {
                         let params = params.clone();
                         repair_store.update(cx, |store, cx| run_repair(store, params, cx));

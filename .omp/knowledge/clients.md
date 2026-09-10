@@ -13,7 +13,12 @@
 - `theme` / `components`：公开完整 `SemanticThemeTokens`，通用组件只取活动 token；gpui-component 初始化已包含 gpui-base 初始化。
 - `shell`：只拥有窗口 chrome、路由与内容槽，不知道下载、设置、账户、RSS 或扩展。
 - `downloads` / `settings` / `account` / `rss` / `extensions`：各自拥有视图模型、controller 与 capability-local port；只消费 `fluxdown_protocol` DTO。
-- `app`：创建唯一 `AgentClient`，向全部 capability 注入 adapter，并把同一有序 snapshot/event 流分发到主窗口和设置窗口。
+- `app`：创建唯一 `AgentClient`；`session.rs` 的 `Entity<AgentSession>` 是快照/事件唯一入口（`EventEmitter<SessionSignal>`），任何视图实现 `SessionConsumer` 后 `attach()` 即可：先用最近全量快照秒开首帧，再 `system.snapshot` 重对齐游标并回放缓冲事件，订阅随视图销毁解除（主窗口关闭不影响其他窗口）。事件泵在 `application.run` 顶层按帧批处理（≤256 条一次 `update`）。
+- `app/windows/`：`WindowRegistry`（`Global`）按 `WindowKey{Main, Settings, NewDownload, QueueManager, QuickCapture, Selection(id), TaskDetail(id), GroupDetail(id)}` 去重、`on_window_closed` 清理；**退出判定唯一入口**：无用户窗口且非 Resident（托盘未装）→ `cx.quit()`。主窗口/设置窗口边界 500ms 防抖写 `desktop.window.<main|settings>`（`agent.preferences.patch` + `sync:false`），恢复时校验可见区域 ≥100×100。主窗口关闭策略：`close_to_tray && resident` → 直接关；有活跃任务 → `AlertDialog` 提示后关。
+- 窗口分级：主窗口 / 设置 / 新建下载 / 队列管理 `Normal`；引擎发起的选择（HLS/BT/变体）每 request 一个 `Floating` 窗口；外部捕获确认单例 `PopUp`（置顶、无任务栏、不抢焦点）；任务窗口 `TaskDetail(id)` 任意数量并存（AB Download 式紧凑进度头，替代 Flutter 悬浮球）。
+- 单实例：`launch.rs` 文件锁 + `instance_ipc.rs` 激活通道（Unix socket / Windows 命名管道，一行 JSON `{urls,files,activate}`）；次实例交给主实例后退出，主实例激活/重建主窗口。`--capture` 由 agent 拉起只开捕获窗口；`--minimized` 等首个快照按 `start_minimized_to_tray` 决定托盘驻留或最小化主窗口。
+- 动作/菜单：`crates/downloads/src/actions.rs` + `crates/app/src/actions.rs`（`actions!`）；键位与菜单树在 `app/menus.rs`（macOS `cx.set_menus` 原生，Windows/Linux `AppMenuBar` 注入 shell 标题栏）；字母键只在 `"DownloadView"` 上下文且无聚焦输入框时生效。
+- 下载数据层：`DownloadsController` 持 `Rc<TaskStore>`（哈希索引 + 逐行增量 + `generation`），表格代理只在 generation/筛选/排序/分组变化时重算 `visible`（含分组头），`render_td` 借 `Ref` 不克隆行。视图偏好（密度/分组/排序/列/详情面板/侧栏宽）全局单套存 `desktop.downloads.view`（设备本地）。
 - 运行链路：`fluxdown-desktop` 探活/单飞启动 `fluxdown-agent`；agent 探活/单飞启动 `fluxdownd`。关闭全部窗口不终止后两者。
 - 三个二进制作为同级文件进入 Windows/macOS/Linux app 包；agent/daemon 使用独立 bearer 文件，云 Token 只保存在 agent 私有状态。
 - gpui-base 尚未发布，依赖暂走固定 gpui-component git commit；Zed workspace 必须在 `Cargo.lock` 统一为单一提交，否则 `gpui` 类型会分裂。

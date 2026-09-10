@@ -8,7 +8,7 @@ use gpui::{
     App, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement as _, Styled, div, px, relative,
 };
-use gpui_base::Button;
+pub use gpui_base::Button;
 
 /// 基础按钮的视觉语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

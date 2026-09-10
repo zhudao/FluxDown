@@ -41,7 +41,6 @@ pub mod keys {
     pub const MAIN_QUEUE: &str = "mainQueue";
     pub const MENU_FILE: &str = "menuFile";
     pub const MENU_HELP: &str = "menuHelp";
-    pub const MENU_ITEMS_PENDING: &str = "menuItemsPending";
     pub const MENU_TASKS: &str = "menuTasks";
     pub const MENU_TOOLS: &str = "menuTools";
     pub const MOBILE_NAV_DOWNLOADS: &str = "mobileNavDownloads";

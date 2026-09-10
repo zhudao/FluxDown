@@ -4,7 +4,6 @@
 //! 创建后以 [`ShellRoute`] 注入。
 
 mod assets;
-mod strings;
 mod view;
 
 use gpui::{SharedString, WindowDecorations, WindowOptions, size};

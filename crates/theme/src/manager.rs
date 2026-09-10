@@ -191,6 +191,9 @@ fn install(
         let component_theme = ComponentTheme::global_mut(cx);
         component_theme.apply_semantic_tokens(&tokens);
         component_theme.focus_ring = false;
+        // gpui-component 的 `text_base` 取 `font_size`（默认映射到 md=16px），
+        // 对桌面密度偏大；与 Flutter 桌面端 13px 正文基线对齐取 sm。
+        component_theme.font_size = tokens.typography.sm.size;
         component_theme.title_bar = tokens.colors.surface;
         component_theme.title_bar_border = tokens.colors.border;
         // gpui-component 的 Sidebar / Settings 侧栏只读 sidebar_* 系列，legacy

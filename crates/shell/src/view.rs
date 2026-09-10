@@ -9,15 +9,10 @@ use gpui::{
     Window, div, img, px,
 };
 use gpui_component::{
-    Icon, Sizable as _, TITLE_BAR_HEIGHT, TitleBar,
-    button::{Button, ButtonVariants as _},
-    h_flex,
-    menu::DropdownMenu as _,
-    tooltip::Tooltip,
-    v_flex,
+    Icon, TITLE_BAR_HEIGHT, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex,
 };
 
-use crate::{assets::APP_LOGO_PATH, strings::ShellStrings};
+use crate::assets::APP_LOGO_PATH;
 
 /// shell 路由的稳定标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,10 +169,11 @@ impl Render for AuxiliaryWindowView {
 /// GPUI 窗口外壳：只负责窗口 chrome、活动栏、路由与内容槽位。
 pub struct ShellView {
     translator: Entity<Translator>,
-    strings: ShellStrings,
     active_route: Option<RouteId>,
     routes: Vec<ShellRoute>,
     actions: Vec<ShellAction>,
+    /// Windows / Linux 标题栏内的应用菜单；macOS 走原生菜单不渲染。
+    menu_bar: Option<Entity<AppMenuBar>>,
 }
 
 impl ShellView {
@@ -186,21 +182,25 @@ impl ShellView {
         translator: Entity<Translator>,
         routes: Vec<ShellRoute>,
         actions: Vec<ShellAction>,
+        menu_bar: Option<Entity<AppMenuBar>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let strings = ShellStrings::from_translator(translator.read(cx));
         let active_route = routes.first().map(|route| route.id);
-        cx.observe(&translator, |this, translator, cx| {
-            this.strings = ShellStrings::from_translator(translator.read(cx));
-            cx.notify();
-        })
-        .detach();
+        cx.observe(&translator, |_, _, cx| cx.notify()).detach();
         Self {
             translator,
-            strings,
             active_route,
             routes,
             actions,
+            menu_bar,
+        }
+    }
+
+    /// 切换到指定路由（宿主导航入口）。
+    pub fn navigate(&mut self, route: RouteId, cx: &mut Context<Self>) {
+        if self.active_route != Some(route) {
+            self.active_route = Some(route);
+            cx.notify();
         }
     }
 
@@ -208,14 +208,6 @@ impl ShellView {
         let tokens = active_theme(cx).tokens();
         let colors = tokens.colors;
         let spacing = tokens.spacing;
-        let typography = tokens.typography.clone();
-        let menu_items = [
-            ("title-menu-file", self.strings.menu_file.clone()),
-            ("title-menu-tasks", self.strings.menu_tasks.clone()),
-            ("title-menu-tools", self.strings.menu_tools.clone()),
-            ("title-menu-help", self.strings.menu_help.clone()),
-        ];
-        let menu_placeholder = self.strings.menu_items_pending.clone();
         let logo = img(APP_LOGO_PATH).size(px(16.));
         let title_bar = TitleBar::new();
         #[cfg(not(target_os = "macos"))]
@@ -224,6 +216,11 @@ impl ShellView {
         let (leading_logo, trailing_logo): (Option<Img>, Option<Img>) = (None, Some(logo));
         #[cfg(not(target_os = "macos"))]
         let (leading_logo, trailing_logo): (Option<Img>, Option<Img>) = (Some(logo), None);
+        let menu_bar = if cfg!(target_os = "macos") {
+            None
+        } else {
+            self.menu_bar.clone()
+        };
 
         title_bar
             .h(TITLE_BAR_HEIGHT)
@@ -238,28 +235,13 @@ impl ShellView {
                     .pl(spacing.xxs)
                     .pr(spacing.md)
                     .children(leading_logo)
-                    .child(
+                    .children(menu_bar.map(|menu_bar| {
                         h_flex()
                             .h_full()
                             .items_center()
-                            .text_size(typography.sm.size)
-                            .font_weight(typography.sm.weight)
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .children(menu_items.into_iter().map(|(id, label)| {
-                                let placeholder = menu_placeholder.clone();
-                                Button::new(id)
-                                    .label(label)
-                                    .xsmall()
-                                    .text()
-                                    .compact()
-                                    .h_full()
-                                    .px(spacing.sm)
-                                    .cursor_pointer()
-                                    .dropdown_menu(move |menu, _, _| {
-                                        menu.min_w(140.).label(placeholder.clone())
-                                    })
-                            })),
-                    )
+                            .child(menu_bar)
+                    }))
                     .child(div().flex_1())
                     .children(trailing_logo),
             )

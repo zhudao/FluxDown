@@ -14,11 +14,14 @@ mod protocol_registry;
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 use fluxdown_protocol::PlatformIntegrationDto;
 
-static DESKTOP_LAUNCHED: AtomicBool = AtomicBool::new(false);
+/// 上次为捕获拉起桌面程序的 unix 毫秒时间戳（0 = 从未拉起）。
+static LAST_CAPTURE_LAUNCH_MS: AtomicI64 = AtomicI64::new(0);
+/// 两次捕获拉起之间的最小间隔：已有 UI 客户端连接时不拉起，断线重连抖动也不重复拉起。
+const CAPTURE_LAUNCH_COOLDOWN_MS: i64 = 10_000;
 
 const DESKTOP_EXECUTABLE_NAME: &str = if cfg!(windows) {
     "fluxdown-desktop.exe"
@@ -48,15 +51,36 @@ pub fn open_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
     launch_path(path, reveal)
 }
 
-/// 首个待确认捕获在无 UI 时只拉起一次同级桌面程序。
-pub fn launch_desktop_once() -> Result<(), PlatformError> {
-    if DESKTOP_LAUNCHED.swap(true, Ordering::AcqRel) {
+/// 无 UI 客户端连接（`ui_clients == 0`）且距上次拉起 ≥ 10s 才需要为捕获拉起桌面程序。
+fn should_launch_desktop_for_capture(
+    ui_clients: &AtomicUsize,
+    last_launch_ms: i64,
+    now_ms: i64,
+) -> bool {
+    ui_clients.load(Ordering::Acquire) == 0
+        && now_ms.saturating_sub(last_launch_ms) >= CAPTURE_LAUNCH_COOLDOWN_MS
+}
+
+/// 待确认捕获入队时，若当前无已连接的桌面 UI 才拉起同级桌面程序进入 `--capture` 模式；
+/// 已有 UI 或距上次拉起不足 10s 时静默跳过。
+pub fn launch_desktop_for_capture(ui_clients: &AtomicUsize) -> Result<(), PlatformError> {
+    let now = now_unix_ms();
+    let last = LAST_CAPTURE_LAUNCH_MS.load(Ordering::Acquire);
+    if !should_launch_desktop_for_capture(ui_clients, last, now) {
+        return Ok(());
+    }
+    if LAST_CAPTURE_LAUNCH_MS
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        // 另一并发调用抢先更新了时间戳，视为已处理。
         return Ok(());
     }
     let executable = desktop_executable().ok_or(PlatformError::Unsupported(
         "fluxdown-desktop is not installed next to fluxdown-agent",
     ))?;
     let mut command = std::process::Command::new(executable);
+    command.arg("--capture");
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -64,6 +88,14 @@ pub fn launch_desktop_once() -> Result<(), PlatformError> {
     set_no_console_window(&mut command);
     command.spawn()?;
     Ok(())
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// 当前系统集成状态快照。
@@ -292,5 +324,15 @@ mod tests {
             set_url_protocol("javascript", true),
             Err(PlatformError::InvalidScheme(_))
         ));
+    }
+
+    #[test]
+    fn should_launch_desktop_for_capture_requires_no_ui_clients_and_cooldown_elapsed() {
+        let zero = AtomicUsize::new(0);
+        let one = AtomicUsize::new(1);
+        assert!(should_launch_desktop_for_capture(&zero, 0, 20_000));
+        assert!(!should_launch_desktop_for_capture(&one, 0, 20_000));
+        assert!(!should_launch_desktop_for_capture(&zero, 15_000, 20_000));
+        assert!(should_launch_desktop_for_capture(&zero, 0, 10_000));
     }
 }

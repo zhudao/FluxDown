@@ -114,6 +114,8 @@ class S {
   String get deleteQueueAction => _r('deleteQueueAction');
   String get queueNameLabel => _r('queueNameLabel');
   String get queueNameHint => _r('queueNameHint');
+  String get queueNameRequired => _r('queueNameRequired');
+  String get queueSaveAction => _r('queueSaveAction');
   String get queueSpeedLimit => _r('queueSpeedLimit');
   String get queueSpeedLimitHint => _r('queueSpeedLimitHint');
   String get queueUploadLimit => _r('queueUploadLimit');
@@ -134,6 +136,12 @@ class S {
   String get mainQueue => _r('mainQueue');
   String get laterQueue => _r('laterQueue');
   String get ungroupedTasks => _r('ungroupedTasks');
+  String get remoteTasksGroup => _r('remoteTasksGroup');
+  String get tooManyWindowsHint => _r('tooManyWindowsHint');
+  String get openTaskInWindowAction => _r('openTaskInWindowAction');
+  String get taskWindowPinOnTop => _r('taskWindowPinOnTop');
+  String get unsupportedDropHint => _r('unsupportedDropHint');
+  String get taskCreatedToast => _r('taskCreatedToast');
   String get startQueueAction => _r('startQueueAction');
   String get stopQueueAction => _r('stopQueueAction');
   String get queueRunningBadge => _r('queueRunningBadge');
@@ -181,6 +189,7 @@ class S {
   // ─────────────────────────────────────────────
   String get newDownload => _r('newDownload');
   String get searchPlaceholder => _r('searchPlaceholder');
+  String get searchTasksPlaceholder => _r('searchTasksPlaceholder');
   String get searchGroupTasks => _r('searchGroupTasks');
   String get searchGroupSettings => _r('searchGroupSettings');
   String settingsSearchSubtitle(String catLabel, String desc) =>
@@ -251,6 +260,7 @@ class S {
   String get viewGroupType => _r('viewGroupType');
   String get viewGroupQueue => _r('viewGroupQueue');
   String get viewGroupSite => _r('viewGroupSite');
+  String get viewGroupGroup => _r('viewGroupGroup');
   String get viewGroupNone => _r('viewGroupNone');
   String get viewSortSmart => _r('viewSortSmart');
   String get viewSortCreated => _r('viewSortCreated');
@@ -520,6 +530,8 @@ class S {
   String shutdownCountdown(String time) =>
       _r('shutdownCountdown', {'time': time});
   String get shutdownCancelButton => _r('shutdownCancelButton');
+  String diskSpaceFreeLabel(String size) =>
+      _r('diskSpaceFreeLabel', {'size': size});
 
   // ─────────────────────────────────────────────
   // Settings — 分类
@@ -830,6 +842,7 @@ class S {
   String get closeToTrayDesc => _r('closeToTrayDesc');
   String get startMinimizedToTray => _r('startMinimizedToTray');
   String get startMinimizedToTrayDesc => _r('startMinimizedToTrayDesc');
+  String get trayUnsupportedLinux => _r('trayUnsupportedLinux');
   String get floatingBall => _r('floatingBall');
   String get floatingBallDesc => _r('floatingBallDesc');
   String get floatingBallActiveOnly => _r('floatingBallActiveOnly');
@@ -1694,6 +1707,22 @@ class S {
   String get resolveVariantDesc => _r('resolveVariantDesc');
 
   // ─────────────────────────────────────────────
+  // GPUI 交互选择窗口（HLS/BT/变体通用）
+  // ─────────────────────────────────────────────
+  String selectionAutoDefaultIn(int seconds) =>
+      _r('selectionAutoDefaultIn', {'seconds': seconds});
+
+  // ─────────────────────────────────────────────
+  // GPUI 快速捕获窗口
+  // ─────────────────────────────────────────────
+  String get quickCaptureTitle => _r('quickCaptureTitle');
+  String get quickCaptureDownload => _r('quickCaptureDownload');
+  String get quickCaptureIgnore => _r('quickCaptureIgnore');
+  String get quickCaptureDownloadAll => _r('quickCaptureDownloadAll');
+  String get quickCaptureIgnoreAll => _r('quickCaptureIgnoreAll');
+  String get quickCaptureMoreOptions => _r('quickCaptureMoreOptions');
+
+  // ─────────────────────────────────────────────
   // TrayService
   // ─────────────────────────────────────────────
   String get trayShowWindow => _r('trayShowWindow');
@@ -1703,7 +1732,6 @@ class S {
   // 应用菜单与桌面标题栏
   // ─────────────────────────────────────────────
   String get menuFile => _r('menuFile');
-  String get menuItemsPending => _r('menuItemsPending');
   String get menuTasks => _r('menuTasks');
   String get menuTools => _r('menuTools');
   String get menuNewDownload => _r('menuNewDownload');
@@ -1719,6 +1747,18 @@ class S {
   String get menuWebsite => _r('menuWebsite');
   String get menuFeedback => _r('menuFeedback');
   String get menuAbout => _r('menuAbout');
+  String get menuOpenLogsFolder => _r('menuOpenLogsFolder');
+  String get menuOpenInWindow => _r('menuOpenInWindow');
+  String get menuClearFinished => _r('menuClearFinished');
+  String get menuDetailPanel => _r('menuDetailPanel');
+  String get menuCycleDensity => _r('menuCycleDensity');
+  String get menuCycleGroupBy => _r('menuCycleGroupBy');
+  String get menuCycleSort => _r('menuCycleSort');
+  String get closeWithActiveTasksTitle => _r('closeWithActiveTasksTitle');
+  String get closeWithActiveTasksHint => _r('closeWithActiveTasksHint');
+  String get protocolVersionLabel => _r('protocolVersionLabel');
+  String get updateAvailableToast => _r('updateAvailableToast');
+  String get goToDownload => _r('goToDownload');
   String get menuHide => _r('menuHide');
   String get menuHideOthers => _r('menuHideOthers');
   String get menuShowAll => _r('menuShowAll');
@@ -2050,6 +2090,7 @@ class S {
   String get groupCopySourceLink => _r('groupCopySourceLink');
   String get groupDelete => _r('groupDelete');
   String get groupDeleteWithFiles => _r('groupDeleteWithFiles');
+  String get openGroupInWindowAction => _r('openGroupInWindowAction');
   String get groupPluginBadge => _r('groupPluginBadge');
   String get groupMemberExpiredResolve => _r('groupMemberExpiredResolve');
   String groupDirMeta(int count, String size) =>

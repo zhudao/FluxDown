@@ -34,3 +34,7 @@ tokio-tungstenite = "0.29"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+tray-icon = "0.24.2"

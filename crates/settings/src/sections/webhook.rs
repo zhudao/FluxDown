@@ -2,19 +2,16 @@
 
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{App, Context, IntoElement as _, ParentElement, SharedString, Styled, div};
-use gpui_component::{
-    Disableable as _, h_flex,
-    setting::{SettingGroup, SettingItem},
-    v_flex,
-};
+use gpui_component::{Disableable as _, h_flex, v_flex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 
 use super::{SectionContext, webhook_dialog};
 use crate::store::SettingsStore;
+use crate::ui::{SettingsRow, SettingsSection};
 
 pub(crate) const ENDPOINTS_KEY: &str = "webhook.endpoints";
 
@@ -68,14 +65,14 @@ pub(crate) fn write_endpoints(
     store.set_daemon(ENDPOINTS_KEY, encoded, cx);
 }
 
-pub(crate) fn endpoints_group(ctx: &SectionContext, _cx: &mut App) -> SettingGroup {
-    SettingGroup::new()
+pub(crate) fn endpoints_group(ctx: &SectionContext, _cx: &mut App) -> SettingsSection {
+    SettingsSection::new()
         .title(ctx.t("notifyGroupWebhook"))
-        .description(ctx.t("webhookSemantics"))
-        .item(endpoints_item(ctx))
+        .subtitle(ctx.t("webhookSemantics"))
+        .row(endpoints_item(ctx))
 }
 
-fn endpoints_item(ctx: &SectionContext) -> SettingItem {
+fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
     let translator = ctx.translator.clone();
     let empty_title = ctx.t("webhookEmptyTitle");
@@ -85,9 +82,8 @@ fn endpoints_item(ctx: &SectionContext) -> SettingItem {
     let test = ctx.t("webhookRowTest");
     let delete = ctx.t("webhookRowDelete");
     let disabled_label = ctx.t("webhookHealthDisabled");
-    SettingItem::render(move |options, _, cx: &mut App| {
+    SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
-        let disabled = options.is_disabled();
         let endpoints = read_endpoints(store.read(cx));
         let deliveries = store.read(cx).webhook_deliveries().to_vec();
         let mut column = v_flex().w_full().gap(tokens.spacing.xs);
@@ -197,6 +193,7 @@ fn endpoints_item(ctx: &SectionContext) -> SettingItem {
                             ButtonVariant::Secondary,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(disabled)
                         .on_click(move |_, window, cx| {
                             webhook_dialog::open(
@@ -215,6 +212,7 @@ fn endpoints_item(ctx: &SectionContext) -> SettingItem {
                             ButtonVariant::Secondary,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || store.read(cx).is_busy("webhookTest"))
                         .on_click({
                             let translator = translator.clone();
@@ -285,6 +283,7 @@ fn endpoints_item(ctx: &SectionContext) -> SettingItem {
                             ButtonVariant::Destructive,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(disabled)
                         .on_click(move |_, _, cx| {
                             let id = delete_id.clone();
@@ -317,6 +316,7 @@ fn endpoints_item(ctx: &SectionContext) -> SettingItem {
             .child(
                 h_flex().w_full().justify_end().child(
                     button("webhook-add", add.clone(), ButtonVariant::Primary, cx)
+                        .h(CONTROL_HEIGHT)
                         .disabled(disabled)
                         .on_click(move |_, window, cx| {
                             webhook_dialog::open(
@@ -334,15 +334,14 @@ fn endpoints_item(ctx: &SectionContext) -> SettingItem {
     .keywords([ctx.t("notifyGroupWebhook"), ctx.t("webhookAddEndpoint")])
 }
 
-pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> SettingGroup {
+pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> SettingsSection {
     let store = ctx.store();
     let translator = ctx.translator.clone();
     let empty = ctx.t("webhookLogEmpty");
     let clear = ctx.t("webhookLogClear");
     let simulate = ctx.t("webhookLogSimulate");
-    let item = SettingItem::render(move |options, _, cx: &mut App| {
+    let row = SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
-        let disabled = options.is_disabled();
         let deliveries = store.read(cx).webhook_deliveries().to_vec();
         let clear_store = store.clone();
         let simulate_store = store.clone();
@@ -420,6 +419,7 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
                             ButtonVariant::Secondary,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || simulate_store.read(cx).is_busy("webhookSimulate"))
                         .on_click(move |_, _, cx| {
                             simulate_store.update(cx, |store, cx| {
@@ -440,6 +440,7 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
                             ButtonVariant::Secondary,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || deliveries.is_empty())
                         .on_click(move |_, _, cx| {
                             clear_store.update(cx, |store, cx| {
@@ -457,8 +458,8 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
             .into_any_element()
     })
     .keywords([ctx.t("webhookDeliveryLog")]);
-    SettingGroup::new()
+    SettingsSection::new()
         .title(ctx.t("webhookDeliveryLog"))
-        .description(ctx.t("webhookLogSubtitle"))
-        .item(item)
+        .subtitle(ctx.t("webhookLogSubtitle"))
+        .row(row)
 }

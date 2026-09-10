@@ -51,7 +51,9 @@ pub struct GatewayService {
     api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
     api_token: fluxdown_api::auth::TokenCell,
     hello: ServiceHello,
-    selection_clients: AtomicUsize,
+    /// 已连接并声明 `client.selections` 能力的 UI 客户端数量；与 `CaptureService` 共享
+    /// 同一个 `Arc`，用于决定无 UI 时是否需要为捕获拉起桌面程序。
+    selection_clients: Arc<AtomicUsize>,
 }
 
 impl GatewayService {
@@ -75,6 +77,7 @@ impl GatewayService {
         store: Arc<crate::state::StateStore>,
         api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
         api_token: fluxdown_api::auth::TokenCell,
+        selection_clients: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             daemon,
@@ -104,7 +107,7 @@ impl GatewayService {
                     method::CAPABILITY_AGENT_DEVICE_LINK.to_owned(),
                 ],
             ),
-            selection_clients: AtomicUsize::new(0),
+            selection_clients,
         }
     }
 
@@ -634,17 +637,13 @@ impl GatewayService {
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
-        let transaction_id = required_string(&params, "transactionId")?;
-        let accepted = params
-            .get("accepted")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| RpcErrorData {
-                code: ApplicationErrorCode::InvalidArgument,
-                retryable: false,
-                field: Some("accepted".to_owned()),
-                revision: None,
-            })?;
-        capture_value(self.capture.resolve(&transaction_id, accepted).await)
+        let params = serde_json::from_value::<fluxdown_protocol::CaptureResolveParams>(params)
+            .map_err(|_| RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false))?;
+        capture_value(
+            self.capture
+                .resolve(&params.transaction_id, params.accepted, params.overrides)
+                .await,
+        )
     }
 
     /// 读取本机 `.torrent`，上传 daemon blob 后走捕获路径建任务。
@@ -1291,6 +1290,7 @@ fn temporary_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -1299,7 +1299,6 @@ mod tests {
     };
 
     use super::{GatewayService, authorized, load_or_create_bearer};
-
     #[tokio::test]
     async fn service_bearer_is_exact_stable_and_private() {
         let dir = std::env::temp_dir().join(format!(
@@ -1384,9 +1383,11 @@ mod tests {
                 state.clone(),
                 store.clone(),
             ));
+            let selection_clients = Arc::new(AtomicUsize::new(0));
             let capture = Arc::new(crate::capture::CaptureService::new(
                 daemon.clone(),
                 events.clone(),
+                selection_clients.clone(),
             ));
             let daemon_config = crate::daemon_client::DaemonClientConfig {
                 rpc_url: "ws://127.0.0.1:9/rpc".to_owned(),
@@ -1425,6 +1426,7 @@ mod tests {
                 store.clone(),
                 api_switches,
                 fluxdown_api::auth::TokenCell::new(""),
+                selection_clients,
             );
             Self {
                 service,

@@ -2,7 +2,7 @@
 
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
     Subscription, Window, div, px,
@@ -10,13 +10,13 @@ use gpui::{
 use gpui_component::{
     h_flex,
     input::{InputEvent, Textarea, TextareaState},
-    setting::{SettingField, SettingItem},
     v_flex,
 };
 use serde_json::json;
 
 use super::SectionContext;
 use crate::store::SettingsStore;
+use crate::ui::{Control, SettingsRow};
 
 struct TextareaSlot {
     state: Entity<TextareaState>,
@@ -31,68 +31,66 @@ pub(crate) fn list_item(
     desc_key: &str,
     placeholder_key: &str,
     key: &'static str,
-) -> SettingItem {
+) -> SettingsRow {
     let field = textarea_field(ctx.store(), ctx.t(placeholder_key), key);
-    ctx.item(title_key, Some(desc_key), field)
-        .layout(gpui::Axis::Vertical)
+    ctx.item(title_key, Some(desc_key), field).vertical()
 }
 
 pub(crate) fn textarea_field(
     store: Entity<SettingsStore>,
     placeholder: SharedString,
     key: &'static str,
-) -> SettingField<SharedString> {
-    SettingField::render(move |options, window: &mut Window, cx: &mut App| {
-        let current = SharedString::from(store.read(cx).daemon_str(key));
-        let slot = window.use_keyed_state(
-            SharedString::from(format!("settings-textarea-{key}")),
-            cx,
-            {
-                let store = store.clone();
-                let current = current.clone();
-                let placeholder = placeholder.clone();
-                move |window, cx| {
-                    let state = cx.new(|cx| {
-                        TextareaState::new(window, cx)
-                            .default_value(current.clone())
-                            .placeholder(placeholder)
-                    });
-                    let _subscription = cx.subscribe(
-                        &state,
-                        move |slot: &mut TextareaSlot, state, event: &InputEvent, cx| {
-                            if matches!(event, InputEvent::Change | InputEvent::Blur) {
-                                let value = state.read(cx).value();
-                                if value != slot.last_synced {
-                                    slot.last_synced = value.clone();
-                                    store.update(cx, |store, cx| {
-                                        store.set_daemon(key, value.to_string(), cx)
-                                    });
+) -> Control {
+    Control::custom(
+        move |disabled, row_key: &SharedString, window: &mut Window, cx: &mut App| {
+            let current = SharedString::from(store.read(cx).daemon_str(key));
+            let slot =
+                window.use_keyed_state(SharedString::from(format!("{row_key}-textarea")), cx, {
+                    let store = store.clone();
+                    let current = current.clone();
+                    let placeholder = placeholder.clone();
+                    move |window, cx| {
+                        let state = cx.new(|cx| {
+                            TextareaState::new(window, cx)
+                                .default_value(current.clone())
+                                .placeholder(placeholder)
+                        });
+                        let _subscription = cx.subscribe(
+                            &state,
+                            move |slot: &mut TextareaSlot, state, event: &InputEvent, cx| {
+                                if matches!(event, InputEvent::Change | InputEvent::Blur) {
+                                    let value = state.read(cx).value();
+                                    if value != slot.last_synced {
+                                        slot.last_synced = value.clone();
+                                        store.update(cx, |store, cx| {
+                                            store.set_daemon(key, value.to_string(), cx)
+                                        });
+                                    }
                                 }
-                            }
-                        },
-                    );
-                    TextareaSlot {
-                        state,
-                        last_synced: current,
-                        _subscription,
+                            },
+                        );
+                        TextareaSlot {
+                            state,
+                            last_synced: current,
+                            _subscription,
+                        }
                     }
+                });
+            slot.update(cx, |slot, cx| {
+                if slot.last_synced != current {
+                    slot.last_synced = current.clone();
+                    slot.state
+                        .update(cx, |state, cx| state.set_value(current.clone(), window, cx));
                 }
-            },
-        );
-        slot.update(cx, |slot, cx| {
-            if slot.last_synced != current {
-                slot.last_synced = current.clone();
-                slot.state
-                    .update(cx, |state, cx| state.set_value(current.clone(), window, cx));
-            }
-        });
-        let state = slot.read(cx).state.clone();
-        Textarea::new(&state)
-            .h(px(120.))
-            .w_full()
-            .disabled(options.is_disabled())
-            .into_any_element()
-    })
+            });
+            let state = slot.read(cx).state.clone();
+            Textarea::new(&state)
+                .h(px(120.))
+                .w_full()
+                .disabled(disabled)
+                .into_any_element()
+        },
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -139,7 +137,7 @@ pub(crate) fn status_item(
     ctx: &SectionContext,
     kind: SubscriptionKind,
     _cx: &mut App,
-) -> SettingItem {
+) -> SettingsRow {
     let store = ctx.store();
     let translator = ctx.translator.clone();
     let prefix = kind.prefix();
@@ -147,7 +145,7 @@ pub(crate) fn status_item(
     let updating = ctx.t(&format!("{prefix}Updating"));
     let failed = ctx.t(&format!("{prefix}UpdateFailed"));
     let never = ctx.t(&format!("{prefix}NeverUpdated"));
-    SettingItem::render(move |_, _, cx: &mut App| {
+    SettingsRow::custom(move |_, _, _, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let snapshot = store.read(cx);
         let count = snapshot
@@ -206,6 +204,7 @@ pub(crate) fn status_item(
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .disabled(busy)
                 .on_click(move |_, _, cx| {
                     click_store.update(cx, |store, cx| {

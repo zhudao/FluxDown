@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 pub struct LaunchOptions {
     /// 启动后最小化主窗口（自启动场景）。
     pub minimized: bool,
+    /// 由 agent 为外部捕获拉起：不开主窗口，只开快速捕获窗口。
+    pub capture_only: bool,
     /// 需要交给 agent 的外部链接。
     pub urls: Vec<String>,
     /// 需要经 agent 上传后建任务的本机 `.torrent` 文件。
@@ -25,6 +27,7 @@ impl LaunchOptions {
         for arg in args {
             match arg.as_str() {
                 "--minimized" | "--start-minimized" => options.minimized = true,
+                "--capture" => options.capture_only = true,
                 value if is_capture_url(value) => options.urls.push(value.to_owned()),
                 value if value.starts_with("--") => {}
                 value => {

@@ -6,11 +6,29 @@
 mod port;
 mod sections;
 mod store;
+mod ui;
 mod view;
 
 pub use port::{PortFuture, SettingsPort};
 pub use store::{SettingsError, SettingsErrorKind, SettingsStore};
 pub use view::{SettingsContentSlots, SettingsView};
+
+/// 打开分类编辑对话框（`id = None` 新建；未知 id 视为新建）。供 app 把下载侧栏的
+/// 「编辑分类」接到设置能力，而不让下载 crate 依赖设置 crate。
+pub fn open_category_editor(
+    store: gpui::Entity<SettingsStore>,
+    translator: &fluxdown_ui_i18n::Translator,
+    id: Option<String>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
+    let existing = id.and_then(|id| {
+        sections::categories::read_categories(store.read(cx))
+            .into_iter()
+            .find(|entry| entry.id == id)
+    });
+    sections::category_dialog::open(store, translator.clone(), existing, window, cx);
+}
 
 /// 将 FluxDown locale 映射为 gpui-component 支持的 locale。
 pub fn component_locale(locale: &str) -> &str {

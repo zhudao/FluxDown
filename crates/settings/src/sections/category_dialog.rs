@@ -3,14 +3,14 @@
 
 use fluxdown_ui_components::{ButtonVariant, button};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, WindowExt as _,
+    Icon, IconName, Sizable as _, Size, WindowExt as _,
     button::ButtonVariant as ComponentButtonVariant,
     dialog::DialogButtonProps,
     h_flex,
@@ -482,12 +482,14 @@ impl CategoryDialog {
             )
             .child(div().h(tokens.spacing.xs));
         match self.match_mode {
-            MatchMode::Extension => column
-                .child(self.label("extensionsLabel", cx))
-                .child(Input::new(&self.extensions).w_full()),
+            MatchMode::Extension => column.child(self.label("extensionsLabel", cx)).child(
+                Input::new(&self.extensions)
+                    .with_size(Size::Medium)
+                    .w_full(),
+            ),
             MatchMode::Regex => column
                 .child(self.label("regexLabel", cx))
-                .child(Input::new(&self.regex).w_full()),
+                .child(Input::new(&self.regex).with_size(Size::Medium).w_full()),
         }
     }
 
@@ -501,7 +503,7 @@ impl CategoryDialog {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.save_dir).w_full()),
+                    .child(Input::new(&self.save_dir).with_size(Size::Medium).w_full()),
             )
             .child(
                 button(
@@ -510,6 +512,7 @@ impl CategoryDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .disabled(self.picking_dir)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.pick_dir(window, cx);
@@ -523,6 +526,7 @@ impl CategoryDialog {
                     ButtonVariant::Ghost,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.save_dir
                         .update(cx, |input, cx| input.set_value("", window, cx));
@@ -553,6 +557,7 @@ impl CategoryDialog {
                     ButtonVariant::Destructive,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.confirm_delete(window, cx);
                 })),
@@ -566,6 +571,7 @@ impl CategoryDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(|_, window, cx| window.close_dialog(cx)),
             )
             .child(
@@ -575,6 +581,7 @@ impl CategoryDialog {
                     ButtonVariant::Primary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save(window, cx))),
             )
     }
@@ -592,7 +599,7 @@ impl Render for CategoryDialog {
                 v_flex()
                     .gap(tokens.spacing.xs)
                     .child(self.label("categoryName", cx))
-                    .child(Input::new(&self.name).w_full()),
+                    .child(Input::new(&self.name).with_size(Size::Medium).w_full()),
             )
             .child(
                 v_flex()

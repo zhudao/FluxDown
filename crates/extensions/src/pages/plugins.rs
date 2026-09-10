@@ -4,12 +4,14 @@
 use std::collections::HashSet;
 
 use fluxdown_protocol::{InstalledPlugin, MarketEntryDto, PluginDto};
+use fluxdown_ui_theme::CONTROL_HEIGHT;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement, SharedString, Styled, Window,
     div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size, StyledExt as _,
+    WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::{DialogButtonProps, DialogFooter},
     h_flex,
@@ -210,6 +212,7 @@ impl ExtensionsView {
                                 Button::new("market-refresh")
                                     .ghost()
                                     .small()
+                                    .h(CONTROL_HEIGHT)
                                     .label(translator.text("marketRefreshTooltip").to_owned())
                                     .loading(self.plugins.market.loading)
                                     .disabled(self.plugins.market.loading || stale)
@@ -274,6 +277,7 @@ impl ExtensionsView {
                 Button::new("plugin-install-zip")
                     .outline()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .icon(IconName::FolderOpen)
                     .label(translator.text("pluginInstallZipButton").to_owned())
                     .loading(self.plugins.installing_file)
@@ -310,6 +314,7 @@ impl ExtensionsView {
                             Button::new("plugin-pick-dev-dir")
                                 .outline()
                                 .small()
+                                .h(CONTROL_HEIGHT)
                                 .icon(IconName::FolderOpen)
                                 .tooltip(translator.text("pluginInstallDirLabel").to_owned())
                                 .disabled(self.plugins.installing_dir)
@@ -321,6 +326,7 @@ impl ExtensionsView {
                             Button::new("plugin-install-dev-dir")
                                 .primary()
                                 .small()
+                                .h(CONTROL_HEIGHT)
                                 .label(translator.text("pluginInstallDirButton").to_owned())
                                 .loading(self.plugins.installing_dir)
                                 .disabled(stale || dev_dir_empty || self.plugins.installing_dir)
@@ -411,6 +417,7 @@ impl ExtensionsView {
                 Button::new(("plugin-detail", index))
                     .ghost()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .icon(IconName::Info)
                     .tooltip(translator.text("pluginDetailDescription").to_owned())
                     .on_click(move |_, window, cx| {
@@ -443,6 +450,7 @@ impl ExtensionsView {
                     Button::new(("plugin-settings", index))
                         .ghost()
                         .small()
+                        .h(CONTROL_HEIGHT)
                         .icon(IconName::Settings2)
                         .tooltip(translator.text("pluginSettingsTooltip").to_owned())
                         .disabled(busy)
@@ -455,6 +463,7 @@ impl ExtensionsView {
                 Button::new(("plugin-uninstall", index))
                     .ghost()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .icon(IconName::Delete)
                     .tooltip(translator.text("pluginUninstallTooltip").to_owned())
                     .disabled(busy)
@@ -509,7 +518,12 @@ impl ExtensionsView {
                     .child(translator.text("marketEmpty").to_owned()),
             );
         }
-        root = root.child(Input::new(search).w_full().cleanable(true));
+        root = root.child(
+            Input::new(search)
+                .w_full()
+                .cleanable(true)
+                .with_size(Size::Medium),
+        );
         let filtered = filter_market(&market.entries, query);
         if filtered.is_empty() {
             return root.child(
@@ -536,6 +550,7 @@ impl ExtensionsView {
                 Button::new("market-show-more")
                     .ghost()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .label(
                         translator
                             .text_with("marketShowMore", &[("count", &remaining.to_string())]),
@@ -639,6 +654,7 @@ impl ExtensionsView {
                 Button::new(("market-detail", index))
                     .ghost()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .icon(IconName::Info)
                     .tooltip(translator.text("pluginDetailDescription").to_owned())
                     .on_click(move |_, window, cx| {
@@ -649,6 +665,7 @@ impl ExtensionsView {
                 Button::new(("market-install", index))
                     .outline()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .label(install_label)
                     .loading(pending)
                     .disabled(installed || pending || stale)

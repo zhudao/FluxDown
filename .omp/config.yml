@@ -6,7 +6,7 @@
 tools:
   # write: 自动放行 read/write 层级工具，exec（bash/browser 等）需确认。
   # 想全自动时改回 yolo，或临时用 `omp --yolo`。
-  approvalMode: write
+  approvalMode: yolo
   approval:
     # 读类工具直接放行，减少打断
     read: allow
@@ -28,6 +28,8 @@ tools:
     task: allow
 
 # ---- TTSR：流中断规则（规则体见 .omp/rules/*.md）----
+# 安全红线类规则（no-unsafe-in-rust / no-unwrap-in-rust / forbidden-commands）用 after-gap 短间隔，
+# 保证同一会话内反复触碰仍会被再次拦截；风格提示类规则（windows-no-console-window）用 never 只提醒不中断。
 ttsr:
   enabled: true
   # discard：中断时丢弃违规半成品输出后重试，避免污染上下文

@@ -1,54 +1,81 @@
-use std::{
-    borrow::Cow,
-    cell::{Cell, RefCell},
-    env,
-    rc::Rc,
-    sync::Arc,
-};
+//! composition root：一个 agent 会话、一个窗口注册表、全局菜单与动作；各窗口按需装配。
 
-use fluxdown_ui_account::AccountView;
-use fluxdown_ui_downloads::{
-    DOWNLOAD_ICON_PATH, DownloadView, NewDownloadContext, NewDownloadView,
-};
-use fluxdown_ui_extensions::ExtensionsView;
-use fluxdown_ui_i18n::{I18nCatalog, I18nError, Translator, keys};
-use fluxdown_ui_rss::RssView;
-use fluxdown_ui_settings::{SettingsContentSlots, SettingsStore, SettingsView, component_locale};
-use fluxdown_ui_shell::{
-    AuxiliaryWindowView, RouteId, ShellAction, ShellRoute, ShellView, auxiliary_window_options,
-    main_window_options,
-};
-use gpui::{
-    App, AppContext as _, Bounds, Entity, WeakEntity, Window, WindowBounds, WindowHandle, px, size,
-};
-use gpui_component::{Icon, IconName, Root};
+use std::{borrow::Cow, collections::BTreeMap, env, sync::Arc};
 
-use crate::account_port::AgentAccountPort;
-use crate::agent_client::{AgentClient, AgentClientConfig, AgentClientEvent};
+use fluxdown_protocol::{AgentEvent, DaemonEvent, DaemonRuntimeStatsDto, ServiceEvent};
+use fluxdown_ui_downloads::DownloadView;
+use fluxdown_ui_i18n::{I18nCatalog, I18nError, Translator};
+use fluxdown_ui_settings::{SettingsStore, component_locale};
+use fluxdown_ui_shell::ShellView;
+use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
+use gpui_component::menu::AppMenuBar;
+use tokio::sync::mpsc;
+
+use crate::agent_client::{AgentClient, AgentClientConfig};
 use crate::assets::DesktopAssets;
-use crate::capability_ports::{AgentExtensionsPort, AgentRssPort};
-use crate::downloads_port::AgentDownloadsPort;
+use crate::instance_ipc::{self, ActivateMessage, Endpoint};
 use crate::launch::{self, LaunchOptions};
 use crate::service_bootstrap::ServiceBootstrap;
+use crate::session::{AgentSession, SessionSignal, attach};
 use crate::settings_port::AgentSettingsPort;
+use crate::windows::{WindowKey, WindowRegistry};
 
 const MI_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Regular.ttf");
 const MI_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Medium.ttf");
 const MI_SANS_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Semibold.ttf");
 
-struct ClientProjection {
-    last_snapshot: Option<fluxdown_protocol::AgentSnapshot>,
-    account: Option<WeakEntity<AccountView>>,
-    rss: Option<WeakEntity<RssView>>,
-    extensions: Option<WeakEntity<ExtensionsView>>,
+/// 事件泵单次批量上限。
+const EVENT_BATCH: usize = 256;
+
+/// 跨窗口共享的应用状态（composition root 独有）。
+pub(crate) struct Desktop {
+    pub translator: Entity<Translator>,
+    pub session: Entity<AgentSession>,
+    pub client: Arc<AgentClient>,
+    pub settings_store: Entity<SettingsStore>,
+    pub menu_bar: Entity<AppMenuBar>,
+    /// 主窗口内的下载页（主窗口关闭后失效）。
+    pub main_downloads: Option<WeakEntity<DownloadView>>,
+    pub main_shell: Option<WeakEntity<ShellView>>,
+    /// 最新偏好（快照 + `PreferencesChanged` 折叠）。
+    pub preferences: BTreeMap<String, serde_json::Value>,
+    /// 最新运行时统计（关窗 / 退出提示与托盘 tooltip 用）。
+    pub runtime_stats: DaemonRuntimeStatsDto,
 }
-const SETTINGS_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(1240.), px(760.));
-const NEW_DOWNLOAD_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(640.), px(760.));
-const NEW_DOWNLOAD_WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(560.), px(600.));
+
+impl Global for Desktop {}
+
+impl Desktop {
+    pub fn global(cx: &App) -> &Self {
+        cx.global::<Self>()
+    }
+
+    pub fn global_mut(cx: &mut App) -> &mut Self {
+        cx.global_mut::<Self>()
+    }
+
+    pub fn active_task_count(cx: &App) -> u32 {
+        Self::global(cx).runtime_stats.active_tasks
+    }
+
+    pub fn pref_bool(cx: &App, key: &str, default: bool) -> bool {
+        Self::global(cx)
+            .preferences
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(default)
+    }
+
+    pub fn pref(cx: &App, key: &str) -> Option<serde_json::Value> {
+        Self::global(cx).preferences.get(key).cloned()
+    }
+}
+
 pub(crate) fn run() -> Result<(), I18nError> {
     let launch = LaunchOptions::from_args(env::args().skip(1));
     let token_path = agent_token_path();
     let instance_dir = launch::instance_dir(&token_path);
+    let endpoint = Endpoint::for_instance_dir(&instance_dir);
     let instance_lock = match launch::InstanceLock::try_acquire(&instance_dir) {
         Ok(Some(lock)) => Some(lock),
         Ok(None) => None,
@@ -63,8 +90,15 @@ pub(crate) fn run() -> Result<(), I18nError> {
         bearer_path: token_path,
     };
     if instance_lock.is_none() {
-        // 已有实例：把链接交给 agent 后直接退出，不再开第二个窗口。
-        forward_urls_and_exit(&agent_config, &launch.urls, &launch.torrent_files);
+        // 已有实例：先经激活通道交给主实例（可激活已有窗口），不可达再直接交给 agent。
+        let message = ActivateMessage {
+            urls: launch.urls.clone(),
+            files: launch.torrent_files.clone(),
+            activate: !launch.capture_only,
+        };
+        if !instance_ipc::try_send_to_primary(&endpoint, &message) {
+            forward_urls_and_exit(&agent_config, &launch.urls, &launch.torrent_files);
+        }
         return Ok(());
     }
     let _instance_lock = instance_lock;
@@ -86,6 +120,8 @@ pub(crate) fn run() -> Result<(), I18nError> {
         launch.urls.clone(),
         launch.torrent_files.clone(),
     );
+    let (activate_tx, mut activate_rx) = mpsc::channel::<ActivateMessage>(16);
+    agent_client.spawn_background(instance_ipc::listen(endpoint, activate_tx));
     let open_urls_client = agent_client.clone();
 
     let application = gpui_platform::application().with_assets(DesktopAssets);
@@ -99,6 +135,11 @@ pub(crate) fn run() -> Result<(), I18nError> {
             .filter(|url| launch::is_capture_url(url))
             .collect();
         submit_captures_detached(&open_urls_client, urls, files);
+    });
+    application.on_reopen(|cx| {
+        if cx.has_global::<Desktop>() && !WindowRegistry::is_open(cx, &WindowKey::Main) {
+            crate::windows::main::open(cx);
+        }
     });
     application.run(move |cx| {
         if let Err(error) = cx.text_system().add_fonts(vec![
@@ -114,13 +155,13 @@ pub(crate) fn run() -> Result<(), I18nError> {
         fluxdown_ui_theme::init(cx);
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
-        let bounds = Bounds::centered(None, size(px(1120.), px(760.)), cx);
-        let mut options = main_window_options();
-        options.window_bounds = Some(WindowBounds::Windowed(bounds));
+        let session = cx.new(|_| AgentSession::new(agent_client.clone()));
+        WindowRegistry::init(cx, agent_client.clone());
 
         // 设置存储跨窗口存活：窗口关闭后防抖中的写回仍完成，快照/事件持续进入。
         let settings_store =
             cx.new(|_| SettingsStore::new(Arc::new(AgentSettingsPort::new(agent_client.clone()))));
+        attach(&session, &settings_store, cx);
         let quit_store = settings_store.clone();
         cx.on_app_quit(move |cx| {
             let calls = quit_store.update(cx, |store, _| store.drain_pending_calls());
@@ -131,202 +172,154 @@ pub(crate) fn run() -> Result<(), I18nError> {
             }
         })
         .detach();
-        let client_projection = Rc::new(RefCell::new(ClientProjection {
-            last_snapshot: None,
-            account: None,
-            rss: None,
-            extensions: None,
-        }));
-        let settings_window = Rc::new(Cell::new(None));
-        let start_minimized = launch.minimized;
-        if let Err(error) = cx.open_window(options, move |window, cx| {
-            let downloads_port = Arc::new(AgentDownloadsPort::new(agent_client.clone()));
-            let downloads =
-                cx.new(|cx| DownloadView::new(translator.clone(), downloads_port, window, cx));
-            let new_download_window = Rc::new(Cell::new(None));
-            let new_download_translator = translator.clone();
-            let new_download_target = downloads.downgrade();
-            downloads.update(cx, |downloads, _| {
-                downloads.set_new_download_opener(Rc::new(move |context, window, cx| {
-                    show_new_download_window(
-                        new_download_translator.clone(),
-                        new_download_target.clone(),
-                        context,
-                        new_download_window.as_ref(),
-                        window,
-                        cx,
-                    );
-                }));
-            });
-            let rss_port = Arc::new(AgentRssPort::new(agent_client.clone()));
-            let rss = cx.new(|cx| RssView::new(translator.clone(), rss_port, window, cx));
-            client_projection.borrow_mut().rss = Some(rss.downgrade());
-            let downloads_events = downloads.downgrade();
-            let projection_events = Rc::clone(&client_projection);
-            let prefs_translator = translator.clone();
-            let settings_store_events = settings_store.clone();
-            cx.spawn(async move |cx| {
-                while let Some(event) = agent_events.recv().await {
-                    match &event {
-                        AgentClientEvent::Snapshot(snapshot) => {
-                            projection_events.borrow_mut().last_snapshot =
-                                Some(snapshot.as_ref().clone());
-                            let values = snapshot.preferences.values.clone();
-                            cx.update(|cx| {
-                                apply_preferences(&values, &prefs_translator, cx);
-                            });
-                        }
-                        AgentClientEvent::Event(frame) => {
-                            if let fluxdown_protocol::ServiceEvent::Agent(
-                                fluxdown_protocol::AgentEvent::PreferencesChanged(prefs),
-                            ) = &frame.event
-                            {
-                                let values = prefs.values.clone();
-                                cx.update(|cx| {
-                                    apply_preferences(&values, &prefs_translator, cx);
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                    if downloads_events
-                        .update(cx, |downloads, cx| match &event {
-                            AgentClientEvent::Snapshot(snapshot) => {
-                                downloads.replace_snapshot(snapshot, cx);
-                            }
-                            AgentClientEvent::Event(frame) => {
-                                downloads.apply_event(&frame.event, cx);
-                            }
-                            AgentClientEvent::Stale | AgentClientEvent::Fatal(_) => {
-                                downloads.mark_stale(cx);
-                            }
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                    settings_store_events.update(cx, |store, cx| match &event {
-                        AgentClientEvent::Snapshot(snapshot) => {
-                            store.replace_snapshot(snapshot, cx);
-                        }
-                        AgentClientEvent::Event(frame) => {
-                            store.apply_event(&frame.event, cx);
-                        }
-                        AgentClientEvent::Stale | AgentClientEvent::Fatal(_) => {
-                            store.mark_stale(cx);
-                        }
-                    });
-                    let account = projection_events.borrow().account.clone();
-                    if let Some(account) = account {
-                        let _ = account.update(cx, |account, cx| match &event {
-                            AgentClientEvent::Snapshot(snapshot) => {
-                                account.replace_snapshot(snapshot, cx);
-                            }
-                            AgentClientEvent::Event(frame) => {
-                                account.apply_event(&frame.event, cx);
-                            }
-                            AgentClientEvent::Stale | AgentClientEvent::Fatal(_) => {
-                                account.mark_stale(cx);
-                            }
-                        });
-                    }
-                    let rss = projection_events.borrow().rss.clone();
-                    if let Some(rss) = rss {
-                        let _ = rss.update(cx, |rss, cx| match &event {
-                            AgentClientEvent::Snapshot(snapshot) => {
-                                rss.replace_snapshot(snapshot, cx);
-                            }
-                            AgentClientEvent::Event(frame) => {
-                                rss.apply_event(&frame.event, cx);
-                            }
-                            AgentClientEvent::Stale | AgentClientEvent::Fatal(_) => {
-                                rss.mark_stale(cx);
-                            }
-                        });
-                    }
-                    let extensions = projection_events.borrow().extensions.clone();
-                    if let Some(extensions) = extensions {
-                        let _ = extensions.update(cx, |extensions, cx| match &event {
-                            AgentClientEvent::Snapshot(snapshot) => {
-                                extensions.replace_snapshot(snapshot, cx);
-                            }
-                            AgentClientEvent::Event(frame) => {
-                                extensions.apply_event(&frame.event, cx);
-                            }
-                            AgentClientEvent::Stale | AgentClientEvent::Fatal(_) => {
-                                extensions.mark_stale(cx);
-                            }
-                        });
-                    }
-                    if let AgentClientEvent::Fatal(error) = &event {
-                        eprintln!("fatal FluxDown agent error: {:?}", error.code);
+
+        crate::menus::bind_keys(cx);
+        let menu_bar = crate::menus::install(cx, &translator);
+        crate::menus::install_global_actions(cx);
+        cx.set_global(Desktop {
+            translator: translator.clone(),
+            session: session.clone(),
+            client: agent_client.clone(),
+            settings_store,
+            menu_bar,
+            main_downloads: None,
+            main_shell: None,
+            preferences: BTreeMap::new(),
+            runtime_stats: DaemonRuntimeStatsDto::default(),
+        });
+
+        // 会话 → 偏好 / 运行时统计折叠进 Desktop；外观与语言随偏好变化。
+        cx.subscribe(&session, |_, signal, cx| match signal {
+            SessionSignal::Snapshot(snapshot) => {
+                if let Some(body) = crate::session::agent_body(snapshot) {
+                    let values = body.preferences.values.clone();
+                    let stats = body.daemon.runtime_stats.clone();
+                    let desktop = Desktop::global_mut(cx);
+                    desktop.preferences = values;
+                    desktop.runtime_stats = stats;
+                    apply_preferences(cx);
+                }
+            }
+            SessionSignal::Event(frame) => match &frame.event {
+                ServiceEvent::Agent(AgentEvent::PreferencesChanged(prefs)) => {
+                    Desktop::global_mut(cx).preferences = prefs.values.clone();
+                    apply_preferences(cx);
+                }
+                ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::RuntimeStatsChanged(
+                    stats,
+                )))
+                | ServiceEvent::Daemon(DaemonEvent::RuntimeStatsChanged(stats)) => {
+                    Desktop::global_mut(cx).runtime_stats = stats.clone();
+                }
+                ServiceEvent::Agent(AgentEvent::DaemonSnapshotReplaced(snapshot))
+                | ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::SnapshotReplaced(
+                    snapshot,
+                ))) => {
+                    Desktop::global_mut(cx).runtime_stats = snapshot.runtime_stats.clone();
+                }
+                _ => {}
+            },
+            SessionSignal::Fatal(error) => {
+                eprintln!("fatal FluxDown agent error: {:?}", error.code);
+            }
+            SessionSignal::Stale => {}
+        })
+        .detach();
+
+        // 事件泵：按帧批处理，一次 `update` 广播一批。
+        let pump_session = session.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                let Some(first) = agent_events.recv().await else {
+                    break;
+                };
+                let mut batch = vec![first];
+                while batch.len() < EVENT_BATCH {
+                    match agent_events.try_recv() {
+                        Ok(event) => batch.push(event),
+                        Err(_) => break,
                     }
                 }
-            })
-            .detach();
-            let routes = vec![
-                ShellRoute::new(
-                    RouteId::new("downloads"),
-                    "activity-downloads",
-                    "activity-downloads-tooltip",
-                    keys::MOBILE_NAV_DOWNLOADS,
-                    Icon::empty().path(DOWNLOAD_ICON_PATH),
-                    downloads.clone().into(),
-                ),
-                ShellRoute::new(
-                    RouteId::new("rss"),
-                    "activity-rss",
-                    "activity-rss-tooltip",
-                    "rssAddSource",
-                    Icon::new(IconName::Globe),
-                    rss.clone().into(),
-                ),
-            ];
-            let settings_translator = translator.clone();
-            let settings_window = Rc::clone(&settings_window);
-            let settings_client = agent_client.clone();
-            let settings_store_window = settings_store.clone();
-            let settings_projection = Rc::clone(&client_projection);
-            let actions = vec![ShellAction::new(
-                "activity-settings",
-                "activity-settings-tooltip",
-                keys::SETTINGS,
-                Icon::new(IconName::Settings),
-                move |window, cx| {
-                    show_settings_window(
-                        settings_translator.clone(),
-                        settings_client.clone(),
-                        settings_store_window.clone(),
-                        Rc::clone(&settings_projection),
-                        settings_window.as_ref(),
-                        window,
-                        cx,
-                    );
-                },
-            )];
-            let shell = cx.new(|cx| ShellView::new(translator, routes, actions, cx));
-            if start_minimized {
-                window.minimize_window();
+                cx.update(|cx| {
+                    pump_session.update(cx, |session, cx| session.ingest(batch, cx));
+                });
             }
-            cx.new(|cx| Root::new(shell, window, cx))
-        }) {
-            eprintln!("failed to open FluxDown desktop window: {error:#}");
+        })
+        .detach();
+
+        // 单实例激活通道：链接交给 agent，`activate` 重建 / 聚焦主窗口。
+        let activate_client = agent_client.clone();
+        cx.spawn(async move |cx| {
+            while let Some(message) = activate_rx.recv().await {
+                submit_captures_detached(&activate_client, message.urls, message.files);
+                if message.activate {
+                    cx.update(|cx| {
+                        crate::windows::main::open(cx);
+                        cx.activate(true);
+                    });
+                }
+            }
+        })
+        .detach();
+
+        // 常驻能力：托盘 / 剪贴板监听 / 完成后关机（须在下方启动分支判断 resident 前完成安装）。
+        crate::tray::install(cx);
+        crate::clipboard_watch::install(cx);
+        crate::power::install(cx);
+        // 引擎选择请求 / 外部捕获确认窗口：跟随会话事件独立开关，不依赖主窗口存在。
+        crate::windows::selection::install(cx);
+        crate::windows::quick_capture::install(cx);
+
+        if launch.capture_only {
+            // 由 agent 为捕获拉起：不开主窗口；捕获窗口随 `PendingCapturesChanged` 打开，
+            // 清空后由退出判定收尾。
             return;
         }
-
+        if launch.minimized {
+            // 自启动：等首个快照决定是「托盘驻留」还是「最小化主窗口」。
+            open_main_after_first_snapshot(cx);
+            return;
+        }
+        crate::windows::main::open(cx);
         cx.activate(true);
     });
 
     Ok(())
 }
 
+/// `--minimized`：首个快照到达后按 `start_minimized_to_tray` 决定是否开主窗口。
+fn open_main_after_first_snapshot(cx: &mut App) {
+    let session = Desktop::global(cx).session.clone();
+    if Desktop::global(cx).session.read(cx).latest().is_some() {
+        open_main_minimized(cx);
+        return;
+    }
+    let subscription = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let holder = std::rc::Rc::clone(&subscription);
+    *subscription.borrow_mut() = Some(cx.subscribe(&session, move |_, signal, cx| {
+        if matches!(signal, SessionSignal::Snapshot(_)) {
+            open_main_minimized(cx);
+            holder.borrow_mut().take();
+        }
+    }));
+}
+
+fn open_main_minimized(cx: &mut App) {
+    let to_tray =
+        WindowRegistry::is_resident(cx) && Desktop::pref_bool(cx, "start_minimized_to_tray", false);
+    if to_tray {
+        return;
+    }
+    if let Some(handle) = crate::windows::main::open(cx) {
+        let _ = handle.update(cx, |_, window, _| window.minimize_window());
+    }
+}
+
 /// 偏好快照 → 全局外观与语言。每次快照/偏好事件都幂等应用。
-fn apply_preferences(
-    values: &std::collections::BTreeMap<String, serde_json::Value>,
-    translator: &Entity<Translator>,
-    cx: &mut App,
-) {
-    fluxdown_ui_theme::apply_appearance_preferences(values, cx);
+fn apply_preferences(cx: &mut App) {
+    let values = Desktop::global(cx).preferences.clone();
+    let translator = Desktop::global(cx).translator.clone();
+    fluxdown_ui_theme::apply_appearance_preferences(&values, cx);
     if let Some(locale) = values
         .get("general.locale")
         .and_then(serde_json::Value::as_str)
@@ -372,7 +365,7 @@ fn capture_calls(
 }
 
 /// 主实例：不阻塞 UI 线程，在后台把链接交给 agent。
-fn submit_captures_detached(
+pub(crate) fn submit_captures_detached(
     client: &Arc<AgentClient>,
     urls: Vec<String>,
     files: Vec<std::path::PathBuf>,
@@ -381,22 +374,16 @@ fn submit_captures_detached(
         return;
     }
     let calls = capture_calls(client, urls, files);
-    std::thread::spawn(move || {
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        else {
-            return;
-        };
+    client.spawn_background(async move {
         for (source, future) in calls {
-            if let Err(error) = runtime.block_on(future) {
+            if let Err(error) = future.await {
                 eprintln!("failed to submit {source}: {:?}", error.code);
             }
         }
     });
 }
 
-/// 次实例：不开窗口，只把链接交给 agent 后退出。
+/// 次实例且主实例激活通道不可达：不开窗口，只把链接交给 agent 后退出。
 fn forward_urls_and_exit(
     config: &AgentClientConfig,
     urls: &[String],
@@ -423,121 +410,6 @@ fn forward_urls_and_exit(
     }
 }
 
-fn show_settings_window(
-    translator: Entity<Translator>,
-    agent_client: Arc<AgentClient>,
-    settings_store: Entity<SettingsStore>,
-    projection: Rc<RefCell<ClientProjection>>,
-    settings_window: &Cell<Option<WindowHandle<Root>>>,
-    parent_window: &mut Window,
-    cx: &mut App,
-) {
-    if let Some(handle) = settings_window.get() {
-        if handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
-        {
-            return;
-        }
-        settings_window.set(None);
-    }
-
-    let display_id = parent_window.display(cx).map(|display| display.id());
-    let title = translator.read(cx).text(keys::SETTINGS).to_owned();
-    let bounds = Bounds::centered(display_id, SETTINGS_WINDOW_SIZE, cx);
-    let mut options = auxiliary_window_options(title.clone());
-    options.display_id = display_id;
-    options.window_bounds = Some(WindowBounds::Windowed(bounds));
-    options.window_min_size = Some(size(px(1000.), px(600.)));
-
-    match cx.open_window(options, move |window, cx| {
-        let window_translator = translator.clone();
-        let account_port = Arc::new(AgentAccountPort::new(agent_client.clone()));
-        let extensions_port = Arc::new(AgentExtensionsPort::new(agent_client));
-        let account = cx.new(|cx| AccountView::new(translator.clone(), account_port, window, cx));
-        let extensions = cx.new(|cx| ExtensionsView::new(translator.clone(), extensions_port, cx));
-        let settings = cx.new(|cx| {
-            SettingsView::new(
-                translator,
-                settings_store,
-                SettingsContentSlots {
-                    account: Some(account.clone().into()),
-                    extensions: Some(extensions.clone().into()),
-                },
-                cx,
-            )
-        });
-        if let Some(snapshot) = projection.borrow().last_snapshot.as_ref() {
-            account.update(cx, |account, cx| {
-                account.replace_snapshot(snapshot, cx);
-            });
-            extensions.update(cx, |extensions, cx| {
-                extensions.replace_snapshot(snapshot, cx);
-            });
-        }
-        let mut projection = projection.borrow_mut();
-        projection.account = Some(account.downgrade());
-        projection.extensions = Some(extensions.downgrade());
-        drop(projection);
-        let window_view = cx.new(|cx| {
-            AuxiliaryWindowView::new(
-                window_translator,
-                keys::SETTINGS,
-                settings.clone().into(),
-                cx,
-            )
-        });
-        cx.new(|cx| Root::new(window_view, window, cx))
-    }) {
-        Ok(handle) => settings_window.set(Some(handle)),
-        Err(error) => eprintln!("failed to open FluxDown settings window: {error:#}"),
-    }
-}
-
-fn show_new_download_window(
-    translator: Entity<Translator>,
-    downloads: WeakEntity<DownloadView>,
-    context: NewDownloadContext,
-    new_download_window: &Cell<Option<WindowHandle<Root>>>,
-    parent_window: &mut Window,
-    cx: &mut App,
-) {
-    if let Some(handle) = new_download_window.get() {
-        if handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
-        {
-            return;
-        }
-        new_download_window.set(None);
-    }
-
-    let display_id = parent_window.display(cx).map(|display| display.id());
-    let title = translator.read(cx).text(keys::NEW_DOWNLOAD).to_owned();
-    let bounds = Bounds::centered(display_id, NEW_DOWNLOAD_WINDOW_SIZE, cx);
-    let mut options = auxiliary_window_options(title);
-    options.display_id = display_id;
-    options.window_bounds = Some(WindowBounds::Windowed(bounds));
-    options.window_min_size = Some(NEW_DOWNLOAD_WINDOW_MIN_SIZE);
-    options.is_resizable = true;
-    match cx.open_window(options, move |window, cx| {
-        let on_submit = Rc::new(move |submission, _: &mut Window, cx: &mut App| {
-            let _ = downloads.update(cx, |downloads, cx| {
-                downloads.create_download(submission, cx);
-            });
-        });
-        let form = cx.new(|cx| {
-            NewDownloadView::new(translator.clone(), context.clone(), on_submit, window, cx)
-        });
-        let window_view =
-            cx.new(|cx| AuxiliaryWindowView::new(translator, keys::NEW_DOWNLOAD, form.into(), cx));
-        cx.new(|cx| Root::new(window_view, window, cx))
-    }) {
-        Ok(handle) => new_download_window.set(Some(handle)),
-        Err(error) => eprintln!("failed to open FluxDown new download window: {error:#}"),
-    }
-}
-
 fn agent_token_path() -> std::path::PathBuf {
     if let Some(path) = env::var_os("FLUXDOWN_AGENT_TOKEN_FILE") {
         return path.into();
@@ -550,7 +422,7 @@ fn agent_token_path() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("agent.token"))
 }
 
-fn system_locale() -> String {
+pub(crate) fn system_locale() -> String {
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Ok(locale) = env::var(key)
             && !locale.trim().is_empty()

@@ -2,9 +2,11 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use fluxdown_protocol::{
-    AgentEvent, CreateTaskRequest, DaemonCreateTaskParams, DownloadRequest, PendingCaptureDto,
+    AgentEvent, CaptureOverridesDto, CreateTaskRequest, DaemonCreateTaskParams, DownloadRequest,
+    PendingCaptureDto,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -24,15 +26,22 @@ pub struct CaptureService {
     daemon: Arc<DaemonClient>,
     events: AgentEventHub,
     pending: Mutex<VecDeque<CaptureTransaction>>,
+    /// 已连接并声明 `client.selections` 能力的 UI 客户端数量（与 `GatewayService` 共享）。
+    ui_clients: Arc<AtomicUsize>,
 }
 
 impl CaptureService {
     #[must_use]
-    pub fn new(daemon: Arc<DaemonClient>, events: AgentEventHub) -> Self {
+    pub fn new(
+        daemon: Arc<DaemonClient>,
+        events: AgentEventHub,
+        ui_clients: Arc<AtomicUsize>,
+    ) -> Self {
         Self {
             daemon,
             events,
             pending: Mutex::new(VecDeque::with_capacity(CAPTURE_CAPACITY)),
+            ui_clients,
         }
     }
 
@@ -43,13 +52,15 @@ impl CaptureService {
         silent: bool,
     ) -> Result<Value, CaptureError> {
         if silent {
-            return self.create(request, None, true).await;
+            return self.create(request, None, true, None).await;
         }
         let public = PendingCaptureDto {
             transaction_id: Uuid::new_v4().to_string(),
             url: request.url.clone(),
             file_name: request.filename.clone(),
             created_at_unix_ms: now_unix_ms(),
+            file_size: request.file_size.unwrap_or(0).max(0),
+            referrer: request.referrer.clone(),
         };
         let first = {
             let mut pending = self.pending.lock().await;
@@ -64,7 +75,7 @@ impl CaptureService {
             first
         };
         self.publish().await;
-        if first && let Err(error) = crate::platform::launch_desktop_once() {
+        if first && let Err(error) = crate::platform::launch_desktop_for_capture(&self.ui_clients) {
             tracing::warn!(error = %error, "could not launch desktop for pending capture");
         }
         Ok(json!({ "transactionId": public.transaction_id }))
@@ -78,7 +89,7 @@ impl CaptureService {
         torrent_blob_id: String,
         unattended: bool,
     ) -> Result<Value, CaptureError> {
-        self.create(request, Some(torrent_blob_id), unattended)
+        self.create(request, Some(torrent_blob_id), unattended, None)
             .await
     }
 
@@ -91,11 +102,12 @@ impl CaptureService {
             .collect()
     }
 
-    /// 确认/拒绝均只消费一次。
+    /// 确认/拒绝均只消费一次；`overrides` 仅在 `accepted` 时按非空字段覆盖原始捕获请求。
     pub async fn resolve(
         &self,
         transaction_id: &str,
         accepted: bool,
+        overrides: Option<CaptureOverridesDto>,
     ) -> Result<Value, CaptureError> {
         let transaction = {
             let mut pending = self.pending.lock().await;
@@ -107,7 +119,8 @@ impl CaptureService {
         };
         self.publish().await;
         if accepted {
-            self.create(transaction.request, None, false).await
+            self.create(transaction.request, None, false, overrides)
+                .await
         } else {
             Ok(json!({ "accepted": false }))
         }
@@ -118,18 +131,9 @@ impl CaptureService {
         request: DownloadRequest,
         torrent_blob_id: Option<String>,
         unattended: bool,
+        overrides: Option<CaptureOverridesDto>,
     ) -> Result<Value, CaptureError> {
-        let create = serde_json::from_value::<CreateTaskRequest>(json!({
-            "url": request.url,
-            "fileName": request.filename,
-            "saveDir": request.save_dir,
-            "referrer": request.referrer,
-            "cookies": request.cookies,
-            "headers": request.headers,
-            "method": request.method,
-            "body": request.body,
-            "audioUrl": request.audio_url,
-        }))?;
+        let create = build_create_request(request, overrides.as_ref())?;
         self.daemon
             .call(
                 fluxdown_protocol::method::DAEMON_TASK_CREATE,
@@ -147,6 +151,39 @@ impl CaptureService {
         self.events
             .publish(AgentEvent::PendingCapturesChanged(self.list().await));
     }
+}
+
+/// 按非空覆盖字段合并进原始捕获请求，构造 `daemon.task.create` 参数。
+/// `queueId`/`segments` 不属于 [`DownloadRequest`]，只能通过覆盖指定。
+fn build_create_request(
+    mut request: DownloadRequest,
+    overrides: Option<&CaptureOverridesDto>,
+) -> Result<CreateTaskRequest, serde_json::Error> {
+    let mut queue_id = String::new();
+    let mut segments = 0_i32;
+    if let Some(overrides) = overrides {
+        if !overrides.save_dir.is_empty() {
+            request.save_dir = overrides.save_dir.clone();
+        }
+        if !overrides.file_name.is_empty() {
+            request.filename = overrides.file_name.clone();
+        }
+        queue_id = overrides.queue_id.clone();
+        segments = overrides.segments;
+    }
+    serde_json::from_value(json!({
+        "url": request.url,
+        "fileName": request.filename,
+        "saveDir": request.save_dir,
+        "referrer": request.referrer,
+        "cookies": request.cookies,
+        "headers": request.headers,
+        "method": request.method,
+        "body": request.body,
+        "audioUrl": request.audio_url,
+        "queueId": queue_id,
+        "segments": segments,
+    }))
 }
 
 fn now_unix_ms() -> i64 {
@@ -259,4 +296,62 @@ pub enum BlobError {
     Status(u16),
     #[error("daemon blob upload response has no blobId")]
     Decode,
+}
+
+#[cfg(test)]
+mod tests {
+    use fluxdown_protocol::CaptureOverridesDto;
+
+    use super::{DownloadRequest, build_create_request};
+
+    fn sample_request() -> DownloadRequest {
+        DownloadRequest {
+            url: "https://example.com/a.bin".to_owned(),
+            filename: "a.bin".to_owned(),
+            save_dir: String::new(),
+            referrer: String::new(),
+            cookies: String::new(),
+            headers: None,
+            file_size: None,
+            mime_type: None,
+            method: None,
+            body: None,
+            audio_url: None,
+        }
+    }
+
+    #[test]
+    fn resolve_overrides_apply_to_created_request() {
+        let overrides = CaptureOverridesDto {
+            save_dir: "/tmp/renamed".to_owned(),
+            file_name: "renamed.bin".to_owned(),
+            queue_id: "later".to_owned(),
+            segments: 4,
+        };
+        let created =
+            build_create_request(sample_request(), Some(&overrides)).expect("build create request");
+        assert_eq!(created.file_name, "renamed.bin");
+        assert_eq!(created.save_dir, "/tmp/renamed");
+        assert_eq!(created.queue_id, "later");
+        assert_eq!(created.segments, 4);
+        assert_eq!(created.url, "https://example.com/a.bin");
+    }
+
+    #[test]
+    fn missing_overrides_keep_original_request_and_leave_queue_and_segments_default() {
+        let created = build_create_request(sample_request(), None).expect("build create request");
+        assert_eq!(created.file_name, "a.bin");
+        assert_eq!(created.save_dir, "");
+        assert_eq!(created.queue_id, "");
+        assert_eq!(created.segments, 0);
+    }
+
+    #[test]
+    fn empty_override_fields_fall_back_to_original_request() {
+        let overrides = CaptureOverridesDto::default();
+        let created =
+            build_create_request(sample_request(), Some(&overrides)).expect("build create request");
+        assert_eq!(created.file_name, "a.bin");
+        assert_eq!(created.save_dir, "");
+    }
 }

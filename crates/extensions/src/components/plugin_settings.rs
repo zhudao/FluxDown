@@ -6,13 +6,15 @@ use std::{collections::HashMap, sync::Arc};
 
 use fluxdown_protocol::{PluginDto, RpcErrorData, SettingFieldDto};
 use fluxdown_ui_i18n::Translator;
+use fluxdown_ui_theme::CONTROL_HEIGHT;
 use gpui::{
     Anchor, AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size, StyledExt as _,
+    WindowExt as _,
     button::Button,
     h_flex,
     input::{Input, InputState, Textarea, TextareaState},
@@ -260,6 +262,7 @@ impl PluginSettingsForm {
         match &self.controls[index] {
             FieldControl::Text(input) => Input::new(input)
                 .w_full()
+                .with_size(Size::Medium)
                 .disabled(disabled)
                 .when(field.widget == "password", Input::mask_toggle)
                 .into_any_element(),
@@ -304,6 +307,7 @@ impl PluginSettingsForm {
                     .label(label)
                     .outline()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .dropdown_caret(true)
                     .disabled(disabled)
                     .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
@@ -356,6 +360,7 @@ impl PluginSettingsForm {
                         Button::new(("plugin-setting-folder", index))
                             .outline()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .icon(IconName::FolderOpen)
                             .label(placeholder)
                             .disabled(disabled)
@@ -437,6 +442,7 @@ impl Render for PluginSettingsForm {
                         Button::new(("plugin-setting-helper", index))
                             .outline()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .icon(gpui_component::IconName::Copy)
                             .label(label)
                             .on_click(cx.listener(move |this, _, window, cx| {

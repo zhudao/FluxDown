@@ -6,12 +6,13 @@ use gpui::{
     Subscription, Window, px,
 };
 use gpui_component::{
+    Sizable as _, Size,
     input::{Input, InputEvent, InputState},
-    setting::SettingField,
     v_flex,
 };
 
 use super::SectionContext;
+use crate::ui::Control;
 
 pub(crate) const UA_KEY: &str = "global_user_agent";
 
@@ -53,7 +54,7 @@ struct CustomSlot {
     _subscription: Subscription,
 }
 
-pub(crate) fn field(ctx: &SectionContext) -> SettingField<SharedString> {
+pub(crate) fn field(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     let options: Vec<(SharedString, SharedString)> = vec![
         (
@@ -70,7 +71,7 @@ pub(crate) fn field(ctx: &SectionContext) -> SettingField<SharedString> {
         (SharedString::from("custom"), ctx.t("userAgentPresetCustom")),
     ];
     let placeholder = ctx.t("userAgentPlaceholder");
-    SettingField::render(move |render_options, window: &mut Window, cx: &mut App| {
+    Control::custom(move |disabled, key, window: &mut Window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let current = store.read(cx).daemon_str(UA_KEY);
         let preset = detect_preset(&current);
@@ -103,7 +104,7 @@ pub(crate) fn field(ctx: &SectionContext) -> SettingField<SharedString> {
                     },
                     cx,
                 )
-                .disabled(render_options.is_disabled())
+                .disabled(disabled)
                 .on_click(move |_, _, cx| {
                     click_store.update(cx, |store, cx| match value_for_click.as_ref() {
                         "default" => {
@@ -129,7 +130,7 @@ pub(crate) fn field(ctx: &SectionContext) -> SettingField<SharedString> {
             .items_end()
             .child(buttons);
         if custom_active {
-            let slot = window.use_keyed_state(SharedString::from("settings-ua-custom"), cx, {
+            let slot = window.use_keyed_state(SharedString::from(format!("{key}-custom")), cx, {
                 let store = store.clone();
                 let current = SharedString::from(current.clone());
                 let placeholder = placeholder.clone();
@@ -171,8 +172,9 @@ pub(crate) fn field(ctx: &SectionContext) -> SettingField<SharedString> {
             let input = slot.read(cx).input.clone();
             column = column.child(
                 Input::new(&input)
+                    .with_size(Size::Medium)
                     .w(px(420.))
-                    .disabled(render_options.is_disabled()),
+                    .disabled(disabled),
             );
         }
         column.into_any_element()

@@ -5,12 +5,13 @@ use fluxdown_protocol::{
     ApplicationErrorCode, ComponentKind, ComponentStatusDto, ComponentVersions,
     DaemonConfigSnapshot, RpcErrorData,
 };
+use fluxdown_ui_theme::CONTROL_HEIGHT;
 use gpui::{
     Anchor, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement,
     SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, StyledExt as _,
     WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
@@ -405,15 +406,17 @@ impl ExtensionsView {
                     .w_full()
                     .gap_2()
                     .items_center()
-                    .children(
-                        ui.path_input
-                            .as_ref()
-                            .map(|input| Input::new(input).flex_1().small().disabled(busy)),
-                    )
+                    .children(ui.path_input.as_ref().map(|input| {
+                        Input::new(input)
+                            .flex_1()
+                            .with_size(Size::Medium)
+                            .disabled(busy)
+                    }))
                     .child(
                         Button::new(("component-path-save", slot))
                             .outline()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .label(translator.text("componentsManualPathSave").to_owned())
                             .loading(ui.saving_path)
                             .disabled(busy)
@@ -425,6 +428,7 @@ impl ExtensionsView {
                         Button::new(("component-path-clear", slot))
                             .ghost()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .icon(IconName::Close)
                             .tooltip(translator.text("componentsManualPathClear").to_owned())
                             .disabled(busy)
@@ -505,6 +509,7 @@ impl ExtensionsView {
                         Button::new(("component-versions-refresh", slot))
                             .ghost()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .label(translator.text("componentsFetchVersionsButton").to_owned())
                             .loading(ui.versions_loading)
                             .disabled(ui.versions_loading || stale)
@@ -546,6 +551,7 @@ impl ExtensionsView {
                             Button::new(("component-versions-retry", slot))
                                 .outline()
                                 .small()
+                                .h(CONTROL_HEIGHT)
                                 .label(translator.text("componentsRetryVersions").to_owned())
                                 .loading(ui.versions_loading)
                                 .disabled(ui.versions_loading || stale)
@@ -559,6 +565,7 @@ impl ExtensionsView {
                 Button::new(("component-version-select", slot))
                     .outline()
                     .small()
+                    .h(CONTROL_HEIGHT)
                     .label(version_label)
                     .dropdown_caret(true)
                     .disabled(versions.is_empty() || busy)
@@ -590,6 +597,7 @@ impl ExtensionsView {
                         Button::new(("component-install", slot))
                             .primary()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .label(
                                 translator
                                     .text(if ui.installing {
@@ -612,6 +620,7 @@ impl ExtensionsView {
                             Button::new(("component-uninstall", slot))
                                 .outline()
                                 .small()
+                                .h(CONTROL_HEIGHT)
                                 .label(translator.text("componentsUninstallButton").to_owned())
                                 .loading(ui.uninstalling)
                                 .disabled(busy)

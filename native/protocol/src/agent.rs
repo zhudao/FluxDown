@@ -434,6 +434,39 @@ pub struct PendingCaptureDto {
     #[serde(default)]
     pub file_name: String,
     pub created_at_unix_ms: i64,
+    /// 捕获方声明的文件大小（字节，0 = 未知）。
+    #[serde(default)]
+    pub file_size: i64,
+    /// 来源页面。
+    #[serde(default)]
+    pub referrer: String,
+}
+
+/// 官方 UI 确认捕获时对请求的覆盖；空字段沿用捕获原值。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureOverridesDto {
+    #[serde(default)]
+    pub save_dir: String,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub queue_id: String,
+    /// 分段数（0 = 沿用）。
+    #[serde(default)]
+    pub segments: i32,
+}
+
+/// `agent.capture.resolve` 参数。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureResolveParams {
+    pub transaction_id: String,
+    pub accepted: bool,
+    #[serde(default)]
+    pub overrides: Option<CaptureOverridesDto>,
 }
 
 /// 桌面系统集成状态（开机自启、`.torrent` 关联、URL scheme 注册）。
@@ -597,4 +630,159 @@ pub struct UpdateCheckResultDto {
     pub release_page_url: String,
     #[serde(default)]
     pub notes: Vec<ReleaseNoteDto>,
+}
+
+/// 偏好键：自定义分类列表（JSON 字符串或数组，与 Flutter `custom_categories` 同形）。
+pub const CUSTOM_CATEGORIES_PREF_KEY: &str = "custom_categories";
+
+/// 自定义分类（与 `lib/src/models/custom_category.dart` 同 JSON 形状）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CustomCategoryDto {
+    pub id: String,
+    pub name: String,
+    #[serde(default = "default_category_icon")]
+    pub icon: String,
+    /// `extension` | `regex`。
+    #[serde(default = "default_category_match_mode")]
+    pub match_mode: String,
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    #[serde(default)]
+    pub regex_pattern: String,
+    #[serde(default)]
+    pub position: i64,
+    #[serde(default = "default_category_visible")]
+    pub visible: bool,
+    #[serde(default)]
+    pub is_builtin: bool,
+    #[serde(default)]
+    pub builtin_type: Option<String>,
+    #[serde(default)]
+    pub save_dir: String,
+}
+
+fn default_category_icon() -> String {
+    "file".to_owned()
+}
+fn default_category_match_mode() -> String {
+    "extension".to_owned()
+}
+fn default_category_visible() -> bool {
+    true
+}
+
+impl CustomCategoryDto {
+    /// 内置分类基线（与 Flutter `CustomCategory.builtinDefaults` 同序同扩展名）。
+    #[must_use]
+    pub fn builtin_defaults() -> Vec<Self> {
+        let make = |id: &str, icon: &str, exts: &[&str], position: i64| Self {
+            id: format!("builtin_{id}"),
+            name: String::new(),
+            icon: icon.to_owned(),
+            match_mode: "extension".to_owned(),
+            extensions: exts.iter().map(|ext| (*ext).to_owned()).collect(),
+            regex_pattern: String::new(),
+            position,
+            visible: true,
+            is_builtin: true,
+            builtin_type: Some(id.to_owned()),
+            save_dir: String::new(),
+        };
+        vec![
+            make("all", "folders", &[], 0),
+            make(
+                "video",
+                "film",
+                &[
+                    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "ts", "m3u8",
+                ],
+                1,
+            ),
+            make(
+                "audio",
+                "music",
+                &["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "opus"],
+                2,
+            ),
+            make(
+                "document",
+                "fileText",
+                &[
+                    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub", "md",
+                ],
+                3,
+            ),
+            make(
+                "image",
+                "image",
+                &[
+                    "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "heic", "avif",
+                ],
+                4,
+            ),
+            make(
+                "program",
+                "cpu",
+                &["exe", "msi", "dmg", "pkg", "deb", "rpm", "apk", "appimage"],
+                5,
+            ),
+            make(
+                "archive",
+                "archive",
+                &["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso"],
+                6,
+            ),
+            make("other", "file", &[], 7),
+        ]
+    }
+
+    /// 从偏好值解析分类列表（JSON 字符串或数组）；空 / 损坏时回退内置基线，按 `position` 排序。
+    #[must_use]
+    pub fn from_preference(value: Option<&serde_json::Value>) -> Vec<Self> {
+        let parsed = match value {
+            Some(serde_json::Value::String(text)) => serde_json::from_str::<Vec<Self>>(text).ok(),
+            Some(value) => serde_json::from_value::<Vec<Self>>(value.clone()).ok(),
+            None => None,
+        };
+        let mut list = parsed
+            .filter(|list| !list.is_empty())
+            .unwrap_or_else(Self::builtin_defaults);
+        list.sort_by_key(|entry| entry.position);
+        list
+    }
+}
+
+#[cfg(test)]
+mod capture_dto_tests {
+    use serde_json::json;
+
+    use super::{CaptureResolveParams, PendingCaptureDto};
+
+    #[test]
+    fn resolve_params_without_overrides_field_deserializes() {
+        let params: CaptureResolveParams = serde_json::from_value(json!({
+            "transactionId": "tx-1",
+            "accepted": true,
+        }))
+        .expect("deserialize without overrides");
+        assert_eq!(params.transaction_id, "tx-1");
+        assert!(params.accepted);
+        assert!(params.overrides.is_none());
+    }
+
+    #[test]
+    fn pending_capture_without_file_size_or_referrer_deserializes_with_defaults() {
+        let capture: PendingCaptureDto = serde_json::from_value(json!({
+            "transactionId": "tx-2",
+            "url": "https://example.com/a.bin",
+            "fileName": "a.bin",
+            "createdAtUnixMs": 1_700_000_000_000_i64,
+        }))
+        .expect("deserialize legacy payload without fileSize/referrer");
+        assert_eq!(capture.transaction_id, "tx-2");
+        assert_eq!(capture.file_size, 0);
+        assert_eq!(capture.referrer, "");
+    }
 }

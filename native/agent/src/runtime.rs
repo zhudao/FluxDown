@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use fluxdown_protocol::{AgentSnapshot, ServiceEvent};
@@ -133,9 +134,11 @@ pub async fn run(
         )
         .run(cancel.clone()),
     );
+    let ui_clients = Arc::new(AtomicUsize::new(0));
     let capture = Arc::new(crate::capture::CaptureService::new(
         daemon.clone(),
         events.clone(),
+        ui_clients.clone(),
     ));
     let blobs = Arc::new(crate::capture::DaemonBlobClient::new(&daemon_config)?);
     let mut nmh_task = tokio::spawn(
@@ -168,6 +171,7 @@ pub async fn run(
         store.clone(),
         api_switches,
         api_token,
+        ui_clients,
     ));
     let api_host = Arc::new(AgentApiHost::new(daemon, events, capture));
     let bearer = load_or_create_bearer(

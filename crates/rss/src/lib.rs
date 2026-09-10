@@ -3,12 +3,13 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use fluxdown_ui_i18n::Translator;
+use fluxdown_ui_theme::CONTROL_HEIGHT;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    Disableable as _, Sizable as _,
+    Disableable as _, Sizable as _, Size,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
@@ -177,11 +178,16 @@ impl Render for RssView {
                 h_flex()
                     .w_full()
                     .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.url_input).small()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&self.url_input).with_size(Size::Medium)),
+                    )
                     .child(
                         Button::new("rss-add-source")
                             .primary()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .label(add_label)
                             .disabled(stale)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -232,6 +238,7 @@ impl Render for RssView {
                         Button::new(format!("rss-refresh-{refresh_id}"))
                             .outline()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .label(refresh_label.clone())
                             .disabled(stale)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -255,6 +262,7 @@ impl Render for RssView {
                         Button::new(format!("rss-delete-{delete_id}"))
                             .danger()
                             .small()
+                            .h(CONTROL_HEIGHT)
                             .label(delete_label.clone())
                             .disabled(stale)
                             .on_click(cx.listener(move |this, _, _, cx| {

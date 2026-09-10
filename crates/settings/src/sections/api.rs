@@ -2,30 +2,31 @@
 
 use fluxdown_protocol::GatewayPatchParams;
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     App, AppContext as _, ClipboardItem, Entity, ParentElement, SharedString, Styled, Window, div,
     px,
 };
 use gpui_component::{
-    Icon, IconName, h_flex,
+    IconName, Sizable as _, Size, h_flex,
     input::{Input, InputEvent, InputState},
-    setting::{SettingField, SettingGroup, SettingPage},
     v_flex,
 };
 
 use super::SectionContext;
+use crate::ui::{Control, SettingsPage, SettingsSection};
 
-pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingPage {
-    SettingPage::new(ctx.t("settingsCatApiService"))
-        .icon(Icon::new(IconName::Globe))
-        .description(ctx.t("settingsCatApiServiceDesc"))
-        .resettable(false)
-        .group(service_group(ctx, cx))
-        .group(features_group(ctx))
+pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
+    SettingsPage::new(
+        "api",
+        ctx.t("settingsCatApiService"),
+        ctx.t("settingsCatApiServiceDesc"),
+        IconName::Globe,
+    )
+    .sections([service_section(ctx, cx), features_section(ctx)])
 }
 
-fn service_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
+fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
     let gateway = ctx.store.read(cx).gateway().clone();
     let port_text = SharedString::from(gateway.port.to_string());
     let address = SharedString::from(format!("http://127.0.0.1:{}", gateway.port));
@@ -33,18 +34,18 @@ fn service_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
     let copied = ctx.t("apiServiceCopied");
     let copy_label = ctx.t("apiServiceCopy");
 
-    SettingGroup::new()
+    SettingsSection::new()
         .title(ctx.t("settingsCatApiService"))
-        .item(ctx.item(
+        .row(ctx.item(
             "apiServicePort",
             Some("apiServicePortDesc"),
-            SettingField::render(move |_, _, _| div().child(port_text.clone())),
+            Control::custom(move |_, _, _, _| div().child(port_text.clone())),
         ))
-        .item(
+        .row(
             ctx.item(
                 "apiServiceAddress",
                 None,
-                SettingField::render(move |_, _, cx: &mut App| {
+                Control::custom(move |_, _, _, cx: &mut App| {
                     let tokens = active_theme(cx).tokens();
                     let address = address_for_copy.clone();
                     h_flex()
@@ -58,6 +59,7 @@ fn service_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
                                 ButtonVariant::Secondary,
                                 cx,
                             )
+                            .h(CONTROL_HEIGHT)
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     address.to_string(),
@@ -68,43 +70,46 @@ fn service_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
             )
             .keywords([copied.clone()]),
         )
-        .item(ctx.item(
+        .row(ctx.item(
             "apiServiceLanEnable",
             Some("apiServiceLanEnableDesc"),
             gateway_switch(ctx, GatewayFlag::Lan),
         ))
-        .item(ctx.item(
-            "apiServiceToken",
-            Some("apiServiceTokenDesc"),
-            token_field(ctx),
-        ))
+        .row(
+            ctx.item(
+                "apiServiceToken",
+                Some("apiServiceTokenDesc"),
+                token_field(ctx),
+            )
+            .vertical(),
+        )
 }
 
-fn features_group(ctx: &SectionContext) -> SettingGroup {
-    SettingGroup::new()
+fn features_section(ctx: &SectionContext) -> SettingsSection {
+    SettingsSection::new()
         .title(ctx.t("apiServiceFeaturesTitle"))
-        .description(ctx.t("apiServiceFeaturesDesc"))
-        .item(ctx.item(
+        .subtitle(ctx.t("apiServiceFeaturesDesc"))
+        .row(ctx.item(
             "apiServiceTakeover",
             Some("apiServiceTakeoverDesc"),
             gateway_switch(ctx, GatewayFlag::Takeover),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "apiServiceJsonrpc",
             Some("apiServiceJsonrpcDesc"),
             gateway_switch(ctx, GatewayFlag::Jsonrpc),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "apiServiceApi",
             Some("apiServiceApiDesc"),
             gateway_switch(ctx, GatewayFlag::Api),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "apiServiceMcp",
             Some("apiServiceMcpDesc"),
             gateway_switch(ctx, GatewayFlag::Mcp),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "apiServiceCorsAllowAll",
             Some("apiServiceCorsAllowAllDesc"),
             gateway_switch(ctx, GatewayFlag::Cors),
@@ -121,10 +126,10 @@ enum GatewayFlag {
     Lan,
 }
 
-fn gateway_switch(ctx: &SectionContext, flag: GatewayFlag) -> SettingField<bool> {
+fn gateway_switch(ctx: &SectionContext, flag: GatewayFlag) -> Control {
     let get = ctx.store();
     let set = ctx.store();
-    SettingField::switch(
+    Control::switch(
         move |cx: &App| {
             let gateway = get.read(cx).gateway();
             match flag {
@@ -159,14 +164,14 @@ struct TokenSlot {
 
 /// 令牌：可见可编辑（回车/失焦提交自定义值）+ 复制 / 生成 / 清空。
 /// 文本经 `agent.gateway.revealToken` 按需读取，不走快照。
-fn token_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn token_field(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     let generate = ctx.t("apiServiceTokenGenerate");
     let clear = ctx.t("apiServiceTokenClear");
     let copy = ctx.t("apiServiceCopy");
     let copied = ctx.t("apiServiceCopied");
     let placeholder = ctx.t("proxyNotConfigured");
-    SettingField::render(move |options, window: &mut Window, cx: &mut App| {
+    Control::custom(move |disabled, key, window: &mut Window, cx: &mut App| {
         let tokens = active_theme(cx).tokens().clone();
         let snapshot = store.read(cx);
         let token: SharedString = snapshot
@@ -184,7 +189,7 @@ fn token_field(ctx: &SectionContext) -> SettingField<SharedString> {
             store.update(cx, |store, cx| store.reveal_gateway_token(cx));
         }
 
-        let slot = window.use_keyed_state(SharedString::from("settings-api-token"), cx, {
+        let slot = window.use_keyed_state(SharedString::from(format!("{key}-token")), cx, {
             let store = store.clone();
             let token = token.clone();
             let placeholder = placeholder.clone();
@@ -242,8 +247,9 @@ fn token_field(ctx: &SectionContext) -> SettingField<SharedString> {
             .items_end()
             .child(
                 Input::new(&input)
+                    .with_size(Size::Medium)
                     .w_full()
-                    .disabled(options.is_disabled() || busy),
+                    .disabled(disabled || busy),
             )
             .child(
                 h_flex()
@@ -261,6 +267,7 @@ fn token_field(ctx: &SectionContext) -> SettingField<SharedString> {
                             ButtonVariant::Secondary,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(token.is_empty())
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(
@@ -296,7 +303,8 @@ fn token_field(ctx: &SectionContext) -> SettingField<SharedString> {
                             ButtonVariant::Primary,
                             cx,
                         )
-                        .disabled(options.is_disabled() || busy)
+                        .h(CONTROL_HEIGHT)
+                        .disabled(disabled || busy)
                         .on_click(move |_, _, cx| {
                             generate_store.update(cx, |store, cx| {
                                 store.patch_gateway(
@@ -316,7 +324,8 @@ fn token_field(ctx: &SectionContext) -> SettingField<SharedString> {
                             ButtonVariant::Destructive,
                             cx,
                         )
-                        .disabled(options.is_disabled() || busy || token.is_empty())
+                        .h(CONTROL_HEIGHT)
+                        .disabled(disabled || busy || token.is_empty())
                         .on_click(move |_, _, cx| {
                             clear_store.update(cx, |store, cx| {
                                 store.patch_gateway(

@@ -12,11 +12,12 @@ pub mod rpc;
 pub mod settings;
 
 pub use agent::{
-    AgentLoginResult, AgentPreferencesDto, AgentSessionDto, AuthVerificationDto, CloudDevice,
-    CloudOrder, CloudPlan, CloudPlanCampaign, CloudPlanCampaignStage, CloudProfile,
-    CloudReferralCode, CloudReferralCodesResult, CloudReferralRecord, CloudReferralRecordsResult,
-    CloudReferralRule, CloudReferralSummary, CloudReferralValidateResult, CloudUser,
-    CloudUserStatus, DiagnosticCheckDto, DiagnosticLevel, DiagnosticRepairParams,
+    AgentLoginResult, AgentPreferencesDto, AgentSessionDto, AuthVerificationDto,
+    CUSTOM_CATEGORIES_PREF_KEY, CaptureOverridesDto, CaptureResolveParams, CloudDevice, CloudOrder,
+    CloudPlan, CloudPlanCampaign, CloudPlanCampaignStage, CloudProfile, CloudReferralCode,
+    CloudReferralCodesResult, CloudReferralRecord, CloudReferralRecordsResult, CloudReferralRule,
+    CloudReferralSummary, CloudReferralValidateResult, CloudUser, CloudUserStatus,
+    CustomCategoryDto, DiagnosticCheckDto, DiagnosticLevel, DiagnosticRepairParams,
     DiagnosticsReportDto, Entitlements, GatewayPatchParams, GatewayStatusDto, LogExportParams,
     LogExportResult, LogPathsDto, OriginIdCheckResult, PendingCaptureDto, PlatformIntegrationDto,
     PlatformOpenPathParams, PlatformToggleParams, PlatformUrlProtocolParams, ReleaseNoteDto,

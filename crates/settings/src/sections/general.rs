@@ -1,33 +1,36 @@
 //! 通用：启动与托盘、系统集成、界面可见性、自定义分类。
 
 use gpui::App;
-use gpui_component::{
-    Icon, IconName,
-    setting::{SettingField, SettingGroup, SettingPage},
-};
+use gpui_component::IconName;
 
 use super::{SectionContext, categories};
+use crate::ui::{Control, SettingsPage, SettingsSection};
 
-pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingPage {
+pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     // 首次进入拉取系统集成状态（自启 / 文件关联 / URL scheme）。
     if ctx.store.read(cx).integration().is_none() && !ctx.store.read(cx).is_busy("integration") {
         ctx.store.update(cx, |store, cx| store.load_integration(cx));
     }
 
-    SettingPage::new(ctx.t("settingsCatGeneral"))
-        .icon(Icon::new(IconName::Settings2))
-        .description(ctx.t("settingsCatGeneralDesc"))
-        .group(startup_group(ctx, cx))
-        .group(system_group(ctx, cx))
-        .group(sidebar_group(ctx))
-        .group(titlebar_group(ctx))
-        .group(categories::group(ctx, cx))
+    SettingsPage::new(
+        "general",
+        ctx.t("settingsCatGeneral"),
+        ctx.t("settingsCatGeneralDesc"),
+        IconName::Settings2,
+    )
+    .sections([
+        startup_section(ctx, cx),
+        system_section(ctx, cx),
+        sidebar_section(ctx),
+        titlebar_section(ctx),
+        categories::group(ctx, cx),
+    ])
 }
 
-fn startup_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
-    SettingGroup::new()
+fn startup_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
+    SettingsSection::new()
         .title(ctx.t("settingsGroupStartupTray"))
-        .item(
+        .row(
             ctx.item(
                 "autoStartup",
                 Some("autoStartupDesc"),
@@ -35,46 +38,44 @@ fn startup_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
             )
             .disabled(!integration_supported(ctx, IntegrationKind::Autostart, cx)),
         )
-        .item(ctx.item(
-            "closeToTray",
-            Some("closeToTrayDesc"),
-            ctx.pref_switch("close_to_tray", true),
-        ))
-        .item(ctx.item(
-            "startMinimizedToTray",
-            Some("startMinimizedToTrayDesc"),
-            ctx.pref_switch("start_minimized_to_tray", false),
-        ))
+        .row(
+            ctx.item(
+                "closeToTray",
+                Some(tray_desc("closeToTrayDesc")),
+                ctx.pref_switch("close_to_tray", true),
+            )
+            .disabled(!TRAY_SUPPORTED),
+        )
+        .row(
+            ctx.item(
+                "startMinimizedToTray",
+                Some(tray_desc("startMinimizedToTrayDesc")),
+                ctx.pref_switch("start_minimized_to_tray", false),
+            )
+            .disabled(!TRAY_SUPPORTED),
+        )
 }
 
-fn system_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
-    let floating_ball = ctx
-        .store
-        .read(cx)
-        .pref_bool("general.floating_ball_enabled", false);
-    let mut group = SettingGroup::new()
-        .title(ctx.t("settingsGroupSystem"))
-        .item(ctx.item(
-            "floatingBall",
-            Some("floatingBallDesc"),
-            ctx.pref_switch("general.floating_ball_enabled", false),
-        ));
-    if floating_ball {
-        group = group.item(ctx.item(
-            "floatingBallActiveOnly",
-            Some("floatingBallActiveOnlyDesc"),
-            ctx.pref_switch("general.floating_ball_active_only", false),
-        ));
+/// 托盘仅 Windows / macOS 提供（GPUI 端 Linux 不做托盘，关窗即退出）。
+const TRAY_SUPPORTED: bool = cfg!(any(windows, target_os = "macos"));
+
+fn tray_desc(key: &'static str) -> &'static str {
+    if TRAY_SUPPORTED {
+        key
+    } else {
+        "trayUnsupportedLinux"
     }
-    if cfg!(target_os = "linux") {
-        group = group.item(ctx.item(
+}
+
+fn system_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
+    SettingsSection::new()
+        .title(ctx.t("settingsGroupSystem"))
+        .row(ctx.item(
             "clipboardWatch",
             Some("clipboardWatchDesc"),
             ctx.pref_switch("general.clipboard_watch", false),
-        ));
-    }
-    group
-        .item(
+        ))
+        .row(
             ctx.item(
                 "torrentFileAssociation",
                 Some("torrentFileAssociationDesc"),
@@ -82,7 +83,7 @@ fn system_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
             )
             .disabled(!integration_supported(ctx, IntegrationKind::Torrent, cx)),
         )
-        .item(
+        .row(
             ctx.item(
                 "magnetLinkAssociation",
                 Some("magnetLinkAssociationDesc"),
@@ -94,7 +95,7 @@ fn system_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
                 cx,
             )),
         )
-        .item(
+        .row(
             ctx.item(
                 "ed2kLinkAssociation",
                 Some("ed2kLinkAssociationDesc"),
@@ -106,43 +107,43 @@ fn system_group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
                 cx,
             )),
         )
-        .item(ctx.item(
+        .row(ctx.item(
             "keepAwakeWhileDownloading",
             Some("keepAwakeWhileDownloadingDesc"),
             ctx.pref_switch("download.keep_awake", false),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "analyticsEnabled",
             Some("analyticsEnabledDesc"),
             ctx.pref_switch("analytics_enabled", true),
         ))
 }
 
-fn sidebar_group(ctx: &SectionContext) -> SettingGroup {
-    SettingGroup::new()
+fn sidebar_section(ctx: &SectionContext) -> SettingsSection {
+    SettingsSection::new()
         .title(ctx.t("sidebarVisibility"))
-        .description(ctx.t("sidebarVisibilityDesc"))
-        .item(ctx.item(
+        .subtitle(ctx.t("sidebarVisibilityDesc"))
+        .row(ctx.item(
             "showSidebarStatus",
             Some("showSidebarStatusDesc"),
             ctx.pref_switch("ui.show_sidebar_status", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showSidebarQueues",
             Some("showSidebarQueuesDesc"),
             ctx.pref_switch("ui.show_sidebar_queues", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showSidebarRss",
             Some("showSidebarRssDesc"),
             ctx.pref_switch("ui.show_sidebar_rss", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showSidebarCategory",
             Some("showSidebarCategoryDesc"),
             ctx.pref_switch("ui.show_sidebar_category", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showSidebarDevice",
             Some("showSidebarDeviceDesc"),
             show_sidebar_device_field(ctx),
@@ -150,10 +151,10 @@ fn sidebar_group(ctx: &SectionContext) -> SettingGroup {
 }
 
 /// `show_sidebar_device` 三态：未设置 = 登录后自动显示。开关显示有效值。
-fn show_sidebar_device_field(ctx: &SectionContext) -> SettingField<bool> {
+fn show_sidebar_device_field(ctx: &SectionContext) -> Control {
     let get = ctx.store();
     let set = ctx.store();
-    SettingField::switch(
+    Control::switch(
         move |cx: &App| {
             let store = get.read(cx);
             store
@@ -169,26 +170,26 @@ fn show_sidebar_device_field(ctx: &SectionContext) -> SettingField<bool> {
     )
 }
 
-fn titlebar_group(ctx: &SectionContext) -> SettingGroup {
-    SettingGroup::new()
+fn titlebar_section(ctx: &SectionContext) -> SettingsSection {
+    SettingsSection::new()
         .title(ctx.t("titlebarButtons"))
-        .description(ctx.t("titlebarButtonsDesc"))
-        .item(ctx.item(
+        .subtitle(ctx.t("titlebarButtonsDesc"))
+        .row(ctx.item(
             "showTitlebarPauseAll",
             Some("showTitlebarPauseAllDesc"),
             ctx.pref_switch("ui.show_titlebar_pause_all", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showTitlebarResumeAll",
             Some("showTitlebarResumeAllDesc"),
             ctx.pref_switch("ui.show_titlebar_resume_all", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showTitlebarSettings",
             Some("showTitlebarSettingsDesc"),
             ctx.pref_switch("ui.show_titlebar_settings", true),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "showTitlebarTheme",
             Some("showTitlebarThemeDesc"),
             ctx.pref_switch("ui.show_titlebar_theme", true),
@@ -215,10 +216,10 @@ fn integration_supported(ctx: &SectionContext, kind: IntegrationKind, cx: &App) 
 }
 
 /// 系统集成开关：值来自 agent 探测结果，切换即调用 agent 注册/注销。
-fn integration_switch(ctx: &SectionContext, kind: IntegrationKind) -> SettingField<bool> {
+fn integration_switch(ctx: &SectionContext, kind: IntegrationKind) -> Control {
     let get = ctx.store();
     let set = ctx.store();
-    SettingField::switch(
+    Control::switch(
         move |cx: &App| {
             get.read(cx).integration().is_some_and(|dto| match kind {
                 IntegrationKind::Autostart => dto.autostart_enabled,

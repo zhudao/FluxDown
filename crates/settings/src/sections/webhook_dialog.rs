@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use fluxdown_protocol::{RpcErrorData, WebhookDeliveriesResponse, WebhookPresetDto, method};
 use fluxdown_ui_components::{ButtonVariant, button};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     Anchor, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, Entity,
     InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 use gpui_component::{
-    Icon, IconName, WindowExt as _,
+    Icon, IconName, Sizable as _, Size, WindowExt as _,
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
@@ -668,7 +668,7 @@ impl WebhookDialog {
         v_flex()
             .gap(tokens.spacing.xs)
             .child(self.label("webhookFieldUrl", cx))
-            .child(Input::new(&self.url).w_full())
+            .child(Input::new(&self.url).with_size(Size::Medium).w_full())
             .child(
                 div()
                     .text_xs()
@@ -756,6 +756,8 @@ impl WebhookDialog {
                     .label(self.queue_name(&self.queue_id, cx))
                     .dropdown_caret(true)
                     .outline()
+                    .small()
+                    .h(CONTROL_HEIGHT)
                     .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                         options.iter().fold(menu, |menu, (value, label)| {
                             let this = this.clone();
@@ -787,12 +789,16 @@ impl WebhookDialog {
                 h_flex()
                     .gap(tokens.spacing.sm)
                     .items_center()
-                    .child(div().w(px(150.)).child(Input::new(&row.key).w_full()))
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .child(Input::new(&row.key).with_size(Size::Medium).w_full()),
+                    )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&row.value).w_full()),
+                            .child(Input::new(&row.value).with_size(Size::Medium).w_full()),
                     )
                     .child(
                         button(
@@ -801,6 +807,7 @@ impl WebhookDialog {
                             ButtonVariant::Ghost,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
                                 this.headers.retain(|row| row.id != row_id);
@@ -818,6 +825,7 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     let mut seq = this.header_seq;
                     let translator = this.translator.clone();
@@ -898,7 +906,7 @@ impl WebhookDialog {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.secret).w_full()),
+                    .child(Input::new(&self.secret).with_size(Size::Medium).w_full()),
             )
             .child(
                 button(
@@ -907,6 +915,7 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     let secret = generate_secret();
                     this.secret
@@ -926,6 +935,7 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_secret(cx))),
             )
     }
@@ -1020,7 +1030,7 @@ impl WebhookDialog {
                             .w(px(170.))
                             .gap(tokens.spacing.xs)
                             .child(self.label("webhookFieldName", cx))
-                            .child(Input::new(&self.name).w_full()),
+                            .child(Input::new(&self.name).with_size(Size::Medium).w_full()),
                     )
                     .child(div().flex_1().min_w_0().child(self.render_url_field(cx))),
             )
@@ -1136,6 +1146,7 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .disabled(!can_test)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.send_test(cx))),
             );
@@ -1163,6 +1174,7 @@ impl WebhookDialog {
                 ButtonVariant::Ghost,
                 cx,
             )
+            .h(CONTROL_HEIGHT)
             .on_click(|_, window, cx| window.close_dialog(cx)),
         )
         .child(
@@ -1172,6 +1184,7 @@ impl WebhookDialog {
                 ButtonVariant::Primary,
                 cx,
             )
+            .h(CONTROL_HEIGHT)
             .disabled(!can_save)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save(window, cx))),
         )

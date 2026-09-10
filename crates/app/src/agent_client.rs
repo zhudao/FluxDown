@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    AgentSnapshot, ApplicationErrorCode, EventFrame, RequestId, RpcErrorData, RpcNotification,
-    RpcRequest, RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
+    ApplicationErrorCode, EventFrame, RequestId, RpcErrorData, RpcNotification, RpcRequest,
+    RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -30,7 +30,8 @@ pub type AgentFuture<T> = Pin<Box<dyn Future<Output = Result<T, RpcErrorData>> +
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub enum AgentClientEvent {
-    Snapshot(Box<AgentSnapshot>),
+    /// 连接 / 重连后的全量快照（带 `epoch`/`sequence` 游标）。
+    Snapshot(Box<Snapshot>),
     Event(Box<EventFrame>),
     Stale,
     Fatal(RpcErrorData),
@@ -50,7 +51,7 @@ struct ClientCommand {
 
 pub struct AgentClient {
     commands: mpsc::Sender<ClientCommand>,
-    _runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl AgentClient {
@@ -69,13 +70,7 @@ impl AgentClient {
         let (commands, command_rx) = mpsc::channel(64);
         let (events, event_rx) = mpsc::channel(1024);
         runtime.spawn(run_client(config, bootstrap, command_rx, events));
-        Ok((
-            Arc::new(Self {
-                commands,
-                _runtime: runtime,
-            }),
-            event_rx,
-        ))
+        Ok((Arc::new(Self { commands, runtime }), event_rx))
     }
 
     pub fn call<P, R>(&self, method_name: &str, params: Option<P>) -> AgentFuture<R>
@@ -102,6 +97,19 @@ impl AgentClient {
             let value = response.await.map_err(|_| unavailable_error())??;
             serde_json::from_value(value).map_err(|_| internal_error())
         })
+    }
+
+    /// 主动拉取一次全量快照（晚开窗口对齐游标用）。
+    pub fn call_snapshot(&self) -> AgentFuture<Snapshot> {
+        self.call::<(), Snapshot>(method::SYSTEM_SNAPSHOT, None)
+    }
+
+    /// 在客户端自有 tokio 运行时上运行后台任务（单实例激活监听等）。
+    pub fn spawn_background<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        self.runtime.spawn(future);
     }
 }
 
@@ -146,7 +154,7 @@ async fn run_client(
     }
 }
 
-async fn connect(config: &AgentClientConfig) -> Result<(Socket, AgentSnapshot), ConnectError> {
+async fn connect(config: &AgentClientConfig) -> Result<(Socket, Snapshot), ConnectError> {
     let bearer = tokio::fs::read_to_string(&config.bearer_path)
         .await
         .map_err(|_| ConnectError::Refused)?;
@@ -186,10 +194,10 @@ async fn connect(config: &AgentClientConfig) -> Result<(Socket, AgentSnapshot), 
     let snapshot_value = call_on_socket(&mut socket, 2, method::SYSTEM_SNAPSHOT, None).await?;
     let snapshot = serde_json::from_value::<Snapshot>(snapshot_value)
         .map_err(|_| ConnectError::Fatal(protocol_error()))?;
-    let SnapshotBody::Agent(snapshot) = snapshot.body else {
+    if !matches!(snapshot.body, SnapshotBody::Agent(_)) {
         return Err(ConnectError::Fatal(protocol_error()));
-    };
-    Ok((socket, *snapshot))
+    }
+    Ok((socket, snapshot))
 }
 
 async fn run_connected(

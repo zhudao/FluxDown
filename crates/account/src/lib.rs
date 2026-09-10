@@ -5,12 +5,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use fluxdown_ui_i18n::Translator;
+use fluxdown_ui_theme::CONTROL_HEIGHT;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Sizable as _, Size, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputContentType, InputState},
@@ -267,42 +268,55 @@ impl Render for AccountView {
         let read_only = self.controller.is_stale();
         let session = self.controller.session().cloned();
         let devices = self.controller.devices().to_vec();
+        // 页头（标题 + 描述）由设置窗口的分类头部承担，这里不再重复标题；
+        // 登录表单收窄成卡片，避免在宽内容区被拉成整行。
         v_flex()
             .w_full()
-            .gap_3()
-            .p_4()
-            .child(div().text_lg().font_semibold().child(title))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.muted_foreground)
-                    .child(subtitle),
-            )
+            .gap_4()
             .when(session.is_none(), |this| {
-                this.child(Input::new(&self.account_input).small())
-                    .child(
-                        Input::new(&self.password_input)
-                            .small()
-                            .content_type(InputContentType::Password)
-                            .mask_toggle(),
-                    )
-                    .when(self.verification_required, |this| {
-                        this.child(Input::new(&self.code_input).small())
-                    })
-                    .child(
-                        Button::new("account-login")
-                            .primary()
-                            .small()
-                            .label(if self.verification_required {
-                                verify
-                            } else {
-                                login
-                            })
-                            .disabled(read_only)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.submit_login(this.verification_required, cx);
-                            })),
-                    )
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .max_w(gpui::px(420.))
+                        .gap_2()
+                        .p_4()
+                        .bg(tokens.background)
+                        .border_1()
+                        .border_color(tokens.border)
+                        .rounded(tokens.radius)
+                        .child(div().text_sm().font_semibold().child(title))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.muted_foreground)
+                                .child(subtitle),
+                        )
+                        .child(Input::new(&self.account_input).with_size(Size::Medium))
+                        .child(
+                            Input::new(&self.password_input)
+                                .with_size(Size::Medium)
+                                .content_type(InputContentType::Password)
+                                .mask_toggle(),
+                        )
+                        .when(self.verification_required, |this| {
+                            this.child(Input::new(&self.code_input).with_size(Size::Medium))
+                        })
+                        .child(
+                            Button::new("account-login")
+                                .primary()
+                                .small()
+                                .h(CONTROL_HEIGHT)
+                                .label(if self.verification_required {
+                                    verify
+                                } else {
+                                    login
+                                })
+                                .disabled(read_only)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.submit_login(this.verification_required, cx);
+                                })),
+                        ),
+                )
             })
             .when_some(self.last_error.clone(), |this, error| {
                 this.child(div().text_sm().child(error))
@@ -325,6 +339,7 @@ impl Render for AccountView {
                                     Button::new("account-devices-refresh")
                                         .outline()
                                         .small()
+                                        .h(CONTROL_HEIGHT)
                                         .label(retry)
                                         .disabled(read_only)
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -340,6 +355,7 @@ impl Render for AccountView {
                                     Button::new("account-logout")
                                         .outline()
                                         .small()
+                                        .h(CONTROL_HEIGHT)
                                         .label(logout)
                                         .disabled(read_only)
                                         .on_click(cx.listener(|this, _, _, cx| {

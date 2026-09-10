@@ -10,20 +10,20 @@ use fluxdown_ui_theme::{
     set_theme_preference, set_ui_scale,
 };
 use gpui::{
-    App, AppContext as _, Axis, Entity, Hsla, InteractiveElement as _, IntoElement as _,
-    ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    App, AppContext as _, Entity, Hsla, InteractiveElement as _, IntoElement as _, ParentElement,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Icon, IconName,
     color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
     h_flex,
-    setting::{SettingField, SettingGroup, SettingPage},
     tooltip::Tooltip,
     v_flex,
 };
 
 use super::SectionContext;
+use crate::ui::{Control, SettingsPage, SettingsSection};
 use crate::{component_locale, store::SettingsStore};
 
 pub(crate) const LOCALE_KEY: &str = "general.locale";
@@ -34,44 +34,41 @@ const THEME_PREVIEW_SIDEBAR_WIDTH: f32 = 28.;
 const THEME_PREVIEW_BAR_HEIGHT: f32 = 3.;
 const COLOR_DOT_SIZE: f32 = 28.;
 
-pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingPage {
-    SettingPage::new(ctx.t("settingsCatAppearance"))
-        .icon(Icon::new(IconName::Palette))
-        .description(ctx.t("settingsCatAppearanceDesc"))
-        .group(SettingGroup::new().item(ctx.item(
-            "language",
-            Some("languageDesc"),
-            language_field(ctx),
-        )))
-        .group(
-            SettingGroup::new()
-                .title(ctx.t("settingsGroupTheme"))
-                .item(ctx.item("themeMode", Some("themeModeDesc"), theme_mode_field(ctx)))
-                .item(
-                    ctx.item(
-                        "themeSelection",
-                        Some("themeSelectionDesc"),
-                        theme_cards_field(ctx),
-                    )
-                    .layout(Axis::Vertical),
+pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
+    SettingsPage::new(
+        "appearance",
+        ctx.t("settingsCatAppearance"),
+        ctx.t("settingsCatAppearanceDesc"),
+        IconName::Palette,
+    )
+    .sections([
+        SettingsSection::new().row(ctx.item("language", Some("languageDesc"), language_field(ctx))),
+        SettingsSection::new()
+            .title(ctx.t("settingsGroupTheme"))
+            .row(ctx.item("themeMode", Some("themeModeDesc"), theme_mode_field(ctx)))
+            .row(
+                ctx.item(
+                    "themeSelection",
+                    Some("themeSelectionDesc"),
+                    theme_cards_field(ctx),
                 )
-                .item(
-                    ctx.item(
-                        "themeColor",
-                        Some("themeColorDesc"),
-                        color_scheme_field(ctx),
-                    )
-                    .layout(Axis::Vertical),
-                ),
-        )
-        .group(
-            SettingGroup::new()
-                .title(ctx.t("settingsGroupInterface"))
-                .item(ctx.item("uiScale", Some("uiScaleDesc"), ui_scale_field(ctx))),
-        )
+                .vertical(),
+            )
+            .row(
+                ctx.item(
+                    "themeColor",
+                    Some("themeColorDesc"),
+                    color_scheme_field(ctx),
+                )
+                .vertical(),
+            ),
+        SettingsSection::new()
+            .title(ctx.t("settingsGroupInterface"))
+            .row(ctx.item("uiScale", Some("uiScaleDesc"), ui_scale_field(ctx))),
+    ])
 }
 
-fn language_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn language_field(ctx: &SectionContext) -> Control {
     let mut options = vec![(SharedString::from("system"), ctx.t("languageSystem"))];
     options.extend(ctx.translator.available_locales().iter().map(|locale| {
         (
@@ -82,7 +79,7 @@ fn language_field(ctx: &SectionContext) -> SettingField<SharedString> {
     let store = ctx.store();
     let set_store = ctx.store();
     let translator = ctx.translator_entity.clone();
-    SettingField::dropdown(
+    Control::dropdown(
         options,
         move |cx: &App| SharedString::from(store.read(cx).pref_str(LOCALE_KEY, "system")),
         move |value: SharedString, cx: &mut App| {
@@ -102,17 +99,16 @@ fn language_field(ctx: &SectionContext) -> SettingField<SharedString> {
             });
         },
     )
-    .default_value(SharedString::from("system"))
 }
 
-fn theme_mode_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn theme_mode_field(ctx: &SectionContext) -> Control {
     let options = vec![
         (SharedString::from("system"), ctx.t("themeModeSystem")),
         (SharedString::from("light"), ctx.t("themeModeLight")),
         (SharedString::from("dark"), ctx.t("themeModeDark")),
     ];
     let store = ctx.store();
-    SettingField::dropdown(
+    Control::dropdown(
         options,
         move |cx: &App| {
             SharedString::from(match active_theme(cx).preference() {
@@ -129,7 +125,6 @@ fn theme_mode_field(ctx: &SectionContext) -> SettingField<SharedString> {
             set_theme_preference(preference, None, cx);
         },
     )
-    .default_value(SharedString::from("system"))
 }
 
 /// 偏好字符串 → 主题偏好；未知值按系统处理。
@@ -145,7 +140,7 @@ pub fn theme_preference(value: &str) -> ThemePreference {
 // ───────────────────────── 内置主题卡片 ─────────────────────────
 
 /// 与 Flutter `_ThemeSelector` 一致：只展示与当前明暗模式同外观的预设卡片。
-fn theme_cards_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn theme_cards_field(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     let dark_label = ctx.t("themeDarkTheme");
     let light_label = ctx.t("themeLightTheme");
@@ -153,41 +148,42 @@ fn theme_cards_field(ctx: &SectionContext) -> SettingField<SharedString> {
         .into_iter()
         .map(|id| (id, ctx.t(id.label_key())))
         .collect();
-    SettingField::render(move |options, _, cx: &mut App| {
-        let state = active_theme(cx);
-        let mode = state.mode();
-        let selected = state.appearance().builtin_theme(mode);
-        let tokens = state.tokens().clone();
-        let disabled = options.is_disabled();
-        let group_label = if mode.is_dark() {
-            dark_label.clone()
-        } else {
-            light_label.clone()
-        };
+    Control::custom(
+        move |disabled: bool, _key: &SharedString, _window: &mut Window, cx: &mut App| {
+            let state = active_theme(cx);
+            let mode = state.mode();
+            let selected = state.appearance().builtin_theme(mode);
+            let tokens = state.tokens().clone();
+            let group_label = if mode.is_dark() {
+                dark_label.clone()
+            } else {
+                light_label.clone()
+            };
 
-        v_flex()
-            .w_full()
-            .gap(tokens.spacing.xs)
-            .child(
-                div()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(group_label),
-            )
-            .child(h_flex().gap(tokens.spacing.sm).flex_wrap().children(
-                BuiltinThemeId::presets_for(mode).map(|id| {
-                    let label = labels
-                        .iter()
-                        .find(|(candidate, _)| *candidate == id)
-                        .map_or_else(
-                            || SharedString::from(id.wire_name()),
-                            |(_, label)| label.clone(),
-                        );
-                    theme_card(id, label, id == selected, disabled, &tokens, store.clone())
-                }),
-            ))
-            .into_any_element()
-    })
+            v_flex()
+                .w_full()
+                .gap(tokens.spacing.xs)
+                .child(
+                    div()
+                        .text_size(tokens.typography.xs.size)
+                        .text_color(tokens.colors.muted_foreground)
+                        .child(group_label),
+                )
+                .child(h_flex().gap(tokens.spacing.sm).flex_wrap().children(
+                    BuiltinThemeId::presets_for(mode).map(|id| {
+                        let label = labels
+                            .iter()
+                            .find(|(candidate, _)| *candidate == id)
+                            .map_or_else(
+                                || SharedString::from(id.wire_name()),
+                                |(_, label)| label.clone(),
+                            );
+                        theme_card(id, label, id == selected, disabled, &tokens, store.clone())
+                    }),
+                ))
+                .into_any_element()
+        },
+    )
 }
 
 fn theme_card(
@@ -306,46 +302,47 @@ struct CustomColorSlot {
 }
 
 /// 与 Flutter `_ColorSchemeSelector` 一致：4 个预设色点 + 自定义；选中自定义时展开取色器。
-fn color_scheme_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn color_scheme_field(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     let labels: Vec<(AccentScheme, SharedString)> = AccentScheme::ALL
         .into_iter()
         .map(|scheme| (scheme, ctx.t(scheme.label_key())))
         .collect();
     let custom_label = ctx.t("colorCustom");
-    SettingField::render(move |options, window: &mut Window, cx: &mut App| {
-        let state = active_theme(cx);
-        let appearance = *state.appearance();
-        let tokens = state.tokens().clone();
-        let disabled = options.is_disabled();
+    Control::custom(
+        move |disabled: bool, _key: &SharedString, window: &mut Window, cx: &mut App| {
+            let state = active_theme(cx);
+            let appearance = *state.appearance();
+            let tokens = state.tokens().clone();
 
-        let dots = h_flex()
-            .gap(tokens.spacing.sm)
-            .flex_wrap()
-            .children(labels.iter().map(|(scheme, label)| {
-                color_dot(
-                    *scheme,
-                    label.clone(),
-                    appearance,
+            let dots = h_flex()
+                .gap(tokens.spacing.sm)
+                .flex_wrap()
+                .children(labels.iter().map(|(scheme, label)| {
+                    color_dot(
+                        *scheme,
+                        label.clone(),
+                        appearance,
+                        disabled,
+                        &tokens,
+                        store.clone(),
+                    )
+                }));
+
+            let mut column = v_flex().w_full().gap(tokens.spacing.md).child(dots);
+            if appearance.color_scheme == AccentScheme::Custom {
+                column = column.child(custom_color_picker(
+                    appearance.custom_color,
+                    custom_label.clone(),
                     disabled,
-                    &tokens,
                     store.clone(),
-                )
-            }));
-
-        let mut column = v_flex().w_full().gap(tokens.spacing.md).child(dots);
-        if appearance.color_scheme == AccentScheme::Custom {
-            column = column.child(custom_color_picker(
-                appearance.custom_color,
-                custom_label.clone(),
-                disabled,
-                store.clone(),
-                window,
-                cx,
-            ));
-        }
-        column.into_any_element()
-    })
+                    window,
+                    cx,
+                ));
+            }
+            column.into_any_element()
+        },
+    )
 }
 
 fn color_dot(
@@ -470,7 +467,7 @@ fn custom_color_picker(
 
 // ───────────────────────── 界面缩放 ─────────────────────────
 
-fn ui_scale_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn ui_scale_field(ctx: &SectionContext) -> Control {
     let options: Vec<(SharedString, SharedString)> = UI_SCALE_PERCENTS
         .iter()
         .map(|percent| {
@@ -481,7 +478,7 @@ fn ui_scale_field(ctx: &SectionContext) -> SettingField<SharedString> {
         })
         .collect();
     let store = ctx.store();
-    SettingField::dropdown(
+    Control::dropdown(
         options,
         move |cx: &App| SharedString::from(active_theme(cx).ui_scale_percent().to_string()),
         move |value: SharedString, cx: &mut App| {
@@ -495,7 +492,6 @@ fn ui_scale_field(ctx: &SectionContext) -> SettingField<SharedString> {
             });
         },
     )
-    .default_value(SharedString::from("100"))
 }
 
 fn system_locale() -> String {

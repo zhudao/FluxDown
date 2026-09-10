@@ -2,90 +2,92 @@
 
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{App, ParentElement, SharedString, Styled, div};
-use gpui_component::{
-    Icon, IconName, h_flex,
-    setting::{SettingField, SettingGroup, SettingPage},
-};
+use gpui_component::{IconName, h_flex};
 use serde_json::json;
 
 use super::{SectionContext, site_auth};
+use crate::ui::{Control, SettingsPage, SettingsSection};
 
-pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingPage {
+pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     let mode = ctx.store.read(cx).daemon_str("proxy_mode");
-    let mut page = SettingPage::new(ctx.t("settingsCatProxy"))
-        .icon(Icon::new(IconName::Globe))
-        .description(ctx.t("settingsCatProxyDesc"))
-        .group(mode_group(ctx));
+    let mut sections = vec![mode_section(ctx)];
     if matches!(mode.as_str(), "manual" | "auto") {
-        page = page.group(manual_group(ctx));
+        sections.push(manual_section(ctx));
     }
-    page.group(site_auth::group(ctx, cx))
+    sections.push(site_auth::group(ctx, cx));
+    SettingsPage::new(
+        "proxy",
+        ctx.t("settingsCatProxy"),
+        ctx.t("settingsCatProxyDesc"),
+        IconName::Globe,
+    )
+    .sections(sections)
 }
 
-fn mode_group(ctx: &SectionContext) -> SettingGroup {
+fn mode_section(ctx: &SectionContext) -> SettingsSection {
     let options = vec![
         (SharedString::from("none"), ctx.t("proxyModeNone")),
         (SharedString::from("system"), ctx.t("proxyModeSystem")),
         (SharedString::from("manual"), ctx.t("proxyModeManual")),
         (SharedString::from("auto"), ctx.t("proxyModeAuto")),
     ];
-    SettingGroup::new()
+    SettingsSection::new()
         .title(ctx.t("proxySettings"))
-        .description(ctx.t("proxyBtNote"))
-        .item(ctx.item(
+        .subtitle(ctx.t("proxyBtNote"))
+        .row(ctx.item(
             "proxySettings",
             Some("proxySettingsDesc"),
             ctx.daemon_dropdown("proxy_mode", options),
         ))
 }
 
-fn manual_group(ctx: &SectionContext) -> SettingGroup {
+fn manual_section(ctx: &SectionContext) -> SettingsSection {
     let types = vec![
         (SharedString::from("http"), SharedString::from("HTTP")),
         (SharedString::from("https"), SharedString::from("HTTPS")),
         (SharedString::from("socks4"), SharedString::from("SOCKS4")),
         (SharedString::from("socks5"), SharedString::from("SOCKS5")),
     ];
-    SettingGroup::new()
+    SettingsSection::new()
         .title(ctx.t("proxyModeManual"))
-        .description(ctx.t("proxyModeManualDesc"))
-        .item(ctx.item("proxyType", None, ctx.daemon_dropdown("proxy_type", types)))
-        .item(ctx.item(
+        .subtitle(ctx.t("proxyModeManualDesc"))
+        .row(ctx.item("proxyType", None, ctx.daemon_dropdown("proxy_type", types)))
+        .row(ctx.item(
             "proxyHost",
             Some("proxyHostPlaceholder"),
             ctx.daemon_input("proxy_host"),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "proxyPort",
             Some("proxyPortPlaceholder"),
             ctx.daemon_input("proxy_port"),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "proxyUsername",
             Some("proxyUsernamePlaceholder"),
             ctx.daemon_input("proxy_username"),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "proxyPassword",
             Some("proxyPasswordPlaceholder"),
             ctx.daemon_input("proxy_password"),
         ))
-        .item(ctx.item(
+        .row(ctx.item(
             "proxyNoList",
             Some("proxyNoListDesc"),
             ctx.daemon_input("proxy_no_list"),
         ))
-        .item(ctx.item("proxyTestConnection", None, test_field(ctx)))
+        .row(ctx.item("proxyTestConnection", None, test_control(ctx)))
 }
 
-fn test_field(ctx: &SectionContext) -> SettingField<SharedString> {
+fn test_control(ctx: &SectionContext) -> Control {
     let store = ctx.store();
     let label = ctx.t("proxyTestConnection");
     let testing = ctx.t("proxyTesting");
     let translator = ctx.translator.clone();
-    SettingField::render(move |_, _, cx: &mut App| {
+    Control::custom(move |_disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let busy = store.read(cx).is_busy("proxyTest");
         let result = store
@@ -110,6 +112,7 @@ fn test_field(ctx: &SectionContext) -> SettingField<SharedString> {
                     ButtonVariant::Secondary,
                     cx,
                 )
+                .h(CONTROL_HEIGHT)
                 .disabled(busy)
                 .on_click({
                     let translator = translator.clone();

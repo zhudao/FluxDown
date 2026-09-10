@@ -1,17 +1,14 @@
 //! 已保存的站点 HTTP Basic 凭据管理（只列站点与用户名，可逐条删除或清空）。
 
 use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{App, IntoElement as _, ParentElement, SharedString, Styled, div};
-use gpui_component::{
-    h_flex,
-    setting::{SettingGroup, SettingItem},
-    v_flex,
-};
+use gpui_component::{h_flex, v_flex};
 
 use super::SectionContext;
+use crate::ui::{SettingsRow, SettingsSection};
 
-pub(crate) fn group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
+pub(crate) fn group(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
     if ctx.store.read(cx).site_auth().is_empty()
         && ctx.store.read(cx).transient("site_auth_loaded").is_none()
     {
@@ -20,18 +17,18 @@ pub(crate) fn group(ctx: &SectionContext, cx: &mut App) -> SettingGroup {
             store.load_site_auth(cx);
         });
     }
-    SettingGroup::new()
+    SettingsSection::new()
         .title(ctx.t("settingsSiteAuthTitle"))
-        .description(ctx.t("settingsSiteAuthDesc"))
-        .item(list_item(ctx))
+        .subtitle(ctx.t("settingsSiteAuthDesc"))
+        .row(list_item(ctx))
 }
 
-fn list_item(ctx: &SectionContext) -> SettingItem {
+fn list_item(ctx: &SectionContext) -> SettingsRow {
     let store = ctx.store();
     let empty = ctx.t("settingsSiteAuthEmpty");
     let delete = ctx.t("settingsSiteAuthDelete");
     let clear_all = ctx.t("settingsSiteAuthClearAll");
-    SettingItem::render(move |_, _, cx: &mut App| {
+    SettingsRow::custom(move |_disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
         let entries = store.read(cx).site_auth().to_vec();
         let busy = store.read(cx).is_busy("siteAuth");
@@ -79,6 +76,7 @@ fn list_item(ctx: &SectionContext) -> SettingItem {
                             ButtonVariant::Destructive,
                             cx,
                         )
+                        .h(CONTROL_HEIGHT)
                         .disabled(busy)
                         .on_click(move |_, _, cx| {
                             let site = site.clone();
@@ -96,6 +94,7 @@ fn list_item(ctx: &SectionContext) -> SettingItem {
                         ButtonVariant::Secondary,
                         cx,
                     )
+                    .h(CONTROL_HEIGHT)
                     .disabled(busy || store.read(cx).site_auth().is_empty())
                     .on_click(move |_, _, cx| {
                         clear_store.update(cx, |store, cx| store.clear_site_auth(cx));
