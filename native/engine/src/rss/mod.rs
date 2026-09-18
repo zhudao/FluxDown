@@ -32,7 +32,9 @@ pub mod filter;
 pub mod model;
 pub mod parser;
 
-use std::collections::HashSet;
+pub use model::RSS_PROVIDER_ID;
+
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +49,7 @@ use crate::proxy_config::ProxyConfig;
 use crate::rss::filter::{CompiledRule, FilterRule, Verdict};
 use crate::rss::model::{RssItemInfo, RssItemStatus, RssSourceInfo};
 use crate::rss::parser::{MAX_FEED_BYTES, ParsedFeed, parse_feed};
+use crate::subscription::{SubscriptionFetchRequest, SubscriptionProvider};
 
 /// 每源保留的条目上限（超量淘汰最旧的**非已下载**条目）。
 pub const MAX_ITEMS_PER_SOURCE: i32 = 500;
@@ -122,8 +125,10 @@ pub struct RssDownloadPlan {
     pub guid: String,
     /// 条目标题（通知文案）。
     pub title: String,
-    /// 下载地址（enclosure 优先，回退条目链接）。
+    /// 下载地址；带 resolverItem 时使用条目链接触发二段解析。
     pub url: String,
+    /// 插件二段解析标识（空 = 普通 RSS 直链）。
+    pub resolver_item: String,
     /// 订阅配置的保存目录（空 = 由调用方按 队列目录 → 全局目录 兜底）。
     pub save_dir: String,
     /// 目标队列（空 = 主队列）。
@@ -190,6 +195,10 @@ pub struct RssManager {
     sources: Vec<RssSourceInfo>,
     /// 正在抓取中的订阅——防同一源被 tick 与手动刷新重复派发。
     in_flight: HashSet<String>,
+    /// 订阅来源适配器。RSS 是内置 provider，插件可以注册自己的 provider。
+    providers: HashMap<String, Arc<dyn SubscriptionProvider>>,
+    /// 未命中内置 map 时交给宿主提供的动态 provider（插件路由）。
+    fallback_provider: Option<Arc<dyn SubscriptionProvider>>,
     tx: mpsc::UnboundedSender<RssEvent>,
     rx: Option<mpsc::UnboundedReceiver<RssEvent>>,
 }
@@ -198,11 +207,15 @@ impl RssManager {
     /// 构造（不读库；由 [`RssManager::load`] 装载）。
     pub fn new(db: Db, sink: Arc<dyn EventSink>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
+        let mut providers: HashMap<String, Arc<dyn SubscriptionProvider>> = HashMap::new();
+        providers.insert(RSS_PROVIDER_ID.to_string(), Arc::new(BuiltinRssProvider));
         Self {
             db,
             sink,
             sources: Vec::new(),
             in_flight: HashSet::new(),
+            providers,
+            fallback_provider: None,
             tx,
             rx: Some(rx),
         }
@@ -231,6 +244,11 @@ impl RssManager {
     /// 按 ID 取订阅。
     pub fn source(&self, source_id: &str) -> Option<&RssSourceInfo> {
         self.sources.iter().find(|s| s.source_id == source_id)
+    }
+
+    /// 设置未命中固定 provider map 时使用的动态路由器。
+    pub fn set_fallback_provider(&mut self, provider: Arc<dyn SubscriptionProvider>) {
+        self.fallback_provider = Some(provider);
     }
 
     /// 广播订阅列表（含未读计数，重新读库以刷新 badge）。
@@ -383,6 +401,8 @@ impl RssManager {
         let request = FetchRequest {
             source_id: source.source_id.clone(),
             url: source.url.clone(),
+            provider_id: source.provider_id.clone(),
+            provider_config: source.provider_config.clone(),
             cookies: source.cookies.clone(),
             user_agent: if source.user_agent.is_empty() {
                 global_ua.to_string()
@@ -391,6 +411,12 @@ impl RssManager {
             },
             proxy: resolve_proxy(&source.proxy_url, proxy),
         };
+        let provider_id = source.provider_id.clone();
+        let provider = self
+            .providers
+            .get(&provider_id)
+            .cloned()
+            .or_else(|| self.fallback_provider.clone());
         // 乐观置位 last_fetch_at：即便抓取任务本身崩了，due 判定也不会把这个
         // 源变成每 tick 重试的死循环（回流分支会用真实结果覆盖）。
         self.in_flight.insert(request.source_id.clone());
@@ -404,16 +430,23 @@ impl RssManager {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let source_id = request.source_id.clone();
-            let outcome = match fetch_feed(&request).await {
-                Ok(feed) => RssFetchOutcome {
-                    source_id,
-                    feed,
-                    error: String::new(),
+            let outcome = match provider {
+                Some(provider) => match provider.fetch(request).await {
+                    Ok(feed) => RssFetchOutcome {
+                        source_id,
+                        feed,
+                        error: String::new(),
+                    },
+                    Err(error) => RssFetchOutcome {
+                        source_id,
+                        feed: ParsedFeed::default(),
+                        error,
+                    },
                 },
-                Err(error) => RssFetchOutcome {
+                None => RssFetchOutcome {
                     source_id,
                     feed: ParsedFeed::default(),
-                    error,
+                    error: format!("subscription provider not installed: {provider_id}"),
                 },
             };
             let _ = tx.send(RssEvent::Fetched(Box::new(outcome)));
@@ -438,7 +471,9 @@ impl RssManager {
     ) -> impl Future<Output = RssValidateOutcome> + Send + use<> {
         let request = FetchRequest {
             source_id: String::new(),
+            provider_id: RSS_PROVIDER_ID.to_string(),
             url: url.clone(),
+            provider_config: String::new(),
             cookies,
             user_agent: if user_agent.is_empty() {
                 global_ua.to_string()
@@ -508,7 +543,9 @@ impl RssManager {
     ) {
         let request = FetchRequest {
             source_id: plan.source_id.clone(),
+            provider_id: RSS_PROVIDER_ID.to_string(),
             url: plan.url.clone(),
+            provider_config: String::new(),
             cookies: plan.cookies.clone(),
             user_agent: if plan.user_agent.is_empty() {
                 global_ua.to_string()
@@ -650,6 +687,25 @@ impl RssManager {
             }
         }
 
+        let resolver_backfill: Vec<(String, String)> = outcome
+            .feed
+            .items
+            .iter()
+            .filter(|p| !p.resolver_item.is_empty() && known.contains(&p.guid))
+            .map(|p| (p.guid.clone(), p.resolver_item.clone()))
+            .collect();
+        let mut resolver_backfilled = 0u64;
+        if !resolver_backfill.is_empty() {
+            match self
+                .db
+                .backfill_rss_resolver_items(&source.source_id, &resolver_backfill)
+                .await
+            {
+                Ok(n) => resolver_backfilled = n,
+                Err(e) => log_error!("[rss] backfill resolver_item failed: {}", e),
+            }
+        }
+
         let fresh = rows.len();
         if let Err(e) = self.db.insert_rss_items(&rows).await {
             log_error!("[rss] persist items failed: {}", e);
@@ -696,7 +752,7 @@ impl RssManager {
                 ""
             }
         );
-        if fresh > 0 || backfilled > 0 || !plans.is_empty() {
+        if fresh > 0 || backfilled > 0 || resolver_backfilled > 0 || !plans.is_empty() {
             self.broadcast_items(&source.source_id, Vec::new()).await;
         }
         self.broadcast_sources().await;
@@ -827,6 +883,7 @@ fn item_from_parsed(source_id: &str, parsed: &parser::ParsedItem, fetched_at: i6
         title: parsed.title.clone(),
         link: parsed.link.clone(),
         enclosure_url: parsed.enclosure_url.clone(),
+        resolver_item: parsed.resolver_item.clone(),
         enclosure_length: parsed.enclosure_length,
         pub_date: parsed.pub_date,
         fetched_at,
@@ -843,6 +900,7 @@ fn plan_for(source: &RssSourceInfo, item: &RssItemInfo) -> RssDownloadPlan {
         guid: item.guid.clone(),
         title: item.title.clone(),
         url: item.download_url().to_string(),
+        resolver_item: item.resolver_item.clone(),
         save_dir: source.save_dir.clone(),
         queue_id: source.queue_id.clone(),
         start_paused: source.start_paused,
@@ -877,12 +935,21 @@ fn feed_origin(feed_url: &str) -> String {
         .unwrap_or_else(|| feed_url.to_string())
 }
 
-struct FetchRequest {
-    source_id: String,
-    url: String,
-    cookies: String,
-    user_agent: String,
-    proxy: ProxyConfig,
+type FetchRequest = SubscriptionFetchRequest;
+
+struct BuiltinRssProvider;
+
+impl SubscriptionProvider for BuiltinRssProvider {
+    fn id(&self) -> &str {
+        RSS_PROVIDER_ID
+    }
+
+    fn fetch(
+        &self,
+        request: SubscriptionFetchRequest,
+    ) -> crate::subscription::SubscriptionFetchFuture {
+        Box::pin(async move { fetch_feed(&request).await })
+    }
 }
 
 /// 抓取并解析一个 feed。**只在 off-actor 任务里调用。**
@@ -1063,6 +1130,12 @@ mod tests {
         assert_eq!(plan.queue_id, "anime");
         assert_eq!(plan.size_hint, 418 * 1024 * 1024);
 
+        let mut resolver_item = item.clone();
+        resolver_item.resolver_item = "ep:123@q:80".to_string();
+        let resolver_plan = plan_for(&s, &resolver_item);
+        assert_eq!(resolver_plan.url, resolver_item.link);
+        assert_eq!(resolver_plan.resolver_item, "ep:123@q:80");
+
         s.send_referer = false;
         assert!(plan_for(&s, &item).referrer.is_empty());
 
@@ -1118,6 +1191,7 @@ mod tests {
             title: title.to_string(),
             link: format!("https://feed.test/item/{guid}"),
             enclosure_url: format!("https://feed.test/dl/{guid}.torrent"),
+            resolver_item: String::new(),
             enclosure_length: size,
             pub_date,
         }

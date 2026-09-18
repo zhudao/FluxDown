@@ -37,6 +37,8 @@ pub enum PluginEntryKind {
     Resolve,
     /// hook 入口：`globalThis.onStart/onError/onDone/onMetaProbed`（由 event 决定）。
     Hook,
+    /// 订阅 provider 入口：`globalThis.subscribe`。
+    Subscription,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +61,24 @@ pub struct ResolveRequest {
     /// 变体收敛静默取默认（不为 N 个子任务弹 N 个选择框）。引擎不解释具体格式，
     /// 由发起方（前端固定选择/引擎自动裂变）与插件约定（D5 契约）。
     pub resolver_item: String,
+}
+
+/// 传入插件订阅 provider 的请求上下文。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubscriptionRequest {
+    /// 当前 provider ID。
+    pub provider_id: String,
+    /// 公共订阅记录 ID。
+    pub source_id: String,
+    /// 订阅记录中的地址。
+    pub url: String,
+    /// provider 专属不透明配置 JSON 字符串。
+    pub provider_config: String,
+    /// 订阅级 Cookie。
+    pub cookies: String,
+    /// 已解析的 User-Agent。
+    pub user_agent: String,
 }
 
 /// `resolve(ctx)` 的返回值。返回 `null`/`undefined` 表示放行不改写（映射为
@@ -438,6 +458,17 @@ pub trait ScriptRuntime: Send + Sync {
         budget: ExecutionBudget,
         host: HostContext,
     ) -> Result<Option<ResolveResult>, PluginError>;
+
+    /// 调用 `globalThis.subscribe(ctx)`，返回插件规范化后的 JSON 字符串。
+    async fn invoke_subscription(
+        &self,
+        plugin: &PluginScript,
+        req: SubscriptionRequest,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        budget: ExecutionBudget,
+        host: HostContext,
+    ) -> Result<String, PluginError>;
 
     /// 通知钩子；**全部事件（含 Error）统一 fire-and-forget，实现方吞掉一切错误
     /// （仅日志），无返回值**。重试意图由脚本经 [`PluginBridge::request_retry`]

@@ -823,6 +823,7 @@ class _HomePageState extends State<HomePage> {
             controller: _controller,
             settingsProvider: _settingsProvider,
             rssProvider: _rssProvider,
+            pluginProvider: _pluginProvider,
           ),
         ),
       ],
@@ -915,6 +916,7 @@ class _HomePageState extends State<HomePage> {
                     context,
                     _rssProvider,
                     _controller,
+                    _pluginProvider,
                     sourceId,
                   ),
                 );

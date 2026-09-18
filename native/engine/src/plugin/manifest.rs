@@ -145,6 +145,21 @@ pub struct ResolverDecl {
     pub multi: bool,
 }
 
+/// 单个订阅 provider 声明。v1 每插件至多一个 provider。
+///
+/// 插件入口函数名固定为 `subscribe`；`entry` 指向包含该函数的脚本文件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SubscriptionDecl {
+    /// 公共订阅记录中的 `providerId`，由插件稳定维护。
+    pub provider_id: String,
+    /// provider 脚本入口文件。
+    pub entry: String,
+    /// 单次调用超时（毫秒），只能下调宿主预算。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 /// hooks 声明。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -173,6 +188,9 @@ pub struct PluginManifest {
     pub min_app_version: String,
     #[serde(default)]
     pub resolvers: Vec<ResolverDecl>,
+    /// 订阅 provider 声明；v1 每插件至多一个。
+    #[serde(default)]
+    pub subscriptions: Vec<SubscriptionDecl>,
     #[serde(default)]
     pub hooks: Option<HooksDecl>,
     #[serde(default)]
@@ -256,6 +274,40 @@ impl PluginManifest {
             {
                 return Err(PluginError::ManifestInvalid(
                     "resolver timeoutMs 不可为 0".to_string(),
+                ));
+            }
+        }
+
+        // subscriptions：v1 每插件至多一个 provider。
+        if self.subscriptions.len() > 1 {
+            return Err(PluginError::ManifestInvalid(
+                "v1 每插件至多一个 subscription provider".to_string(),
+            ));
+        }
+        for s in &self.subscriptions {
+            if !is_valid_provider_id(&s.provider_id) {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "subscription providerId '{}' 非法：须为小写字母、数字、'_' 或 '-'",
+                    s.provider_id
+                )));
+            }
+            if s.provider_id == crate::rss::RSS_PROVIDER_ID {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "subscription providerId '{}' 为内置 provider 保留字",
+                    s.provider_id
+                )));
+            }
+            if !is_safe_relative_path(&s.entry) {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "subscription entry 路径 '{}' 非法",
+                    s.entry
+                )));
+            }
+            if let Some(t) = s.timeout_ms
+                && t == 0
+            {
+                return Err(PluginError::ManifestInvalid(
+                    "subscription timeoutMs 不可为 0".to_string(),
                 ));
             }
         }
@@ -470,6 +522,13 @@ fn is_valid_identity(s: &str) -> bool {
     ok(author) && ok(name)
 }
 
+fn is_valid_provider_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
 /// 相对路径安全：禁 `..`、绝对路径、`/` 或 `\` 开头、盘符（`C:`）、空段。
 pub fn is_safe_relative_path(p: &str) -> bool {
     if p.is_empty() {
@@ -570,6 +629,35 @@ mod tests {
                              "options":[{"value":"a","label":"A"}],"default":"a"}]}"#,
         );
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn subscription_manifest_passes() {
+        let m = parse_ok(
+            r#"{"identity":"a@b","name":"N","version":"1.0.0",
+                "subscriptions":[{"providerId":"demo-json","entry":"subscribe.js","timeoutMs":10000}]}"#,
+        );
+        assert!(m.validate().is_ok());
+        assert_eq!(m.subscriptions[0].provider_id, "demo-json");
+    }
+
+    #[test]
+    fn rejects_bad_subscription_provider_id() {
+        let m = parse_ok(
+            r#"{"identity":"a@b","name":"N","version":"1.0.0",
+                "subscriptions":[{"providerId":"Demo.JSON","entry":"subscribe.js"}]}"#,
+        );
+        assert!(m.validate().is_err());
+    }
+
+    /// 内置 `rss` 是保留字：插件声明会被内置 provider 遮蔽而永不调用。
+    #[test]
+    fn rejects_reserved_rss_provider_id() {
+        let m = parse_ok(
+            r#"{"identity":"a@b","name":"N","version":"1.0.0",
+                "subscriptions":[{"providerId":"rss","entry":"subscribe.js"}]}"#,
+        );
+        assert!(m.validate().is_err());
     }
 
     #[test]

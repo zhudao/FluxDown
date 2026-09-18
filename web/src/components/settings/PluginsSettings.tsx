@@ -63,7 +63,7 @@ export function PluginsSettings() {
 
       <div className="set-group">
         <SetRow title={t('plugins.installZip')} desc={t('plugins.installZipDesc')}>
-          <input ref={fileRef} type="file" accept=".zip" className="hidden" onChange={onZipChosen} />
+          <input ref={fileRef} type="file" accept=".fxplug,.zip" className="hidden" onChange={onZipChosen} />
           <button
             type="button"
             className="btn ghost sm flex-shrink-0"

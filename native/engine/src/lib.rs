@@ -31,6 +31,7 @@ pub mod link;
 pub mod logger;
 pub mod meta_prober;
 pub mod model;
+pub(crate) mod output;
 /// 插件系统（可选、可失败的下载中间层）。仅 `plugins` feature 下编译。
 #[cfg(feature = "plugins")]
 pub mod plugin;
@@ -46,6 +47,8 @@ pub mod selection;
 /// 站点 HTTP Basic 认证凭据（per-host 保存 + 建任务时自动套用）。
 pub mod site_auth;
 pub mod speed_limiter;
+/// 通用订阅 provider 接口（RSS 与插件订阅共用）。
+pub mod subscription;
 pub mod tracker_subscription;
 /// 用户主目录下的系统标准目录（下载目录：Windows 已知文件夹 / XDG user-dirs）。
 pub mod user_dirs;
@@ -306,6 +309,7 @@ impl Engine {
                 plugin_sink,
             ));
             pm.load_all().await;
+            manager.rss.set_fallback_provider(pm.subscription_router());
             manager.install_plugin_manager(pm);
         }
         // 装载 RSS 订阅到内存镜像——放在引擎构造而非交给宿主，保证任何

@@ -1200,6 +1200,8 @@ pub struct PluginInfoSignal {
     pub settings_values: Vec<ConfigEntry>,
     /// manifest 声明的能力权限（如 `["ffmpeg"]`，供 UI 展示授权徽章）。
     pub permissions: Vec<String>,
+    /// manifest 声明的订阅 provider ID，供订阅创建界面生成可选来源。
+    pub subscription_provider_ids: Vec<String>,
 }
 
 #[cfg(hub_plugins)]
@@ -1221,6 +1223,7 @@ impl From<fluxdown_engine::plugin::PluginInfo> for PluginInfoSignal {
                 .map(|(key, value)| ConfigEntry { key, value })
                 .collect(),
             permissions: info.permissions,
+            subscription_provider_ids: info.subscription_provider_ids,
         }
     }
 }
@@ -1784,6 +1787,12 @@ pub struct RssSourceEntry {
     /// UUID；创建时留空由引擎生成。
     #[serde(default)]
     pub source_id: String,
+    /// 来源 provider 的稳定 ID；空值由引擎 `RssSourceInfo::normalize` 回填内置 RSS。
+    #[serde(default)]
+    pub provider_id: String,
+    /// provider 专属配置 JSON。
+    #[serde(default)]
+    pub provider_config: String,
     pub url: String,
     /// 显示名（空 = 用 feed 标题回填）。
     #[serde(default)]

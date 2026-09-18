@@ -14,6 +14,7 @@
 | **新增插件工具面** | `runtime.rs` 加 Spec/Outcome/Availability（禁 rquickjs 类型）；`HostContext` 加门；`bridge.rs` 实现（semaphore + 牢笼）；`manifest` 加 permission |
 | **新增 Dart↔Rust 信号** | `hub/src/signals/mod.rs` 定义（`DartSignal`/`RustSignal`/`SignalPiece`）→ `rinf gen` → **并进 `download_actor` 的 `AuxSignal` 合并泵**（主 `select!` 已满 64 分支硬上限，绝不能加新分支，见 AGENTS.md「crate 边界与硬不变式」）→ Dart 端 `XxxSignal.rustSignalStream` 监听 |
 | **新增 RSS 过滤规则** | `engine/src/rss/filter.rs` 改判定 + 补单测 → **同步** `lib/src/models/rss_filter.dart` 与 `web/src/lib/rss-filter.ts` 两份镜像（预览与实际下载不一致会直接摧毁功能可信度）→ 三 Tab 对话框加控件 + i18n |
+| **新增订阅 provider** | 插件 manifest 加 `subscriptions:[{providerId,entry,timeoutMs}]`，脚本实现 `globalThis.subscribe(ctx)` 并返回规范化条目 → `PluginManager` 动态路由到 `subscription::SubscriptionProvider` → 公共调度负责退避/去重/过滤/落库/建任务（`Engine::initialize` 经 `set_fallback_provider` 挂载路由，宿主无需接线）；订阅级「代理 / User-Agent」只对内置 `rss` provider 生效，插件请求走 `flux.fetch` 的全局出口 |
 | **新增 HTTP 能力** | 扩 `ApiHost`（带默认 impl 保持现有宿主可编译）+ `api/server.rs` handler + `routes.rs` 常量；两宿主（hub `api_host.rs` / server `host.rs`）按需 override；跑 `gen_openapi` 重生成 |
 | **新增本机 RPC 能力** | `native/protocol` 先加唯一 method/DTO/event/error → owner 进程（下载事实进 daemon actor；账户/云/UI Gateway 进 agent）实现 → `crates/app` 单会话 adapter 映射到 capability-local port；二进制 body 留专用鉴权 HTTP 端点 |
 | **新增 aria2 方法** | `aria2.rs` `METHOD_NAMES` + `jsonrpc.rs` dispatch | 

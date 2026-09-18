@@ -25,7 +25,7 @@ use tokio::sync::Semaphore;
 use super::runtime::{
     ExecutionBudget, FfmpegSpec, HostContext, PluginBridge, PluginEntryKind, PluginError,
     PluginEvent, PluginLogLevel, PluginScript, ResolveRequest, ResolveResult, ScriptRuntime,
-    YtdlpSpec,
+    SubscriptionRequest, YtdlpSpec,
 };
 
 /// 硬顶（**CPU/中断**预算）：单次调用的 JS 字节码执行不得跨过该墙——interrupt
@@ -296,6 +296,44 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         let result: ResolveResult = serde_json::from_str(&raw)
             .map_err(|e| PluginError::InvalidOutput(format!("resolve 返回值非法: {e}")))?;
         Ok(Some(result))
+    }
+
+    async fn invoke_subscription(
+        &self,
+        plugin: &PluginScript,
+        req: SubscriptionRequest,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        budget: ExecutionBudget,
+        host: HostContext,
+    ) -> Result<String, PluginError> {
+        let permit = tokio::time::timeout(
+            RESOLVE_ACQUIRE_TIMEOUT,
+            self.resolve_sema.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| PluginError::Overloaded)?
+        .map_err(|_| PluginError::Overloaded)?;
+        let _permit = permit;
+
+        let arg_json =
+            serde_json::to_string(&req).map_err(|e| PluginError::Runtime(e.to_string()))?;
+        let info_json = info_json(&plugin.identity, &plugin.version, &plugin.app_version);
+        self.run_script(
+            plugin.source.clone(),
+            "subscribe",
+            true,
+            arg_json,
+            settings_json,
+            info_json,
+            None,
+            None,
+            bridge,
+            plugin.identity.clone(),
+            budget,
+            host,
+        )
+        .await
     }
 
     async fn invoke_hook(
@@ -951,7 +989,7 @@ mod tests {
     use crate::plugin::runtime::{
         BridgeHttpRequest, BridgeHttpResponse, ExecutionBudget, HostContext, PluginBridge,
         PluginEntryKind, PluginError, PluginLogLevel, PluginScript, ResolveRequest, ResolveResult,
-        ScriptRuntime,
+        ScriptRuntime, SubscriptionRequest,
     };
 
     /// 测试桩：全空实现（OOM 测试不触网/不落盘）。
@@ -1023,6 +1061,57 @@ mod tests {
             matches!(err, PluginError::MemoryLimitExceeded),
             "expected MemoryLimitExceeded, got: {err:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn subscription_entry_returns_normalized_json() {
+        let rt = QuickJsScriptRuntime::new(1).expect("runtime");
+        let script = PluginScript {
+            identity: "test@subscription".to_string(),
+            source: r#"
+                globalThis.subscribe = async (ctx) => ({
+                  title: "Demo feed",
+                  link: ctx.url,
+                  items: [{
+                    guid: ctx.providerConfig,
+                    title: "Episode 1",
+                    link: ctx.url,
+                    enclosureUrl: "https://cdn.example/episode-1.mp4",
+                    enclosureLength: 42,
+                    pubDate: 1710000000
+                  }]
+                });
+            "#
+            .to_string(),
+            entry_fn_hint: PluginEntryKind::Subscription,
+            version: "1.0.0".to_string(),
+            app_version: "0.0.0".to_string(),
+        };
+        let raw = rt
+            .invoke_subscription(
+                &script,
+                SubscriptionRequest {
+                    provider_id: "demo-json".to_string(),
+                    source_id: "source-1".to_string(),
+                    url: "https://example.com/feed".to_string(),
+                    provider_config: "item-1".to_string(),
+                    cookies: String::new(),
+                    user_agent: "FluxDown/test".to_string(),
+                },
+                "{}".to_string(),
+                Arc::new(NullBridge),
+                ExecutionBudget {
+                    timeout: Duration::from_secs(5),
+                    memory_limit_bytes: 16 * 1024 * 1024,
+                },
+                HostContext::default(),
+            )
+            .await
+            .expect("subscription entry");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("json");
+        assert_eq!(value["title"], "Demo feed");
+        assert_eq!(value["items"][0]["guid"], "item-1");
+        assert_eq!(value["items"][0]["enclosureLength"], 42);
     }
 
     /// 用给定 host 上下文跑一段 resolver，返回其 `url` 字段（测试探针）。

@@ -27,6 +27,7 @@ use crate::downloader::{
     ProgressUpdate, SegmentProgressInfo, TEMP_EXT, extract_from_url, sanitize_filename,
 };
 use crate::logger::log_info;
+use crate::output;
 use crate::proxy_config::{self, ProxyConfig};
 use crate::speed_limiter::SpeedLimiter;
 
@@ -992,9 +993,7 @@ async fn ftp_download_single(
     speed_limiter: &SpeedLimiter,
     proxy_config: &ProxyConfig,
 ) -> Result<(), DownloadError> {
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    output::ensure_parent(dest).await?;
 
     let existing_len = match tokio::fs::metadata(dest).await {
         Ok(m) => m.len() as i64,
@@ -1268,9 +1267,7 @@ async fn ftp_download_multi_segment(
     proxy_config: &ProxyConfig,
     spawn_gen: i64,
 ) -> Result<(), DownloadError> {
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    output::ensure_parent(dest).await?;
 
     // 夺取段行布局属主权：先于 load_segments/建行（顺序即正确性，见
     // db::set_segments_epoch 文档）。旧 spawn 迟到的段进度写从此全类失效。

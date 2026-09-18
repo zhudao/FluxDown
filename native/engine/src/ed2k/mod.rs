@@ -34,6 +34,7 @@ use crate::ed2k::link::{Ed2kLink, parse_ed2k_link};
 use crate::ed2k::peer::download_block_on_stream;
 use crate::ed2k::server::{PeerAddr, parse_server_list};
 use crate::logger::log_info;
+use crate::output;
 
 /// 块下载失败时携带失败 peer 身份的错误，供调度层区分"投毒/越界 → 拉黑"
 /// 与"纯网络失败 → 退避"。`download_block_from_peer` 的所有 `Err` 路径一律
@@ -206,9 +207,7 @@ async fn run_ed2k_download_inner(params: &DownloadParams) -> Result<i64, Downloa
     if temp_ok {
         params.db.init_ed2k_blocks(&task_id, block_count).await?;
     } else {
-        if let Some(parent) = temp_path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
+        output::ensure_parent(&temp_path).await?;
         let file = tokio::fs::File::create(&temp_path)
             .await
             .map_err(DownloadError::Io)?;

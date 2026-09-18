@@ -26,8 +26,8 @@
 - `ed2k_blocks`(复合 PK task_id+block_index, state, downloaded_bytes, retry_count)
 - `ed2k_hashset`(task_id PK, hashes BLOB)
 - `task_artifacts`(复合 PK task_id+file_name；追踪 sidecar/产物文件供清理)
-- `rss_sources`(id PK, url, name, enabled, auto_download, start_paused, queue_id, save_dir, interval_minutes, include/exclude_pattern, use_regex, smart_episode, size_min/max_bytes, send_referer, notify_on_download, max_per_fetch, cookies, user_agent, proxy_url, last_fetch_at, last_success_at, last_error, fail_count, `seeded`（首轮是否已完成）, position)
-- `rss_items`(复合 PK source_id+guid, title, link, enclosure_url/length, pub_date, fetched_at, status 0..5, task_id 回链, episode_key, reason 原因码；`ON DELETE CASCADE` 于 rss_sources)
+- `rss_sources`(id PK, `provider_id`/`provider_config`（订阅 provider 适配器与其不透明配置，旧数据默认 `rss`/空）, url, name, enabled, auto_download, start_paused, queue_id, save_dir, interval_minutes, include/exclude_pattern, use_regex, smart_episode, size_min/max_bytes, send_referer, notify_on_download, max_per_fetch, cookies, user_agent, proxy_url, last_fetch_at, last_success_at, last_error, fail_count, `seeded`（首轮是否已完成）, position)
+- `rss_items`(复合 PK source_id+guid, title, link, enclosure_url/length, `resolver_item`（插件二段解析标识，空 = 普通直链）, pub_date, fetched_at, status 0..5, task_id 回链, episode_key, reason 原因码；`ON DELETE CASCADE` 于 rss_sources)
 
 **内置队列**: `main`（主）/`later`（稍后下载），播种于 `Engine::new`，不可删/改名；存量 `queue_id=''` 迁入 `main`。
 
@@ -82,7 +82,7 @@
 - `data_dir.rs`：数据目录解析（Windows 便携 `<exe>/portable_data` via `portable` 标记 vs 安装 `%LOCALAPPDATA%`；Linux XDG；macOS App Support；Android files dir）+ 旧版迁移。**Dart 侧 `services/platform_utils.dart` 的 KNOWN_ITEMS 必须与此同步。**
 - `logger.rs`：全局文件日志宏 `log_info!`/`log_error!`（`#[macro_export]`，`$crate` 前缀跨 crate 安全；每文件顶显式 `use`）。与 Dart `LogService` 写同一文件。
 - `model.rs`/`events.rs`/`selection.rs`：领域类型 / `EngineEvent`（`#[non_exhaustive]`）+ `EventSink` / `HostSelection`。
-- `rss/`（`model`/`parser`/`filter`/`mod`）：RSS 订阅自动下载。`RssManager` 挂在 `DownloadManager.rss` 上；宿主只提供 60s 节拍（`tick_rss_sources()`）与回流 drain（`on_rss_event()`），抓取 off-actor，建任务仍收敛到 `create_task`。三层去重：guid → 单轮上限（超额留 `New` 下轮从旧到新续派）→ 智能剧集去重（识别失败即放行）。失败指数退避封顶 6h，**不自动停用订阅**。`filter.rs` 是纯函数单测主战场，**Dart/TS 各有一份逐条对齐的镜像**（`lib/src/models/rss_filter.dart`、`web/src/lib/rss-filter.ts`）供规则预览用——改任一侧必须同步三处。
+- `rss/`（`model`/`parser`/`filter`/`mod`）：订阅自动下载。`RssManager` 挂在 `DownloadManager.rss` 上；宿主只提供 60s 节拍（`tick_rss_sources()`）与回流 drain（`on_rss_event()`），抓取 off-actor，建任务仍收敛到 `create_task`。`subscription::SubscriptionProvider` 是 RSS 与插件订阅共用的 provider 分支：内置 `rss` provider 保持原流程；插件在 manifest 的 `subscriptions` 声明 `providerId` + `entry`，由 `PluginManager` 动态路由到 `globalThis.subscribe(ctx)`，返回规范化 `ParsedFeed`，并可通过 `flux.fetch` 请求平台接口。provider 不负责调度、退避、去重、过滤、落库或建任务。三层去重：guid → 单轮上限（超额留 `New` 下轮从旧到新续派）→ 智能剧集去重（识别失败即放行）。失败指数退避封顶 6h，**不自动停用订阅**。`filter.rs` 是纯函数单测主战场，**Dart/TS 各有一份逐条对齐的镜像**（`lib/src/models/rss_filter.dart`、`web/src/lib/rss-filter.ts`）供规则预览用——改任一侧必须同步三处。
 
   **「无人值守」是 RSS 的核心不变式**——订阅可能半夜抓到 5 集,任何需要用户点一下才能继续的东西都是 bug:① BT 条目建任务时 `NewTaskSpec.unattended_selection=true`,**在启动前**把「已确认全部文件」落库(`save_bt_selected_files(id, &[], true)`)并落 `tasks.unattended=1`(HLS/变体选择也静默),否则 `do_start_task` 会走 `HostSelection` 弹 5 次文件选择框,而用户点「取消」后条目已被标记「已下载」,状态就撒谎了;② `create_task` 内部自发建任务不经过 Dart 的建任务路径,**必须显式补发** `load_and_send_all_tasks()`——`TaskProgress` 信号不带 `queue_id`,不补发的话新任务在 UI 里不属于任何队列;③ 手动「重新下载」对**任何**状态(含已下载)都放行,挡住重下没有任何好处,只会逼用户去别处找种子。
 
@@ -95,6 +95,7 @@
 
 **可选、可失败的下载任务中间层**，JS 编写（rquickjs 沙箱），声明式设置项（双端自动生成表单）。两个正交能力平面 + 门控工具面：
 
+- **订阅平面**：manifest `subscriptions:[{providerId,entry,timeoutMs}]` 声明 provider，脚本导出 `globalThis.subscribe(ctx)`，通过 `flux.fetch` 自主完成平台请求/解析，返回 `{title,link,items:[{guid,title,link,enclosureUrl,resolverItem,enclosureLength,pubDate}]}`（`providerId` 不得占用内置 `rss`；单条非法跳过并记日志，全部非法才算失败；`ctx.providerConfig` 空值归一为 `{}`）；宿主自动把它挂到公共订阅调度，插件安装/启停后由动态路由读取最新快照。
 - **Resolver 平面**：`resolve(url,ctx)→{url}|{manifest}|null`。协议判定**之前**惰性执行、**off-actor**（防冻结 actor），命中后 fail-closed（失败进 status=4，绝不把 HTML 当视频存）。惰性 = 每次 start/resume 重跑，天然防直链过期。支持两段式：初段返 manifest 清单 → 引擎裂变为任务组；二段（`ctx.resolverItem`）返直链。`multi:true` 触发新建对话框前置预解析（`begin_resolve_preview` 只读）。
 - **通知平面**：onStart/onDone/onError/onMetaProbed，全 fire-and-forget（失败仅记日志/超时/`try_acquire`，绝不影响任务状态）；仅 onError 内可 `flux.task.requestRetry`。
 - **门控工具面**（manifest `permissions` 声明才注入）：
@@ -102,7 +103,7 @@
   - `flux.ytdlp`（`permissions:["ytdlp"]`）：**放行 URL/网络**（本职抓站），封危险开关（`--exec`/`--config-location`/`--plugin-dirs`/`--ffmpeg-location`/`--batch-file`…），bridge 自持 per-plugin scratch 牢笼，宿主注入 `--ffmpeg-location`（受管 ffmpeg 不在 PATH）+ `--cache-dir` 收进牢笼。resolve + 全 hook 可用。
   - `flux.fs`：per-plugin 通用临时文件读写（扁平安全名 + 单文件 8MB/总量 64MB/文件数 100 上限 + unix 0600），取代"每种输入给工具加类型化字段"的反模式。
 
-**模块**：`manifest`（校验器 + `permissions`⊆{ffmpeg,ytdlp}）、`semver`、`runtime`（**无 rquickjs 类型**——可换 deno_core；含 Spec/Outcome 跨界结构 + `HostContext`）、`quickjs`（v1 唯一 impl，rquickjs 限在此文件；memory_limit + interrupt + timeout 三重兜底 + 连续 3 次熔断）、`bridge`（网络出口 SSRF 守卫 + flux.* 面）、`manager`（`RwLock<Arc<Vec>>` 整表原子替换）、`dependencies`（权限→组件依赖：ffmpeg→[ffmpeg]，ytdlp→[ytdlp,ffmpeg]，**提醒式非阻断**）、`install`（.fxplug zip：zip-slip + 压缩炸弹防护 + 单层剥壳）、`market`（去中心化市场：Git 版本化联邦索引 `zerx-lab/fluxdown-plugin-index`、内容寻址 `contentHash=sha256(zip)`、多源 failover、per-index sequence 防回滚；v1 无作者签名，schema 预留）。
+**模块**：`manifest`（校验器 + subscription/provider 声明 + `permissions`⊆{ffmpeg,ytdlp}）、`semver`、`runtime`（**无 rquickjs 类型**——可换 deno_core；含 Spec/Outcome 跨界结构 + `HostContext`）、`quickjs`（v1 唯一 impl，rquickjs 限在此文件；memory_limit + interrupt + timeout 三重兜底 + 连续 3 次熔断）、`bridge`（网络出口 SSRF 守卫 + flux.* 面）、`manager`（`RwLock<Arc<Vec>>` 整表原子替换 + 动态订阅路由）、`dependencies`（权限→组件依赖：ffmpeg→[ffmpeg]，ytdlp→[ytdlp,ffmpeg]，**提醒式非阻断**）、`install`（.fxplug zip：zip-slip + 压缩炸弹防护 + 单层剥壳）、`market`（去中心化市场：Git 版本化联邦索引 `zerx-lab/fluxdown-plugin-index`、内容寻址 `contentHash=sha256(zip)`、多源 failover、per-index sequence 防回滚；v1 无作者签名，schema 预留）。
 
 **off-actor 惰性 resolve 接线**：`create_task` 命中 `match_resolver` → 落 `tasks.resolver_plugin_id`（仅存 ID）+ 跳过 meta_prober。`do_start/resume_task` 体首守卫：resolver 非空且未解析 → 占位 active_tasks + off-actor spawn → return。worker 经 `resolve_rx` 回流，actor `select!` 分支 `on_resolve_ready`（复查生命周期 → 用解析后 url 重算五路协议分派）。**宿主 actor 必须接线 `resolve_rx` + `plugin_retry_rx`**。
 

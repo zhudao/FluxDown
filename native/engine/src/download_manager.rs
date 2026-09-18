@@ -8702,6 +8702,7 @@ impl DownloadManager {
                 save_dir: self.resolve_rss_save_dir(&plan.save_dir, &plan.queue_id),
                 cookies: plan.cookies.clone(),
                 referrer: plan.referrer.clone(),
+                resolver_item: plan.resolver_item.clone(),
                 proxy_url: plan.proxy_url.clone(),
                 user_agent: plan.user_agent.clone(),
                 queue_id: plan.queue_id.clone(),

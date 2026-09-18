@@ -46,6 +46,7 @@ use crate::db::Db;
 use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo, is_server_rejection};
 use crate::events::{EngineEvent, EventSink};
 use crate::logger::log_info;
+use crate::output;
 use crate::speed_limiter::SpeedLimiter;
 
 // ---------------------------------------------------------------------------
@@ -1355,6 +1356,11 @@ pub async fn run_coordinated_download(
             "coordinator: invalid initial_segment_count={initial_segment_count} for task {task_id}"
         )));
     }
+    // Every coordinator caller shares this write boundary.  This is especially
+    // important for DASH multi-segment downloads, which reach preallocation
+    // before the single-stream downloader's directory preparation.
+    output::ensure_parent(dest).await?;
+
     // 段数钳制：保证每个新建分段至少覆盖 1 字节。build_fresh_segments 用
     // chunk = total_bytes / count；当 count > total_bytes 时 chunk=0，会生成大量
     // start>end 的空段，worker 据此发出非法 Range（如 bytes=0--1），分段永远无法

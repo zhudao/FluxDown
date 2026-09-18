@@ -31,6 +31,7 @@ use crate::downloader::{
 };
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
+use crate::output;
 use crate::selection::SelectionOutcome;
 
 // ---------------------------------------------------------------------------
@@ -900,9 +901,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
 
     // Ensure parent directory exists
-    if let Some(parent) = temp_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    output::ensure_parent(&temp_path).await?;
 
     // --- HLS resume support ---
     // On resume, check if we have a saved segment index from a previous run.

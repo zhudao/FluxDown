@@ -48,6 +48,7 @@ use crate::db::Db;
 use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo};
 use crate::logger::{log_error, log_info};
 use crate::model::{BtFileEntry, TorrentMetaResult};
+use crate::output;
 use crate::selection::{HostSelection, SelectionOutcome};
 
 // ---------------------------------------------------------------------------
@@ -2443,7 +2444,7 @@ fn move_file(src: &Path, dst: &Path, budget: &mut u32, replace: bool) -> std::io
 /// 单个子项失败**不中止兄弟项**(尽量多移,减少下一轮重试量),记录首个
 /// 错误于循环结束后返回——上层将本次 completion 标 ERROR 并保留重试。
 fn move_dir_recursive(src: &Path, dst: &Path, budget: &mut u32) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
+    output::ensure_dir_sync(dst)?;
     let mut first_err: Option<std::io::Error> = None;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -2526,10 +2527,8 @@ fn move_completion_item(
         ));
     }
 
-    if let Some(parent) = dst.parent()
-        && !parent.exists()
-    {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(parent) = dst.parent() {
+        output::ensure_dir_sync(parent)?;
     }
     if retrying_completion && task_owned_container && dst.exists() {
         move_path_with_file_replace(src, dst, true)?;
@@ -3323,13 +3322,14 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // Create the staging directory now (before librqbit does) so we can
         // immediately mark it hidden.  librqbit uses `overwrite: true` and
         // will reuse the directory if it already exists.
-        if let Err(e) = std::fs::create_dir_all(&stage_dir) {
+        if let Err(e) = output::ensure_dir_sync(&stage_dir) {
             log_info!(
                 "[BT] task={} failed to pre-create staging dir '{}': {}",
                 short_id(&task_id),
                 stage_dir.display(),
                 e
             );
+            return Err(e.into());
         } else {
             set_hidden(&stage_dir);
         }

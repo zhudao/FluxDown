@@ -42,6 +42,8 @@ RssSourceEntry _source({
   int failCount = 0,
 }) => RssSourceEntry(
   sourceId: 's1',
+  providerId: 'rss',
+  providerConfig: '',
   url: 'https://mikanani.me/RSS/Bangumi?bangumiId=3600',
   name: '',
   enabled: true,

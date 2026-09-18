@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::db::Db;
 use crate::events::EventSink;
 use crate::logger::log_info;
+use crate::output;
 use crate::speed_limiter::SpeedLimiter;
 
 // ---------------------------------------------------------------------------
@@ -3682,9 +3683,7 @@ async fn download_single_once(
     expected_etag: &str,
     expected_last_modified: &str,
 ) -> Result<SingleDownloadResult, DownloadError> {
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    output::ensure_parent(dest).await?;
 
     let physical_existing_len = match tokio::fs::metadata(dest).await {
         Ok(metadata) => i64::try_from(metadata.len()).map_err(|_| {
@@ -4065,9 +4064,7 @@ async fn download_multi_segment(
     allow_hint_uncap: bool,
     auto_proxy: Option<std::sync::Arc<crate::auto_proxy::AutoProxyCtx>>,
 ) -> Result<i64, DownloadError> {
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    output::ensure_parent(dest).await?;
 
     // NOTE: total_bytes arriving here is already the *effective* value returned
     // by update_task_file_info_resume — it is consistent with the stored segment

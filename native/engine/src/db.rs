@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS link_devices (
 );
 CREATE TABLE IF NOT EXISTS rss_sources (
     id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL DEFAULT 'rss',
+    provider_config TEXT NOT NULL DEFAULT '',
     url TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -212,6 +214,7 @@ CREATE TABLE IF NOT EXISTS rss_items (
     title TEXT NOT NULL DEFAULT '',
     link TEXT NOT NULL DEFAULT '',
     enclosure_url TEXT NOT NULL DEFAULT '',
+    resolver_item TEXT NOT NULL DEFAULT '',
     enclosure_length INTEGER NOT NULL DEFAULT 0,
     pub_date INTEGER NOT NULL DEFAULT 0,
     fetched_at INTEGER NOT NULL DEFAULT 0,
@@ -359,6 +362,8 @@ CREATE TABLE IF NOT EXISTS link_devices (
 );
 CREATE TABLE IF NOT EXISTS rss_sources (
     id TEXT PRIMARY KEY,
+    provider_id TEXT NOT NULL DEFAULT 'rss',
+    provider_config TEXT NOT NULL DEFAULT '',
     url TEXT NOT NULL,
     name TEXT NOT NULL DEFAULT '',
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -392,6 +397,7 @@ CREATE TABLE IF NOT EXISTS rss_items (
     title TEXT NOT NULL DEFAULT '',
     link TEXT NOT NULL DEFAULT '',
     enclosure_url TEXT NOT NULL DEFAULT '',
+    resolver_item TEXT NOT NULL DEFAULT '',
     enclosure_length BIGINT NOT NULL DEFAULT 0,
     pub_date BIGINT NOT NULL DEFAULT 0,
     fetched_at BIGINT NOT NULL DEFAULT 0,
@@ -681,6 +687,13 @@ impl Db {
         sqlx::raw_sql(schema).execute(&self.pool).await?;
 
         // --- Schema migrations（幂等，只为升级旧库；新库建表已含全量列） ---
+        // 订阅 provider 扩展：旧 RSS 源默认归入内置 `rss` provider。
+        self.add_column_if_missing("rss_sources", "provider_id", "TEXT NOT NULL DEFAULT 'rss'")
+            .await?;
+        self.add_column_if_missing("rss_sources", "provider_config", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.add_column_if_missing("rss_items", "resolver_item", "TEXT NOT NULL DEFAULT ''")
+            .await?;
         self.add_column_if_missing("tasks", "proxy_url", "TEXT NOT NULL DEFAULT ''")
             .await?;
         self.add_column_if_missing("tasks", "queue_id", "TEXT NOT NULL DEFAULT ''")
@@ -3395,14 +3408,16 @@ impl Db {
     /// ```
     pub async fn insert_rss_source(&self, source: &RssSourceInfo) -> Result<(), DbError> {
         sqlx::query(
-            "INSERT INTO rss_sources (id, url, name, enabled, auto_download, start_paused, queue_id, save_dir, \
-             interval_minutes, include_pattern, exclude_pattern, use_regex, smart_episode, size_min_bytes, \
+            "INSERT INTO rss_sources (id, provider_id, provider_config, url, name, enabled, auto_download, start_paused, queue_id, save_dir, \
+              interval_minutes, include_pattern, exclude_pattern, use_regex, smart_episode, size_min_bytes, \
              size_max_bytes, send_referer, notify_on_download, max_per_fetch, cookies, user_agent, proxy_url, \
              last_fetch_at, last_success_at, last_error, fail_count, seeded, position) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, \
-             $21, $22, $23, $24, $25, $26, $27)",
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, \
+              $21, $22, $23, $24, $25, $26, $27, $28, $29)",
         )
         .bind(&source.source_id)
+        .bind(&source.provider_id)
+        .bind(&source.provider_config)
         .bind(&source.url)
         .bind(&source.name)
         .bind(i32::from(source.enabled))
@@ -3439,12 +3454,14 @@ impl Db {
     /// UI 保存会把正在进行的退避账本抹掉）。
     pub async fn update_rss_source(&self, source: &RssSourceInfo) -> Result<(), DbError> {
         sqlx::query(
-            "UPDATE rss_sources SET url = $1, name = $2, enabled = $3, auto_download = $4, start_paused = $5, \
-             queue_id = $6, save_dir = $7, interval_minutes = $8, include_pattern = $9, exclude_pattern = $10, \
-             use_regex = $11, smart_episode = $12, size_min_bytes = $13, size_max_bytes = $14, send_referer = $15, \
-             notify_on_download = $16, max_per_fetch = $17, cookies = $18, user_agent = $19, proxy_url = $20 \
-             WHERE id = $21",
+            "UPDATE rss_sources SET provider_id = $1, provider_config = $2, url = $3, name = $4, enabled = $5, auto_download = $6, start_paused = $7, \
+             queue_id = $8, save_dir = $9, interval_minutes = $10, include_pattern = $11, exclude_pattern = $12, \
+             use_regex = $13, smart_episode = $14, size_min_bytes = $15, size_max_bytes = $16, send_referer = $17, \
+             notify_on_download = $18, max_per_fetch = $19, cookies = $20, user_agent = $21, proxy_url = $22 \
+             WHERE id = $23",
         )
+        .bind(&source.provider_id)
+        .bind(&source.provider_config)
         .bind(&source.url)
         .bind(&source.name)
         .bind(i32::from(source.enabled))
@@ -3523,7 +3540,7 @@ impl Db {
     /// 计数（`unread_count`）——与配置同批返回，避免 UI 两段式闪烁。
     pub async fn load_all_rss_sources(&self) -> Result<Vec<RssSourceInfo>, DbError> {
         let rows = sqlx::query(
-            "SELECT s.id, s.url, s.name, s.enabled, s.auto_download, s.start_paused, s.queue_id, s.save_dir, \
+            "SELECT s.id, s.provider_id, s.provider_config, s.url, s.name, s.enabled, s.auto_download, s.start_paused, s.queue_id, s.save_dir, \
              s.interval_minutes, s.include_pattern, s.exclude_pattern, s.use_regex, s.smart_episode, \
              s.size_min_bytes, s.size_max_bytes, s.send_referer, s.notify_on_download, s.max_per_fetch, \
              s.cookies, s.user_agent, s.proxy_url, s.last_fetch_at, s.last_success_at, s.last_error, \
@@ -3537,6 +3554,10 @@ impl Db {
         for row in &rows {
             sources.push(RssSourceInfo {
                 source_id: row.try_get("id")?,
+                provider_id: row
+                    .try_get("provider_id")
+                    .unwrap_or_else(|_| "rss".to_string()),
+                provider_config: row.try_get("provider_config").unwrap_or_default(),
                 url: row.try_get("url")?,
                 name: row.try_get("name")?,
                 enabled: row.try_get::<i32, _>("enabled").unwrap_or(1) != 0,
@@ -3591,7 +3612,7 @@ impl Db {
     ) -> Result<Vec<RssItemInfo>, DbError> {
         let rows = sqlx::query(
             "SELECT source_id, guid, title, link, enclosure_url, enclosure_length, pub_date, fetched_at, \
-             status, task_id, episode_key, reason FROM rss_items WHERE source_id = $1 AND status = 0 \
+             status, task_id, episode_key, resolver_item, reason FROM rss_items WHERE source_id = $1 AND status = 0 \
              ORDER BY pub_date ASC, fetched_at ASC, guid ASC LIMIT $2",
         )
         .bind(source_id)
@@ -3612,7 +3633,7 @@ impl Db {
     ) -> Result<Vec<RssItemInfo>, DbError> {
         let rows = sqlx::query(
             "SELECT source_id, guid, title, link, enclosure_url, enclosure_length, pub_date, fetched_at, \
-             status, task_id, episode_key, reason FROM rss_items WHERE source_id = $1 \
+             status, task_id, episode_key, resolver_item, reason FROM rss_items WHERE source_id = $1 \
              ORDER BY pub_date DESC, fetched_at DESC, guid ASC LIMIT $2",
         )
         .bind(source_id)
@@ -3633,7 +3654,7 @@ impl Db {
     ) -> Result<Option<RssItemInfo>, DbError> {
         let items = sqlx::query(
             "SELECT source_id, guid, title, link, enclosure_url, enclosure_length, pub_date, fetched_at, \
-             status, task_id, episode_key, reason FROM rss_items WHERE source_id = $1 AND guid = $2",
+             status, task_id, episode_key, resolver_item, reason FROM rss_items WHERE source_id = $1 AND guid = $2",
         )
         .bind(source_id)
         .bind(guid)
@@ -3682,9 +3703,9 @@ impl Db {
         let mut inserted = 0u64;
         for item in items {
             let r = sqlx::query(
-                "INSERT INTO rss_items (source_id, guid, title, link, enclosure_url, enclosure_length, \
+                "INSERT INTO rss_items (source_id, guid, title, link, enclosure_url, resolver_item, enclosure_length, \
                  pub_date, fetched_at, status, task_id, episode_key, reason) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
                  ON CONFLICT (source_id, guid) DO NOTHING",
             )
             .bind(&item.source_id)
@@ -3692,6 +3713,7 @@ impl Db {
             .bind(&item.title)
             .bind(&item.link)
             .bind(&item.enclosure_url)
+            .bind(&item.resolver_item)
             .bind(item.enclosure_length)
             .bind(item.pub_date)
             .bind(item.fetched_at)
@@ -3728,6 +3750,36 @@ impl Db {
                  WHERE source_id = $2 AND guid = $3 AND pub_date = 0",
             )
             .bind(*pub_date)
+            .bind(source_id)
+            .bind(guid)
+            .execute(&mut *tx)
+            .await?;
+            updated += r.rows_affected();
+        }
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// 回填历史插件条目缺失的二段解析标识。
+    ///
+    /// 订阅条目的 guid 是身份，插件升级后相同 guid 不会重新插入；仅在历史行
+    /// 还没有 resolver_item 时补写，保证已有订阅可以无缝切换到精确画质解析。
+    pub async fn backfill_rss_resolver_items(
+        &self,
+        source_id: &str,
+        items: &[(String, String)],
+    ) -> Result<u64, DbError> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.pool.begin().await?;
+        let mut updated = 0u64;
+        for (guid, resolver_item) in items {
+            let r = sqlx::query(
+                "UPDATE rss_items SET resolver_item = $1 \
+                 WHERE source_id = $2 AND guid = $3 AND resolver_item = ''",
+            )
+            .bind(resolver_item)
             .bind(source_id)
             .bind(guid)
             .execute(&mut *tx)
@@ -3997,6 +4049,7 @@ fn rss_item_from_row(row: &AnyRow) -> Result<RssItemInfo, sqlx::Error> {
         title: row.try_get("title").unwrap_or_default(),
         link: row.try_get("link").unwrap_or_default(),
         enclosure_url: row.try_get("enclosure_url").unwrap_or_default(),
+        resolver_item: row.try_get("resolver_item").unwrap_or_default(),
         enclosure_length: row.try_get("enclosure_length").unwrap_or(0),
         pub_date: row.try_get("pub_date").unwrap_or(0),
         fetched_at: row.try_get("fetched_at").unwrap_or(0),

@@ -2167,6 +2167,8 @@ class S {
   String get rssNameLabel => _r('rssNameLabel');
   String get rssNameHint => _r('rssNameHint');
   String get rssIntervalLabel => _r('rssIntervalLabel');
+  String get rssProviderLabel => _r('rssProviderLabel');
+  String get rssProviderPluginHint => _r('rssProviderPluginHint');
   String get rssUrlLabel => _r('rssUrlLabel');
   String get rssUrlHint => _r('rssUrlHint');
   String get rssQueueLabel => _r('rssQueueLabel');

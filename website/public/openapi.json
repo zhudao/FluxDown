@@ -3798,6 +3798,13 @@
               "type": "string"
             }
           },
+          "subscriptionProviderIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "manifest 声明的订阅 provider ID，供订阅创建界面生成可选来源。"
+          },
           "version": {
             "type": "string"
           }
@@ -4239,6 +4246,14 @@
           "position": {
             "type": "integer",
             "format": "int32"
+          },
+          "providerConfig": {
+            "type": "string",
+            "description": "provider 专属配置 JSON；缺省为空。"
+          },
+          "providerId": {
+            "type": "string",
+            "description": "来源 provider 的稳定 ID；缺省为内置 RSS provider。"
           },
           "proxyUrl": {
             "type": "string"

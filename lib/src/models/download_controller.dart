@@ -2655,6 +2655,89 @@ int compareEntitiesSmart(ListEntity a, ListEntity b) {
   return b.createdAt.compareTo(a.createdAt);
 }
 
+/// 按人类阅读顺序比较名称中的 ASCII 数字段。
+///
+/// 非数字部分保持 Dart 字符串的原有字典序；连续数字部分按数值比较，
+/// 因此 `episode 2` 会排在 `episode 10` 前面。数值相同的数字字段继续
+/// 比较后续内容，最终仍以原始字符串作为稳定的平局裁决。
+int compareNaturalNames(String a, String b) {
+  var aIndex = 0;
+  var bIndex = 0;
+
+  while (aIndex < a.length && bIndex < b.length) {
+    final aDigit = _isAsciiDigit(a.codeUnitAt(aIndex));
+    final bDigit = _isAsciiDigit(b.codeUnitAt(bIndex));
+    if (aDigit && bDigit) {
+      final aEnd = _digitRunEnd(a, aIndex);
+      final bEnd = _digitRunEnd(b, bIndex);
+      final numberComparison = _compareDigitRuns(
+        a.substring(aIndex, aEnd),
+        b.substring(bIndex, bEnd),
+      );
+      if (numberComparison != 0) return numberComparison;
+      aIndex = aEnd;
+      bIndex = bEnd;
+      continue;
+    }
+
+    if (aDigit != bDigit) {
+      return a.codeUnitAt(aIndex).compareTo(b.codeUnitAt(bIndex));
+    }
+
+    final aEnd = _nonDigitRunEnd(a, aIndex);
+    final bEnd = _nonDigitRunEnd(b, bIndex);
+    final textComparison = a
+        .substring(aIndex, aEnd)
+        .compareTo(b.substring(bIndex, bEnd));
+    if (textComparison != 0) return textComparison;
+    aIndex = aEnd;
+    bIndex = bEnd;
+  }
+
+  if (aIndex != a.length || bIndex != b.length) {
+    return aIndex == a.length ? -1 : 1;
+  }
+  return a.compareTo(b);
+}
+
+bool _isAsciiDigit(int codeUnit) => codeUnit >= 0x30 && codeUnit <= 0x39;
+
+int _digitRunEnd(String value, int start) {
+  var end = start;
+  while (end < value.length && _isAsciiDigit(value.codeUnitAt(end))) {
+    end++;
+  }
+  return end;
+}
+
+int _nonDigitRunEnd(String value, int start) {
+  var end = start;
+  while (end < value.length && !_isAsciiDigit(value.codeUnitAt(end))) {
+    end++;
+  }
+  return end;
+}
+
+int _compareDigitRuns(String a, String b) {
+  final aSignificantStart = _significantDigitStart(a);
+  final bSignificantStart = _significantDigitStart(b);
+  final aSignificantLength = a.length - aSignificantStart;
+  final bSignificantLength = b.length - bSignificantStart;
+  final lengthComparison = aSignificantLength.compareTo(bSignificantLength);
+  if (lengthComparison != 0) return lengthComparison;
+  return a
+      .substring(aSignificantStart)
+      .compareTo(b.substring(bSignificantStart));
+}
+
+int _significantDigitStart(String digits) {
+  var start = 0;
+  while (start < digits.length - 1 && digits.codeUnitAt(start) == 0x30) {
+    start++;
+  }
+  return start;
+}
+
 /// 6 键排序比较器表（`smart` 忽略 [dir]；其余按 [dir] 升/降序，
 /// design-proto-spec §3 `sortEnts`）。
 int compareEntities(ViewSortKey key, SortDir dir, ListEntity a, ListEntity b) {
@@ -2664,7 +2747,7 @@ int compareEntities(ViewSortKey key, SortDir dir, ListEntity a, ListEntity b) {
     case ViewSortKey.created:
       return a.createdAt.compareTo(b.createdAt) * mul;
     case ViewSortKey.name:
-      return a.name.compareTo(b.name) * mul;
+      return compareNaturalNames(a.name, b.name) * mul;
     case ViewSortKey.size:
       return a.totalBytes.compareTo(b.totalBytes) * mul;
     case ViewSortKey.progress:
@@ -2781,7 +2864,7 @@ List<ListEntity> flattenGroupMembers({
   ];
   String fullPath(({DownloadTask task, String dir}) e) =>
       e.dir.isEmpty ? e.task.fileName : '${e.dir}/${e.task.fileName}';
-  withDir.sort((a, b) => fullPath(a).compareTo(fullPath(b)));
+  withDir.sort((a, b) => compareNaturalNames(fullPath(a), fullPath(b)));
 
   final result = <ListEntity>[];
   String? currentDir;

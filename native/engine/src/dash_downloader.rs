@@ -11,6 +11,7 @@ use crate::downloader::{
 };
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
+use crate::output;
 use crate::selection::SelectionOutcome;
 
 fn is_same_origin(base_url: &str, target_url: &str) -> bool {
@@ -1740,9 +1741,7 @@ async fn download_track_inner(
     temp_path: &Path,
     progress_state: &mut ProgressState,
 ) -> Result<i64, DownloadError> {
-    if let Some(parent) = temp_path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    output::ensure_parent(temp_path).await?;
 
     let mut file = File::create(temp_path).await?;
     let mut total_track: i64 = 0;

@@ -173,6 +173,10 @@ export interface QueueDto {
  */
 export interface RssSourceDto {
   sourceId: string
+  /** 来源 provider 的稳定 ID；当前内置值为 `rss`。 */
+  providerId: string
+  /** provider 专属配置 JSON；当前 RSS 为空。 */
+  providerConfig: string
   url: string
   /** 空 = 用 feed 标题回填。 */
   name: string
@@ -649,6 +653,8 @@ export interface PluginDto {
   settingsValues: Record<string, string>
   /** manifest 声明的能力权限（如 ["ffmpeg"]），旧服务端可能缺省。 */
   permissions?: string[]
+  /** manifest 声明的订阅 provider ID，旧服务端可能缺省。 */
+  subscriptionProviderIds?: string[]
 }
 
 export interface InstalledPlugin {
