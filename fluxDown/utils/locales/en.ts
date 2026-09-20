@@ -189,6 +189,12 @@ const en: Record<MessageKey, string> = {
   "panel.trackVideo": "Video Track",
   "panel.trackAudio": "Audio Track",
   "panel.qualityUnknown": "Unknown Quality",
+  "panel.videoCandidate": "Video candidate",
+  "panel.videoIndex": "Video",
+  "panel.videoNeedsManifest": "Fragments found, but no playlist was found; raw fragments are not downloadable candidates",
+  "panel.autoQuality": "Auto",
+  "panel.originalQuality": "Original",
+  "panel.downloadCandidate": "Download video",
   "panel.previewTitle": "Preview",
   "panel.previewClose": "Close preview",
   "panel.previewFailed": "Preview failed to load, may require login or be blocked by CORS",
@@ -200,6 +206,10 @@ const en: Record<MessageKey, string> = {
   "panel.previewLimitedHint": "Browser preview failed due to CORS/login limits, but download may still succeed (the engine sends your session)",
   "panel.clearFailed": "Clear failed previews",
   "panel.clearFailedHint": "Hide resources that failed to preview (doesn't affect others, and doesn't mean they can't be downloaded)",
+  "panel.exportDebugLog": "Export debug log",
+  "panel.exportDebugLogTitle": "Export raw sniffed resources, playlists, and aggregation links for this page",
+  "panel.exportDebugLogDone": "Sniffer debug log exported",
+  "panel.exportDebugLogFailed": "Failed to export sniffer debug log",
 
   // Shortcut toggle
   "shortcut.toggleTitle": "Intercept Toggle",

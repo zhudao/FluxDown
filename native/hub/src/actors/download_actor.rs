@@ -26,10 +26,10 @@ use crate::protocol_registry;
 use crate::rinf_selection::RinfHostSelection;
 use crate::rinf_sink::RinfEventSink;
 use crate::signals::{
-    BatchControlTask, BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol,
-    ClearWebhookDeliveries, ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask,
-    CopyPathToClipboard, CopyPathToClipboardResult, CreateQueue, CreateRssSource, CreateTask,
-    CreateTaskGroup, DeleteQueue, DeleteRssSource, DetectSystemProxy, DownloadUpdate,
+    AuthenticatePlugin, BatchControlTask, BatchCreateTask, CheckFileAssociation, CheckForUpdate,
+    CheckUrlProtocol, ClearWebhookDeliveries, ConfigEntry, ConfigLoaded, ConfirmExternalDownload,
+    ControlTask, CopyPathToClipboard, CopyPathToClipboardResult, CreateQueue, CreateRssSource,
+    CreateTask, CreateTaskGroup, DeleteQueue, DeleteRssSource, DetectSystemProxy, DownloadUpdate,
     Ed2kServerSubscriptionResult, ExternalDownloadRequest, FfmpegInstallProgress,
     FfmpegInstallResult, FfmpegStatusReport, FfmpegVersionList, FileAssociationStatus,
     GroupControl, IgnorePluginRetry, InstallFfmpeg, InstallMarketPlugin, InstallPlugin,
@@ -638,6 +638,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
     let install_plugin_recv = InstallPlugin::get_dart_signal_receiver();
     let uninstall_plugin_recv = UninstallPlugin::get_dart_signal_receiver();
     let set_plugin_enabled_recv = SetPluginEnabled::get_dart_signal_receiver();
+    let authenticate_plugin_recv = AuthenticatePlugin::get_dart_signal_receiver();
     let save_plugin_settings_recv = SavePluginSettings::get_dart_signal_receiver();
     let ignore_plugin_retry_recv = IgnorePluginRetry::get_dart_signal_receiver();
     let request_market_index_recv = RequestMarketIndex::get_dart_signal_receiver();
@@ -659,6 +660,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
         InstallPlugin(InstallPlugin),
         UninstallPlugin(UninstallPlugin),
         SetPluginEnabled(SetPluginEnabled),
+        AuthenticatePlugin(AuthenticatePlugin),
         SavePluginSettings(SavePluginSettings),
         IgnorePluginRetry(IgnorePluginRetry),
         RequestMarketIndex,
@@ -679,6 +681,9 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                 }
                 Some(signal) = set_plugin_enabled_recv.recv() => {
                     let _ = plugin_cmd_tx.send(PluginHubCmd::SetPluginEnabled(signal.message)).await;
+                }
+                Some(signal) = authenticate_plugin_recv.recv() => {
+                    let _ = plugin_cmd_tx.send(PluginHubCmd::AuthenticatePlugin(signal.message)).await;
                 }
                 Some(signal) = save_plugin_settings_recv.recv() => {
                     let _ = plugin_cmd_tx.send(PluginHubCmd::SavePluginSettings(signal.message)).await;
@@ -985,6 +990,11 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
         /// 文件大小提示：>0 已知大小、-1 已确认可下载但大小未知（跳过 probe）、
         /// 0 未知（正常 probe）。语义与 `DownloadRequest::file_size` 一致。
         file_size: i64,
+        /// 音频轨 URL（浏览器嗅探到的离散视频+音频轨对）。批量本地 NMH 请求
+        /// 不在确认信号里逐条携带该字段（`synthesize_batch_request` 合成的
+        /// 多行文本 / `parseQuickDownloadEntries` 都不编码 audioUrl），必须
+        /// 靠本缓存按 URL 找回，否则批量确认会静默产出无声视频任务。
+        audio_url: String,
     }
     let mut ext_request_cache: HashMap<String, ExtRequestCtx> = HashMap::new();
     // 缓存插入序（FIFO 淘汰用）：确认消费不回收队列条目（懒清理），
@@ -1319,11 +1329,19 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                     //   • referrer：缓存优先——批量表单【没有】referrer 输入框，
                     //     msg.referrer 只是首条请求的共享值，per-item 缓存更准。
                     //   • fileSize/method/body：仅存在于缓存。
+                    //   • audio_url：批量确认信号不逐条携带该字段——
+                    //     `synthesize_batch_request` 合成的多行文本只编码
+                    //     url/out=filename，`parseQuickDownloadEntries` 也
+                    //     不识别 audioUrl 选项行，故 `entry.audio_url` 对本地
+                    //     NMH 批量恒为空；必须靠本缓存按 URL 找回，否则批量
+                    //     确认会静默产出无声视频任务（信号值非空时仍优先，
+                    //     为未来可能携带该字段的调用方留出正确路径）。
                     let ctx = ext_request_cache.remove(&entry.url).unwrap_or_default();
                     let extra_headers = merge_ext_headers(ctx.headers, &msg.extra_headers);
                     let cookies = if msg.cookies.is_empty() { ctx.cookies } else { msg.cookies.clone() };
                     let referrer = if ctx.referrer.is_empty() { msg.referrer.clone() } else { ctx.referrer };
                     let body = ctx.body.map(nm_body_to_captured);
+                    let audio_url = if entry.audio_url.is_empty() { ctx.audio_url } else { entry.audio_url };
                     engine.manager
                         .create_task(NewTaskSpec {
                             url: entry.url,
@@ -1341,7 +1359,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                             extra_headers,
                             method: ctx.method,
                             body,
-                            audio_url: if entry.audio_url.is_empty() { None } else { Some(entry.audio_url) },
+                            audio_url: if audio_url.is_empty() { None } else { Some(audio_url) },
                             start_paused: msg.start_paused,
                             unattended_selection: msg.unattended,
                             ..Default::default()
@@ -1705,9 +1723,10 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                     let has_headers =
                         req.headers.as_ref().is_some_and(|h| !h.is_empty());
                     let file_size = req.file_size.unwrap_or(0);
+                    let has_audio_url = req.audio_url.as_deref().is_some_and(|s| !s.is_empty());
                     if has_headers || req.method.is_some() || req.body.is_some()
                         || !req.cookies.is_empty() || !req.referrer.is_empty()
-                        || file_size != 0
+                        || file_size != 0 || has_audio_url
                     {
                         ext_request_cache.insert(
                             req.url.clone(),
@@ -1718,6 +1737,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                                 cookies: req.cookies.clone(),
                                 referrer: req.referrer.clone(),
                                 file_size,
+                                audio_url: req.audio_url.clone().unwrap_or_default(),
                             },
                         );
                         ext_cache_order.push_back(req.url.clone());
@@ -1769,11 +1789,15 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                 // = 用户在表单里主动清空，必须尊重该意图（与改动前语义一致）。
                 // hint_file_size 例外：表单不可编辑该值，0 只可能是"信号未携带"
                 // （批量弹窗缩减为单条确认的路径），回退缓存恢复 per-item 精度。
+                // audio_url 同理回退缓存：批量弹窗缩减为单条确认时，信号走的
+                // 也是本分支，而合成的多行文本/解析出的单条 URL 均不携带
+                // audioUrl，必须靠缓存恢复，否则批量退化单条同样会丢音轨。
                 let cookies = msg.cookies;
                 let referrer = msg.referrer;
                 let hint_file_size = if msg.hint_file_size == 0 { ctx.file_size } else { msg.hint_file_size };
                 let method = ctx.method;
                 let body = ctx.body.map(nm_body_to_captured);
+                let audio_url = if msg.audio_url.is_empty() { ctx.audio_url } else { msg.audio_url };
                 log_info!(
                     "[actor] user confirmed external download: url={}, cookies_len={}, extra_headers={}, method={:?}, has_body={}",
                     msg.url,
@@ -1798,7 +1822,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                         extra_headers,
                         method,
                         body,
-                        audio_url: if msg.audio_url.is_empty() { None } else { Some(msg.audio_url) },
+                        audio_url: if audio_url.is_empty() { None } else { Some(audio_url) },
                         start_paused: msg.start_paused,
                         http_user: msg.http_user,
                         http_password: msg.http_password,
@@ -2263,6 +2287,61 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                                 finish_plugin_op(&pm, "set_enabled", &msg.identity, result, Vec::new()).await;
                             } else {
                                 notify_plugin_manager_unavailable("set_enabled", &msg.identity).await;
+                            }
+                        }
+                    }
+                    PluginHubCmd::AuthenticatePlugin(msg) => {
+                        #[cfg(hub_plugins)]
+                        {
+                            if let Some(pm) = engine.manager.plugin_manager() {
+                                let identity = msg.identity.clone();
+                                let session_id = msg.session_id.clone();
+                                tokio::spawn(async move {
+                                    let result = pm
+                                        .authenticate(
+                                            &identity,
+                                            fluxdown_engine::plugin::AuthRequest {
+                                                action: msg.action,
+                                                site: msg.site,
+                                                auth_ref: msg.auth_ref,
+                                                session_id: msg.session_id,
+                                                input: msg.input,
+                                            },
+                                        )
+                                        .await;
+                                    let result = match result {
+                                        Ok(result) => crate::signals::PluginAuthResult {
+                                            identity,
+                                            status: result.status,
+                                            session_id: result.session_id,
+                                            challenge: result.challenge.unwrap_or_default(),
+                                            challenge_type: result.challenge_type.unwrap_or_default(),
+                                            message: result.message,
+                                            auth_ref: result.auth_ref.unwrap_or_default(),
+                                        },
+                                        Err(error) => crate::signals::PluginAuthResult {
+                                            identity,
+                                            status: "error".to_string(),
+                                            session_id,
+                                            challenge: String::new(),
+                                            challenge_type: String::new(),
+                                            message: error.to_string(),
+                                            auth_ref: String::new(),
+                                        },
+                                    };
+                                    result.send_signal_to_dart();
+                                });
+                            } else {
+                                crate::signals::PluginAuthResult {
+                                    identity: msg.identity,
+                                    status: "error".to_string(),
+                                    session_id: msg.session_id,
+                                    challenge: String::new(),
+                                    challenge_type: String::new(),
+                                    message: "插件系统未启用".to_string(),
+                                    auth_ref: String::new(),
+                                }
+                                .send_signal_to_dart();
                             }
                         }
                     }

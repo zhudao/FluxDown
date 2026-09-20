@@ -84,6 +84,10 @@ pub fn permission_label(translator: &Translator, permission: &str) -> (String, S
             translator.text("pluginPermYtdlpName").to_owned(),
             translator.text("pluginPermYtdlpDesc").to_owned(),
         ),
+        "auth" => (
+            translator.text("pluginPermAuthName").to_owned(),
+            translator.text("pluginPermAuthDesc").to_owned(),
+        ),
         other => (
             other.to_owned(),
             translator.text("pluginPermUnknownDesc").to_owned(),

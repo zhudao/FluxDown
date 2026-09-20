@@ -170,6 +170,20 @@ pub struct HooksDecl {
     pub match_decl: Option<MatchDecl>,
 }
 
+/// 平台登录入口。脚本实现 `globalThis.authenticate(ctx)`，由 daemon 以
+/// `begin`/`poll`/`cancel`/`logout`/`status` action 驱动，登录成功后脚本调用
+/// `flux.auth.save`。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthDecl {
+    pub entry: String,
+    /// 单次 auth 调用超时（毫秒）。独立于 resolver 的 timeoutMs（M-2：登录轮询
+    /// 与 resolve 分属不同的信号量/预算平面，不共享 resolver 的低超时配置）；
+    /// 未声明时宿主默认 30s，30s 硬顶。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
 /// 插件 manifest。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -193,9 +207,12 @@ pub struct PluginManifest {
     pub subscriptions: Vec<SubscriptionDecl>,
     #[serde(default)]
     pub hooks: Option<HooksDecl>,
+    /// 可选的平台特有登录入口。
+    #[serde(default)]
+    pub auth: Option<AuthDecl>,
     #[serde(default)]
     pub settings: Vec<SettingField>,
-    /// 声明式能力权限（v1 仅 `"ffmpeg"`）。空 = 无额外能力。授予的能力经宿主
+    /// 声明式能力权限（如 `"auth"`、`"ffmpeg"`）。空 = 无额外能力。授予的能力经宿主
     /// 门控注入对应 `flux.*` 门面（见 [`super::runtime::HostContext`]）。
     #[serde(default)]
     pub permissions: Vec<String>,
@@ -208,8 +225,10 @@ pub const VALID_EVENTS: [&str; 4] = ["onStart", "onError", "onDone", "onMetaProb
 pub const PERMISSION_FFMPEG: &str = "ffmpeg";
 /// yt-dlp 能力权限名（manifest `permissions`）。
 pub const PERMISSION_YTDLP: &str = "ytdlp";
+/// 通用认证能力权限名（manifest `permissions`）。
+pub const PERMISSION_AUTH: &str = "auth";
 /// 合法能力权限（manifest `permissions`）。
-pub const VALID_PERMISSIONS: [&str; 2] = [PERMISSION_FFMPEG, PERMISSION_YTDLP];
+pub const VALID_PERMISSIONS: [&str; 3] = [PERMISSION_FFMPEG, PERMISSION_YTDLP, PERMISSION_AUTH];
 
 impl PluginManifest {
     /// 从 JSON 字节解析（不校验语义，仅结构）。
@@ -337,6 +356,28 @@ impl PluginManifest {
             {
                 return Err(PluginError::ManifestInvalid(
                     "hooks match.urls 不可为空".to_string(),
+                ));
+            }
+        }
+
+        // auth：入口同样是插件包内的可执行脚本，且必须显式授予认证能力。
+        if let Some(a) = &self.auth {
+            if !is_safe_relative_path(&a.entry) {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "auth entry 路径 '{}' 非法",
+                    a.entry
+                )));
+            }
+            if !self.has_permission(PERMISSION_AUTH) {
+                return Err(PluginError::ManifestInvalid(
+                    "声明 auth.entry 时 permissions 必须包含 auth".to_string(),
+                ));
+            }
+            if let Some(t) = a.timeout_ms
+                && t == 0
+            {
+                return Err(PluginError::ManifestInvalid(
+                    "auth timeoutMs 不可为 0".to_string(),
                 ));
             }
         }
@@ -503,8 +544,10 @@ pub fn validate_setting_field(f: &SettingField) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// identity 校验：`^[a-z0-9_-]+@[a-z0-9_-]+$`，禁 '.'。
-fn is_valid_identity(s: &str) -> bool {
+/// identity 校验：`^[a-z0-9_-]+@[a-z0-9_-]+$`，禁 '.'。`pub`：`plugin::manager`
+/// 的 `purge` 复用同一判据校验失败插件的 identity 是否安全可用于拼路径/config
+/// 键（671#8：此前 manager.rs 自留了一份逐字重复的 `is_safe_plugin_identity`）。
+pub fn is_valid_identity(s: &str) -> bool {
     let Some((author, name)) = s.split_once('@') else {
         return false;
     };

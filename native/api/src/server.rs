@@ -43,7 +43,7 @@ use fluxdown_protocol::daemon::{
     LinkDiscoveryRequest, LinkOkResponse, LinkPairApproveRequest, LinkPairBeginRequest,
     LinkPairConfirmRequest, LinkPairFinishRequest, LinkPairFinishResponse, LinkPairHelloRequest,
     LinkProbeRequest, ResolvePreviewRequest, RssItemActionRequest, RssSourceDto,
-    RssValidateRequest,
+    RssValidateRequest, SiteAuthCredentialDto, SiteAuthEntryDto, SiteAuthSaveRequest,
 };
 
 /// 请求体大小上限：4 MB（足够容纳批量 URL 列表）。
@@ -372,6 +372,14 @@ fn register_core(state: AppState) -> Router<AppState> {
             .route(routes::API_TASK_CONTINUE, put(api_continue_task))
             .route(routes::API_TASK_RENAME, post(api_rename_task))
             .route(routes::API_QUEUES, get(api_list_queues))
+            .route(
+                routes::API_SITE_AUTH,
+                get(api_list_site_auth).put(api_save_site_auth),
+            )
+            .route(
+                routes::API_SITE_AUTH_SITE,
+                get(api_get_site_auth).delete(api_delete_site_auth),
+            )
             .route(routes::API_RESOLVE_PREVIEW, post(api_resolve_preview))
             .route(
                 routes::API_GROUPS,
@@ -402,6 +410,7 @@ fn register_core(state: AppState) -> Router<AppState> {
             )
             .route(routes::API_PLUGIN_ENABLED, put(api_set_plugin_enabled))
             .route(routes::API_PLUGIN_SETTINGS, put(api_update_plugin_settings))
+            .route(routes::API_PLUGIN_AUTH, post(api_plugin_auth))
             .route(
                 routes::API_PLUGIN,
                 axum::routing::delete(api_uninstall_plugin),
@@ -1537,6 +1546,113 @@ pub(crate) async fn api_list_queues(State(state): State<AppState>, headers: Head
     }
 }
 
+/// 列出已保存的站点凭据；只返回站点和用户名，不返回密码。
+#[utoipa::path(get, path = "/api/v1/site-auth", tag = "management",
+    responses(
+        (status = 200, description = "脱敏后的站点凭据列表", body = Vec<SiteAuthEntryDto>),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+    ),
+    security(("bearerAuth" = []), ("tokenHeader" = []))
+)]
+pub(crate) async fn api_list_site_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers) {
+        return *resp;
+    }
+    match state.host.list_site_auth().await {
+        Ok(entries) => Json(entries).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// 读取单个站点凭据详情。只允许按站点定向读取，不进入通用配置快照。
+///
+/// **`pass` 字段是明文密码**（未脱敏）：仅供编辑对话框回填原值，调用方不应
+/// 在列表页/日志里回显；列表接口 [`api_list_site_auth`] 本就不含密码（L-1）。
+#[utoipa::path(get, path = "/api/v1/site-auth/{site}", tag = "management",
+    params(("site" = String, Path, description = "host 或 host:port")),
+    responses(
+        (status = 200, description = "站点凭据详情；pass 为明文密码，仅用于编辑表单回填，不要在列表/日志中回显", body = SiteAuthCredentialDto),
+        (status = 404, description = "站点凭据不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+    ),
+    security(("bearerAuth" = []), ("tokenHeader" = []))
+)]
+pub(crate) async fn api_get_site_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(site): Path<String>,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers) {
+        return *resp;
+    }
+    match state.host.get_site_auth(&site).await {
+        Ok(Some(entry)) => Json(entry).into_response(),
+        Ok(None) => ApiError::NotFound.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// 保存单个站点 HTTP Basic 凭据。
+#[utoipa::path(put, path = "/api/v1/site-auth", tag = "management",
+    request_body = SiteAuthSaveRequest,
+    responses(
+        (status = 200, description = "已保存", body = SiteAuthEntryDto),
+        (status = 400, description = "载荷非法", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+    ),
+    security(("bearerAuth" = []), ("tokenHeader" = []))
+)]
+pub(crate) async fn api_save_site_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers) {
+        return *resp;
+    }
+    let request: SiteAuthSaveRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return result_response(
+                StatusCode::BAD_REQUEST,
+                false,
+                &format!("invalid site auth payload: {error}"),
+            );
+        }
+    };
+    match state.host.save_site_auth(request).await {
+        Ok(entry) => Json(entry).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// 删除单个站点凭据。
+#[utoipa::path(delete, path = "/api/v1/site-auth/{site}", tag = "management",
+    params(("site" = String, Path, description = "host 或 host:port")),
+    responses(
+        (status = 200, description = "已删除", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "站点凭据不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+    ),
+    security(("bearerAuth" = []), ("tokenHeader" = []))
+)]
+pub(crate) async fn api_delete_site_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(site): Path<String>,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers) {
+        return *resp;
+    }
+    match state.host.delete_site_auth(&site).await {
+        Ok(()) => result_response(StatusCode::OK, true, "deleted"),
+        Err(e) => e.into_response(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 任务组与前置预解析（/api/v1/groups*、/api/v1/resolve/preview，全强制 token；
 // docs/multi-file-task-group-design.md Phase D）
@@ -2101,6 +2217,44 @@ pub(crate) async fn api_update_plugin_settings(
         }
     };
     ack(state.host.update_plugin_settings(&identity, entries).await)
+}
+
+/// 驱动插件登录流程（二维码/账号登录）。认证结果只返回交互状态，凭据由引擎保存。
+#[utoipa::path(post, path = "/api/v1/plugins/{identity}/auth", tag = "plugins",
+    params(("identity" = String, Path, description = "插件 identity")),
+    request_body = fluxdown_protocol::daemon::PluginAuthRequest,
+    responses(
+        (status = 200, description = "登录交互状态", body = fluxdown_protocol::daemon::PluginAuthResponse),
+        (status = 400, description = "插件登录失败", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+    ),
+    security(("bearerAuth" = []), ("tokenHeader" = []))
+)]
+pub(crate) async fn api_plugin_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(identity): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers) {
+        return *resp;
+    }
+    let mut request: fluxdown_protocol::daemon::PluginAuthRequest =
+        match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return result_response(
+                    StatusCode::BAD_REQUEST,
+                    false,
+                    &format!("invalid payload: {error}"),
+                );
+            }
+        };
+    request.identity = identity;
+    match state.host.plugin_auth(request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 /// 卸载插件。

@@ -540,6 +540,32 @@ impl DaemonService {
             #[cfg(feature = "plugins")]
             method::DAEMON_PLUGIN_LIST => to_value(self.list_plugins().await?),
             #[cfg(feature = "plugins")]
+            method::DAEMON_PLUGIN_AUTH => {
+                let request = parse_params::<fluxdown_protocol::PluginAuthRequest>(params)?;
+                let result = self
+                    .plugin_manager()?
+                    .authenticate(
+                        &request.identity,
+                        fluxdown_engine::plugin::AuthRequest {
+                            action: request.action,
+                            site: request.site,
+                            auth_ref: request.auth_ref,
+                            session_id: request.session_id,
+                            input: request.input,
+                        },
+                    )
+                    .await
+                    .map_err(|error| invalid_argument("auth", &error.to_string()))?;
+                to_value(fluxdown_protocol::PluginAuthResponse {
+                    status: result.status,
+                    session_id: result.session_id,
+                    challenge: result.challenge,
+                    challenge_type: result.challenge_type,
+                    message: result.message,
+                    auth_ref: result.auth_ref,
+                })
+            }
+            #[cfg(feature = "plugins")]
             method::DAEMON_PLUGIN_SET_ENABLED => {
                 let params = parse_params::<PluginEnabledParams>(params)?;
                 let manager = self.plugin_manager()?;

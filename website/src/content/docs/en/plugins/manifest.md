@@ -20,7 +20,8 @@ order: 3
 | `minAppVersion` | no | string | Three-part version. If the running FluxDown is older, the plugin is skipped at load (logged, not an error). |
 | `resolvers` | no | array | **At most one entry** in v1. See below. |
 | `hooks` | no | object | See below. |
-| `permissions` | no | array | Capability grants. v1 accepts `"ffmpeg"` and `"ytdlp"`. Unknown values are rejected. |
+| `auth` | no | object | Platform login entry. See below. |
+| `permissions` | no | array | Capability grants. v1 accepts `"ffmpeg"`, `"ytdlp"` and `"auth"`. Unknown values are rejected. |
 | `settings` | no | array | Declarative settings fields. See below. |
 
 A plugin may declare a resolver, hooks, or both. A manifest with neither is valid but does nothing.
@@ -66,17 +67,33 @@ A plugin may declare a resolver, hooks, or both. A manifest with neither is vali
 Caveat: if the same plugin also declares a resolver, `onMetaProbed` never fires for its tasks — resolver tasks skip the metadata probe entirely. FluxDown logs a warning if you subscribe to it anyway.
 
 
+## `auth`
+
+```json
+{
+  "auth": { "entry": "auth.js", "timeoutMs": 20000 }
+}
+```
+
+| Field | Required | Rules |
+|---|---|---|
+| `entry` | yes | Script file, safe relative path. Must define `globalThis.authenticate`. |
+| `timeoutMs` | no | Per-call timeout in milliseconds for `authenticate`. Must not be `0`. Replaces the 30 s default but is capped at the 30 s hard ceiling regardless of what you write; this budget is entirely independent from `resolvers[0].timeoutMs`. |
+
+`permissions` must include `"auth"` when `auth.entry` is declared, otherwise manifest validation fails. See the [API reference](/docs/en/plugins/api-reference/#authenticatectx) for how login is driven and the full `flux.auth` surface.
+
 ## `permissions`
 
-Extra host capabilities a plugin opts into. Empty or omitted = the base sandbox (network via `flux.fetch`, `flux.storage`, logging). v1 recognises two values:
+Extra host capabilities a plugin opts into. Empty or omitted = the base sandbox (network via `flux.fetch`, `flux.storage`, logging). v1 recognises three values:
 
 | Value | Grants |
 |---|---|
 | `ffmpeg` | The `flux.ffmpeg` API — run the resolved ffmpeg on a finished file (see the [API reference](/docs/en/plugins/api-reference/)). |
 | `ytdlp` | The `flux.ytdlp` API — run the resolved yt-dlp from `resolve` or any hook (see the [API reference](/docs/en/plugins/api-reference/)). |
+| `auth` | Declare `auth.entry` for a platform login flow, and allow `flux.fetch`/`flux.auth` to use stored credentials (see the [API reference](/docs/en/plugins/api-reference/)). |
 
 ```json
-{ "permissions": ["ffmpeg", "ytdlp"] }
+{ "permissions": ["ffmpeg", "ytdlp", "auth"] }
 ```
 
 Unknown values fail the whole manifest, so an older FluxDown that doesn't know a permission rejects the plugin rather than silently ignoring it — pair a new permission with a `minAppVersion` bump.
@@ -145,6 +162,6 @@ Examples:
 
 ## Validation summary
 
-The manifest is validated when the plugin is installed and every time it's loaded. On failure the plugin is skipped and the reason lands in the log. The checks, in order: identity format → name non-empty → version format → `minAppVersion` format → icon path safety → at most one resolver → resolver entry path / non-empty `match.urls` / `timeoutMs ≠ 0` → hooks entry path / non-empty valid `events` / non-empty `match.urls` if present → settings key uniqueness and the per-field rules above → `permissions` are all recognised values.
+The manifest is validated when the plugin is installed and every time it's loaded. On failure the plugin is skipped and the reason lands in the log. The checks, in order: identity format → name non-empty → version format → `minAppVersion` format → icon path safety → at most one resolver → resolver entry path / non-empty `match.urls` / `timeoutMs ≠ 0` → hooks entry path / non-empty valid `events` / non-empty `match.urls` if present → auth entry path / `permissions` includes `auth` when `auth.entry` is declared / `timeoutMs ≠ 0` → settings key uniqueness and the per-field rules above → `permissions` are all recognised values.
 
-Both entry scripts are also compile-checked at install time — a syntax error is rejected up front rather than discovered on the first download.
+Entry scripts are also compile-checked at install time — a syntax error is rejected up front rather than discovered on the first download (three scripts when `auth.entry` is declared).

@@ -6,8 +6,9 @@ use std::collections::HashSet;
 use fluxdown_protocol::{InstalledPlugin, MarketEntryDto, PluginDto};
 use fluxdown_ui_theme::CONTROL_HEIGHT;
 use gpui::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement, SharedString, Styled, Window,
-    div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, Size, StyledExt as _,
@@ -19,6 +20,7 @@ use gpui_component::{
     link::Link,
     switch::Switch,
     tag::Tag,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -26,6 +28,7 @@ use super::Frame;
 use crate::{
     ExtensionsTab, ExtensionsView,
     components::{
+        plugin_auth::PluginAuthDialog,
         plugin_detail::{PluginDetail, open_plugin_detail, yanked_label},
         plugin_settings::PluginSettingsForm,
     },
@@ -352,10 +355,16 @@ impl ExtensionsView {
         } = frame;
         let identity = plugin.identity.clone();
         let busy = stale || self.plugins.busy.contains(&plugin.identity);
+        let load_failed = plugin.load_status == "Failed";
         let badges = [
             plugin
                 .dev_mode
                 .then(|| Tag::info().child(translator.text("pluginDevModeBadge").to_owned())),
+            Some(if load_failed {
+                Tag::danger().child(translator.text("pluginLoadStatusFailed").to_owned())
+            } else {
+                Tag::info().child(translator.text("pluginLoadStatusLoaded").to_owned())
+            }),
             (plugin.disabled_reason == "Manual").then(|| {
                 Tag::secondary().child(translator.text("pluginDisabledManual").to_owned())
             }),
@@ -411,6 +420,22 @@ impl ExtensionsView {
                                 .text_color(theme.muted_foreground)
                                 .child(plugin.description.clone()),
                         )
+                    })
+                    .when(load_failed && !plugin.load_error.is_empty(), |this| {
+                        let load_error = plugin.load_error.clone();
+                        let load_error_tooltip = plugin.load_error.clone();
+                        this.child(
+                            div()
+                                .id(("plugin-load-error", index))
+                                .w_full()
+                                .truncate()
+                                .text_xs()
+                                .text_color(theme.danger)
+                                .child(load_error)
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(load_error_tooltip.clone()).build(window, cx)
+                                }),
+                        )
                     }),
             )
             .child(
@@ -426,8 +451,8 @@ impl ExtensionsView {
             )
             .child(
                 Switch::new(("plugin-enabled", index))
-                    .checked(plugin.enabled)
-                    .disabled(busy)
+                    .checked(plugin.enabled && !load_failed)
+                    .disabled(busy || load_failed)
                     .on_click({
                         let identity = identity.clone();
                         cx.listener(move |this, checked: &bool, window, cx| {
@@ -444,7 +469,7 @@ impl ExtensionsView {
                         })
                     }),
             )
-            .when(!plugin.settings.is_empty(), |this| {
+            .when(!load_failed && !plugin.settings.is_empty(), |this| {
                 let identity = identity.clone();
                 this.child(
                     Button::new(("plugin-settings", index))
@@ -453,9 +478,23 @@ impl ExtensionsView {
                         .h(CONTROL_HEIGHT)
                         .icon(IconName::Settings2)
                         .tooltip(translator.text("pluginSettingsTooltip").to_owned())
-                        .disabled(busy)
+                        .disabled(busy || load_failed)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.open_plugin_settings(&identity, window, cx);
+                        })),
+                )
+            })
+            .when(!load_failed && plugin.auth_supported, |this| {
+                let identity = identity.clone();
+                this.child(
+                    Button::new(("plugin-auth", index))
+                        .outline()
+                        .small()
+                        .h(CONTROL_HEIGHT)
+                        .label(translator.text("pluginAuthButton").to_owned())
+                        .disabled(busy || load_failed)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_plugin_auth(&identity, window, cx);
                         })),
                 )
             })
@@ -1022,6 +1061,34 @@ impl ExtensionsView {
                                 }),
                         ),
                 )
+        });
+    }
+
+    fn open_plugin_auth(&self, identity: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(plugin) = self.controller.plugin(identity) else {
+            return;
+        };
+        let translator = self.translator.clone();
+        let port = self.controller.port().clone();
+        let identity = plugin.identity.clone();
+        let title = SharedString::from(
+            self.translator
+                .read(cx)
+                .text_with("pluginAuthDialogTitle", &[("name", &plugin.name)]),
+        );
+        let dialog = cx.new(|cx| PluginAuthDialog::new(translator, port, identity, window, cx));
+        let dialog_for_cancel = dialog.clone();
+        window.open_dialog(cx, move |dialog_view, _, _| {
+            let dialog_for_content = dialog.clone();
+            let dialog_for_cancel = dialog_for_cancel.clone();
+            dialog_view
+                .title(title.clone())
+                .w(px(460.))
+                .on_cancel(move |_, _, cx| {
+                    dialog_for_cancel.update(cx, |this, cx| this.cancel_session(cx));
+                    true
+                })
+                .content(move |content, _, _| content.child(dialog_for_content.clone()))
         });
     }
 }

@@ -32,11 +32,11 @@ pub mod market;
 pub mod quickjs;
 pub mod runtime;
 pub mod semver;
-pub use manager::{DisabledReason, LoadedPlugin, PluginInfo, PluginManager};
+pub use manager::{DisabledReason, LoadedPlugin, PluginInfo, PluginLoadStatus, PluginManager};
 pub use manifest::{PluginManifest, SettingField, SettingType, SettingWidget, SubscriptionDecl};
 pub use market::{MarketClient, MarketEntry, MarketError, MarketIndex};
 pub use runtime::{
-    ExecutionBudget, ManifestItem, ManifestVariant, PluginBridge, PluginError, PluginEvent,
-    PluginLogLevel, ResolveManifest, ResolveRequest, ResolveResult, ResolveVariant, ScriptRuntime,
-    SubscriptionRequest,
+    AuthRequest, AuthResult, ExecutionBudget, ManifestItem, ManifestVariant, PluginBridge,
+    PluginError, PluginEvent, PluginLogLevel, ResolveManifest, ResolveRequest, ResolveResult,
+    ResolveVariant, ScriptRuntime, SubscriptionRequest,
 };

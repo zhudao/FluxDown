@@ -195,7 +195,7 @@ function RssDialogContent({
     const seen = new Set<string>(['rss'])
     const options = [{ value: 'rss', label: t('rss.providerRss') }]
     for (const plugin of plugins) {
-      if (!plugin.enabled) continue
+      if (!plugin.enabled || plugin.loadStatus === 'Failed') continue
       for (const providerId of plugin.subscriptionProviderIds ?? []) {
         if (seen.has(providerId)) continue
         seen.add(providerId)

@@ -22,6 +22,8 @@ pub enum DbError {
     Io(#[from] std::io::Error),
     #[error("engine writer lease is already held: {0}")]
     WriterLeaseHeld(String),
+    #[error("invalid stored configuration: {0}")]
+    InvalidConfig(String),
 }
 
 /// 原子配置补丁失败。

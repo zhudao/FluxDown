@@ -1849,6 +1849,7 @@ impl DownloadManager {
             let req = crate::plugin::ResolveRequest {
                 task_id: String::new(),
                 url: url.clone(),
+                auth_ref: String::new(),
                 cookies,
                 referrer,
                 user_agent,
@@ -2400,6 +2401,7 @@ impl DownloadManager {
         let req = crate::plugin::ResolveRequest {
             task_id: task_id.clone(),
             url: queued.url.clone(),
+            auth_ref: String::new(),
             cookies: queued.cookies.clone(),
             referrer: queued.referrer.clone(),
             user_agent: queued.user_agent.clone(),
@@ -2466,6 +2468,7 @@ impl DownloadManager {
         let req = crate::plugin::ResolveRequest {
             task_id: task_id.to_string(),
             url: task.url.clone(),
+            auth_ref: String::new(),
             cookies,
             referrer,
             user_agent: String::new(),

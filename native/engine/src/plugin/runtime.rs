@@ -37,6 +37,8 @@ pub enum PluginEntryKind {
     Resolve,
     /// hook 入口：`globalThis.onStart/onError/onDone/onMetaProbed`（由 event 决定）。
     Hook,
+    /// auth 入口：`globalThis.authenticate`。
+    Auth,
     /// 订阅 provider 入口：`globalThis.subscribe`。
     Subscription,
 }
@@ -51,6 +53,11 @@ pub enum PluginEntryKind {
 pub struct ResolveRequest {
     pub task_id: String,
     pub url: String,
+    /// 当前插件对该站点的默认认证引用；只有声明了 `auth` 权限的插件才会被
+    /// 填充（M-5），未授权插件恒为空串。插件通常直接使用 `flux.fetch`，
+    /// bridge 会自动按该引用查找并复用凭据。
+    #[serde(default)]
+    pub auth_ref: String,
     pub cookies: String,
     pub referrer: String,
     pub user_agent: String,
@@ -61,6 +68,31 @@ pub struct ResolveRequest {
     /// 变体收敛静默取默认（不为 N 个子任务弹 N 个选择框）。引擎不解释具体格式，
     /// 由发起方（前端固定选择/引擎自动裂变）与插件约定（D5 契约）。
     pub resolver_item: String,
+}
+
+/// 一次平台登录动作。`action` 为 `begin`、`poll`、`cancel`、`logout` 或 `status`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthRequest {
+    pub action: String,
+    pub site: String,
+    pub auth_ref: String,
+    pub session_id: String,
+    pub input: String,
+}
+
+/// 插件登录入口返回的交互状态。
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AuthResult {
+    /// `pending` / `success` / `error`。
+    pub status: String,
+    pub session_id: String,
+    /// 二维码内容、data URL 或平台要求展示给用户的挑战数据。
+    pub challenge: Option<String>,
+    pub challenge_type: Option<String>,
+    pub message: String,
+    pub auth_ref: Option<String>,
 }
 
 /// 传入插件订阅 provider 的请求上下文。
@@ -300,6 +332,12 @@ pub struct BridgeHttpRequest {
     pub url: String,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
+    /// 显式认证引用；为空时 bridge 按插件 ID + 请求站点推导默认引用。
+    #[serde(default)]
+    pub auth_ref: Option<String>,
+    /// 由运行时注入，插件脚本不能自行打开认证能力。
+    #[serde(skip)]
+    pub auth_allowed: bool,
 }
 
 impl Default for BridgeHttpRequest {
@@ -309,6 +347,8 @@ impl Default for BridgeHttpRequest {
             url: String::new(),
             headers: HashMap::new(),
             body: None,
+            auth_ref: None,
+            auth_allowed: false,
         }
     }
 }
@@ -427,6 +467,9 @@ pub struct HostContext {
     /// yt-dlp 的文件牢笼由 bridge 自持（每插件 scratch 目录），故此处只需授权门，
     /// 无需牢笼根：resolve 与全部 hook 上下文下授权即可用（区别于 ffmpeg）。
     pub ytdlp_permitted: bool,
+    /// manifest `permissions` 是否含 `"auth"`——决定是否允许插件读取/保存
+    /// 通用认证凭据以及让 `flux.fetch` 自动注入凭据。
+    pub auth_permitted: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +501,17 @@ pub trait ScriptRuntime: Send + Sync {
         budget: ExecutionBudget,
         host: HostContext,
     ) -> Result<Option<ResolveResult>, PluginError>;
+
+    /// 调用 `globalThis.authenticate(ctx)`，返回一次登录交互状态。
+    async fn invoke_auth(
+        &self,
+        plugin: &PluginScript,
+        req: AuthRequest,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        budget: ExecutionBudget,
+        host: HostContext,
+    ) -> Result<AuthResult, PluginError>;
 
     /// 调用 `globalThis.subscribe(ctx)`，返回插件规范化后的 JSON 字符串。
     async fn invoke_subscription(
@@ -499,6 +553,29 @@ pub trait PluginBridge: Send + Sync {
         plugin_id: &str,
         req: BridgeHttpRequest,
     ) -> Result<BridgeHttpResponse, PluginError>;
+
+    /// 读取插件自己的认证档案。默认 bridge 不提供认证能力。
+    async fn auth_get(
+        &self,
+        _plugin_id: &str,
+        _auth_ref: &str,
+    ) -> Result<Option<crate::auth::AuthProfile>, PluginError> {
+        Ok(None)
+    }
+
+    /// 写入或替换插件自己的认证档案，返回稳定 authRef。
+    async fn auth_save(
+        &self,
+        _plugin_id: &str,
+        _profile: crate::auth::AuthProfile,
+    ) -> Result<String, PluginError> {
+        Err(PluginError::Runtime("此 bridge 不支持认证存储".to_string()))
+    }
+
+    /// 删除插件自己的认证档案。
+    async fn auth_remove(&self, _plugin_id: &str, _auth_ref: &str) -> Result<(), PluginError> {
+        Err(PluginError::Runtime("此 bridge 不支持认证存储".to_string()))
+    }
 
     /// `flux.storage.get`。
     async fn storage_get(&self, plugin_id: &str, key: &str) -> Option<String>;
@@ -659,6 +736,7 @@ mod tests {
         let req = ResolveRequest {
             task_id: "t".into(),
             url: "u".into(),
+            auth_ref: String::new(),
             cookies: String::new(),
             referrer: String::new(),
             user_agent: "UA".into(),

@@ -46,6 +46,10 @@ pub const API_TASKS_CONTINUE: &str = "/api/v1/tasks/continue";
 pub const API_QUEUES: &str = "/api/v1/queues";
 /// OpenAPI 3.1 规范文档（GET，无鉴权）。
 pub const API_OPENAPI: &str = "/api/v1/openapi.json";
+/// 已保存站点凭据列表/保存（GET/PUT）。
+pub const API_SITE_AUTH: &str = "/api/v1/site-auth";
+/// 单站点凭据详情/删除（GET/DELETE）。
+pub const API_SITE_AUTH_SITE: &str = "/api/v1/site-auth/{site}";
 
 /// 插件集合（GET 列表）。
 pub const API_PLUGINS: &str = "/api/v1/plugins";
@@ -57,6 +61,8 @@ pub const API_PLUGINS_INSTALL_DEV: &str = "/api/v1/plugins/install-dev";
 pub const API_PLUGIN_ENABLED: &str = "/api/v1/plugins/{identity}/enabled";
 /// 单插件设置（PUT {key:value}）。
 pub const API_PLUGIN_SETTINGS: &str = "/api/v1/plugins/{identity}/settings";
+/// 驱动插件登录流程（POST begin/poll/cancel/logout/status）。
+pub const API_PLUGIN_AUTH: &str = "/api/v1/plugins/{identity}/auth";
 /// 卸载单插件（DELETE）。
 pub const API_PLUGIN: &str = "/api/v1/plugins/{identity}";
 /// 任务级逃生舱：忽略插件重试，按原始链接重跑（POST）。

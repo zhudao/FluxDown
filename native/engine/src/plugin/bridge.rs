@@ -14,6 +14,7 @@
 //! - 配置代理时 DNS 由代理侧解析，[`GuardResolver`] 不参与（hostname 级过滤失效；
 //!   字面量 IP 前置校验与逐跳重定向校验仍然生效）。代理由用户显式配置，视为可信出口。
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -319,6 +320,8 @@ enum GuardError {
 /// 引擎侧 `PluginBridge` 实现。
 pub struct EngineBridge {
     client: reqwest::Client,
+    /// 认证请求专用 client：认证档案里的自定义 headers 不能跨 origin 跟随重定向。
+    auth_client: reqwest::Client,
     db: Db,
     plugin_retry_tx: mpsc::UnboundedSender<(String, u64)>,
     fetch_sema: Arc<Semaphore>,
@@ -338,35 +341,11 @@ impl EngineBridge {
         plugin_retry_tx: mpsc::UnboundedSender<(String, u64)>,
         data_dir: PathBuf,
     ) -> Result<Self, PluginError> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .dns_resolver(Arc::new(GuardResolver))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= MAX_REDIRECTS {
-                    return attempt.error(GuardError::TooManyRedirects);
-                }
-                if let Some(host) = attempt.url().host_str() {
-                    let trimmed = host.trim_matches(|c| c == '[' || c == ']');
-                    if let Ok(ip) = trimmed.parse::<IpAddr>()
-                        && !is_globally_routable_unicast(ip)
-                    {
-                        return attempt.error(GuardError::BlockedRedirect);
-                    }
-                }
-                attempt.follow()
-            }));
-
-        if let Some(url) = proxy.resolve().to_proxy_url()
-            && let Ok(p) = reqwest::Proxy::all(&url)
-        {
-            builder = builder.proxy(p);
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| PluginError::Runtime(format!("构建守卫 Client 失败: {e}")))?;
+        let client = build_guarded_client(proxy, false, "守卫")?;
+        let auth_client = build_guarded_client(proxy, true, "认证守卫")?;
         Ok(Self {
             client,
+            auth_client,
             db,
             plugin_retry_tx,
             fetch_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCH)),
@@ -377,12 +356,77 @@ impl EngineBridge {
     }
 }
 
+fn build_guarded_client(
+    proxy: &ProxyConfig,
+    same_origin_redirects_only: bool,
+    label: &str,
+) -> Result<reqwest::Client, PluginError> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .dns_resolver(Arc::new(GuardResolver))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error(GuardError::TooManyRedirects);
+            }
+            if same_origin_redirects_only
+                && let Some(previous) = attempt.previous().first()
+                && (previous.scheme() != attempt.url().scheme()
+                    || previous.host_str() != attempt.url().host_str()
+                    || previous.port_or_known_default() != attempt.url().port_or_known_default())
+            {
+                return attempt.stop();
+            }
+            if let Some(host) = attempt.url().host_str() {
+                let trimmed = host.trim_matches(|c| c == '[' || c == ']');
+                if let Ok(ip) = trimmed.parse::<IpAddr>()
+                    && !is_globally_routable_unicast(ip)
+                {
+                    return attempt.error(GuardError::BlockedRedirect);
+                }
+            }
+            attempt.follow()
+        }));
+
+    if let Some(url) = proxy.resolve().to_proxy_url()
+        && let Ok(p) = reqwest::Proxy::all(&url)
+    {
+        builder = builder.proxy(p);
+    }
+
+    builder
+        .build()
+        .map_err(|e| PluginError::Runtime(format!("构建{label} Client 失败: {e}")))
+}
+
+fn collect_response_headers(headers: &reqwest::header::HeaderMap) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+    for (key, value) in headers {
+        if let Ok(value) = value.to_str() {
+            result
+                .entry(key.as_str().to_string())
+                .and_modify(|existing: &mut String| {
+                    existing.push('\n');
+                    existing.push_str(value);
+                })
+                .or_insert_with(|| value.to_string());
+        }
+    }
+    result
+}
+
+/// `authRef` 空串视同未提供（M-5）。抽成独立函数只为不依赖网络就能单测：
+/// `http_request` 内联判定需要真实 SSRF 守卫环境才能触发调用，纯逻辑
+/// 判定不需要。
+fn normalize_explicit_auth_ref(auth_ref: Option<String>) -> Option<String> {
+    auth_ref.filter(|value| !value.is_empty())
+}
+
 #[async_trait::async_trait]
 impl PluginBridge for EngineBridge {
     async fn http_request(
         &self,
-        _plugin_id: &str,
-        req: BridgeHttpRequest,
+        plugin_id: &str,
+        mut req: BridgeHttpRequest,
     ) -> Result<BridgeHttpResponse, PluginError> {
         // scheme 仅 http/https。
         let parsed = url::Url::parse(&req.url)
@@ -404,6 +448,59 @@ impl PluginBridge for EngineBridge {
             }
         }
 
+        // 空串视同未提供（M-5）：`{"authRef":""}` 反序列化为 `Some("")`，不是
+        // `None`；`ctx.authRef` 本就可能是空串（PluginManager::resolve 对
+        // magnet/ed2k/ftp 等 URL 拿不到站点键时不填充，authenticate() 未传
+        // site 时也是空串），插件把它原样透传给 flux.fetch 不该被当成「显式
+        // 声明了一个空引用」进而 fail-closed。
+        req.auth_ref = normalize_explicit_auth_ref(req.auth_ref);
+        let explicit_auth_ref = req.auth_ref.is_some();
+        let mut auth_applied = false;
+        let auth_ref = req
+            .auth_ref
+            .clone()
+            .or_else(|| crate::auth::default_auth_ref(plugin_id, &req.url));
+        if explicit_auth_ref && !req.auth_allowed {
+            return Err(PluginError::Runtime(
+                "插件未声明 auth 权限，不能使用认证凭据".to_string(),
+            ));
+        }
+        if req.auth_allowed
+            && let Some(auth_ref) = auth_ref
+        {
+            match crate::auth::load(&self.db, &auth_ref)
+                .await
+                .map_err(|e| PluginError::Runtime(format!("读取认证凭据失败: {e:#}")))?
+            {
+                Some(profile) => {
+                    if profile.plugin_id != plugin_id {
+                        return Err(PluginError::Runtime("认证凭据不属于当前插件".to_string()));
+                    }
+                    if crate::auth::site_key(&req.url).as_deref() != Some(profile.site.as_str()) {
+                        return Err(PluginError::Runtime(
+                            "认证凭据不属于当前请求站点".to_string(),
+                        ));
+                    }
+                    let profile_valid = profile.is_valid_at(crate::auth::now_unix());
+                    if !profile_valid && explicit_auth_ref {
+                        return Err(PluginError::Runtime(format!(
+                            "authentication_required: 认证凭据已过期 {auth_ref}"
+                        )));
+                    }
+                    if profile_valid {
+                        profile.apply_to_headers(&mut req.headers);
+                        auth_applied = true;
+                    }
+                }
+                None if explicit_auth_ref => {
+                    return Err(PluginError::Runtime(format!(
+                        "authentication_required: 未找到认证凭据 {auth_ref}"
+                    )));
+                }
+                None => {}
+            }
+        }
+
         let permit = self
             .fetch_sema
             .clone()
@@ -414,7 +511,12 @@ impl PluginBridge for EngineBridge {
 
         let method = reqwest::Method::from_bytes(req.method.as_bytes())
             .map_err(|_| PluginError::InvalidOutput(format!("HTTP method 非法: {}", req.method)))?;
-        let mut rb = self.client.request(method, parsed);
+        let client = if auth_applied {
+            &self.auth_client
+        } else {
+            &self.client
+        };
+        let mut rb = client.request(method, parsed);
         for (k, v) in &req.headers {
             if let (Ok(name), Ok(value)) = (
                 reqwest::header::HeaderName::from_bytes(k.as_bytes()),
@@ -431,12 +533,9 @@ impl PluginBridge for EngineBridge {
             PluginError::Runtime(format!("fetch 失败: {}", reqwest_error_detail(&e)))
         })?;
         let status = resp.status().as_u16();
-        let mut headers = std::collections::HashMap::new();
-        for (k, v) in resp.headers() {
-            if let Ok(s) = v.to_str() {
-                headers.insert(k.as_str().to_string(), s.to_string());
-            }
-        }
+        // HeaderMap 允许同名响应头（尤其是多个 Set-Cookie）；wire 层以换行
+        // 拼接，避免登录插件丢掉除最后一个之外的 Cookie。
+        let headers = collect_response_headers(resp.headers());
 
         let mut body = Vec::new();
         let mut truncated = false;
@@ -462,6 +561,70 @@ impl PluginBridge for EngineBridge {
             body: String::from_utf8_lossy(&body).to_string(),
             truncated,
         })
+    }
+
+    async fn auth_get(
+        &self,
+        plugin_id: &str,
+        auth_ref: &str,
+    ) -> Result<Option<crate::auth::AuthProfile>, PluginError> {
+        let Some(profile) = crate::auth::load(&self.db, auth_ref)
+            .await
+            .map_err(|e| PluginError::Runtime(format!("读取认证凭据失败: {e:#}")))?
+        else {
+            return Ok(None);
+        };
+        if profile.plugin_id != plugin_id {
+            return Err(PluginError::Runtime("认证凭据不属于当前插件".to_string()));
+        }
+        Ok(Some(profile))
+    }
+
+    async fn auth_save(
+        &self,
+        plugin_id: &str,
+        mut profile: crate::auth::AuthProfile,
+    ) -> Result<String, PluginError> {
+        if profile.site.trim().is_empty() {
+            return Err(PluginError::InvalidOutput(
+                "认证档案必须提供 site".to_string(),
+            ));
+        }
+        profile.plugin_id = plugin_id.to_string();
+        profile.site = crate::auth::normalize_site(&profile.site).ok_or_else(|| {
+            PluginError::InvalidOutput("认证档案的 site 必须是有效的 URL 或 host".to_string())
+        })?;
+        let canonical_auth_ref = format!("{plugin_id}::{}", profile.site);
+        if profile.auth_ref.is_empty() {
+            profile.auth_ref = canonical_auth_ref;
+        } else if profile.auth_ref != canonical_auth_ref {
+            return Err(PluginError::InvalidOutput(
+                "authRef 必须等于当前插件和规范化站点组成的引用".to_string(),
+            ));
+        }
+        let size = serde_json::to_vec(&profile)
+            .map_err(|e| PluginError::Runtime(format!("序列化认证档案失败: {e}")))?
+            .len();
+        if size > MAX_STORAGE_VALUE {
+            return Err(PluginError::InvalidOutput(format!(
+                "认证档案超过 {MAX_STORAGE_VALUE} 字节上限"
+            )));
+        }
+        crate::auth::save(&self.db, &profile)
+            .await
+            .map_err(|e| PluginError::Runtime(format!("保存认证凭据失败: {e:#}")))?;
+        Ok(profile.auth_ref)
+    }
+
+    async fn auth_remove(&self, plugin_id: &str, auth_ref: &str) -> Result<(), PluginError> {
+        if !auth_ref.starts_with(&format!("{plugin_id}::")) {
+            return Err(PluginError::InvalidOutput(
+                "authRef 必须属于当前插件".to_string(),
+            ));
+        }
+        crate::auth::remove(&self.db, auth_ref)
+            .await
+            .map_err(|e| PluginError::Runtime(format!("删除认证凭据失败: {e:#}")))
     }
 
     async fn storage_get(&self, plugin_id: &str, key: &str) -> Option<String> {
@@ -1129,13 +1292,24 @@ fn ytdlp_arg_reject_reason(a: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        arg_reject_reason, is_globally_routable_unicast, truncate_utf8, validate_ffmpeg_args,
-        validate_ytdlp_args, ytdlp_arg_reject_reason,
+        arg_reject_reason, collect_response_headers, is_globally_routable_unicast,
+        normalize_explicit_auth_ref, truncate_utf8, validate_ffmpeg_args, validate_ytdlp_args,
+        ytdlp_arg_reject_reason,
     };
     use std::net::IpAddr;
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap_or_else(|_| panic!("bad ip {s}"))
+    }
+
+    #[test]
+    fn empty_explicit_auth_ref_normalizes_to_none() {
+        assert_eq!(normalize_explicit_auth_ref(Some(String::new())), None);
+        assert_eq!(normalize_explicit_auth_ref(None), None);
+        assert_eq!(
+            normalize_explicit_auth_ref(Some("a@b::https://x.com".to_string())),
+            Some("a@b::https://x.com".to_string())
+        );
     }
 
     #[test]
@@ -1286,6 +1460,24 @@ mod tests {
         let (s, t) = truncate_utf8("啊啊".as_bytes(), 4);
         assert_eq!(s, "啊");
         assert!(t);
+    }
+
+    #[test]
+    fn response_headers_join_duplicate_values_in_wire_order() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.append(
+            reqwest::header::HeaderName::from_static("set-cookie"),
+            reqwest::header::HeaderValue::from_static("a=1"),
+        );
+        headers.append(
+            reqwest::header::HeaderName::from_static("set-cookie"),
+            reqwest::header::HeaderValue::from_static("b=2"),
+        );
+        let result = collect_response_headers(&headers);
+        assert_eq!(
+            result.get("set-cookie").map(String::as_str),
+            Some("a=1\nb=2")
+        );
     }
 
     #[test]

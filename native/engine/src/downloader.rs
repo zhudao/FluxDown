@@ -1867,11 +1867,16 @@ fn has_plausible_extension(name: &str) -> bool {
 
 fn extract_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Option<String> {
     let disposition = headers.get(reqwest::header::CONTENT_DISPOSITION)?;
-    // Use from_utf8 instead of to_str(): the http crate's to_str() rejects any byte > 0x7E,
-    // but some servers (e.g. z-lib CDN) embed raw UTF-8 characters (Chinese, Japanese, etc.)
-    // directly in the filename="" parameter.  Those bytes are valid UTF-8 even though they
-    // are not ASCII, so from_utf8 succeeds where to_str would silently return None.
-    let value = std::str::from_utf8(disposition.as_bytes()).ok()?;
+    // HeaderValue may contain raw UTF-8, GBK, or Big5 bytes in legacy filename= values.
+    // Carry each header byte as a Latin-1 code unit so the ASCII parameter structure can
+    // be split with &str tools; every value is turned back into its original bytes with
+    // `latin1_bytes` before decoding — `str::as_bytes` on this carrier would re-encode
+    // the non-ASCII code units as two-byte UTF-8 and corrupt raw legacy bytes.
+    let value: String = disposition
+        .as_bytes()
+        .iter()
+        .map(|&byte| byte as char)
+        .collect();
 
     // Prefer filename*= (RFC 5987 / RFC 6266) over filename=
     for part in value.split(';') {
@@ -1881,16 +1886,20 @@ fn extract_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Opt
             // e.g. UTF-8''My%20File.pdf
             //
             // 注：按 RFC 5987 charset 字段明确指定编码，严格实现
-            // 应该读取该字段。目前以 urlencoding_decode 的
-            // "UTF-8 优先，GBK fallback" 表现足够应对老旧中文服务器
+            // 应该读取该字段。这里读取并支持 UTF-8、GBK 与 Big5；
+            // 对声明不可靠的老旧中文服务器仍保留候选探测。
             // （它们通常话不对题，声明 UTF-8 但发 GBK）。
             // 非标准实现（腾讯云 COS 等）会把整个 ext-value 用双引号包起来：
             // `filename*="UTF-8''foo.exe"`。RFC 6266 的 ext-value 是 token 不
             // 允许加引号，若原样保留，尾引号会跟进文件名（Windows 上再被
             // sanitize_filename 换成 `_`，落盘名多一个下划线）。
             let name = name.trim().trim_matches('"').trim();
-            if let Some(encoded) = name.split('\'').nth(2)
-                && let Ok(decoded) = urlencoding_decode(encoded)
+            let mut parts = name.splitn(3, '\'');
+            let charset = parts.next();
+            let _language = parts.next();
+            if let Some(encoded) = parts.next()
+                && let Ok(decoded) =
+                    percent_decode_bytes_with_charset(&latin1_bytes(encoded), charset)
             {
                 let decoded = decoded.trim();
                 if !decoded.is_empty() {
@@ -1911,14 +1920,17 @@ fn extract_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Opt
                 // percent-encoded sequences, try URL-decoding it so that
                 // `%E6%B0%B8%E7%94%9F.mp4` becomes `永生.mp4`.
                 if name.contains('%')
-                    && let Ok(decoded) = urlencoding_decode(name)
+                    && let Ok(decoded) =
+                        percent_decode_bytes_with_charset(&latin1_bytes(name), None)
                 {
                     let decoded = decoded.trim();
                     if !decoded.is_empty() && decoded != name {
                         return Some(sanitize_filename(decoded));
                     }
                 }
-                return Some(sanitize_filename(name));
+                let decoded = decode_bytes_with_charset(&latin1_bytes(name), None)
+                    .unwrap_or_else(|_| name.to_owned());
+                return Some(sanitize_filename(&decoded));
             }
         }
     }
@@ -2044,8 +2056,30 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// 在调用前已 `split('?')` 丢弃 query，故 `+`→空格 在所有实际用途下都是错的
 /// （会把 `C++Primer.pdf` 损坏成 `C  Primer.pdf`）。
 fn urlencoding_decode(s: &str) -> Result<String, String> {
-    let mut result = Vec::with_capacity(s.len());
-    let bytes = s.as_bytes();
+    urlencoding_decode_with_charset(s, None)
+}
+
+/// 解码 URL / `Content-Disposition` 中的百分号转义，并在声明了字符集时
+/// 使用声明的字符集。未声明字符集时保留 UTF-8 → GBK/Big5 的兼容探测。
+fn urlencoding_decode_with_charset(s: &str, charset: Option<&str>) -> Result<String, String> {
+    percent_decode_bytes_with_charset(s.as_bytes(), charset)
+}
+
+/// 把 Latin-1 载体字符串（每个 char 的码位 = 原始字节值）还原为原始字节。
+///
+/// 只用于 `extract_from_content_disposition`：响应头按 RFC 7230 是字节序列，
+/// 这里用 `byte as char` 承载以便按 ASCII 结构切分，取值前必须还原。
+fn latin1_bytes(carrier: &str) -> Vec<u8> {
+    carrier.chars().map(|ch| (ch as u32 & 0xff) as u8).collect()
+}
+
+/// 字节级百分号解码 + 字符集解码：`bytes` 是待解码的原始字节（可含字面的
+/// 非 ASCII 字节），`%XX` 展开后整体交给 [`decode_bytes_with_charset`]。
+fn percent_decode_bytes_with_charset(
+    bytes: &[u8],
+    charset: Option<&str>,
+) -> Result<String, String> {
+    let mut result = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%'
@@ -2060,44 +2094,120 @@ fn urlencoding_decode(s: &str) -> Result<String, String> {
         result.push(bytes[i]);
         i += 1;
     }
-    decode_bytes_utf8_or_gbk(&result)
+    decode_bytes_with_charset(&result, charset)
 }
 
-/// 将一组字节解码为字符串，优先 UTF-8，失败时回退到 GBK。
+/// 将一组字节解码为字符串，优先 UTF-8，失败时兼容 GBK 与 Big5。
 ///
 /// HTML5 规范要求 URL percent-encoding 使用 UTF-8，但大量老旧中文站点
 /// （包括一些 CDN/云存储）仍使用 GBK 编码，如 `%CE%C4%BC%FE.txt`
 /// 对应 GBK 的 "文件.txt"。若不做回退则 UTF-8 解码必然失败，最终
 /// 用户看到 `%CE%C4%BC%FE.txt` 这种看似乱码的文件名。
 ///
-/// # 已知局限
-///
-/// GBK 的字节空间很宽松（0x81-0xFE × 0x40-0xFE），其他二字节编码
-/// 的字节序列（如 Big5、Shift-JIS）也可能被 GBK “成功”解码为错误的中文。
-/// 权衡上这个误判仅在罕见场景下发生（现代 Big5/Latin 站点几乎不会
-/// 在 URL 中使用非 UTF-8 percent-encoding），而 GBK 中文乱码是老旧中文
-/// 站点的高频问题。
-///
 /// # 返回值
 ///
-/// 返回 Err 仅当两种编码都无法解码时（极罕见，需要出现 GBK 不允许的
+/// 返回 Err 仅当候选编码都无法解码时（极罕见，需要出现 GBK/Big5 都不允许的
 /// 字节组合，如 0x81 0x7F）。
 pub(crate) fn decode_bytes_utf8_or_gbk(bytes: &[u8]) -> Result<String, String> {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => Ok(s.to_string()),
-        Err(_) => {
-            // 使用 decode_without_bom_handling_and_without_replacement：
-            // 遇到非法字节时返回 None，不插入 U+FFFD。
-            // 这样可以准确区分 “GBK 中合法但含替换字符” 和 “GBK 解码失败”。
-            match encoding_rs::GBK.decode_without_bom_handling_and_without_replacement(bytes) {
-                Some(decoded) => Ok(decoded.into_owned()),
-                None => Err(format!(
-                    "bytes are neither valid UTF-8 nor valid GBK ({} bytes)",
-                    bytes.len()
-                )),
+    decode_bytes_with_charset(bytes, None)
+}
+
+fn decode_bytes_with_charset(bytes: &[u8], charset: Option<&str>) -> Result<String, String> {
+    match normalized_legacy_charset(charset) {
+        Some(LegacyCharset::Gbk) => decode_with_encoding(bytes, encoding_rs::GBK, "GBK"),
+        Some(LegacyCharset::Big5) => decode_with_encoding(bytes, encoding_rs::BIG5, "Big5"),
+        Some(LegacyCharset::Utf8) | None => match std::str::from_utf8(bytes) {
+            Ok(s) => Ok(s.to_string()),
+            Err(_) => {
+                // Some legacy servers declare UTF-8 but send GBK/Big5 bytes.
+                // Preserve the historical compatibility fallback for that case.
+                decode_legacy_filename(bytes)
             }
-        }
+        },
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyCharset {
+    Utf8,
+    Gbk,
+    Big5,
+}
+
+fn normalized_legacy_charset(charset: Option<&str>) -> Option<LegacyCharset> {
+    let charset = charset?.trim().trim_matches('"').to_ascii_lowercase();
+    match charset.as_str() {
+        "utf-8" | "utf8" => Some(LegacyCharset::Utf8),
+        "gbk" | "gb2312" | "gb18030" | "cp936" => Some(LegacyCharset::Gbk),
+        "big5" | "big5-hkscs" | "cp950" | "windows-950" => Some(LegacyCharset::Big5),
+        _ => None,
+    }
+}
+
+fn decode_with_encoding(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    label: &str,
+) -> Result<String, String> {
+    encoding
+        .decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|decoded| decoded.into_owned())
+        .ok_or_else(|| format!("bytes are not valid {label} ({} bytes)", bytes.len()))
+}
+
+/// 对未声明字符集的传统中文文件名做有限候选选择。
+///
+/// GBK 与 Big5 的字节范围存在重叠，不能简单地把 Big5 放在 GBK 前面，否则
+/// 现有大陆站点的文件名会被误判。优先保留 GBK；只有 Big5 候选明显更像中文，
+/// 且 GBK 候选含假名、控制字符、私用区字符等典型误解码结果时才选择 Big5。
+fn decode_legacy_filename(bytes: &[u8]) -> Result<String, String> {
+    let gbk = encoding_rs::GBK
+        .decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|decoded| decoded.into_owned());
+    let big5 = encoding_rs::BIG5
+        .decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|decoded| decoded.into_owned());
+
+    match (gbk, big5) {
+        (Some(gbk), Some(big5))
+            if has_strong_legacy_mojibake(&gbk)
+                && filename_encoding_score(&big5) > filename_encoding_score(&gbk) =>
+        {
+            Ok(big5)
+        }
+        (Some(gbk), _) => Ok(gbk),
+        (None, Some(big5)) => Ok(big5),
+        (None, None) => Err(format!(
+            "bytes are neither valid GBK nor Big5 ({} bytes)",
+            bytes.len()
+        )),
+    }
+}
+
+fn filename_encoding_score(value: &str) -> i32 {
+    value.chars().fold(0, |score, ch| {
+        score
+            + if ch.is_control() {
+                -8
+            } else if ('\u{3040}'..='\u{30ff}').contains(&ch) {
+                -5
+            } else if ('\u{4e00}'..='\u{9fff}').contains(&ch) {
+                2
+            } else if ch == '\u{fffd}' {
+                -10
+            } else {
+                0
+            }
+    })
+}
+
+fn has_strong_legacy_mojibake(value: &str) -> bool {
+    value.chars().any(|ch| {
+        ch.is_control()
+            || ('\u{3040}'..='\u{30ff}').contains(&ch)
+            || ('\u{e000}'..='\u{f8ff}').contains(&ch)
+            || ch == '\u{fffd}'
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4114,6 +4224,7 @@ mod tests {
         PROBE_MAX_RETRIES, PROBE_RETRY_BASE_DELAY, PROBE_TIMEOUT, TEMP_EXT, dedup_filename,
         extract_filename, extract_from_content_disposition, extract_from_url, format_probe_failure,
         mime_to_ext, parse_http_date, sanitize_filename, urlencoding_decode,
+        urlencoding_decode_with_charset,
     };
     use std::time::Duration;
 
@@ -4343,6 +4454,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extract_from_content_disposition_big5_filename() {
+        // 台湾站点常见的 Big5/CP950 编码：“中文” = A4 A4 A4 E5。
+        let headers = make_headers_with_cd("attachment; filename=\"%A4%A4%A4%E5.txt\"");
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(
+            name.as_deref(),
+            Some("中文.txt"),
+            "Big5 percent-encoded Content-Disposition 应能被正确解码"
+        );
+    }
+
+    #[test]
+    fn extract_from_content_disposition_explicit_big5_charset() {
+        let headers = make_headers_with_cd("attachment; filename*=Big5''%A4%A4%A4%E5.txt");
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("中文.txt"));
+    }
+
+    #[test]
+    fn extract_from_content_disposition_explicit_big5_charset_overrides_utf8() {
+        // C2 A1 is valid UTF-8 (U+00A1) but Big5 "癒". The declared charset
+        // must win when both decoders accept the same bytes.
+        let headers = make_headers_with_cd("attachment; filename*=Big5''%C2%A1.txt");
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("癒.txt"));
+    }
+
+    #[test]
+    fn extract_from_content_disposition_raw_big5_bytes() {
+        let headers = make_headers_with_raw_cd(b"attachment; filename=\"\xA4\xA4\xA4\xE5.txt\"");
+        let name = extract_from_content_disposition(&headers);
+        assert_eq!(name.as_deref(), Some("中文.txt"));
+    }
+
+    fn make_headers_with_raw_cd(raw: &[u8]) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        let value = reqwest::header::HeaderValue::from_bytes(raw)
+            .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("attachment"));
+        headers.insert(reqwest::header::CONTENT_DISPOSITION, value);
+        headers
+    }
+
+    #[test]
+    fn extract_from_content_disposition_raw_utf8_in_filename_star() {
+        // 非标准但常见：filename* 的 ext-value 直接塞原始 UTF-8 字节而非 %XX。
+        // 回归：Latin-1 载体若经 str::as_bytes 二次编码会得到 "ä¸\u{ad}æ__.txt"。
+        let headers =
+            make_headers_with_raw_cd(b"attachment; filename*=UTF-8''\xe4\xb8\xad\xe6\x96\x87.txt");
+        assert_eq!(
+            extract_from_content_disposition(&headers).as_deref(),
+            Some("中文.txt")
+        );
+    }
+
+    #[test]
+    fn extract_from_content_disposition_raw_utf8_mixed_with_percent() {
+        // 原始 UTF-8 字节与 %20 混排：percent 分支也必须先还原原始字节。
+        let headers =
+            make_headers_with_raw_cd(b"attachment; filename=\"\xe4\xb8\xad\xe6\x96\x87%20a.txt\"");
+        assert_eq!(
+            extract_from_content_disposition(&headers).as_deref(),
+            Some("中文 a.txt")
+        );
+    }
+
+    #[test]
+    fn extract_from_content_disposition_raw_gbk_with_declared_charset() {
+        let headers = make_headers_with_raw_cd(b"attachment; filename*=GBK''\xce\xc4\xbc\xfe.txt");
+        assert_eq!(
+            extract_from_content_disposition(&headers).as_deref(),
+            Some("文件.txt")
+        );
+    }
+
     // -----------------------------------------------------------------------
     // urlencoding_decode
     // -----------------------------------------------------------------------
@@ -4406,22 +4592,33 @@ mod tests {
         assert_eq!(result, "€", "GBK 0x80 应解码为 €");
     }
 
-    // ——— 已知局限（文档性测试，默认 ignore）———
-    //
-    // GBK fallback 存在 false-positive：非 UTF-8 且非 GBK 的编码（如 Big5、
-    // ISO-8859-1）也可能被 GBK “成功”解码为错误的中文。考虑到：
-    //   1. 现代 Big5/Latin 站点几乎不会在 URL 中使用非 UTF-8 percent-encoding
-    //   2. 本修复主要目标是 “老旧中文站点的 GBK URL” 高频场景
-    //   3. 我们接受该权衡，后续可考虑加入 chardet/Big5 预检测
+    #[test]
+    fn urlencoding_decode_mislabeled_utf8_falls_back_to_gbk() {
+        let result =
+            urlencoding_decode_with_charset("%CE%C4%BC%FE", Some("UTF-8")).unwrap_or_default();
+        assert_eq!(result, "文件");
+    }
 
     #[test]
-    #[ignore = "记录 GBK fallback false-positive 行为，不是回归报警"]
-    fn urlencoding_decode_big5_chinese_filename_misdecoded_as_gbk() {
-        // Big5 编码的 “中文” = A4 A4 A4 E5
-        // UTF-8 失败 → GBK 成功但解码为 “いゅ”（错误的日文假名）
+    fn urlencoding_decode_big5_chinese_filename() {
+        // Big5 编码的 “中文” = A4 A4 A4 E5；GBK 会错误解码为日文假名。
         let result = urlencoding_decode("%A4%A4%A4%E5").unwrap_or_default();
-        eprintln!("big5 bytes decoded as GBK: {:?}", result);
-        assert_ne!(result, "中文", "已知局限：不会还原 Big5");
+        assert_eq!(result, "中文");
+    }
+
+    #[test]
+    fn urlencoding_decode_big5_filename_with_private_use_mojibake() {
+        // Big5 “檔案下載” = C0 C9 AE D7 A4 55 B8 FC；GBK 会产生私用区字符。
+        let result = urlencoding_decode("%C0%C9%AE%D7%A4%55%B8%FC").unwrap_or_default();
+        assert_eq!(result, "檔案下載");
+    }
+
+    #[test]
+    fn urlencoding_decode_ambiguous_legacy_bytes_keeps_gbk() {
+        // C0 C9 也能被两种编码解码为普通 CJK 字符，无法可靠自动判断；
+        // 未出现强乱码特征时保留既有 GBK 优先行为，避免静默误改文件名。
+        let result = urlencoding_decode("%C0%C9").unwrap_or_default();
+        assert_eq!(result, "郎");
     }
 
     #[test]

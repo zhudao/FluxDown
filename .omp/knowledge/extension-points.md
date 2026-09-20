@@ -12,6 +12,7 @@
 | **新增下载协议** | 加 `is_X_url` 谓词 + `run_X_download`（照 `ed2k` 模板）；在 `download_manager` 的 `do_start_task` **与** `do_resume_task` if/else 各加一臂；新表加进 `SQLITE_SCHEMA`+`POSTGRES_SCHEMA`+迁移 |
 | **新增受管组件** | `components/` 下照 `ffmpeg.rs`/`ytdlp.rs` 加模块（resolve 优先级 + Status + install under cfg）；加 config 键；在 `plugin/dependencies.rs` 映射 |
 | **新增插件工具面** | `runtime.rs` 加 Spec/Outcome/Availability（禁 rquickjs 类型）；`HostContext` 加门；`bridge.rs` 实现（semaphore + 牢笼）；`manifest` 加 permission |
+| **插件通用认证** | `engine/src/auth.rs` 保存受控 `AuthProfile`；`manifest.permissions` 声明 `auth`；插件经 `flux.auth.save/get/remove` 管理登录结果，`flux.fetch({authRef})` 或插件+站点默认引用自动注入 Cookie/Bearer/Header |
 | **新增 Dart↔Rust 信号** | `hub/src/signals/mod.rs` 定义（`DartSignal`/`RustSignal`/`SignalPiece`）→ `rinf gen` → **并进 `download_actor` 的 `AuxSignal` 合并泵**（主 `select!` 已满 64 分支硬上限，绝不能加新分支，见 AGENTS.md「crate 边界与硬不变式」）→ Dart 端 `XxxSignal.rustSignalStream` 监听 |
 | **新增 RSS 过滤规则** | `engine/src/rss/filter.rs` 改判定 + 补单测 → **同步** `lib/src/models/rss_filter.dart` 与 `web/src/lib/rss-filter.ts` 两份镜像（预览与实际下载不一致会直接摧毁功能可信度）→ 三 Tab 对话框加控件 + i18n |
 | **新增订阅 provider** | 插件 manifest 加 `subscriptions:[{providerId,entry,timeoutMs}]`，脚本实现 `globalThis.subscribe(ctx)` 并返回规范化条目 → `PluginManager` 动态路由到 `subscription::SubscriptionProvider` → 公共调度负责退避/去重/过滤/落库/建任务（`Engine::initialize` 经 `set_fallback_provider` 挂载路由，宿主无需接线）；订阅级「代理 / User-Agent」只对内置 `rss` provider 生效，插件请求走 `flux.fetch` 的全局出口 |

@@ -596,9 +596,61 @@ pub struct PluginDto {
     /// manifest 声明的能力权限（如 `["ffmpeg"]`，供 UI 展示授权徽章）。
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// 是否声明平台登录入口。
+    #[serde(default)]
+    pub auth_supported: bool,
     /// manifest 声明的订阅 provider ID，供订阅创建界面生成可选来源。
     #[serde(default)]
     pub subscription_provider_ids: Vec<String>,
+    /// `Loaded` / `Failed`；与 `enabled` 独立，手动禁用的插件仍可能已加载。
+    #[serde(default = "default_plugin_load_status")]
+    pub load_status: String,
+    /// 加载失败的可读原因；成功时为空。
+    #[serde(default)]
+    pub load_error: String,
+}
+
+fn default_plugin_load_status() -> String {
+    "Loaded".to_string()
+}
+
+/// 驱动插件平台登录（二维码/账号登录）的请求。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuthRequest {
+    #[serde(default)]
+    pub identity: String,
+    /// `begin` / `poll` / `cancel` / `logout` / `status`。
+    pub action: String,
+    #[serde(default)]
+    pub site: String,
+    #[serde(default)]
+    pub auth_ref: String,
+    #[serde(default)]
+    pub session_id: String,
+    /// 账号、验证码或平台登录流程需要的额外输入。
+    #[serde(default)]
+    pub input: String,
+}
+
+/// 插件平台登录交互状态。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginAuthResponse {
+    /// `pending` / `success` / `error`。
+    pub status: String,
+    pub session_id: String,
+    /// 二维码文本、data URL 或其他挑战内容。
+    #[serde(default)]
+    pub challenge: Option<String>,
+    #[serde(default)]
+    pub challenge_type: Option<String>,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub auth_ref: Option<String>,
 }
 
 /// 安装 dev 插件请求体。
@@ -1653,6 +1705,30 @@ pub struct SiteAuthEntryDto {
     /// `host` 或 `host:port`。
     pub site: String,
     pub user: String,
+}
+
+/// 单站点 HTTP Basic 凭据详情；仅由受保护的定向查询返回（`GET
+/// /api/v1/site-auth/{site}`，须管理 token）。`pass` 是明文密码，不脱敏
+/// ——保留是为了编辑表单可以回填原值；只应用于「打开编辑对话框」这类需要
+/// 原文的场景，不要在列表/日志里回显（L-1；列表接口 [`SiteAuthEntryDto`]
+/// 本就不含 `pass`）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SiteAuthCredentialDto {
+    pub site: String,
+    pub user: String,
+    pub pass: String,
+}
+
+/// 保存单站点 HTTP Basic 凭据的请求。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SiteAuthSaveRequest {
+    pub site: String,
+    pub user: String,
+    pub pass: String,
 }
 
 /// `daemon.siteAuth.delete` 参数。

@@ -314,7 +314,7 @@ export function DownloadSettings({
         </SetRow>
       </SetSection>
 
-      <SiteAuthCredentials config={config} mutate={mutate} />
+      <SiteAuthCredentials />
     </>
   )
 }

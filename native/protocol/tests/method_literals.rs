@@ -56,6 +56,7 @@ fn canonical_method_literals_are_exact_and_unique() {
         "daemon.rss.itemAction",
         "daemon.rss.validate",
         "daemon.plugin.list",
+        "daemon.plugin.auth",
         "daemon.plugin.setEnabled",
         "daemon.plugin.updateSettings",
         "daemon.plugin.install",

@@ -5,7 +5,7 @@ section: plugins
 order: 4
 ---
 
-Everything a plugin script can see: five entry points FluxDown calls, and the `flux` object it injects. All field names crossing the JS boundary are camelCase.
+Everything a plugin script can see: six entry points FluxDown calls, and the `flux` object it injects. All field names crossing the JS boundary are camelCase.
 
 ## Entry points
 
@@ -59,6 +59,35 @@ Notification hooks. All receive `{ event, taskId, url }` plus event-specific fie
 
 Hooks are fire-and-forget: exceptions and timeouts are logged and swallowed, and if the plugin runtime is saturated the notification is dropped. Nothing a hook does can change the task — with one exception, `flux.task.requestRetry`, valid only inside `onError`.
 
+### `authenticate(ctx)`
+
+The platform login entry point, called only when the manifest declares `auth.entry` (and `permissions` includes `"auth"`). The host drives it via the `daemon.plugin.auth` RPC with an `action`: `begin` when the user clicks "Log in" in settings, `poll` on subsequent polling as needed, `cancel` when the user cancels, `logout` when the user signs out; `status` lets the host probe the current login state without user interaction. **A disabled plugin can still receive `logout`** — the host does not call this function in that case, it deletes the stored credential directly instead (see `flux.auth` below).
+
+`ctx` fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `action` | string | One of `begin` / `poll` / `cancel` / `logout` / `status`. |
+| `site` | string | The site the user entered (empty string if none was provided). |
+| `authRef` | string | The known auth reference (`poll`/`cancel`/`logout` usually carry back the value `begin`/`status` returned). |
+| `sessionId` | string | A plugin-defined session identifier, threaded through from `begin` to `poll`. |
+| `input` | string | A value the user typed into an interactive form (e.g. a verification code); the format is up to the plugin. |
+
+Return value (a JSON string):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | Required, one of `pending` / `success` / `error`. |
+| `sessionId` | string | Echo back or continue the session identifier. |
+| `challenge` | string | Optional; QR code content, a data URL, or other challenge data to show the user. |
+| `challengeType` | string | Optional; the type of `challenge` (e.g. `"qrcode"`), by agreement between the plugin and the host UI. |
+| `message` | string | Optional; status text to show the user. |
+| `authRef` | string | Optional; on success this should point at the credential you just saved (the host falls back to the request's `authRef` when omitted). |
+
+When a `poll` reply omits `challenge`/`challengeType`, the host UI keeps whatever challenge it last showed instead of clearing it — only include these fields when there's a new challenge to display.
+
+On successful login the plugin calls `flux.auth.save` to persist the credential; `authenticate` itself is not responsible for persistence.
+
 ## The `flux` object
 
 ### `flux.fetch(opts)` → `Promise<response>`
@@ -71,8 +100,9 @@ HTTP client. `opts`:
 | `url` | — | Required. |
 | `headers` | `{}` | String key-values. |
 | `body` | none | Request body, text only. |
+| `authRef` | none | An explicit auth reference (see `flux.auth` below). When omitted or empty, and the plugin declares `permissions: ["auth"]`, the host derives a default reference from "plugin ID + request site" and looks it up automatically; plugins without the `auth` permission never receive any credential injection. |
 
-Resolves to `{ status, headers, body, truncated }` — `status` is the numeric code, `body` is text (binary responses are not supported in v1), and `truncated` is `true` when the body hit the size cap. Network and guard failures reject the Promise.
+Resolves to `{ status, headers, body, truncated }` — `status` is the numeric code, `body` is text (binary responses are not supported in v1), and `truncated` is `true` when the body hit the size cap. Network and guard failures reject the Promise. **Duplicate response headers** (most commonly multiple `Set-Cookie`s) are joined into a single string value with a newline (`\n`) rather than dropping every value but the last — split on `\n` when parsing cookies out of a login response.
 
 Guard rails, all enforced host-side:
 
@@ -84,6 +114,28 @@ Guard rails, all enforced host-side:
 | Per-request timeout | 10 s |
 | Concurrent requests | 8, shared across all plugins |
 | Max redirects | 30 |
+
+### `flux.auth`
+
+Available **only** when the manifest declares `permissions: ["auth"]` — otherwise `flux.auth` is `undefined`. Manages host-persisted plugin credentials (cookies / bearer tokens / HTTP Basic / custom headers) for `flux.fetch` to reuse automatically. Credentials do not live in the plugin's own `flux.storage` — the host implements persistence and expiry once, so plugins don't each reinvent it.
+
+- `flux.auth.save(profile)` → `Promise<string>` — write or replace a credential, returning the normalized `authRef`. `profile.site` is required and accepts a full URL or a bare `host[:port]` (a bare host is normalized to `https` by default — registering a site that explicitly allows plaintext requires passing `"http://host"` yourself). When `authRef` is omitted it's generated as `pluginId::normalizedSite`; when provided explicitly it must equal that normalized result or the call rejects.
+- `flux.auth.get(authRef)` → `Promise<profile | null>` — read a credential back; rejects if `authRef` doesn't belong to the current plugin.
+- `flux.auth.remove(authRef)` → `Promise<void>` — delete a credential; `authRef` must belong to the current plugin (prefixed `pluginId::`).
+
+`profile` fields (shared by `save`/`get`):
+
+| Field | Notes |
+|---|---|
+| `site` | The site key, as above. **Scheme-qualified** — `http` and `https` on the same host are two distinct sites; a credential established over `https` is never auto-reused on an `http` request (this stops a passive man-in-the-middle from harvesting the credential over plaintext). |
+| `kind` | `basic` / `cookie` / `bearer` / `headers` / `session` — descriptive only; the host applies the injection rules below regardless of the value. |
+| `cookies` | Injected as a `Cookie` header (skipped if the request already has one). |
+| `accessToken` | Injected as `Authorization: Bearer <accessToken>` (skipped if `Authorization` is already present). |
+| `username` / `password` | When `kind === "basic"`, injected as `Authorization: Basic <base64>` (skipped if `Authorization` is already present). |
+| `headers` | Extra headers, written individually (highest priority — overrides same-named headers generated by the fields above). |
+| `account` / `refreshToken` / `expiresAt` / `refreshAt` / `metadata` | Platform-specific metadata; the host stores it without interpreting it, except `expiresAt` (Unix seconds) — past that point the credential is expired: an implicit reference (a `flux.fetch` without an explicit `authRef`) silently skips injection, while an explicit `authRef` rejects with `authentication_required`. |
+
+`flux.fetch`'s `authRef` resolution: when passed explicitly, a missing or expired credential rejects with an `authentication_required`-prefixed error; when omitted (or empty), the host derives the default reference from plugin+site and silently skips injection on a miss or expiry — the request still goes out, just without credentials.
 
 ### `flux.storage`
 
@@ -241,11 +293,11 @@ globalThis.resolve = async (ctx) => {
 
 Each invocation runs in a fresh QuickJS context: no globals survive between calls, timers and DOM APIs don't exist, and scripts load as classic scripts (top-level `function` declarations become globals; `export` syntax will not work).
 
-| Budget | Resolve | Hooks |
-|---|---|---|
-| Timeout | 10 s (manifest `timeoutMs` overrides, 30 s hard ceiling) | 5 s |
-| Memory | 64 MB | 32 MB |
+| Budget | Resolve | Hooks | authenticate |
+|---|---|---|---|
+| Timeout | 10 s (manifest `timeoutMs` overrides, 30 s hard ceiling) | 5 s | 30 s (manifest `auth.timeoutMs` overrides, 30 s hard ceiling; a fully separate budget and concurrency pool from resolve, so login polling never crowds out resolve calls) |
+| Memory | 64 MB | 32 MB | 64 MB |
 
-Three consecutive timeouts or memory-limit hits trip the circuit breaker: the plugin is auto-disabled, the app shows a notice, and it stays off until manually re-enabled.
+Three consecutive timeouts or memory-limit hits trip the circuit breaker: the plugin is auto-disabled, the app shows a notice, and it stays off until manually re-enabled (`authenticate` does not count toward this circuit breaker).
 
 Hooks granted `permissions: ["ffmpeg"]` (running against a produced file, i.e. `onDone`) or `permissions: ["ytdlp"]` (any hook) get a raised wall-clock budget (~30 min) so a long external-tool run can finish; the 30 s CPU ceiling still bounds the JavaScript itself — time spent awaiting the subprocess doesn't count against it. `resolve` keeps its own budget (10 s default, `timeoutMs` override, 30 s hard ceiling) even where `flux.ytdlp` is reachable — plan long `run()` calls accordingly.

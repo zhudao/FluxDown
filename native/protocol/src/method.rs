@@ -55,6 +55,7 @@ pub const DAEMON_RSS_ITEM_ACTION: &str = "daemon.rss.itemAction";
 pub const DAEMON_RSS_VALIDATE: &str = "daemon.rss.validate";
 
 pub const DAEMON_PLUGIN_LIST: &str = "daemon.plugin.list";
+pub const DAEMON_PLUGIN_AUTH: &str = "daemon.plugin.auth";
 pub const DAEMON_PLUGIN_SET_ENABLED: &str = "daemon.plugin.setEnabled";
 pub const DAEMON_PLUGIN_UPDATE_SETTINGS: &str = "daemon.plugin.updateSettings";
 pub const DAEMON_PLUGIN_INSTALL: &str = "daemon.plugin.install";
@@ -226,6 +227,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_RSS_ITEM_ACTION,
     DAEMON_RSS_VALIDATE,
     DAEMON_PLUGIN_LIST,
+    DAEMON_PLUGIN_AUTH,
     DAEMON_PLUGIN_SET_ENABLED,
     DAEMON_PLUGIN_UPDATE_SETTINGS,
     DAEMON_PLUGIN_INSTALL,

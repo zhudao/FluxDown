@@ -21,7 +21,8 @@ sourceHash: "b8cae49fcfee"
 | `minAppVersion` | 否 | string | 三段版本号。运行中的 FluxDown 比它旧时，插件在加载阶段被跳过（记日志，不算错误）。 |
 | `resolvers` | 否 | array | v1 **至多一个**。见下。 |
 | `hooks` | 否 | object | 见下。 |
-| `permissions` | 否 | array | 能力授权。v1 接受 `"ffmpeg"` 与 `"ytdlp"`，未知值一律拒绝。 |
+| `auth` | 否 | object | 平台登录入口。见下。 |
+| `permissions` | 否 | array | 能力授权。v1 接受 `"ffmpeg"`、`"ytdlp"` 与 `"auth"`，未知值一律拒绝。 |
 | `settings` | 否 | array | 声明式设置项。见下。 |
 
 插件可以只声明 resolver、只声明 hooks，或两者都有。两者都没有的 manifest 合法，只是什么也不做。
@@ -66,17 +67,33 @@ sourceHash: "b8cae49fcfee"
 
 注意：同一插件如果还声明了 resolver，`onMetaProbed` 对它的任务永远不触发——带 resolver 的任务直接跳过元数据探测。你照订阅的话，FluxDown 会记一条警告日志。
 
+## `auth`
+
+```json
+{
+  "auth": { "entry": "auth.js", "timeoutMs": 20000 }
+}
+```
+
+| 字段 | 必填 | 规则 |
+|---|---|---|
+| `entry` | 是 | 脚本文件，安全相对路径。必须定义 `globalThis.authenticate`。 |
+| `timeoutMs` | 否 | 单次 `authenticate` 调用超时（毫秒），不能是 `0`。它替换默认的 30 秒，但无论写多大都被 30 秒硬顶封住；与 `resolvers[0].timeoutMs` 完全独立的预算，互不影响。 |
+
+声明 `auth.entry` 时 `permissions` 必须包含 `"auth"`，否则 manifest 校验失败。登录驱动方式与 `flux.auth` 的完整字段见 [API 参考](/docs/zh/plugins/api-reference/#authenticatectx)。
+
 ## `permissions`
 
-插件主动申请的额外宿主能力。为空或省略 = 基础沙箱（`flux.fetch` 网络、`flux.storage`、日志）。v1 识别两个值：
+插件主动申请的额外宿主能力。为空或省略 = 基础沙箱（`flux.fetch` 网络、`flux.storage`、日志）。v1 识别三个值：
 
 | 值 | 授予 |
 |---|---|
 | `ffmpeg` | `flux.ffmpeg` 接口——对下载完成的文件运行解析到的 ffmpeg（见 [API 参考](/docs/zh/plugins/api-reference/)）。 |
 | `ytdlp` | `flux.ytdlp` 接口——在 `resolve` 或任意 hook 里运行解析到的 yt-dlp（见 [API 参考](/docs/zh/plugins/api-reference/)）。 |
+| `auth` | 声明 `auth.entry` 平台登录入口，并允许 `flux.fetch`/`flux.auth` 使用认证凭据（见 [API 参考](/docs/zh/plugins/api-reference/)）。 |
 
 ```json
-{ "permissions": ["ffmpeg", "ytdlp"] }
+{ "permissions": ["ffmpeg", "ytdlp", "auth"] }
 ```
 
 未知值会让整份 manifest 失败——这样不认识某权限的旧版 FluxDown 会拒绝该插件，而不是悄悄忽略；新增权限时请一并抬高 `minAppVersion`。
@@ -145,6 +162,6 @@ pattern 不是正则，也不是浏览器扩展的 match pattern。完整规则�
 
 ## 校验总结
 
-manifest 在安装时和每次加载时都会校验；失败则跳过该插件，原因写进日志。检查顺序：identity 格式 → name 非空 → version 格式 → `minAppVersion` 格式 → icon 路径安全 → resolver 至多一个 → resolver 的 entry 路径 / `match.urls` 非空 / `timeoutMs ≠ 0` → hooks 的 entry 路径 / `events` 非空且合法 / `match.urls`（如有）非空 → settings 的 key 唯一性和上面的逐字段规则 → `permissions` 全为已知值。
+manifest 在安装时和每次加载时都会校验；失败则跳过该插件，原因写进日志。检查顺序：identity 格式 → name 非空 → version 格式 → `minAppVersion` 格式 → icon 路径安全 → resolver 至多一个 → resolver 的 entry 路径 / `match.urls` 非空 / `timeoutMs ≠ 0` → hooks 的 entry 路径 / `events` 非空且合法 / `match.urls`（如有）非空 → auth 的 entry 路径 / 声明 `auth.entry` 时 `permissions` 含 `auth` / `timeoutMs ≠ 0` → settings 的 key 唯一性和上面的逐字段规则 → `permissions` 全为已知值。
 
-两个入口脚本在安装时还会做编译检查——语法错误当场拒绝，而不是等到第一次下载才发现。
+两个入口脚本在安装时还会做编译检查——语法错误当场拒绝，而不是等到第一次下载才发现（有 `auth.entry` 时是三个）。

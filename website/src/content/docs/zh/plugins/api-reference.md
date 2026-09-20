@@ -6,7 +6,7 @@ order: 4
 sourceHash: "4501af5b1d55"
 ---
 
-插件脚本能看到的一切：FluxDown 会调用的五个入口函数，和注入的 `flux` 对象。跨越 JS 边界的字段名全部是 camelCase。
+插件脚本能看到的一切：FluxDown 会调用的六个入口函数，和注入的 `flux` 对象。跨越 JS 边界的字段名全部是 camelCase。
 
 ## 入口函数
 
@@ -60,6 +60,35 @@ sourceHash: "4501af5b1d55"
 
 钩子发出后不管结果：异常和超时只记日志然后吞掉，插件运行时忙不过来时通知直接丢弃。钩子做的任何事都改变不了任务——唯一例外是 `flux.task.requestRetry`，且只在 `onError` 里有效。
 
+### `authenticate(ctx)`
+
+平台登录入口，仅在 manifest 声明了 `auth.entry`（且 `permissions` 含 `"auth"`）时才会被调用。宿主经 `daemon.plugin.auth` RPC 以 `action` 驱动它，用户在设置页点「登录」时触发 `begin`，随后按需轮询 `poll`，用户取消时 `cancel`，「退出登录」时 `logout`；`status` 用于宿主在无用户交互时探测当前登录态。**禁用的插件仍可以收到 `logout`**——宿主此时不会调用这个函数，而是直接删除已存凭据（见下文 `flux.auth`）。
+
+`ctx` 字段：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `action` | string | `begin` / `poll` / `cancel` / `logout` / `status` 之一。 |
+| `site` | string | 用户输入的站点（未提供时为空串）。 |
+| `authRef` | string | 已知的认证引用（`poll`/`cancel`/`logout` 通常带上 `begin`/`status` 返回的值）。 |
+| `sessionId` | string | 插件自定义的会话标识，跨 `begin`→`poll` 透传。 |
+| `input` | string | 用户在交互式表单里填入的值（如验证码），插件自行约定格式。 |
+
+返回值（JSON 字符串）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `status` | string | 必填，`pending` / `success` / `error` 之一。 |
+| `sessionId` | string | 回传或延续会话标识。 |
+| `challenge` | string | 可选，二维码内容 / data URL / 需要展示给用户的挑战数据。 |
+| `challengeType` | string | 可选，`challenge` 的类型（如 `"qrcode"`），由插件与宿主 UI 约定。 |
+| `message` | string | 可选，展示给用户的状态文案。 |
+| `authRef` | string | 可选，成功后应指向刚保存的认证引用（省略时宿主用请求中的 `authRef` 兜底）。 |
+
+`poll` 回包省略 `challenge`/`challengeType` 时，宿主 UI 保留上一帧已展示的挑战，不清空——插件只需要在有新挑战时才带上这两个字段。
+
+登录成功后插件调用 `flux.auth.save` 落库凭据；`authenticate` 本身不负责持久化。
+
 ## `flux` 对象
 
 ### `flux.fetch(opts)` → `Promise<response>`
@@ -72,8 +101,9 @@ HTTP 客户端。`opts`：
 | `url` | — | 必填。 |
 | `headers` | `{}` | 字符串键值。 |
 | `body` | 无 | 请求体，仅文本。 |
+| `authRef` | 无 | 显式认证引用（见下文 `flux.auth`）。省略或空串时，若插件声明了 `permissions: ["auth"]`，宿主按「插件 ID + 请求站点」推导默认引用并自动查找复用；未声明 `auth` 权限的插件不会拿到任何认证注入。 |
 
-resolve 出 `{ status, headers, body, truncated }`——`status` 是数字状态码，`body` 是文本（v1 不支持二进制响应），`truncated` 为 `true` 时表示响应体触顶被截断。网络失败和守卫拦截都会 reject。
+resolve 出 `{ status, headers, body, truncated }`——`status` 是数字状态码，`body` 是文本（v1 不支持二进制响应），`truncated` 为 `true` 时表示响应体触顶被截断。网络失败和守卫拦截都会 reject。**同名响应头**（最典型是多个 `Set-Cookie`）在 `headers` 里以换行符（`\n`）拼接成一个字符串值，而不是丢弃除最后一个之外的值——按登录场景解析 Cookie 时请按 `\n` 拆分后逐条处理。
 
 安全护栏，全部在宿主侧强制：
 
@@ -85,6 +115,28 @@ resolve 出 `{ status, headers, body, truncated }`——`status` 是数字状态
 | 单请求超时 | 10 秒 |
 | 并发请求数 | 8，全部插件共享 |
 | 最大重定向 | 30 跳 |
+
+### `flux.auth`
+
+**仅当** manifest 声明 `permissions: ["auth"]` 时可用——否则 `flux.auth` 为 `undefined`。管理宿主持久化的插件认证凭据（Cookie / Bearer token / HTTP Basic / 自定义请求头），供 `flux.fetch` 自动复用。凭据不放在插件自己的 `flux.storage` 里，避免每个插件重复实现持久化和过期判断。
+
+- `flux.auth.save(profile)` → `Promise<string>`——写入或替换一份凭据，返回规范化后的 `authRef`。`profile.site` 必填，接受完整 URL 或裸 `host[:port]`（裸 host 默认按 `https` 规范化——要登记一个明确允许明文的站点，必须自己传 `"http://host"`）。`authRef` 省略时按 `插件ID::规范化站点` 自动生成；显式传入时必须等于该规范化结果，否则 reject。
+- `flux.auth.get(authRef)` → `Promise<profile | null>`——读回一份凭据；`authRef` 不属于当前插件时 reject。
+- `flux.auth.remove(authRef)` → `Promise<void>`——删除一份凭据；`authRef` 必须属于当前插件（前缀 `插件ID::`）。
+
+`profile` 字段（`save`/`get` 共用）：
+
+| 字段 | 说明 |
+|---|---|
+| `site` | 站点键，见上文。**含 scheme**——同一 host 的 `http`/`https` 是两个不同站点，`https` 登录建立的凭据不会被自动复用到 `http` 请求（防明文中间人窃取）。 |
+| `kind` | `basic` / `cookie` / `bearer` / `headers` / `session`，仅描述用途，宿主按下面的注入规则处理，不校验取值。 |
+| `cookies` | 注入为 `Cookie` 请求头（已有同名 header 时不覆盖）。 |
+| `accessToken` | 注入为 `Authorization: Bearer <accessToken>`（已有 `Authorization` 时不覆盖）。 |
+| `username` / `password` | `kind === "basic"` 时注入 `Authorization: Basic <base64>`（已有 `Authorization` 时不覆盖）。 |
+| `headers` | 额外请求头，逐个覆盖写入（优先级最高，会覆盖上面几项生成的同名 header）。 |
+| `account` / `refreshToken` / `expiresAt` / `refreshAt` / `metadata` | 平台自定义元数据，宿主只存储不解释；`expiresAt` 为 Unix 秒，超过后凭据视为过期——隐式引用（未显式传 `authRef` 的 `flux.fetch`）静默跳过注入，显式 `authRef` 则 reject（`authentication_required`）。 |
+
+`flux.fetch` 的 `authRef` 解析规则：显式传入时若找不到凭据或凭据已过期，reject 并带 `authentication_required` 前缀；省略（或空串）时按插件+站点自动推导，找不到或过期都静默跳过注入，请求正常发出（不带认证信息）。
 
 ### `flux.storage`
 
@@ -242,11 +294,11 @@ globalThis.resolve = async (ctx) => {
 
 每次调用都在全新的 QuickJS 上下文里跑：调用之间没有任何全局变量残留，没有定时器和 DOM API，脚本按 classic script 加载（顶层 `function` 声明自动成为全局函数；`export` 语法不能用）。
 
-| 预算 | resolve | hooks |
-|---|---|---|
-| 超时 | 10 秒（manifest `timeoutMs` 可改，30 秒硬顶） | 5 秒 |
-| 内存 | 64 MB | 32 MB |
+| 预算 | resolve | hooks | authenticate |
+|---|---|---|---|
+| 超时 | 10 秒（manifest `timeoutMs` 可改，30 秒硬顶） | 5 秒 | 30 秒（manifest `auth.timeoutMs` 可改，30 秒硬顶；与 resolve 完全独立的预算与并发池，登录轮询不会挤占 resolve） |
+| 内存 | 64 MB | 32 MB | 64 MB |
 
-连续 3 次超时或内存超限会触发熔断：插件被自动禁用，应用弹出提示，直到手动重新启用为止。
+连续 3 次超时或内存超限会触发熔断：插件被自动禁用，应用弹出提示，直到手动重新启用为止（`authenticate` 不计入这个熔断计数）。
 
 获得 `permissions: ["ffmpeg"]`（且命中产物钩子，即 `onDone`）或 `permissions: ["ytdlp"]`（任意 hook）的插件会拿到抬高的墙钟预算（约 30 分钟），好让长时外部工具跑完；30 秒 CPU 顶仍约束 JavaScript 本身——等待子进程的时间不计入。`resolve` 始终用自己的预算（默认 10 秒，`timeoutMs` 可改，30 秒硬顶），即便 `flux.ytdlp` 在那里也能用——长任务请按此规划 `run()` 调用。

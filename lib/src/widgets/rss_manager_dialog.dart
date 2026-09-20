@@ -357,7 +357,7 @@ class _RssManagerDialogState extends State<RssManagerDialog> {
   Widget _buildBasicTab(S s, AppColors c) {
     final providerOptions = <String, String>{'rss': 'RSS'};
     for (final plugin in widget.pluginProvider.plugins) {
-      if (!plugin.enabled) continue;
+      if (!plugin.enabled || plugin.loadStatus == 'Failed') continue;
       for (final id in plugin.subscriptionProviderIds) {
         providerOptions.putIfAbsent(id, () => '${plugin.name} · $id');
       }

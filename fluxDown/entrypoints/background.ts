@@ -56,14 +56,19 @@ import {
   matchSniffRule,
   classifyResource,
   extractFilenameFromUrl,
+  normalizeUrlForDedup,
 } from "@/utils/resource-types";
 import type { ResourceMessagePayload } from "@/utils/resource-types";
+import { normalizeDashManifest } from "@/utils/dash-manifest";
 import type { DashManifest } from "@/utils/dash-manifest";
+import {
+  buildMediaCandidates,
+  countMediaCandidateRows,
+} from "@/utils/media-candidates";
 import {
   addResources,
   addSniffedResource,
   getResourcesForTab,
-  getResourceCountForTab,
   clearResourcesForTab,
   updateBadgeForTab,
   initTabLifecycleListeners,
@@ -216,16 +221,142 @@ export default defineBackground(() => {
   initTabLifecycleListeners();
 
   // ===== DASH manifest tab 级存储（权威清晰度 + 轨道 URL，仿 resource-store）=====
-  // 每 tab 只保留最新一份：manifest 是页面当前播放内容的完整清晰度列表，
-  // 旧的一份在新 manifest 到达后已无参考价值（不同分片会话失效）。
-  const tabDashManifests = new Map<number, DashManifest>();
+  // 同一页面可能同时存在多个播放器/播放会话，按规范化后的 manifest URL 保留
+  // 一个有界集合，由 UI 再投影为多个视频候选。
+  const tabDashManifests = new Map<number, Map<string, DashManifest>>();
+  const MAX_DASH_MANIFESTS_PER_TAB = 8;
+  const tabPageUrls = new Map<number, string>();
+  const tabResourceVersions = new Map<number, number>();
+  const tabManifestVersions = new Map<number, number>();
+  const tabCandidateCache = new Map<number, {
+    resourceVersion: number;
+    manifestVersion: number;
+    candidates: ReturnType<typeof buildMediaCandidates>;
+  }>();
+
+  function bumpTabVersion(versions: Map<number, number>, tabId: number): void {
+    versions.set(tabId, (versions.get(tabId) || 0) + 1);
+    tabCandidateCache.delete(tabId);
+  }
+
+  function clearTabProjection(tabId: number): void {
+    tabDashManifests.delete(tabId);
+    clearResourcesForTab(tabId);
+    bumpTabVersion(tabResourceVersions, tabId);
+    bumpTabVersion(tabManifestVersions, tabId);
+  }
+
+  /**
+   * origin+pathname+search（忽略 hash）。Chrome 的 `tabs.onUpdated` 对
+   * fragment 导航（`#comment-123`）和 `history.pushState`/`replaceState`
+   * 都会发出带 `changeInfo.url`、不带 `status` 的事件；同页面播放器点锚点/
+   * 用 replaceState 写回状态时 hash 常变而内容不变，若按原始 URL 整串比较
+   * 会把已嗅探到的分片/清单/认证上下文误判为"换页"而整体清空。
+   */
+  function pageUrlKey(url: string): string {
+    try {
+      const u = new URL(url);
+      return `${u.origin}${u.pathname}${u.search}`;
+    } catch {
+      return url;
+    }
+  }
+
+  /** Also catches history.pushState navigations reported by content scripts. */
+  function syncTabPageUrl(tabId: number, pageUrl: string): void {
+    if (!pageUrl) return;
+    const previous = tabPageUrls.get(tabId);
+    if (previous && pageUrlKey(previous) !== pageUrlKey(pageUrl)) clearTabProjection(tabId);
+    tabPageUrls.set(tabId, pageUrl);
+  }
+
+  function tabCandidates(tabId: number): ReturnType<typeof buildMediaCandidates> {
+    const resourceVersion = tabResourceVersions.get(tabId) || 0;
+    const manifestVersion = tabManifestVersions.get(tabId) || 0;
+    const cached = tabCandidateCache.get(tabId);
+    if (
+      cached &&
+      cached.resourceVersion === resourceVersion &&
+      cached.manifestVersion === manifestVersion
+    ) {
+      return cached.candidates;
+    }
+    const resources = getResourcesForTab(tabId);
+    const stored = tabDashManifests.get(tabId);
+    const manifests = stored
+      ? Array.from(stored.entries()).map(([url, manifest]) => ({ url, manifest }))
+      : [];
+    const candidates = buildMediaCandidates(resources, {
+      fallbackTitle: "Video",
+      pageUrl: resources.find((resource) => resource.pageUrl)?.pageUrl,
+      manifests,
+    });
+    tabCandidateCache.set(tabId, { resourceVersion, manifestVersion, candidates });
+    return candidates;
+  }
+
+  /**
+   * 计算资源面板实际展示的行数：媒体按候选/清晰度聚合，已被候选代表的
+   * 原始视频、音频和分片不重复计数；非媒体资源各占一行。
+   */
+  function displayedResourceCount(tabId: number): number {
+    const resources = getResourcesForTab(tabId);
+    const candidates = tabCandidates(tabId);
+    const representedIds = new Set(
+      candidates.flatMap((candidate) => candidate.rawResourceIds),
+    );
+    const rawCount = resources.filter(
+      (resource) =>
+        resource.type !== "video" &&
+        resource.type !== "stream" &&
+        !representedIds.has(resource.id),
+    ).length;
+    return countMediaCandidateRows(candidates) + rawCount;
+  }
+
+  const pendingBadgeUpdates = new Map<number, {
+    timer: ReturnType<typeof setTimeout>;
+    waiters: Array<() => void>;
+  }>();
+
+  function updateDisplayedBadgeForTab(tabId: number): Promise<void> {
+    return new Promise((resolve) => {
+      const pending = pendingBadgeUpdates.get(tabId);
+      if (pending) {
+        pending.waiters.push(resolve);
+        return;
+      }
+      const timer = setTimeout(() => {
+        const current = pendingBadgeUpdates.get(tabId);
+        pendingBadgeUpdates.delete(tabId);
+        try {
+          void updateBadgeForTab(tabId, displayedResourceCount(tabId)).catch((error) => {
+            console.warn("[FluxDown] failed to update displayed badge:", error);
+          });
+        } catch (error) {
+          console.warn("[FluxDown] failed to compute displayed badge count:", error);
+        }
+        for (const waiter of current?.waiters || [resolve]) waiter();
+      }, 50);
+      pendingBadgeUpdates.set(tabId, { timer, waiters: [resolve] });
+    });
+  }
+
   browser.tabs.onRemoved.addListener((tabId) => {
     tabDashManifests.delete(tabId);
+    tabPageUrls.delete(tabId);
+    tabResourceVersions.delete(tabId);
+    tabManifestVersions.delete(tabId);
+    tabCandidateCache.delete(tabId);
+    const pending = pendingBadgeUpdates.get(tabId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingBadgeUpdates.delete(tabId);
+      for (const resolve of pending.waiters) resolve();
+    }
   });
   browser.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === "loading" && changeInfo.url) {
-      tabDashManifests.delete(tabId);
-    }
+    if (changeInfo.url) syncTabPageUrl(tabId, changeInfo.url);
   });
 
   // ===== 右键菜单：即使关闭自动拦截也可以手动发送链接到 FluxDown 下载 =====
@@ -714,7 +845,8 @@ export default defineBackground(() => {
             mainHeaders,
           );
           if (added > 0) {
-            updateBadgeForTab(details.tabId);
+            bumpTabVersion(tabResourceVersions, details.tabId);
+            updateDisplayedBadgeForTab(details.tabId);
             notifyContentScript(details.tabId);
           }
         }
@@ -807,7 +939,8 @@ export default defineBackground(() => {
 
         if (added > 0) {
           // 更新 Badge
-          updateBadgeForTab(details.tabId);
+          bumpTabVersion(tabResourceVersions, details.tabId);
+          updateDisplayedBadgeForTab(details.tabId);
           // 推送给 Content Script UI
           notifyContentScript(details.tabId);
         }
@@ -844,12 +977,16 @@ export default defineBackground(() => {
    * 向指定 tab 的 Content Script 推送最新 DASH manifest（权威清晰度 + 轨道 URL）
    */
   async function notifyDashManifest(tabId: number): Promise<void> {
-    const manifest = tabDashManifests.get(tabId);
-    if (!manifest) return;
+    const stored = tabDashManifests.get(tabId);
+    const dashManifests = stored
+      ? Array.from(stored.entries()).map(([url, manifest]) => ({ url, manifest }))
+      : [];
     try {
       await browser.tabs.sendMessage(tabId, {
         action: "dashManifestUpdated",
-        manifest,
+        // `manifest` 保留给旧版 content script；新 UI 使用有界数组。
+        manifest: dashManifests[dashManifests.length - 1]?.manifest,
+        dashManifests,
       });
     } catch {
       // Content script 可能还未注入
@@ -2438,27 +2575,19 @@ export default defineBackground(() => {
     // 限制：不经过 NMH，Cookie/Headers/method/body 无法携带，适用于公开文件。
     {
       const protocolSettings = await getCachedSettings();
-      if (protocolSettings.enableFluxdownProtocol) {
-        if (audioUrl) {
-          // 音视频分轨对（video+audio mux）无法经协议 URL 表达 —— 丢弃
-          // audioUrl 会下成无声视频。返回失败让调用方回退浏览器下载。
-          console.warn(
-            "[FluxDown] protocol mode cannot carry audioUrl; falling back to browser download",
+      // fluxdown:// 只承载单 URL；音视频分轨对必须继续走 NMH/远程，
+      // 否则音频轨会被静默丢弃，最终得到无声视频。
+      if (protocolSettings.enableFluxdownProtocol && !audioUrl) {
+        const ok = await openProtocolUrl(url, filename);
+        await incrementStat(ok ? "sent" : "failed");
+        if (ok && (await shouldNotifyChannel("local"))) {
+          const shownName = filename || extractCleanFilename(url) || url;
+          notify(
+            t("notify.downloadSent"),
+            t("notify.sentToFluxDown", { name: shownName }),
           );
-          await incrementStat("failed");
-          return false;
-        } else {
-          const ok = await openProtocolUrl(url, filename);
-          await incrementStat(ok ? "sent" : "failed");
-          if (ok && (await shouldNotifyChannel("local"))) {
-            const shownName = filename || extractCleanFilename(url) || url;
-            notify(
-              t("notify.downloadSent"),
-              t("notify.sentToFluxDown", { name: shownName }),
-            );
-          }
-          return ok;
         }
+        return ok;
       }
     }
 
@@ -2718,6 +2847,43 @@ export default defineBackground(() => {
   }
 
   // ===== 统一消息处理（Popup + Content Script） =====
+  /**
+   * 查找资源存储中的原始请求。
+   *
+   * Popup 发来的 DASH 轨道 URL 通常与 resource-store 中的 URL 相同，
+   * 但签名参数顺序或已知的缓存参数可能不同。resource-store 使用的也是
+   * normalizeUrlForDedup，因此下载兜底查找必须使用同一套归一化规则，
+   * 否则嗅探到的 Cookie/Referer 等认证上下文会在 Popup 路径丢失。
+   */
+  function findStoredResource(
+    stored: ReturnType<typeof getResourcesForTab>,
+    url: string,
+  ): ReturnType<typeof getResourcesForTab>[number] | undefined {
+    const exact = stored.find((resource) => resource.url === url);
+    if (exact) return exact;
+    const normalizedUrl = normalizeUrlForDedup(url);
+    return stored.find(
+      (resource) => normalizeUrlForDedup(resource.url) === normalizedUrl,
+    );
+  }
+
+  function mergeStoredHeaders(
+    primary: Record<string, string> | undefined,
+    secondary: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    if (!primary && !secondary) return undefined;
+    const merged = { ...(secondary || {}), ...(primary || {}) };
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  function sameOrigin(firstUrl: string, secondUrl: string): boolean {
+    try {
+      return new URL(firstUrl).origin === new URL(secondUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
   async function handleMessage(
     message: any,
     sender: chrome.runtime.MessageSender,
@@ -2830,6 +2996,8 @@ export default defineBackground(() => {
 
         const pageUrl = sender.tab?.url || sender.url || "";
         const payloads: ResourceMessagePayload[] = message.resources || [];
+        const reportedPageUrl = payloads.find((payload) => payload.pageUrl)?.pageUrl || pageUrl;
+        syncTabPageUrl(tabId, reportedPageUrl);
 
         if (payloads.length === 0) return { success: true, added: 0 };
 
@@ -2837,12 +3005,24 @@ export default defineBackground(() => {
         const rdSettings = await getCachedSettings();
         if (!rdSettings.resourceSniffing) return { success: true, added: 0 };
 
-        const added = addResources(tabId, pageUrl, payloads);
+        const added = addResources(tabId, reportedPageUrl, payloads);
         if (added > 0) {
-          await updateBadgeForTab(tabId);
+          bumpTabVersion(tabResourceVersions, tabId);
+          await updateDisplayedBadgeForTab(tabId);
           await notifyContentScript(tabId);
         }
         return { success: true, added };
+      }
+
+      case "pageUrlChanged": {
+        const tabId = sender.tab?.id;
+        const pageUrl = typeof message.pageUrl === "string" ? message.pageUrl : "";
+        if (!tabId || tabId < 0 || !pageUrl) return { success: false };
+        syncTabPageUrl(tabId, pageUrl);
+        await updateDisplayedBadgeForTab(tabId);
+        await notifyContentScript(tabId);
+        await notifyDashManifest(tabId);
+        return { success: true };
       }
 
       // --- Content Script: DASH manifest 检测上报（权威清晰度 + 轨道 URL）---
@@ -2853,11 +3033,29 @@ export default defineBackground(() => {
         // 资源嗅探开关：关闭时丢弃（旧页面的 fetch 拦截脚本可能仍在运行）
         const dmSettings = await getCachedSettings();
         if (!dmSettings.resourceSniffing) return { success: false };
-        const manifest = message.manifest as DashManifest | undefined;
-        if (!manifest || (!manifest.video?.length && !manifest.audio?.length)) {
+        const manifest = normalizeDashManifest(message.manifest);
+        if (!manifest) {
           return { success: false };
         }
-        tabDashManifests.set(tabId, manifest);
+        syncTabPageUrl(tabId, typeof message.pageUrl === "string" ? message.pageUrl : sender.tab?.url || "");
+        const manifestUrl =
+          typeof message.manifestUrl === "string" && message.manifestUrl
+            ? normalizeUrlForDedup(message.manifestUrl)
+            : "__legacy__";
+        let stored = tabDashManifests.get(tabId);
+        if (!stored) {
+          stored = new Map();
+          tabDashManifests.set(tabId, stored);
+        }
+        stored.delete(manifestUrl);
+        stored.set(manifestUrl, manifest);
+        while (stored.size > MAX_DASH_MANIFESTS_PER_TAB) {
+          const oldest = stored.keys().next().value;
+          if (typeof oldest !== "string") break;
+          stored.delete(oldest);
+        }
+        bumpTabVersion(tabManifestVersions, tabId);
+        await updateDisplayedBadgeForTab(tabId);
         await notifyDashManifest(tabId);
         return { success: true };
       }
@@ -2869,10 +3067,17 @@ export default defineBackground(() => {
         const tabId =
           sender.tab?.id ??
           (typeof message.tabId === "number" ? message.tabId : -1);
-        if (!tabId || tabId < 0) return { resources: [], dashManifest: null };
+        if (!tabId || tabId < 0) {
+          return { resources: [], dashManifest: null, dashManifests: [] };
+        }
+        const stored = tabDashManifests.get(tabId);
+        const dashManifests = stored
+          ? Array.from(stored.entries()).map(([url, manifest]) => ({ url, manifest }))
+          : [];
         return {
           resources: getResourcesForTab(tabId),
-          dashManifest: tabDashManifests.get(tabId) ?? null,
+          dashManifest: dashManifests[dashManifests.length - 1]?.manifest ?? null,
+          dashManifests,
         };
       }
 
@@ -2886,18 +3091,30 @@ export default defineBackground(() => {
         // 从资源存储中查找匹配的资源，获取嗅探时保存的 cookies/headers/fileSize。
         // 用户从资源面板点击下载时，原始请求的 requestHeaderCache 可能已过期，
         // 必须依赖持久存储的认证信息才能成功下载需要认证的资源（如政务站点 PDF）。
-        const dlTabId = sender.tab?.id;
+        // Popup 没有 sender.tab；它会把打开资源面板时的活跃 tabId 一并带回。
+        // Content Script 仍优先使用 sender.tab，避免信任页面脚本自报的 tabId。
+        const dlTabId =
+          sender.tab?.id ??
+          (typeof message.tabId === "number" ? message.tabId : undefined);
         let resCookies: string | undefined;
         let resHeaders: Record<string, string> | undefined;
         let resFileSize: number | undefined;
-        if (dlTabId && dlTabId >= 0) {
+        if (typeof dlTabId === "number" && dlTabId >= 0) {
           const tabRes = getResourcesForTab(dlTabId);
-          const matched = tabRes.find((r) => r.url === url);
-          if (matched) {
-            resCookies = matched.cookies;
-            resHeaders = matched.headers;
-            resFileSize = matched.size > 0 ? matched.size : undefined;
-          }
+          const matched = findStoredResource(tabRes, url);
+          const audioMatched =
+            typeof message.audioUrl === "string" && message.audioUrl
+              && sameOrigin(url, message.audioUrl)
+              ? findStoredResource(tabRes, message.audioUrl)
+              : undefined;
+          resCookies = matched?.cookies || audioMatched?.cookies;
+          resHeaders = mergeStoredHeaders(matched?.headers, audioMatched?.headers);
+          resFileSize =
+            matched && matched.size > 0
+              ? matched.size
+              : audioMatched && audioMatched.size > 0
+                ? audioMatched.size
+                : undefined;
         }
         // IDM/NDM 策略：对于从资源面板 / 嗅探触发的下载，必须跳过 probe。
         // 一次性 token URL（如 ctbpsp.com）的 token 已被浏览器消费，
@@ -2906,7 +3123,7 @@ export default defineBackground(() => {
         // fileSize = -1 → 大小未知但确认是下载资源，跳过 probe
         // fileSize = 0/undefined → 正常 probe（仅限手动添加的 URL）
         const effectiveFileSize = message.fileSize || resFileSize || -1;
-        await sendToFluxDown(
+        const sent = await sendToFluxDown(
           url,
           message.referrer,
           message.filename,
@@ -2918,7 +3135,10 @@ export default defineBackground(() => {
           // 离散音视频轨对：内容脚本清晰度选择小窗传来的音频轨 URL（可选）。
           message.audioUrl as string | undefined,
         );
-        return { success: true };
+        return {
+          success: sent,
+          message: sent ? undefined : t("notify.sendFailed"),
+        };
       }
 
       // --- Content Script UI: 批量下载多个资源 ---
@@ -2930,15 +3150,31 @@ export default defineBackground(() => {
       // batch_download action 的桌面应用会自动回退为逐条 download 循环。
       // 远程通道（fluxdown_server）：单次 POST /download/batch 发送全部条目。
       case "batchDownload": {
-        const items = message.items as Array<{
+        const rawItems = message.items as Array<{
           url: string;
+          audioUrl?: string;
           referrer?: string;
           filename?: string;
           fileSize?: number;
           mimeType?: string;
         }>;
-        if (!Array.isArray(items) || items.length === 0) {
+        if (!Array.isArray(rawItems) || rawItems.length === 0) {
           return { success: false, message: "No items" };
+        }
+
+        // 同一个候选可能同时由弹窗和页内面板触发，或因快速双击被重复
+        // 放进同一批次。相同视频轨 + 音频轨只允许创建一个任务；不同
+        // 清晰度/编码的 URL 仍然保留，用户明确选中多档时可以批量下载。
+        const seenBatchItems = new Set<string>();
+        const items = rawItems.filter((item) => {
+          if (!item?.url) return false;
+          const key = `${item.url}\u0000${item.audioUrl || ""}`;
+          if (seenBatchItems.has(key)) return false;
+          seenBatchItems.add(key);
+          return true;
+        });
+        if (items.length === 0) {
+          return { success: false, message: "No valid items" };
         }
 
         // === fluxdown:// 协议模式：批量走逐条协议唤起 ===
@@ -2947,7 +3183,12 @@ export default defineBackground(() => {
         // 认证信息无法携带。
         {
           const protoSettings = await getCachedSettings();
-          if (protoSettings.enableFluxdownProtocol) {
+          // fluxdown:// 只承载单 URL；带 audioUrl 的聚合视频必须走 NMH/远程，
+          // 避免批量下载时静默丢失音频轨。
+          if (
+            protoSettings.enableFluxdownProtocol &&
+            !items.some((item) => item.audioUrl)
+          ) {
             let batchProtoSent = 0;
             for (const item of items) {
               const ok = await openProtocolUrl(item.url, item.filename);
@@ -2975,9 +3216,13 @@ export default defineBackground(() => {
         // Bug R4-6 修复：并发提取所有 URL 的 cookies，避免串行 N×500ms 超时
         // 需要排除的浏览器内部头（Cookie 已单独处理）
         // 预加载当前 tab 的资源列表，用于 cookies/headers 兜底查找
-        const batchTabId = sender.tab?.id;
+        const batchTabId =
+          sender.tab?.id ??
+          (typeof message.tabId === "number" ? message.tabId : undefined);
         const batchTabResources =
-          batchTabId && batchTabId >= 0 ? getResourcesForTab(batchTabId) : [];
+          typeof batchTabId === "number" && batchTabId >= 0
+            ? getResourcesForTab(batchTabId)
+            : [];
 
         const batchItems: BatchDownloadItem[] = await Promise.all(
           items.map(async (item) => {
@@ -3005,24 +3250,23 @@ export default defineBackground(() => {
             }
             // 策略 3：从资源存储中恢复认证信息（兜底）
             if (!cookieString || Object.keys(extraHeaders).length === 0) {
-              const matchedRes = batchTabResources.find(
-                (r) => r.url === item.url,
-              );
-              if (matchedRes) {
-                if (!cookieString && matchedRes.cookies) {
-                  cookieString = matchedRes.cookies;
-                }
-                if (
-                  Object.keys(extraHeaders).length === 0 &&
-                  matchedRes.headers &&
-                  Object.keys(matchedRes.headers).length > 0
-                ) {
-                  extraHeaders = matchedRes.headers;
-                }
+              const matchedRes = findStoredResource(batchTabResources, item.url);
+              const audioMatchedRes = item.audioUrl
+                && sameOrigin(item.url, item.audioUrl)
+                ? findStoredResource(batchTabResources, item.audioUrl)
+                : undefined;
+              if (!cookieString) {
+                cookieString = matchedRes?.cookies || audioMatchedRes?.cookies || "";
+              }
+              if (Object.keys(extraHeaders).length === 0) {
+                extraHeaders =
+                  mergeStoredHeaders(matchedRes?.headers, audioMatchedRes?.headers) ||
+                  {};
               }
             }
             return {
               url: item.url,
+              audioUrl: item.audioUrl,
               referrer: item.referrer || "",
               filename: item.filename,
               cookies: cookieString,
@@ -3034,7 +3278,12 @@ export default defineBackground(() => {
           }),
         );
 
-        // 单次 HTTP POST 发送所有 URL（用换行符连接）
+        // NMH 的 batch_download 条目与 DownloadRequest 同构并携带逐条
+        // audioUrl；hub 侧按 URL 缓存该字段，并在快速下载对话框的单条确认
+        // （ConfirmExternalDownload）与多条确认（BatchCreateTask）两条路径下
+        // 都按 URL 回填，故本地批量始终保持一次往返、且不丢音轨。只有远程
+        // 旧版 /download/batch 不支持该字段，路由层才将带音频条目降级为
+        // 远程单条请求（见 remoteSendBatchPreservingAudio）。
         const response = await sendBatchDownloadRequest(batchItems);
         const batchNotifyOk = await shouldNotifyChannel(response.channel);
         if (response.success) {
@@ -3196,21 +3445,87 @@ export default defineBackground(() => {
   }
 
   /**
-   * 将字节数组解码为字符串：优先 UTF-8，失败时回退 GBK（老旧中文服务器常见），
-   * 双失败返回 `null`。与 Rust 引擎 `decode_bytes_utf8_or_gbk` 保持一致的策略，
+   * 将字节数组解码为字符串：优先 UTF-8，失败时兼容 GBK / Big5（老旧中文
+   * 服务器常见），双失败返回 `null`。与 Rust 引擎保持一致的策略，
    * 避免浏览器插件与桌面端对同一响应头解析出不同的文件名。
    */
-  function decodeBytesUtf8OrGbk(bytes: Uint8Array): string | null {
-    try {
-      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch {
-      // fallthrough
+  type LegacyFilenameCharset = "utf-8" | "gbk" | "big5";
+
+  function normalizeLegacyFilenameCharset(
+    charset: string | undefined,
+  ): LegacyFilenameCharset | undefined {
+    const normalized = charset?.trim().replace(/^"+|"+$/g, "").toLowerCase();
+    if (!normalized) return undefined;
+    if (normalized === "utf-8" || normalized === "utf8") return "utf-8";
+    if (["gbk", "gb2312", "gb18030", "cp936"].includes(normalized)) {
+      return "gbk";
     }
+    if (
+      ["big5", "big5-hkscs", "cp950", "windows-950"].includes(normalized)
+    ) {
+      return "big5";
+    }
+    return undefined;
+  }
+
+  // 写成 \u{...} 转义而非字面字符：假名/CJK/私用区字符在编辑器与格式化
+  // 工具里容易被当成不可见字符吞掉，区间端点一旦丢失就退化成匹配连字符。
+  const KANA_RE = /[\u{3040}-\u{30ff}]/u;
+  const CJK_RE = /[\u{4e00}-\u{9fff}]/u;
+  const PUA_RE = /[\u{e000}-\u{f8ff}]/u;
+
+  function filenameEncodingScore(value: string): number {
+    let score = 0;
+    for (const ch of value) {
+      if (/\p{Cc}/u.test(ch)) score -= 8;
+      else if (KANA_RE.test(ch)) score -= 5;
+      else if (CJK_RE.test(ch)) score += 2;
+      else if (ch === "\ufffd") score -= 10;
+    }
+    return score;
+  }
+
+  function hasStrongLegacyMojibake(value: string): boolean {
+    return [...value].some(
+      (ch) =>
+        /\p{Cc}/u.test(ch) ||
+        KANA_RE.test(ch) ||
+        PUA_RE.test(ch) ||
+        ch === "\ufffd",
+    );
+  }
+
+  function tryDecode(bytes: Uint8Array, label: LegacyFilenameCharset): string | null {
     try {
-      return new TextDecoder("gbk", { fatal: true }).decode(bytes);
+      return new TextDecoder(label, { fatal: true }).decode(bytes);
     } catch {
       return null;
     }
+  }
+
+  function decodeBytesUtf8OrChineseLegacy(
+    bytes: Uint8Array,
+    charset?: string,
+  ): string | null {
+    const preferred = normalizeLegacyFilenameCharset(charset);
+    if (preferred === "gbk" || preferred === "big5") {
+      // 显式声明的字符集优先；解码失败返回 null，由调用方决定是否回退到
+      // 下一个 filename 参数（与 Rust 引擎 extract_from_content_disposition 一致）。
+      return tryDecode(bytes, preferred);
+    }
+
+    const utf8 = tryDecode(bytes, "utf-8");
+    if (utf8 !== null) return utf8;
+    // A mislabeled UTF-8 filename may still contain legacy Chinese bytes.
+    // Keep the compatibility fallback below for that non-conforming case.
+    const gbk = tryDecode(bytes, "gbk");
+    const big5 = tryDecode(bytes, "big5");
+    if (gbk === null) return big5;
+    if (big5 === null) return gbk;
+    return hasStrongLegacyMojibake(gbk) &&
+      filenameEncodingScore(big5) > filenameEncodingScore(gbk)
+      ? big5
+      : gbk;
   }
 
   /**
@@ -3254,16 +3569,21 @@ export default defineBackground(() => {
    *   产生重音拉丁字母乱码。
    *
    * 纯 ASCII 值直接返回，避免无谓的字节往返；否则按字节展开
-   * （percent-decode + Latin-1 还原）后用 UTF-8/GBK 解码，失败则回退原值。
+   * （percent-decode + Latin-1 还原）后用 UTF-8/GBK/Big5 解码。
+   * 解码失败返回 `null`（显式 charset 解码失败或候选编码全部不接受该字节），
+   * 由调用方决定回退到原值还是下一个 filename 参数。
    */
-  function decodeDispositionFilenameValue(raw: string): string {
+  function decodeDispositionFilenameValue(
+    raw: string,
+    charset?: string,
+  ): string | null {
     const trimmed = raw.trim();
     if (!trimmed || !/[%\u0080-\uffff]/.test(trimmed)) {
       return trimmed;
     }
     const bytes = percentDecodeToBytes(trimmed);
-    const decoded = decodeBytesUtf8OrGbk(bytes);
-    return decoded && decoded.trim() ? decoded : trimmed;
+    const decoded = decodeBytesUtf8OrChineseLegacy(bytes, charset);
+    return decoded && decoded.trim() ? decoded : null;
   }
 
   /**
@@ -3293,15 +3613,17 @@ export default defineBackground(() => {
     if (!disposition) return "";
 
     // 优先尝试 filename*（RFC 5987 编码：charset'lang'percent-encoded-name）。
-    // charset 字段按理应决定解码方式，这里统一走 UTF-8 优先 / GBK 回退
-    // （老旧中文服务器常声明 UTF-8 却实际发送 GBK），与 filename= 分支
-    // 及 Rust 引擎 extract_from_content_disposition 保持一致。
+    // charset 字段优先决定解码方式；未声明或声明不可靠时使用 UTF-8 优先、
+    // GBK/Big5 候选探测，与 filename= 分支及 Rust 引擎保持一致。
+    // charset 只允许 token 字符，避免在畸形头（`filename*=x.txt; note=a'b'c`）
+    // 上跨参数边界匹配；声明字符集解码失败时回退到 filename=（同 Rust 侧）。
     const starMatch = disposition.match(
-      /filename\*\s*=\s*[^']*'[^']*'([^;]+)/i,
+      /filename\*\s*=\s*"?([A-Za-z0-9_\-]*)'[^';"]*'([^;"]+)"?/i,
     );
     if (starMatch) {
       const decoded = decodeDispositionFilenameValue(
-        stripSurroundingQuotes(starMatch[1]),
+        stripSurroundingQuotes(starMatch[2]),
+        starMatch[1],
       );
       if (decoded) return decoded;
     }
@@ -3309,15 +3631,14 @@ export default defineBackground(() => {
     // 再尝试 filename="..."（带引号）
     const quotedMatch = disposition.match(/filename\s*=\s*"(.+?)"/i);
     if (quotedMatch) {
-      return decodeDispositionFilenameValue(quotedMatch[1]);
+      return decodeDispositionFilenameValue(quotedMatch[1]) ?? quotedMatch[1].trim();
     }
 
     // 最后尝试 filename=...（无引号）
     const plainMatch = disposition.match(/filename\s*=\s*([^\s;]+)/i);
     if (plainMatch) {
-      return decodeDispositionFilenameValue(
-        stripSurroundingQuotes(plainMatch[1]),
-      );
+      const plain = stripSurroundingQuotes(plainMatch[1]);
+      return decodeDispositionFilenameValue(plain) ?? plain;
     }
 
     return "";
