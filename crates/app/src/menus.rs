@@ -2,15 +2,17 @@
 
 use fluxdown_ui_downloads::actions as dl;
 use fluxdown_ui_i18n::Translator;
-use gpui::{App, Entity, KeyBinding, Menu, MenuItem, SharedString};
+use gpui::{App, Entity, KeyBinding, Menu, MenuItem, SharedString, Window};
 use gpui_component::{GlobalState, WindowExt as _, menu::AppMenuBar};
 
 use crate::{
     actions::{
-        About, CheckUpdate, OpenLogsFolder, OpenSettings, OpenWebsite, Quit, ShowMainWindow,
+        About, BringAllToFront, CheckUpdate, CloseWindow, Hide, HideOthers, MinimizeWindow,
+        OpenLogsFolder, OpenSettings, OpenWebsite, Quit, ShowAll, ShowMainWindow, ToggleFullScreen,
+        ZoomWindow,
     },
     app::Desktop,
-    windows::{WindowKey, WindowRegistry},
+    windows::{WindowKey, WindowRegistry, confirm_active_tasks},
 };
 
 const WEBSITE_URL: &str = "https://fluxdown.zerx.dev";
@@ -24,6 +26,9 @@ fn primary() -> &'static str {
 }
 
 /// 注册全局键位。字母键只在下载页上下文生效（页面内再按聚焦输入框二次拦截）。
+///
+/// macOS 的 ⌘W / ⌘M / ⌘H / ⌃⌘F 由 AppKit 经菜单 key equivalent 分发，gpui 不会自动
+/// 提供；须像 Zed 一样显式绑定并在菜单树里给出对应项。
 pub fn bind_keys(cx: &mut App) {
     let p = primary();
     let dl_ctx = Some(dl::KEY_CONTEXT);
@@ -44,7 +49,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", dl::ClearSelection, dl_ctx),
     ];
     if cfg!(target_os = "macos") {
-        bindings.push(KeyBinding::new("cmd-q", Quit, None));
+        bindings.extend([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-m", MinimizeWindow, None),
+            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
+            KeyBinding::new("cmd-h", Hide, None),
+            KeyBinding::new("alt-cmd-h", HideOthers, None),
+        ]);
     }
     cx.bind_keys(bindings);
 }
@@ -55,12 +67,16 @@ fn t(translator: &Translator, key: &str) -> SharedString {
 
 /// 菜单树（macOS 原生菜单与标题栏菜单栏共用一份）。
 pub fn build_menus(translator: &Translator) -> Vec<Menu> {
-    let mut menus = Vec::with_capacity(6);
+    let mut menus = Vec::with_capacity(7);
     if cfg!(target_os = "macos") {
         menus.push(Menu::new("FluxDown").items([
             MenuItem::action(t(translator, "menuAbout"), About),
             MenuItem::separator(),
             MenuItem::action(t(translator, "menuSettings"), OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action(t(translator, "menuHide"), Hide),
+            MenuItem::action(t(translator, "menuHideOthers"), HideOthers),
+            MenuItem::action(t(translator, "menuShowAll"), ShowAll),
             MenuItem::separator(),
             MenuItem::action(t(translator, "menuQuit"), Quit),
         ]));
@@ -69,8 +85,13 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
         MenuItem::action(t(translator, "menuNewDownload"), dl::NewDownload),
         MenuItem::action(t(translator, "openTorrentFile"), dl::OpenTorrentFile),
     ];
-    if !cfg!(target_os = "macos") {
-        file.push(MenuItem::separator());
+    file.push(MenuItem::separator());
+    if cfg!(target_os = "macos") {
+        file.push(MenuItem::action(
+            t(translator, "menuCloseWindow"),
+            CloseWindow,
+        ));
+    } else {
         file.push(MenuItem::action(t(translator, "menuQuit"), Quit));
     }
     menus.push(Menu::new(t(translator, "menuFile")).items(file));
@@ -96,13 +117,21 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
         MenuItem::action(t(translator, "boostDownload"), dl::ToggleBoostSelected),
         MenuItem::action(t(translator, "menuOpenInWindow"), dl::OpenSelectedInWindow),
     ]));
-    menus.push(Menu::new(t(translator, "menuView")).items([
+    let mut view = vec![
         MenuItem::action(t(translator, "menuCycleDensity"), dl::CycleDensity),
         MenuItem::action(t(translator, "menuCycleGroupBy"), dl::CycleGroupBy),
         MenuItem::action(t(translator, "menuCycleSort"), dl::CycleSort),
         MenuItem::separator(),
         MenuItem::action(t(translator, "menuDetailPanel"), dl::ToggleDetailPanel),
-    ]));
+    ];
+    if cfg!(target_os = "macos") {
+        view.push(MenuItem::separator());
+        view.push(MenuItem::action(
+            t(translator, "menuToggleFullScreen"),
+            ToggleFullScreen,
+        ));
+    }
+    menus.push(Menu::new(t(translator, "menuView")).items(view));
     let mut tools = Vec::with_capacity(4);
     if !cfg!(target_os = "macos") {
         tools.push(MenuItem::action(
@@ -116,6 +145,14 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
         MenuItem::action(t(translator, "menuOpenLogsFolder"), OpenLogsFolder),
     ]);
     menus.push(Menu::new(t(translator, "menuTools")).items(tools));
+    if cfg!(target_os = "macos") {
+        menus.push(Menu::new(t(translator, "menuWindow")).items([
+            MenuItem::action(t(translator, "menuMinimize"), MinimizeWindow),
+            MenuItem::action(t(translator, "menuZoom"), ZoomWindow),
+            MenuItem::separator(),
+            MenuItem::action(t(translator, "menuBringAllToFront"), BringAllToFront),
+        ]));
+    }
     let mut help = vec![MenuItem::action(t(translator, "menuWebsite"), OpenWebsite)];
     if !cfg!(target_os = "macos") {
         help.push(MenuItem::action(t(translator, "menuAbout"), About));
@@ -148,7 +185,7 @@ fn apply_menus(translator: &Entity<Translator>, cx: &mut App) {
     );
 }
 
-/// 应用级动作（不依赖具体窗口）。
+/// 应用级动作（不依赖具体窗口）。窗口级动作作用于当前活动窗口。
 pub fn install_global_actions(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| crate::windows::settings::open(cx));
     cx.on_action(|_: &ShowMainWindow, cx| {
@@ -156,6 +193,16 @@ pub fn install_global_actions(cx: &mut App) {
         cx.activate(true);
     });
     cx.on_action(|_: &Quit, cx| request_quit(cx));
+    cx.on_action(|_: &CloseWindow, cx| WindowRegistry::close_active_window(cx));
+    cx.on_action(|_: &MinimizeWindow, cx| with_active_window(cx, |w| w.minimize_window()));
+    cx.on_action(|_: &ZoomWindow, cx| with_active_window(cx, |w| w.zoom_window()));
+    cx.on_action(|_: &ToggleFullScreen, cx| {
+        with_active_window(cx, |w| w.toggle_fullscreen());
+    });
+    cx.on_action(|_: &Hide, cx| cx.hide());
+    cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
+    cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
     cx.on_action(|_: &OpenWebsite, cx| cx.open_url(WEBSITE_URL));
     cx.on_action(|_: &dl::NewDownload, cx| crate::windows::new_download::open_default(cx));
     cx.on_action(|_: &dl::OpenQueueManager, cx| crate::windows::queue_manager::open(cx));
@@ -164,36 +211,31 @@ pub fn install_global_actions(cx: &mut App) {
     cx.on_action(|_: &About, cx| show_about(cx));
 }
 
+/// 全局动作里操作活动窗口必须 defer：键盘触发时正处于该窗口自己的 update 栈内，
+/// 同步 `handle.update` 拿不到窗口会静默失败（菜单点击不在 update 栈内，所以只有键盘路径失效）。
+fn with_active_window(cx: &mut App, f: impl FnOnce(&Window) + 'static) {
+    cx.defer(move |cx| {
+        if let Some(window) = WindowRegistry::focused_window(cx) {
+            let _ = window.update(cx, |_, window, _| f(window));
+        }
+    });
+}
+
 /// 退出：有活跃任务时先在当前窗口提示「下载将继续由后台服务执行」。
 pub fn request_quit(cx: &mut App) {
-    let active = Desktop::active_task_count(cx);
-    let Some(window) = cx
-        .active_window()
-        .or_else(|| WindowRegistry::handle(cx, &WindowKey::Main))
-        .filter(|_| active > 0)
-    else {
+    if Desktop::active_task_count(cx) == 0 {
         cx.quit();
         return;
-    };
-    let translator = Desktop::global(cx).translator.read(cx).clone();
-    let title = t(&translator, "closeWithActiveTasksTitle");
-    let hint = t(&translator, "closeWithActiveTasksHint");
-    let ok = t(&translator, "menuQuit");
-    let cancel = t(&translator, "cancel");
-    let _ = window.update(cx, |_, window, cx| {
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            dialog
-                .title(title.clone())
-                .description(hint.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok.clone())
-                        .cancel_text(cancel.clone()),
-                )
-                .on_ok(|_, _, cx| {
-                    cx.quit();
-                    true
-                })
+    }
+    cx.defer(|cx| {
+        let Some(window) = WindowRegistry::focused_window(cx)
+            .or_else(|| WindowRegistry::handle(cx, &WindowKey::Main))
+        else {
+            cx.quit();
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            confirm_active_tasks(window, cx, |_, cx| cx.quit());
         });
     });
 }

@@ -11,6 +11,16 @@ actions!(
         CheckUpdate,
         OpenLogsFolder,
         OpenWebsite,
-        About
+        About,
+        /// 关闭当前活动窗口（走该窗口的关闭策略，与原生关闭按钮一致）。
+        CloseWindow,
+        MinimizeWindow,
+        ZoomWindow,
+        ToggleFullScreen,
+        /// macOS：隐藏本应用 / 隐藏其他 / 全部显示 / 前置全部窗口。
+        Hide,
+        HideOthers,
+        ShowAll,
+        BringAllToFront
     ]
 );

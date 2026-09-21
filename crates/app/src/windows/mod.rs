@@ -5,7 +5,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::Rc,
     sync::Arc,
     time::Duration,
@@ -15,9 +15,10 @@ use gpui::{
     AnyWindowHandle, App, Bounds, Context, Entity, Global, Pixels, Point, Render, Size,
     Subscription, Window, WindowBounds, WindowHandle, WindowId, WindowOptions, point, px, size,
 };
+use gpui_component::WindowExt as _;
 use serde_json::{Value, json};
 
-use crate::agent_client::AgentClient;
+use crate::{agent_client::AgentClient, app::Desktop};
 
 pub mod group_detail;
 pub mod main;
@@ -56,6 +57,8 @@ pub struct WindowRegistry {
     open: HashMap<WindowKey, AnyWindowHandle>,
     ids: HashMap<WindowId, WindowKey>,
     resident: bool,
+    /// 正在显示「下载仍在进行」确认框的窗口：重复 ⌘W / ⌘Q 不叠第二个对话框。
+    confirming: HashSet<WindowId>,
     /// 防抖中尚未落盘的窗口边界（退出时强制写一次）。
     pending_bounds: Rc<RefCell<HashMap<&'static str, Value>>>,
     _closed_sub: Subscription,
@@ -73,6 +76,7 @@ impl WindowRegistry {
                 if let Some(key) = registry.ids.remove(&window_id) {
                     registry.open.remove(&key);
                 }
+                registry.confirming.remove(&window_id);
                 registry.should_quit()
             };
             if should_quit {
@@ -94,6 +98,7 @@ impl WindowRegistry {
             open: HashMap::new(),
             ids: HashMap::new(),
             resident: false,
+            confirming: HashSet::new(),
             pending_bounds,
             _closed_sub: closed_sub,
             _quit_sub: quit_sub,
@@ -174,6 +179,45 @@ impl WindowRegistry {
     #[must_use]
     pub fn handle(cx: &App, key: &WindowKey) -> Option<AnyWindowHandle> {
         cx.global::<Self>().open.get(key).copied()
+    }
+
+    /// 窗口 id → 注册 key（未注册的窗口返回 `None`）。
+    #[must_use]
+    pub fn key_of(cx: &App, id: WindowId) -> Option<WindowKey> {
+        cx.global::<Self>().ids.get(&id).cloned()
+    }
+
+    /// 当前获得焦点的窗口。macOS 的 `cx.active_window()` 只认 `NSWindow`，`Floating` /
+    /// `PopUp` 是 `NSPanel`（选择框、快速捕获）会返回 `None`，此时按 gpui 记录的 key 态扫描。
+    /// 只能在 defer 之后调用：正在 update 栈内的窗口不在 `cx.windows` 里，扫描会漏掉它。
+    #[must_use]
+    pub fn focused_window(cx: &mut App) -> Option<AnyWindowHandle> {
+        cx.active_window().or_else(|| {
+            cx.windows().into_iter().find(|handle| {
+                handle
+                    .update(cx, |_, window, _| window.is_window_active())
+                    .unwrap_or(false)
+            })
+        })
+    }
+
+    /// 关闭当前活动窗口：主窗口走 [`main::should_close`] 关闭策略（与原生关闭按钮一致，
+    /// `remove_window` 不会触发 `windowShouldClose:`），其他窗口直接关。
+    ///
+    /// 键盘触发时正处于该窗口自己的 update 栈内（窗口已被从 `cx.windows` 取走），同步
+    /// `handle.update` 会拿不到窗口而静默失败；必须 defer 到本轮 update 结束再操作。
+    pub fn close_active_window(cx: &mut App) {
+        cx.defer(|cx| {
+            let Some(handle) = Self::focused_window(cx) else {
+                return;
+            };
+            let is_main = Self::key_of(cx, handle.window_id()) == Some(WindowKey::Main);
+            let _ = handle.update(cx, |_, window, cx| {
+                if !is_main || main::should_close(window, cx) {
+                    window.remove_window();
+                }
+            });
+        });
     }
 
     /// 托盘已安装 → 无窗口也不退出。变为 `false` 且无窗口 → 退出。
@@ -261,6 +305,43 @@ impl WindowRegistry {
             _ => WindowBounds::Windowed(Bounds::centered(None, default_size, cx)),
         }
     }
+}
+
+/// 「下载仍在进行」确认框：用户确认后执行 `on_ok`（关窗 / 退出）。同一窗口已在提示中
+/// （重复 ⌘W / ⌘Q、再点关闭按钮）则不再叠第二个对话框。
+pub fn confirm_active_tasks(
+    window: &mut Window,
+    cx: &mut App,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    let id = window.window_handle().window_id();
+    if !cx.global_mut::<WindowRegistry>().confirming.insert(id) {
+        return;
+    }
+    let translator = Desktop::global(cx).translator.read(cx).clone();
+    let title = translator.text("closeWithActiveTasksTitle").to_owned();
+    let hint = translator.text("closeWithActiveTasksHint").to_owned();
+    let ok = translator.text("menuQuit").to_owned();
+    let cancel = translator.text("cancel").to_owned();
+    let on_ok = Rc::new(on_ok);
+    window.open_alert_dialog(cx, move |dialog, _, _| {
+        let on_ok = Rc::clone(&on_ok);
+        dialog
+            .title(title.clone())
+            .description(hint.clone())
+            .button_props(
+                gpui_component::dialog::DialogButtonProps::default()
+                    .ok_text(ok.clone())
+                    .cancel_text(cancel.clone()),
+            )
+            .on_ok(move |_, window, cx| {
+                on_ok(window, cx);
+                true
+            })
+            .on_close(move |_, _, cx| {
+                cx.global_mut::<WindowRegistry>().confirming.remove(&id);
+            })
+    });
 }
 
 /// `agent.preferences.patch` 设备本地写入（`sync:false`，不进云同步）。

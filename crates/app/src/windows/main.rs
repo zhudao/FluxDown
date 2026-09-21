@@ -7,14 +7,14 @@ use fluxdown_ui_i18n::keys;
 use fluxdown_ui_rss::RssView;
 use fluxdown_ui_shell::{RouteId, ShellAction, ShellRoute, ShellView, main_window_options};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
-use gpui_component::{Icon, IconName, Root, WindowExt as _};
+use gpui_component::{Icon, IconName, Root};
 
 use crate::{
     app::Desktop,
     capability_ports::AgentRssPort,
     downloads_port::AgentDownloadsPort,
     session::attach,
-    windows::{WindowKey, WindowRegistry},
+    windows::{WindowKey, WindowRegistry, confirm_active_tasks},
 };
 
 const MAIN_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(1120.), px(760.));
@@ -125,35 +125,21 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
     })
 }
 
-/// 关闭策略：托盘驻留 → 直接关；有活跃任务 → 提示后关；否则直接关。
+/// 关闭策略：原生关闭按钮（`windowShouldClose:`）与 ⌘W 共用一份判定。
 fn install_close_policy(window: &mut Window, cx: &mut App) {
-    window.on_window_should_close(cx, |window, cx| {
-        let close_to_tray = Desktop::pref_bool(cx, "close_to_tray", true);
-        if close_to_tray && WindowRegistry::is_resident(cx) {
-            return true;
-        }
-        if Desktop::active_task_count(cx) == 0 || WindowRegistry::open_count(cx) > 1 {
-            return true;
-        }
-        let translator = Desktop::global(cx).translator.read(cx).clone();
-        let title = translator.text("closeWithActiveTasksTitle").to_owned();
-        let hint = translator.text("closeWithActiveTasksHint").to_owned();
-        let ok = translator.text("menuQuit").to_owned();
-        let cancel = translator.text("cancel").to_owned();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            dialog
-                .title(title.clone())
-                .description(hint.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok.clone())
-                        .cancel_text(cancel.clone()),
-                )
-                .on_ok(|_, window, _| {
-                    window.remove_window();
-                    true
-                })
-        });
-        false
-    });
+    window.on_window_should_close(cx, should_close);
+}
+
+/// 主窗口是否可立即关闭：托盘驻留 → 关；无活跃任务或还有其他窗口 → 关；否则弹
+/// 「下载仍在进行」确认框并返回 `false`（确认后由对话框自己关窗）。
+pub fn should_close(window: &mut Window, cx: &mut App) -> bool {
+    let close_to_tray = Desktop::pref_bool(cx, "close_to_tray", true);
+    if close_to_tray && WindowRegistry::is_resident(cx) {
+        return true;
+    }
+    if Desktop::active_task_count(cx) == 0 || WindowRegistry::open_count(cx) > 1 {
+        return true;
+    }
+    confirm_active_tasks(window, cx, |window, _| window.remove_window());
+    false
 }
