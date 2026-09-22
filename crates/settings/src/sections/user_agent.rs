@@ -1,5 +1,7 @@
 //! 全局 User-Agent：预设下拉 + 自定义输入，与 `lib/src/models/ua_presets.dart` 同基线。
 
+use std::rc::Rc;
+
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
@@ -12,7 +14,7 @@ use gpui_component::{
 };
 
 use super::SectionContext;
-use crate::ui::Control;
+use crate::ui::{Control, dropdown_button};
 
 pub(crate) const UA_KEY: &str = "global_user_agent";
 
@@ -82,53 +84,42 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
             .unwrap_or(false)
             || preset == "custom";
 
-        // 预设用一组互斥按钮表达；选择自定义时展开输入框。
-        let buttons = gpui_component::h_flex()
-            .gap(tokens.spacing.xs)
-            .flex_wrap()
-            .children(options.iter().map(|(value, label)| {
-                let selected = if custom_active {
-                    value.as_ref() == "custom"
-                } else {
-                    value.as_ref() == preset
-                };
-                let value_for_click = value.clone();
-                let click_store = store.clone();
-                fluxdown_ui_components::button(
-                    SharedString::from(format!("ua-preset-{value}")),
-                    label.clone(),
-                    if selected {
-                        fluxdown_ui_components::ButtonVariant::Primary
-                    } else {
-                        fluxdown_ui_components::ButtonVariant::Secondary
-                    },
-                    cx,
-                )
-                .disabled(disabled)
-                .on_click(move |_, _, cx| {
-                    click_store.update(cx, |store, cx| match value_for_click.as_ref() {
-                        "default" => {
-                            store.set_transient("ua_custom_mode", serde_json::json!(false), cx);
-                            store.set_daemon(UA_KEY, "", cx);
+        let selected_key: SharedString = if custom_active {
+            SharedString::from("custom")
+        } else {
+            SharedString::from(preset)
+        };
+        let select_store = store.clone();
+        let dropdown = dropdown_button(
+            format!("{key}-preset-dropdown"),
+            &options,
+            selected_key,
+            disabled,
+            false,
+            Rc::new(move |value: SharedString, cx: &mut App| {
+                select_store.update(cx, |store, cx| match value.as_ref() {
+                    "default" => {
+                        store.set_transient("ua_custom_mode", serde_json::json!(false), cx);
+                        store.set_daemon(UA_KEY, "", cx);
+                    }
+                    "custom" => {
+                        store.set_transient("ua_custom_mode", serde_json::json!(true), cx);
+                    }
+                    preset_key => {
+                        store.set_transient("ua_custom_mode", serde_json::json!(false), cx);
+                        if let Some((_, ua)) = UA_PRESETS.iter().find(|(k, _)| *k == preset_key) {
+                            store.set_daemon(UA_KEY, *ua, cx);
                         }
-                        "custom" => {
-                            store.set_transient("ua_custom_mode", serde_json::json!(true), cx);
-                        }
-                        key => {
-                            store.set_transient("ua_custom_mode", serde_json::json!(false), cx);
-                            if let Some((_, ua)) = UA_PRESETS.iter().find(|(k, _)| *k == key) {
-                                store.set_daemon(UA_KEY, *ua, cx);
-                            }
-                        }
-                    });
-                })
-            }));
+                    }
+                });
+            }),
+        );
 
         let mut column = v_flex()
             .w_full()
             .gap(tokens.spacing.sm)
             .items_end()
-            .child(buttons);
+            .child(dropdown);
         if custom_active {
             let slot = window.use_keyed_state(SharedString::from(format!("{key}-custom")), cx, {
                 let store = store.clone();

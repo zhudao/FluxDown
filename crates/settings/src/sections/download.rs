@@ -286,9 +286,12 @@ fn advanced_section(ctx: &SectionContext) -> SettingsSection {
     SettingsSection::new()
         .title(ctx.t("settingsGroupAdvanced"))
         .row(ctx.item("userAgent", Some("userAgentDesc"), user_agent::field(ctx)))
-        .row(ctx.item(
-            "revealFileCmdLabel",
-            Some("revealFileCmdDesc"),
-            ctx.pref_input("reveal_file_cmd", ""),
-        ))
+        .row(
+            ctx.item(
+                "revealFileCmdLabel",
+                Some("revealFileCmdShortDesc"),
+                ctx.pref_input("reveal_file_cmd", ""),
+            )
+            .help(ctx.t("revealFileCmdDesc")),
+        )
 }

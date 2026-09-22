@@ -1,4 +1,4 @@
-use fluxdown_protocol::{CustomCategoryDto, QueueDto, RssSourceDto};
+use fluxdown_protocol::{CustomCategoryDto, QueueDto};
 use fluxdown_ui_components::sidebar_navigation_button;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -25,6 +25,7 @@ use crate::{
 };
 
 const NAV_ITEM_HEIGHT: f32 = 32.;
+const SHOW_SIDEBAR_CATEGORY_PREF: &str = "ui.show_sidebar_category";
 
 /// 分类 wire 图标名 → 渲染图标（与 `crates/settings/src/sections/category_dialog.rs`
 /// 的 `CATEGORY_ICONS` 表保持一致）；未知名字回退通用文件图标。
@@ -246,6 +247,7 @@ impl DownloadView {
         status: DownloadStatusFilter,
         label: SharedString,
         expanded: bool,
+        has_children: bool,
         cx: &mut Context<Self>,
     ) -> fluxdown_ui_components::Button {
         let tokens = active_theme(cx).tokens();
@@ -269,14 +271,16 @@ impl DownloadView {
                     .text_size(px(11.))
                     .child(self.filter_count(&filter, cx)),
             )
-            .child(
-                Icon::new(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(px(12.)),
-            );
+            .when(has_children, |this| {
+                this.child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size(px(12.)),
+                )
+            });
 
         sidebar_navigation_button(
             id,
@@ -308,7 +312,25 @@ impl DownloadView {
             .collect()
     }
 
+    /// 分类子项显隐偏好；关闭后状态文件夹保留，但不渲染分类子项也不显示展开箭头。
+    fn categories_visible(&self) -> bool {
+        self.controller
+            .preference_bool(SHOW_SIDEBAR_CATEGORY_PREF, true)
+    }
+
+    /// 分类子项显示时的实际渲染数量；用于高度动画计算，偏好关闭时恒为 0。
+    fn visible_category_count(&self) -> f32 {
+        if self.categories_visible() {
+            self.category_entries().len() as f32
+        } else {
+            0.
+        }
+    }
+
     fn render_categories(&self, status: DownloadStatusFilter, cx: &mut Context<Self>) -> Div {
+        if !self.categories_visible() {
+            return v_flex().w_full();
+        }
         let entries = self.category_entries();
         let mut items = Vec::with_capacity(entries.len());
         for dto in entries {
@@ -459,10 +481,10 @@ impl DownloadView {
     ) -> Div {
         let expanded = self.expanded_status == Some(status);
         let open_amount = self.folder_open_amount(status, window, cx);
-        let category_count = self.category_entries().len() as f32;
+        let category_count = self.visible_category_count();
         v_flex()
             .w_full()
-            .child(self.folder_item(id, status, label, expanded, cx))
+            .child(self.folder_item(id, status, label, expanded, category_count > 0., cx))
             .child(
                 div()
                     .w_full()
@@ -485,7 +507,7 @@ impl DownloadView {
     /// 状态区：全部 / 下载中 / 已完成 / 失败 / 暂停 五个文件夹，各自可展开显示分类子项。
     fn render_status_section(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let open_amount = self.section_open_amount(SidebarSection::Status, window, cx);
-        let category_count = self.category_entries().len() as f32;
+        let category_count = self.visible_category_count();
         let folder_open_sum: f32 = DownloadStatusFilter::ALL
             .iter()
             .map(|status| self.folder_open_amount(*status, window, cx))
@@ -712,92 +734,6 @@ impl DownloadView {
             )
     }
 
-    /// RSS 订阅右键菜单：立即抓取、管理订阅。
-    fn rss_item_context_menu(
-        &self,
-        source_id: String,
-        cx: &Context<Self>,
-    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-        let this = cx.weak_entity();
-        let refresh_label = self.strings.rss_refresh_action.clone();
-        let manage_label = self.strings.rss_manage_action.clone();
-        let navigate_rss = self.host.navigate_rss.clone();
-
-        move |menu, _window, _cx| {
-            let menu = menu.item({
-                let this = this.clone();
-                let source_id = source_id.clone();
-                PopupMenuItem::new(refresh_label.clone()).on_click(move |_, _window, cx| {
-                    let source_id = source_id.clone();
-                    let _ = this.update(cx, |this, cx| {
-                        this.execute_commands(vec![DownloadsCommand::RssRefresh { source_id }], cx);
-                    });
-                })
-            });
-            menu.item({
-                let navigate_rss = navigate_rss.clone();
-                PopupMenuItem::new(manage_label.clone()).on_click(move |_, window, cx| {
-                    if let Some(navigate) = navigate_rss.clone() {
-                        navigate(window, cx);
-                    }
-                })
-            })
-        }
-    }
-
-    fn render_rss_section(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let open_amount = self.section_open_amount(SidebarSection::Rss, window, cx);
-        let sources: Vec<RssSourceDto> = self.controller.rss_sources().to_vec();
-        let count = sources.len() as f32;
-        let mut items = Vec::with_capacity(sources.len());
-        for source in sources {
-            let id = source.source_id.clone();
-            let label = if source.name.is_empty() {
-                SharedString::from(source.url.clone())
-            } else {
-                SharedString::from(source.name.clone())
-            };
-            let count_label = {
-                let id = id.clone();
-                SharedString::from(
-                    self.table_state
-                        .read(cx)
-                        .delegate()
-                        .count_where(move |task| task.rss_source_id == id)
-                        .to_string(),
-                )
-            };
-            let menu = self.rss_item_context_menu(id.clone(), cx);
-            items.push(
-                self.nav_item(
-                    format!("download-nav-rss-{id}"),
-                    SidebarSelection::RssSource(id),
-                    label,
-                    IconName::Globe,
-                    (count_label, None),
-                    cx,
-                )
-                .context_menu(menu),
-            );
-        }
-        self.section_card(cx)
-            .child(self.section_header(
-                "download-rss-toggle",
-                self.strings.sidebar_rss.clone(),
-                SidebarSection::Rss,
-                open_amount,
-                None,
-                cx,
-            ))
-            .child(
-                div()
-                    .w_full()
-                    .overflow_hidden()
-                    .h(px(NAV_ITEM_HEIGHT * count * open_amount))
-                    .child(v_flex().w_full().opacity(open_amount).children(items)),
-            )
-    }
-
     /// 设备区：本机 + 云设备 + 已配对设备；远程任务按来源设备 id / 指纹计数。
     fn render_devices_section(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let open_amount = self.section_open_amount(SidebarSection::Devices, window, cx);
@@ -857,6 +793,25 @@ impl DownloadView {
             )
     }
 
+    /// 分区可见性：设备区三态（偏好显式设置则按值，未设置时按「是否有任何设备」
+    /// 判定，与 Flutter 桌面端 `showSidebarDeviceEffective` 同语义）；其余分区
+    /// 二态，默认显示。
+    fn section_visible(&self, section: SidebarSection) -> bool {
+        match section {
+            SidebarSection::Devices => self
+                .controller
+                .preference(section.visibility_pref())
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_else(|| {
+                    !self.controller.cloud_devices().is_empty()
+                        || !self.controller.linked_devices().is_empty()
+                }),
+            _ => self
+                .controller
+                .preference_bool(section.visibility_pref(), true),
+        }
+    }
+
     pub(crate) fn render_sidebar(
         &self,
         window: &mut Window,
@@ -869,16 +824,12 @@ impl DownloadView {
             .overflow_y_scrollbar()
             .bg(surface);
         for section in SidebarSection::ALL {
-            if !self
-                .controller
-                .preference_bool(section.visibility_pref(), true)
-            {
+            if !self.section_visible(section) {
                 continue;
             }
             let content: Div = match section {
                 SidebarSection::Status => self.render_status_section(window, cx),
                 SidebarSection::Queues => self.render_queue_section(window, cx),
-                SidebarSection::Rss => self.render_rss_section(window, cx),
                 SidebarSection::Devices => self.render_devices_section(window, cx),
             };
             root = root.child(content);

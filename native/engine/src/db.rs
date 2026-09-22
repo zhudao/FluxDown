@@ -1555,6 +1555,22 @@ impl Db {
         }
     }
 
+    /// URL 去重候选集：活跃/排队状态（pending/downloading/paused/preparing）
+    /// 任务的 `(id, url)`。刻意不下推字符串比较到 SQL——`url` 列存的是原始
+    /// 值（可能带 fragment），去重比较前需要先按 fragment 归一化，交给调用方
+    /// 用同一套归一化规则处理。任务量通常是几十到几百条，一次性取回后在
+    /// 内存比较比逐条查询更省 round-trip。
+    pub async fn active_task_urls(&self) -> Result<Vec<(String, String)>, DbError> {
+        let rows = sqlx::query("SELECT id, url FROM tasks WHERE status IN (0, 1, 2, 5)")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            out.push((row.try_get("id")?, row.try_get("url")?));
+        }
+        Ok(out)
+    }
+
     /// Batch-load multiple tasks by ID with chunked IN clauses
     /// (same pattern as `delete_tasks_batch`).
     pub async fn load_tasks_by_ids(&self, ids: &[String]) -> Result<Vec<TaskInfo>, DbError> {
@@ -1604,6 +1620,18 @@ impl Db {
             .bind(format!("hls_resume_{id}"))
             .execute(&mut *tx)
             .await?;
+        // 359#1：该任务若是某条 RSS 条目的下载产物（`rss_items.task_id` 回链），
+        // 任务删除后条目须回退到「新」，否则条目永久卡在「已下载」，用户既看
+        // 不出任务已消失，也无法再次手动下载。只回退真正处于 Downloaded 的行
+        // （避免误伤已被用户手动改判为 Ignored/Filtered 等其他终态的条目）。
+        sqlx::query(
+            "UPDATE rss_items SET status = $1, task_id = '' WHERE task_id = $2 AND status = $3",
+        )
+        .bind(crate::rss::model::RssItemStatus::New.as_i32())
+        .bind(id)
+        .bind(crate::rss::model::RssItemStatus::Downloaded.as_i32())
+        .execute(&mut *tx)
+        .await?;
         sqlx::query("DELETE FROM tasks WHERE id = $1")
             .bind(id)
             .execute(&mut *tx)
@@ -1643,6 +1671,17 @@ impl Db {
                     .execute(&mut *tx)
                     .await?;
             }
+            // 359#1：批量删除同样要回退 RSS 条目状态，见 delete_task 注释。
+            let rss_sql = format!(
+                "UPDATE rss_items SET status = {new}, task_id = '' WHERE task_id IN ({placeholders}) AND status = {downloaded}",
+                new = crate::rss::model::RssItemStatus::New.as_i32(),
+                downloaded = crate::rss::model::RssItemStatus::Downloaded.as_i32(),
+            );
+            let mut rss_query = sqlx::query(AssertSqlSafe(rss_sql));
+            for id in chunk {
+                rss_query = rss_query.bind(id.as_str());
+            }
+            rss_query.execute(&mut *tx).await?;
 
             let sql = format!("DELETE FROM tasks WHERE id IN ({placeholders})");
             let mut query = sqlx::query(AssertSqlSafe(sql));
@@ -2240,6 +2279,10 @@ impl Db {
             // 任务的文件被删除或移动时的动作："keep" = 保留任务记录（默认，
             // 仅标记 file_missing）；"delete" = 扫描到文件消失后自动删除任务记录。
             ("file_missing_action", "keep"),
+            // 空闲（无活跃/排队任务）时是否仍执行周期性文件跟踪扫描：
+            // "1" = 照常扫描（默认，现状）；"0" = 完全空闲期跳过定时扫描，
+            // 避免不必要地唤醒 NAS/网络盘；窗口聚焦、手动重扫不受影响。
+            ("idle_file_scan", "1"),
             // 自动重试：-1=无限，0=关闭，1..10=次数。延迟（秒）固定基值×已重试次数。
             ("max_auto_retries", "3"),
             ("auto_retry_delay_secs", "5"),
@@ -2870,6 +2913,15 @@ impl Db {
             .fetch_one(&self.pool)
             .await?;
         Ok(count as i32)
+    }
+
+    /// Count tasks currently at the given status (e.g. `1` = downloading).
+    pub async fn count_tasks_by_status(&self, status: i32) -> Result<i64, DbError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE status = $1")
+            .bind(status)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
     }
 
     /// 更新队列运行状态（启动/停止队列的持久化半边）。
@@ -3869,6 +3921,17 @@ impl Db {
         Ok(())
     }
 
+    /// 更新任务的下载源地址（换链接续传等场景）；不触碰分段/进度行，
+    /// `task_segments` 按 `task_id` 索引，与 `url` 无关。
+    pub async fn update_task_url(&self, task_id: &str, url: &str) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET url = $1 WHERE id = $2")
+            .bind(url)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// 写入 `ProxyMode::Auto` 的任务级最终链路标签（wire 值见
     /// `auto_proxy::route`；空 = 非 Auto 模式）。任务启动时由 manager
     /// 重写基线，运行中热切换/采样定论由 coordinator 状态机更新。
@@ -4516,6 +4579,92 @@ mod tests {
             result.is_ok(),
             "second delete of already-deleted task must succeed"
         );
+        close_test_db(&db, dir).await;
+    }
+
+    // 359#1：任务删除后，回链的 RSS 条目须从 Downloaded 回退到 New，
+    // 并清空过期的 task_id 回链，使其重新变为可下载/未处理状态。
+    #[tokio::test]
+    async fn delete_task_reverts_linked_rss_item_to_new() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "t1").await;
+        let source = crate::rss::model::RssSourceInfo {
+            source_id: "s1".to_string(),
+            ..Default::default()
+        };
+        db.insert_rss_source(&source).await.expect("insert source");
+        let item = crate::rss::model::RssItemInfo {
+            source_id: "s1".to_string(),
+            guid: "g1".to_string(),
+            title: "ep1".to_string(),
+            status: crate::rss::model::RssItemStatus::Downloaded,
+            task_id: "t1".to_string(),
+            ..Default::default()
+        };
+        db.insert_rss_items(&[item]).await.expect("insert item");
+
+        db.delete_task("t1").await.expect("delete task");
+
+        let loaded = db
+            .rss_item("s1", "g1")
+            .await
+            .expect("load item")
+            .expect("item must still exist");
+        assert_eq!(
+            loaded.status,
+            crate::rss::model::RssItemStatus::New,
+            "downloaded rss item must revert to New after its task is deleted"
+        );
+        assert!(
+            loaded.task_id.is_empty(),
+            "stale task_id back-link must be cleared"
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    // 359#1：批量删除路径同样要回退状态。
+    #[tokio::test]
+    async fn delete_tasks_batch_reverts_linked_rss_items_to_new() {
+        let (db, dir) = open_test_db().await;
+        insert_task(&db, "t1").await;
+        insert_task(&db, "t2").await;
+        let source = crate::rss::model::RssSourceInfo {
+            source_id: "s1".to_string(),
+            ..Default::default()
+        };
+        db.insert_rss_source(&source).await.expect("insert source");
+        db.insert_rss_items(&[
+            crate::rss::model::RssItemInfo {
+                source_id: "s1".to_string(),
+                guid: "g1".to_string(),
+                status: crate::rss::model::RssItemStatus::Downloaded,
+                task_id: "t1".to_string(),
+                ..Default::default()
+            },
+            crate::rss::model::RssItemInfo {
+                source_id: "s1".to_string(),
+                guid: "g2".to_string(),
+                status: crate::rss::model::RssItemStatus::Downloaded,
+                task_id: "t2".to_string(),
+                ..Default::default()
+            },
+        ])
+        .await
+        .expect("insert items");
+
+        db.delete_tasks_batch(&["t1".to_string(), "t2".to_string()])
+            .await
+            .expect("batch delete");
+
+        for guid in ["g1", "g2"] {
+            let loaded = db
+                .rss_item("s1", guid)
+                .await
+                .expect("load item")
+                .expect("item must still exist");
+            assert_eq!(loaded.status, crate::rss::model::RssItemStatus::New);
+            assert!(loaded.task_id.is_empty());
+        }
         close_test_db(&db, dir).await;
     }
 

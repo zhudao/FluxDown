@@ -295,6 +295,12 @@ impl GatewayService {
             method::AGENT_SYNC_ENABLE => sync_value(self.sync.set_enabled(true).await),
             method::AGENT_SYNC_DISABLE => sync_value(self.sync.set_enabled(false).await),
             method::AGENT_SYNC_NOW => sync_value(self.sync.sync_now().await),
+            method::AGENT_CLOUD_ENDPOINT_GET => to_value(self.cloud.endpoint()),
+            method::AGENT_CLOUD_ENDPOINT_SET => {
+                let params =
+                    parse_params::<fluxdown_protocol::CloudEndpointSetParams>(request.params)?;
+                cloud_value(self.cloud.set_endpoint(&params.base_url).await)
+            }
             method::AGENT_REMOTE_LIST => remote_value(self.remote.refresh_snapshot().await),
             method::AGENT_REMOTE_DISPATCH => {
                 self.remote_dispatch(params_or_empty(request.params)).await
@@ -524,11 +530,8 @@ impl GatewayService {
         self.events
             .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         if deleting_current {
+            // `clear_session` 自身投影 `SessionChanged(None)`。
             self.cloud.clear_session().await.map_err(cloud_error_data)?;
-            self.events
-                .publish(fluxdown_protocol::AgentEvent::SessionChanged(Box::new(
-                    None,
-                )));
         }
         Ok(value)
     }
@@ -1061,7 +1064,10 @@ fn cloud_error_data(error: CloudError) -> RpcErrorData {
         (Some(401 | 403), _) => ApplicationErrorCode::Unauthorized,
         (Some(404), _) => ApplicationErrorCode::NotFound,
         (Some(409), _) => ApplicationErrorCode::Conflict,
-        (_, Some("invalidArgument")) => ApplicationErrorCode::InvalidArgument,
+        (Some(400 | 422), _) | (_, Some("invalidArgument")) => {
+            ApplicationErrorCode::InvalidArgument
+        }
+        (_, Some("unsupported")) => ApplicationErrorCode::Unsupported,
         _ if error.retryable => ApplicationErrorCode::Unavailable,
         _ => ApplicationErrorCode::Internal,
     };

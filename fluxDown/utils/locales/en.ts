@@ -115,6 +115,12 @@ const en: Record<MessageKey, string> = {
     "Invalid format, e.g. application/epub+zip or video/",
   "options.rules.resetMime": "Restore Defaults",
   "options.rules.mimeResetDone": "Default MIME list restored",
+  "options.rules.excludeExtTitle": "Excluded Extensions",
+  "options.rules.excludeExtDesc":
+    "Downloads matching these extensions are never intercepted, even if they also match the include rules above (e.g. .torrent, .crx)",
+  "options.rules.excludeExtPlaceholder": "e.g. .torrent",
+  "options.rules.minFileSizeCustom": "Custom",
+  "options.rules.minFileSizeCustomPlaceholder": "Custom size (MB)",
 
 
   // Domain exclusion
@@ -148,6 +154,12 @@ const en: Record<MessageKey, string> = {
   "notify.fallbackBrowser": "Fell back to browser download",
   "notify.fallbackBrowserDetail":
     "Could not send to FluxDown, fell back to browser: {url}",
+  "notify.videoSourceUnavailableTitle": "Cannot Download This Video/Audio",
+  "notify.videoSourceUnavailableDetail":
+    "This source can't be downloaded directly (likely blob:/MSE stream); use the resource sniffer panel instead",
+  "notify.selectionInvalidTitle": "No Downloadable Link Found",
+  "notify.selectionInvalidDetail":
+    "The selection isn't a complete magnet:/ed2k:/http(s) link",
   "notify.appUnavailable": "FluxDown app not detected",
   "notify.appUnavailableDetail":
     "Temporarily using the browser's built-in download. Make sure the FluxDown desktop app is running; interception will resume automatically.",
@@ -210,6 +222,8 @@ const en: Record<MessageKey, string> = {
   "panel.exportDebugLogTitle": "Export raw sniffed resources, playlists, and aggregation links for this page",
   "panel.exportDebugLogDone": "Sniffer debug log exported",
   "panel.exportDebugLogFailed": "Failed to export sniffer debug log",
+  "panel.clearResources": "Clear",
+  "panel.clearResourcesTitle": "Clear the sniffed resources on this page",
 
   // Shortcut toggle
   "shortcut.toggleTitle": "Intercept Toggle",
@@ -220,6 +234,7 @@ const en: Record<MessageKey, string> = {
   "contextMenu.sendToFluxDown": "Download this link with FluxDown",
   "contextMenu.sendImageToFluxDown": "Download this image with FluxDown",
   "contextMenu.sendVideoToFluxDown": "Download this video/audio with FluxDown",
+  "contextMenu.sendSelectionToFluxDown": "Download selection with FluxDown",
   "contextMenu.sendPageToFluxDown": "Download this page with FluxDown",
 
   // Manifest

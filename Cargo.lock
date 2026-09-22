@@ -3051,6 +3051,7 @@ name = "fluxdown_ui_account"
 version = "0.1.0"
 dependencies = [
  "fluxdown_protocol",
+ "fluxdown_ui_components",
  "fluxdown_ui_i18n",
  "fluxdown_ui_theme",
  "gpui",
@@ -3078,6 +3079,9 @@ dependencies = [
  "gpui-component-assets",
  "gpui_platform",
  "image",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

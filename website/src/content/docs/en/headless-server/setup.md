@@ -54,12 +54,15 @@ All configuration is read once at startup from environment variables. There is n
 |---|---|---|
 | `FLUXDOWN_BIND` | `0.0.0.0:17800` | TCP address the HTTP/WebSocket server listens on. |
 | `FLUXDOWN_DATA_DIR` | Platform auto-detected (see below) | Directory holding the database file and logs. |
+| `FLUXDOWN_SAVE_DIR` | unset — platform download directory | Initial default save directory, applied only on first start (seeded into the database when no `default_save_dir` is stored yet). A directory later chosen in Settings always wins. The Synology package uses it to point at the shared folder picked in the install wizard. |
 | `FLUXDOWN_DATABASE_URL` | unset — uses a SQLite file inside the data dir | Explicit connection string: `sqlite:/path/to/file.db` or `postgres://user:pass@host/db`. |
 | `FLUXDOWN_WEBROOT` | unset — serves the embedded Web UI | Optional override: serve the SPA from this directory instead of the embedded copy (custom front end, or a hot-swapped `bun run build` output). There is **no** implicit `./web` lookup next to the executable. |
-| `FLUXDOWN_TOKEN` | unset — first-run Web setup wizard | Optional pre-set management access key. Applied only when the database has no key yet (value is trimmed; must satisfy the key rules below, otherwise ignored with a warning). Use for unattended docker-compose / k8s / CI deploys that skip the wizard. |
+| `FLUXDOWN_TOKEN` | unset — first-run Web setup wizard | Optional pre-set management access key. Applied only when the database has no key yet (value is trimmed; must satisfy the key rules below, otherwise ignored with a warning). Use for unattended docker-compose / k8s / CI deploys that skip the wizard. See `FLUXDOWN_TOKEN_FORCE` below to override an existing key instead. |
+| `FLUXDOWN_TOKEN_FORCE` | unset — `FLUXDOWN_TOKEN` only seeds an empty key | Truthy value (`1`/`true`/`yes`/`on`) makes `FLUXDOWN_TOKEN` override the stored key on every boot, instead of only when no key is set yet. Use when an orchestrator (Kubernetes Secret, docker-compose env) is the single source of truth for the key and Web UI key changes should not stick across restarts. |
 | `FLUXDOWN_DEMO` | unset (off) | Truthy value (`1`/`true`/`yes`/`on`) turns on demo mode: only a built-in, generated 64 MiB file can be downloaded. Useful for public demos. |
 | `FLUXDOWN_DEMO_URL` | unset (off) | Overrides demo mode's allowed URL with a specific one instead of the built-in generated file. |
 | `FLUXDOWN_LANG` | unset (falls back to browser language) | Default Web UI language (`en`/`zh`; regional variants like `zh-CN` accepted). Pure fallback: once any user saves a language in Settings, the saved value becomes the server-side default (applies live, survives restarts); users who explicitly picked a language in their browser always keep their own choice. |
+| `FLUXDOWN_LOG_LEVEL` | unset — `info` | Default `tracing` log level (`error`/`warn`/`info`/`debug`/`trace`, case-insensitive) applied when `RUST_LOG` is not set. `RUST_LOG` always wins when present — use `FLUXDOWN_LOG_LEVEL` for a simple one-value override, `RUST_LOG` for per-module directives. Read once at startup; changing it requires a restart. |
 
 When `FLUXDOWN_DATA_DIR` is not set, the data directory is auto-detected the same way the desktop app does:
 
@@ -118,6 +121,12 @@ To skip the wizard (docker-compose, Kubernetes, CI), preset the key with `FLUXDO
 
 ```bash
 FLUXDOWN_TOKEN='your-strong-key-here' ./fluxdown-server
+```
+
+To instead force the environment variable to always win — even after someone changes the key from the Web UI — also set `FLUXDOWN_TOKEN_FORCE=1`:
+
+```bash
+FLUXDOWN_TOKEN='your-strong-key-here' FLUXDOWN_TOKEN_FORCE=1 ./fluxdown-server
 ```
 
 ### Security note

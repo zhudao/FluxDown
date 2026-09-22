@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildMediaCandidates,
+  candidateFilename,
   countMediaCandidateRows,
   isMediaCandidateVisible,
   selectQualityVideoTracks,
@@ -451,5 +452,30 @@ describe("buildMediaCandidates", () => {
     expect(candidates.find((candidate) => candidate.source === "ignored")?.rawResourceIds)
       .toEqual(expect.arrayContaining(["preload-video", "preload-audio"]));
     expect(countMediaCandidateRows(candidates)).toBe(2);
+  });
+
+  test("issue #16: HLS 候选下载文件名取自页面标题（消毒后）而非 CDN 分片原始名", () => {
+    const resources = [
+      resource({
+        id: "hls-1",
+        url: "https://cdn.example.com/live/index-v1-a1.m3u8",
+        type: "stream",
+        mimeType: "application/vnd.apple.mpegurl",
+      }),
+    ];
+
+    const candidates = buildMediaCandidates(resources, {
+      pageTitle: 'My "Cool" Video: Part 1/2',
+      pageUrl: PAGE_URL,
+      fallbackTitle: "Video",
+    });
+
+    const hls = candidates.find((candidate) => candidate.source === "hls");
+    expect(hls).toBeDefined();
+    const filename = candidateFilename(hls!, hls!.variants[0]);
+    // 扩展名 .ts：HLS auto 候选走引擎 HLS 下载器，产物即分片拼接，见
+    // variantExtension 对 m3u8 → ts 的映射说明。
+    expect(filename).toBe("My Cool Video Part 1 2.ts");
+    expect(filename).not.toContain("index-v1-a1");
   });
 });

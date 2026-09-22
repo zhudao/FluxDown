@@ -103,6 +103,25 @@ function incrementStat(field: "sent" | "failed"): Promise<void> {
   return _statChain;
 }
 
+/**
+ * 从选中文本中提取一个可下载的 magnet:/ed2k:/http(s) 纯文本链接（#348）。
+ * 仅接受完整且合法的链接格式，避免把选区里夹带的其他文字误判为下载源。
+ */
+function extractSelectionDownloadUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const text = raw.trim();
+  if (!text) return null;
+  // magnet 链接：xt=urn:<hash-algo>:<hash> 是必需字段
+  if (/^magnet:\?xt=urn:[a-zA-Z0-9]+:[a-zA-Z0-9]+/i.test(text)) return text;
+  // ed2k 链接：ed2k://|file|<name>|<size>|<32位十六进制 hash>|/
+  if (/^ed2k:\/\/\|file\|[^|]+\|\d+\|[a-fA-F0-9]{32}\|\/?$/i.test(text)) {
+    return text;
+  }
+  // 纯文本形式的完整 http(s) 直链
+  if (/^https?:\/\/\S+$/i.test(text)) return text;
+  return null;
+}
+
 export default defineBackground(() => {
   console.log("[FluxDown] Background service worker started");
 
@@ -162,10 +181,33 @@ export default defineBackground(() => {
         .then((s) => {
           updateIcon(s.enabled);
           syncDownloadShelfState(s.enabled);
+          setDeterminingFilenameListenerActive(s.enabled);
         })
         .catch(() => {});
     }
   });
+
+  // #527/#609/#199/#293：onDeterminingFilename 的实际注册状态。拦截关闭后
+  // 必须真正 removeListener 把该事件让给其他扩展（脚本猫/PDM/IDM 等）——
+  // 仅在回调里 suggest() 放行不够，Chrome 只要本扩展仍注册着 listener 就
+  // 视为参与"确定文件名"的竞争。初次注册在下方 handleDeterminingFilename
+  // 定义处完成（保留 MV3 冷启动唤醒可靠性 + 现有冷启动预防拦截逻辑），
+  // 这里只声明状态位与切换函数，供 warmup / storage.onChanged 回调调用。
+  let _determiningFilenameListenerActive = false;
+  function setDeterminingFilenameListenerActive(active: boolean) {
+    if (!browser.downloads.onDeterminingFilename) return;
+    if (active === _determiningFilenameListenerActive) return;
+    if (active) {
+      browser.downloads.onDeterminingFilename.addListener(
+        handleDeterminingFilename,
+      );
+    } else {
+      browser.downloads.onDeterminingFilename.removeListener(
+        handleDeterminingFilename,
+      );
+    }
+    _determiningFilenameListenerActive = active;
+  }
 
   // ===== 同类产品核心策略：隐藏浏览器下载 UI =====
   // IDM / Motrix / FDM 等下载管理器均通过此 API 全局禁用浏览器下载栏，
@@ -199,6 +241,7 @@ export default defineBackground(() => {
       updateIcon(s.enabled);
       // 同类产品（IDM/Motrix/FDM）共同使用的策略：启动时立即隐藏下载 UI
       syncDownloadShelfState(s.enabled);
+      setDeterminingFilenameListenerActive(s.enabled);
       console.log("[FluxDown] Settings cache warmed up");
     })
     .catch((e) => {
@@ -398,6 +441,11 @@ export default defineBackground(() => {
           title: t("contextMenu.sendPageToFluxDown"),
           contexts: ["page"],
         });
+        browser.contextMenus.create({
+          id: "fluxdown-send-selection",
+          title: t("contextMenu.sendSelectionToFluxDown"),
+          contexts: ["selection"],
+        });
         console.log("[FluxDown] Context menus created");
       })
       .catch((e: unknown) => {
@@ -422,17 +470,73 @@ export default defineBackground(() => {
           case "fluxdown-send-page":
             downloadUrl = info.pageUrl;
             break;
+          case "fluxdown-send-selection": {
+            // #348 修复：选中的磁力/ed2k/http(s) 纯文本链接右键发送到 FluxDown。
+            const selectionUrl = extractSelectionDownloadUrl(info.selectionText);
+            if (!selectionUrl) {
+              notify(
+                t("notify.selectionInvalidTitle"),
+                t("notify.selectionInvalidDetail"),
+              );
+              return;
+            }
+            console.log(
+              "[FluxDown] Context menu download (selection):",
+              selectionUrl,
+            );
+            const selectionReferrer = tab?.url || info.pageUrl || "";
+            const selectionSendOk = await sendToFluxDown(
+              selectionUrl,
+              selectionReferrer,
+            );
+            if (!selectionSendOk) {
+              // magnet:/ed2k: 无法回退浏览器原生下载（浏览器不识别这些协议），
+              // 只提示失败；http(s) 纯文本链接可正常回退。
+              if (/^https?:/i.test(selectionUrl)) {
+                await fallbackAfterSendFailure(selectionUrl);
+              } else {
+                notify(t("notify.sendFailed"), selectionUrl);
+              }
+            }
+            return;
+          }
           default:
             return; // 非 FluxDown 菜单项，忽略
         }
 
-        if (!downloadUrl) return;
+        if (!downloadUrl) {
+          // #407 修复：视频/音频右键项常见 blob:/MSE 源（无 srcUrl），点击后
+          // 之前静默无反应；显式提示改走资源嗅探面板。
+          if (info.menuItemId === "fluxdown-send-video") {
+            notify(
+              t("notify.videoSourceUnavailableTitle"),
+              t("notify.videoSourceUnavailableDetail"),
+            );
+          }
+          return;
+        }
 
         // 过滤非 HTTP(S)/FTP 协议（javascript: / mailto: / data: 等不可下载）
         try {
           const protocol = new URL(downloadUrl).protocol;
-          if (!["http:", "https:", "ftp:"].includes(protocol)) return;
+          if (!["http:", "https:", "ftp:"].includes(protocol)) {
+            // #407 修复：视频/音频常见 blob:/MSE 源，协议过滤在此挡下，
+            // 之前静默无反应；显式提示改走资源嗅探面板。
+            if (info.menuItemId === "fluxdown-send-video") {
+              notify(
+                t("notify.videoSourceUnavailableTitle"),
+                t("notify.videoSourceUnavailableDetail"),
+              );
+            }
+            return;
+          }
         } catch {
+          if (info.menuItemId === "fluxdown-send-video") {
+            notify(
+              t("notify.videoSourceUnavailableTitle"),
+              t("notify.videoSourceUnavailableDetail"),
+            );
+          }
           return;
         }
 
@@ -1183,11 +1287,14 @@ export default defineBackground(() => {
 
       const dispositionFilename =
         parseContentDispositionFilename(contentDisposition);
+      const referrer: string | undefined =
+        details.originUrl || details.documentUrl || undefined;
       const itemInfo: DownloadItemInfo = {
         url: details.url,
         fileSize: contentLength > 0 ? contentLength : -1,
         mime: contentType || undefined,
         filename: dispositionFilename || undefined,
+        referrerUrl: referrer,
       };
       if (!shouldIntercept(itemInfo, settings)) return undefined;
 
@@ -1200,10 +1307,6 @@ export default defineBackground(() => {
       });
 
       const cleanFilename = extractCleanFilename(itemInfo.filename, details.url);
-      const referrer =
-        (details as { originUrl?: string }).originUrl ||
-        (details as { documentUrl?: string }).documentUrl ||
-        undefined;
       // fire-and-forget：blocking 回调必须尽快返回；发送失败时回退浏览器下载
       sendToFluxDown(
         details.url,
@@ -1468,6 +1571,7 @@ export default defineBackground(() => {
       fileSize: rc.contentLength > 0 ? rc.contentLength : -1,
       mime: rc.contentType || undefined,
       filename: rc.dispositionFilename || originalItem.filename || undefined,
+      referrerUrl: originalItem.referrer || undefined,
     };
 
     const intercept = shouldIntercept(itemInfo, settings);
@@ -1536,6 +1640,7 @@ export default defineBackground(() => {
       fileSize,
       mime,
       filename,
+      referrerUrl: freshItem.referrer || originalItem.referrer || undefined,
     };
 
     if (hasActiveBypass(url)) return;
@@ -1622,22 +1727,32 @@ export default defineBackground(() => {
   // 在浏览器弹出「另存为」对话框之前触发，
   // suggest() 释放文件名管线 + downloads.cancel() 取消下载，不弹出任何浏览器下载 UI。
   // Firefox 不支持此 API，完全依赖第三层兜底拦截
-  if (browser.downloads.onDeterminingFilename)
-    browser.downloads.onDeterminingFilename.addListener(
-      (downloadItem, suggest) => {
+  // #527/#609/#199/#293 修复：
+  // 1) 拦截关闭（或未启用）时必须真正 removeListener 把该事件让给其他扩展
+  //    （脚本猫/PDM/IDM 等）——仅在回调里 suggest() 放行不够，Chrome 只要
+  //    本扩展仍注册着 listener 就视为参与"确定文件名"的竞争，见上方
+  //    setDeterminingFilenameListenerActive()（由 warmup / storage.onChanged 驱动）。
+  // 2) 所有"放行"分支一律改为不带参数的 suggest()，不再重复回填
+  //    { filename: downloadItem.filename }——哪怕值与浏览器当前默认值一致，
+  //    显式传参也会被 Chrome 视为本扩展"确定了文件名"，与其他扩展的建议冲突
+  //    （典型现象：脚本猫报"另一扩展已确定其他文件名"，PDM/IDM 自定义文件名丢失）。
+  type DeterminingFilenameListener = Parameters<
+    NonNullable<typeof browser.downloads.onDeterminingFilename>["addListener"]
+  >[0];
+  const handleDeterminingFilename: DeterminingFilenameListener = (
+    downloadItem,
+    suggest,
+  ) => {
         const url = downloadItem.url;
         // 使用 finalUrl（重定向后的真实 URL）作为下载 URL。
         // 蓝奏云等 CDN 对浏览器 302 重定向到真实文件 URL，但对非浏览器客户端返回 HTML。
         // 使用 finalUrl 让 Rust 下载器请求重定向后的真实 URL，绕过 CDN 反爬。
         const downloadUrl = (downloadItem as any).finalUrl || url;
 
-        // 跳过 blob 和 data URL（filename 为空时传 undefined，避免 Chrome 抛出非空校验错误）
+        // 跳过 blob 和 data URL：FluxDown 无法处理，交给浏览器/其他扩展决定
+        // 文件名，不带参数调用 suggest() 避免显式"确定"文件名与其他扩展冲突
         if (url.startsWith("blob:") || url.startsWith("data:")) {
-          suggest(
-            downloadItem.filename
-              ? { filename: downloadItem.filename }
-              : (undefined as any),
-          );
+          suggest();
           return;
         }
 
@@ -1667,11 +1782,7 @@ export default defineBackground(() => {
               url,
             );
             handledDownloads.delete(downloadItem.id);
-            suggest(
-              downloadItem.filename
-                ? { filename: downloadItem.filename }
-                : (undefined as any),
-            );
+            suggest();
             return;
           }
           // 发生重定向 — finalUrl 是真实文件 URL，继续走正常拦截流程
@@ -1695,32 +1806,20 @@ export default defineBackground(() => {
         if (_syncSettings !== null) {
           if (hasActiveBypass(url)) {
             handledDownloads.delete(downloadItem.id);
-            suggest(
-              downloadItem.filename
-                ? { filename: downloadItem.filename }
-                : (undefined as any),
-            );
+            suggest();
             downloadItemCache.delete(downloadItem.id);
             return;
           }
           if (!_syncSettings.enabled) {
             handledDownloads.delete(downloadItem.id);
-            suggest(
-              downloadItem.filename
-                ? { filename: downloadItem.filename }
-                : (undefined as any),
-            );
+            suggest();
             downloadItemCache.delete(downloadItem.id);
             return;
           }
           // App 熔断期内：直接放行给浏览器原生下载，跳过拦截，避免弹窗风暴。
           if (isAppKnownDown()) {
             handledDownloads.delete(downloadItem.id);
-            suggest(
-              downloadItem.filename
-                ? { filename: downloadItem.filename }
-                : (undefined as any),
-            );
+            suggest();
             downloadItemCache.delete(downloadItem.id);
             return;
           }
@@ -1740,6 +1839,7 @@ export default defineBackground(() => {
             fileSize: _syncFileSize,
             mime: _syncMime,
             filename: _syncFilename,
+            referrerUrl: _syncReferrer,
           };
           if (shouldIntercept(_syncItemInfo, _syncSettings)) {
             // 同步释放文件名决策管线——在 onCreated 触发前完成，Linux 不会显示下载栏
@@ -1805,11 +1905,7 @@ export default defineBackground(() => {
           // shouldIntercept=false：若已有足够信息可以确定，同步放行
           if (_syncMime || _syncFilename) {
             handledDownloads.delete(downloadItem.id);
-            suggest(
-              downloadItem.filename
-                ? { filename: downloadItem.filename }
-                : (undefined as any),
-            );
+            suggest();
             downloadItemCache.delete(downloadItem.id);
             return;
           }
@@ -1899,6 +1995,7 @@ export default defineBackground(() => {
                 fileSize,
                 mime,
                 filename,
+                referrerUrl: referrer,
               };
 
               if (!shouldIntercept(itemInfo, settings)) {
@@ -1962,12 +2059,10 @@ export default defineBackground(() => {
           // Chrome API 的 suggest() 不支持 cancel 属性（FilenameSuggestion 只有 filename 和 conflictAction）。
           // 正确的取消方式：suggest() 无参数释放管线 + downloads.cancel() 实际取消。
           // 放行时：传入有效 filename 或 undefined（让浏览器使用默认文件名）。
-          const callSuggest = (
-            arg?: chrome.downloads.DownloadFilenameSuggestion,
-          ) => {
+          const callSuggest = () => {
             if (suggestCalled) return;
             suggestCalled = true;
-            suggest(arg as any);
+            suggest();
           };
           const callSuggestCancel = async () => {
             downloadCancelled = true;
@@ -2000,11 +2095,7 @@ export default defineBackground(() => {
             if (!settings.enabled) {
               // 不拦截，删除预标记，放行
               handledDownloads.delete(downloadItem.id);
-              callSuggest(
-                downloadItem.filename
-                  ? { filename: downloadItem.filename }
-                  : undefined,
-              );
+              callSuggest();
               return;
             }
 
@@ -2012,22 +2103,14 @@ export default defineBackground(() => {
             if (hasActiveBypass(url)) {
               // Bug R2-1 修复：删除预标记，让浏览器正常下载
               handledDownloads.delete(downloadItem.id);
-              callSuggest(
-                downloadItem.filename
-                  ? { filename: downloadItem.filename }
-                  : undefined,
-              );
+              callSuggest();
               return;
             }
 
             // App 熔断期内：删除预标记，放行给浏览器原生下载，跳过拦截。
             if (isAppKnownDown()) {
               handledDownloads.delete(downloadItem.id);
-              callSuggest(
-                downloadItem.filename
-                  ? { filename: downloadItem.filename }
-                  : undefined,
-              );
+              callSuggest();
               return;
             }
 
@@ -2045,16 +2128,13 @@ export default defineBackground(() => {
               fileSize,
               mime,
               filename: downloadItem.filename || undefined,
+              referrerUrl: referrer,
             };
 
             if (!shouldIntercept(itemInfo, settings)) {
               // 不拦截，删除预标记，放行
               handledDownloads.delete(downloadItem.id);
-              callSuggest(
-                downloadItem.filename
-                  ? { filename: downloadItem.filename }
-                  : undefined,
-              );
+              callSuggest();
               return;
             }
 
@@ -2108,11 +2188,7 @@ export default defineBackground(() => {
             // 若下载已被取消，保留 'primary' 标记，阻止兜底层重复拦截并重复发送。
             if (!downloadCancelled) {
               handledDownloads.delete(downloadItem.id);
-              callSuggest(
-                downloadItem.filename
-                  ? { filename: downloadItem.filename }
-                  : undefined,
-              );
+              callSuggest();
             }
           } finally {
             downloadItemCache.delete(downloadItem.id);
@@ -2121,8 +2197,14 @@ export default defineBackground(() => {
 
         // 返回 true 表示 suggest 将被异步调用
         return true;
-      },
+  };
+
+  if (browser.downloads.onDeterminingFilename) {
+    browser.downloads.onDeterminingFilename.addListener(
+      handleDeterminingFilename,
     );
+    _determiningFilenameListenerActive = true;
+  }
 
   // ===== 消息处理（Popup + Content Script） =====
   //
@@ -2673,6 +2755,18 @@ export default defineBackground(() => {
       );
     }
 
+    // #610 修复：确保发给引擎的 headers 携带浏览器真实 UA。
+    // 引擎已支持通过 extra_headers 的 User-Agent 键覆盖默认 UA（native/engine
+    // downloader.rs 有专门的 UA 降级重试逻辑，注释明确写着"浏览器扩展捕获
+    // 下载时通过 extra_headers 传入真实 UA"）——这是现有的、唯一的 UA 传递
+    // 通道，并非新增协议字段。webRequest 捕获的头通常已包含 User-Agent，
+    // 但右键菜单/快捷下载/资源面板手动下载等路径没有捕获记录，这里统一
+    // 兜底补上 navigator.userAgent，确保所有下载路径都带上浏览器真实 UA
+    // （不少反爬站点仅传 Cookie 而 UA 不一致仍会拦截，见 #610）。
+    if (!Object.keys(extraHeaders).some((k) => k.toLowerCase() === "user-agent")) {
+      extraHeaders = { ...extraHeaders, "User-Agent": navigator.userAgent };
+    }
+
     // 反查浏览器原始 method 与 body —— 修复 form-POST 触发的下载（uupdump 等）。
     // 优先以下载发起的真实 url 查找；命中不到时回退到重定向前的 originalUrl。
     const reqRecord = lookupRequestRecord(url, originalUrl);
@@ -3079,6 +3173,25 @@ export default defineBackground(() => {
           dashManifest: dashManifests[dashManifests.length - 1]?.manifest ?? null,
           dashManifests,
         };
+      }
+
+      // --- Content Script UI / Popup: 清空指定 tab 的嗅探资源列表（#559）---
+      // 长会话 SPA（抖音等）不断切换播放会话会持续累积嗅探资源，提供
+      // 一键清空入口。清空后同步刷新 badge 并推送空列表给页内面板，
+      // 保持 popup / 页内面板两处 UI 与 store 状态一致；后续嗅探到的
+      // 新资源会正常重新加入。
+      case "clearResources": {
+        const tabId =
+          sender.tab?.id ??
+          (typeof message.tabId === "number" ? message.tabId : -1);
+        if (!tabId || tabId < 0) {
+          return { success: false, message: "No tab" };
+        }
+        clearTabProjection(tabId);
+        await updateDisplayedBadgeForTab(tabId);
+        await notifyContentScript(tabId);
+        await notifyDashManifest(tabId);
+        return { success: true };
       }
 
       // --- Content Script UI / Popup: 触发单个资源下载 ---

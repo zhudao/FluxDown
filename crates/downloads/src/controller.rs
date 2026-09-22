@@ -8,8 +8,7 @@ use std::{
 
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, CloudDevice, DaemonEvent, DaemonRuntimeStatsDto, DaemonSnapshot,
-    GroupDto, LinkDeviceInfo, QueueDto, RemoteTaskDto, RssSourceDto, ServiceEvent, TaskDto,
-    WsServerMsg,
+    GroupDto, LinkDeviceInfo, QueueDto, RemoteTaskDto, ServiceEvent, TaskDto, WsServerMsg,
 };
 
 use crate::model::{CategoryIndex, DownloadTaskView, TaskState, TaskStore};
@@ -116,9 +115,6 @@ pub enum DownloadsCommand {
         group_id: String,
         delete_files: bool,
     },
-    RssRefresh {
-        source_id: String,
-    },
     ResolveSelection(fluxdown_protocol::SelectionResolutionDto),
     /// 外部捕获确认 / 忽略（可覆盖保存目录、文件名、队列）。
     CaptureResolve(fluxdown_protocol::CaptureResolveParams),
@@ -180,7 +176,6 @@ pub struct DownloadsController {
     groups: Vec<GroupDto>,
     group_summaries: Vec<GroupSummary>,
     group_summaries_generation: u64,
-    rss_sources: Vec<RssSourceDto>,
     cloud_devices: Vec<CloudDevice>,
     linked_devices: Vec<LinkDeviceInfo>,
     config: BTreeMap<String, String>,
@@ -205,7 +200,6 @@ impl DownloadsController {
             groups: Vec::new(),
             group_summaries: Vec::new(),
             group_summaries_generation: u64::MAX,
-            rss_sources: Vec::new(),
             cloud_devices: Vec::new(),
             linked_devices: Vec::new(),
             config: BTreeMap::new(),
@@ -328,11 +322,6 @@ impl DownloadsController {
     }
 
     #[must_use]
-    pub(crate) fn rss_sources(&self) -> &[RssSourceDto] {
-        &self.rss_sources
-    }
-
-    #[must_use]
     pub(crate) fn cloud_devices(&self) -> &[CloudDevice] {
         &self.cloud_devices
     }
@@ -414,7 +403,6 @@ impl DownloadsController {
     fn absorb_daemon_context(&mut self, snapshot: &DaemonSnapshot) {
         self.queues.clone_from(&snapshot.queues);
         self.groups.clone_from(&snapshot.groups);
-        self.rss_sources.clone_from(&snapshot.rss_sources);
         self.config.clone_from(&snapshot.config.values);
         self.config_revision = snapshot.config.revision;
         self.runtime_stats.clone_from(&snapshot.runtime_stats);

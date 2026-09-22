@@ -127,7 +127,7 @@ impl WindowRegistry {
             registry.open.remove(&key);
             registry.ids.remove(&handle.window_id());
         }
-        match cx.open_window(options, build) {
+        match cx.open_window(crate::app_icon::window_options(options), build) {
             Ok(handle) => {
                 let any: AnyWindowHandle = handle.into();
                 let registry = cx.global_mut::<Self>();

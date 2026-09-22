@@ -530,6 +530,8 @@ export interface FsListResponse {
   path: string
   parent: string | null
   dirs: FsEntry[]
+  /** 服务进程对该目录无读取权限（NAS 套件未授权共享文件夹）；dirs 必为空。 */
+  denied: boolean
 }
 
 export interface StatsResponse {

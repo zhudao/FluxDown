@@ -3,18 +3,28 @@
 use fluxdown_protocol::method;
 use fluxdown_ui_components::{ButtonVariant, button};
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, ParentElement, SharedString, Styled, div};
-use gpui_component::{IconName, h_flex};
+use gpui::{App, ParentElement, SharedString, Styled, div, px};
+use gpui_component::{Icon, IconName, h_flex};
 use serde_json::json;
 
 use super::{SectionContext, site_auth};
-use crate::ui::{Control, SettingsPage, SettingsSection};
+use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     let mode = ctx.store.read(cx).daemon_str("proxy_mode");
+    if mode == "system"
+        && ctx.store.read(cx).system_proxy().is_none()
+        && !ctx.store.read(cx).is_busy("systemProxy")
+    {
+        ctx.store
+            .update(cx, |store, cx| store.load_system_proxy(cx));
+    }
     let mut sections = vec![mode_section(ctx)];
-    if matches!(mode.as_str(), "manual" | "auto") {
-        sections.push(manual_section(ctx));
+    match mode.as_str() {
+        "auto" => sections.push(auto_desc_section(ctx)),
+        "system" => sections.push(system_section(ctx, cx)),
+        "manual" => sections.push(manual_section(ctx)),
+        _ => {}
     }
     sections.push(site_auth::group(ctx, cx));
     SettingsPage::new(
@@ -33,14 +43,91 @@ fn mode_section(ctx: &SectionContext) -> SettingsSection {
         (SharedString::from("manual"), ctx.t("proxyModeManual")),
         (SharedString::from("auto"), ctx.t("proxyModeAuto")),
     ];
+    let get = ctx.store();
+    let set = ctx.store();
+    let control = Control::dropdown(
+        options,
+        move |cx: &App| SharedString::from(get.read(cx).daemon_str("proxy_mode")),
+        move |value: SharedString, cx: &mut App| {
+            set.update(cx, |store, cx| {
+                store.set_daemon("proxy_mode", value.to_string(), cx);
+                // 切到系统代理模式时立即重新检测（系统设置可能在两次切换之间变化）。
+                if value.as_ref() == "system" && !store.is_busy("systemProxy") {
+                    store.load_system_proxy(cx);
+                }
+            });
+        },
+    );
     SettingsSection::new()
         .title(ctx.t("proxySettings"))
         .subtitle(ctx.t("proxyBtNote"))
-        .row(ctx.item(
-            "proxySettings",
-            Some("proxySettingsDesc"),
-            ctx.daemon_dropdown("proxy_mode", options),
-        ))
+        .row(ctx.item("proxySettings", Some("proxySettingsDesc"), control))
+}
+
+/// `auto` 模式：只读说明行，无可编辑表单。
+fn auto_desc_section(ctx: &SectionContext) -> SettingsSection {
+    let desc = ctx.t("proxyModeAutoDesc");
+    SettingsSection::new().row(SettingsRow::custom(move |_, _, _, cx: &mut App| {
+        info_line(desc.clone(), cx)
+    }))
+}
+
+/// `system` 模式：检测状态 + 只读的系统代理详情（不可编辑）。
+fn system_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
+    let busy = ctx.store.read(cx).is_busy("systemProxy");
+    let snapshot = ctx.store.read(cx).system_proxy().cloned();
+
+    let status_text = if busy {
+        ctx.t("proxySystemDetecting")
+    } else {
+        match &snapshot {
+            Some(dto) if dto.detected => ctx.t("proxySystemDetected"),
+            Some(_) => ctx.t("proxySystemNotConfigured"),
+            None => ctx.t("proxySystemDetecting"),
+        }
+    };
+
+    let mut section = SettingsSection::new()
+        .title(ctx.t("proxyModeSystem"))
+        .subtitle(ctx.t("proxyModeSystemDesc"))
+        .row(SettingsRow::custom(move |_, _, _, cx: &mut App| {
+            info_line(status_text.clone(), cx)
+        }));
+
+    if let Some(dto) = snapshot.as_ref()
+        && dto.detected
+        && !busy
+    {
+        section = section
+            .row(ctx.item(
+                "proxyType",
+                None,
+                readonly_control(SharedString::from(dto.proxy_type.to_uppercase())),
+            ))
+            .row(ctx.item(
+                "proxyHost",
+                None,
+                readonly_control(SharedString::from(dto.host.clone())),
+            ))
+            .row(ctx.item(
+                "proxyPort",
+                None,
+                readonly_control(SharedString::from(dto.port.to_string())),
+            ));
+        if !dto.no_list.is_empty() {
+            section = section.row(ctx.item(
+                "proxyNoList",
+                None,
+                readonly_control(SharedString::from(dto.no_list.clone())),
+            ));
+        }
+        section = section.row(ctx.item(
+            "proxyTestConnection",
+            None,
+            test_control(ctx, ProxyTestSource::System),
+        ));
+    }
+    section
 }
 
 fn manual_section(ctx: &SectionContext) -> SettingsSection {
@@ -62,7 +149,7 @@ fn manual_section(ctx: &SectionContext) -> SettingsSection {
         .row(ctx.item(
             "proxyPort",
             Some("proxyPortPlaceholder"),
-            ctx.daemon_input("proxy_port"),
+            proxy_port_control(ctx),
         ))
         .row(ctx.item(
             "proxyUsername",
@@ -79,10 +166,70 @@ fn manual_section(ctx: &SectionContext) -> SettingsSection {
             Some("proxyNoListDesc"),
             ctx.daemon_input("proxy_no_list"),
         ))
-        .row(ctx.item("proxyTestConnection", None, test_control(ctx)))
+        .row(ctx.item(
+            "proxyTestConnection",
+            None,
+            test_control(ctx, ProxyTestSource::Manual),
+        ))
 }
 
-fn test_control(ctx: &SectionContext) -> Control {
+/// 端口号输入：过滤非数字字符并夹取到 `1..=65535`。
+fn proxy_port_control(ctx: &SectionContext) -> Control {
+    let get = ctx.store();
+    let set = ctx.store();
+    Control::input(
+        move |cx: &App| SharedString::from(get.read(cx).daemon_str("proxy_port")),
+        move |value: SharedString, cx: &mut App| {
+            let digits: String = value.chars().filter(char::is_ascii_digit).collect();
+            let clamped = digits
+                .parse::<u32>()
+                .ok()
+                .map(|port| port.clamp(1, 65535).to_string())
+                .unwrap_or_default();
+            set.update(cx, |store, cx| store.set_daemon("proxy_port", clamped, cx));
+        },
+    )
+}
+
+/// 只读值展示（禁用态，不可编辑）。
+fn readonly_control(value: SharedString) -> Control {
+    Control::custom(move |_disabled, _key, _window, cx: &mut App| {
+        let tokens = active_theme(cx).tokens();
+        div()
+            .text_sm()
+            .text_color(tokens.colors.muted_foreground)
+            .child(value.clone())
+    })
+}
+
+/// info 图标 + 说明文字的整行（无标题/控件结构）。
+fn info_line(text: SharedString, cx: &mut App) -> gpui::Div {
+    let tokens = active_theme(cx).tokens();
+    h_flex()
+        .gap(tokens.spacing.sm)
+        .items_start()
+        .child(
+            Icon::new(IconName::Info)
+                .size(px(13.))
+                .text_color(tokens.colors.muted_foreground),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_xs()
+                .text_color(tokens.colors.muted_foreground)
+                .child(text),
+        )
+}
+
+#[derive(Clone, Copy)]
+enum ProxyTestSource {
+    Manual,
+    System,
+}
+
+fn test_control(ctx: &SectionContext, source: ProxyTestSource) -> Control {
     let store = ctx.store();
     let label = ctx.t("proxyTestConnection");
     let testing = ctx.t("proxyTesting");
@@ -119,13 +266,25 @@ fn test_control(ctx: &SectionContext) -> Control {
                     move |_, _, cx| {
                         let translator = translator.clone();
                         click_store.update(cx, |store, cx| {
-                            let params = json!({
-                                "proxyType": store.daemon_str("proxy_type"),
-                                "host": store.daemon_str("proxy_host"),
-                                "port": store.daemon_str("proxy_port"),
-                                "username": store.daemon_str("proxy_username"),
-                                "password": store.daemon_str("proxy_password"),
-                            });
+                            let params = match source {
+                                ProxyTestSource::Manual => json!({
+                                    "proxyType": store.daemon_str("proxy_type"),
+                                    "host": store.daemon_str("proxy_host"),
+                                    "port": store.daemon_str("proxy_port"),
+                                    "username": store.daemon_str("proxy_username"),
+                                    "password": store.daemon_str("proxy_password"),
+                                }),
+                                ProxyTestSource::System => {
+                                    let dto = store.system_proxy().cloned().unwrap_or_default();
+                                    json!({
+                                        "proxyType": dto.proxy_type,
+                                        "host": dto.host,
+                                        "port": dto.port.to_string(),
+                                        "username": "",
+                                        "password": "",
+                                    })
+                                }
+                            };
                             store.call_with(
                                 "proxyTest",
                                 method::DAEMON_CONFIG_PROXY_TEST,

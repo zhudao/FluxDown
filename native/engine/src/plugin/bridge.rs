@@ -8,8 +8,9 @@
 //! 3. 逐跳重定向 `Policy::custom`（手动重建 30 跳上限 + 每跳字面量 IP 校验）。
 //!
 //! ## v1 限制（记录在案）
-//! - `proxy` 在 bridge 构造时快照（reqwest ClientBuilder 配置构建时定死）；运行期改
-//!   代理后插件出口不随动（可接受，非安全问题）。
+//! - `proxy` 在 bridge 构造时快照（reqwest ClientBuilder 配置构建时定死；
+//!   `ytdlp_proxy_url` 同理快照进 `--proxy` 参数，见 #401）；运行期改代理后
+//!   插件出口（含 yt-dlp 子进程）不随动（可接受，非安全问题）。
 //! - 单次调用严格 per-call fetch 上限退化为**全局并发 fetch 上限**（对宿主保护更强）。
 //! - 配置代理时 DNS 由代理侧解析，[`GuardResolver`] 不参与（hostname 级过滤失效；
 //!   字面量 IP 前置校验与逐跳重定向校验仍然生效）。代理由用户显式配置，视为可信出口。
@@ -331,6 +332,9 @@ pub struct EngineBridge {
     ffmpeg_sema: Arc<Semaphore>,
     /// 全局并发 yt-dlp 进程限流。
     ytdlp_sema: Arc<Semaphore>,
+    /// yt-dlp 子进程用 `--proxy` URL（构造时快照，同 v1 限制：运行期改代理
+    /// 不随动，见模块文档）。`None` = 直连，不注入 `--proxy`。#401
+    ytdlp_proxy_url: Option<String>,
 }
 
 impl EngineBridge {
@@ -343,6 +347,7 @@ impl EngineBridge {
     ) -> Result<Self, PluginError> {
         let client = build_guarded_client(proxy, false, "守卫")?;
         let auth_client = build_guarded_client(proxy, true, "认证守卫")?;
+        let ytdlp_proxy_url = proxy.resolve().to_proxy_url();
         Ok(Self {
             client,
             auth_client,
@@ -352,6 +357,7 @@ impl EngineBridge {
             data_dir,
             ffmpeg_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_FFMPEG)),
             ytdlp_sema: Arc::new(Semaphore::new(MAX_CONCURRENT_YTDLP)),
+            ytdlp_proxy_url,
         })
     }
 }
@@ -966,13 +972,24 @@ impl PluginBridge for EngineBridge {
         // `--cache-dir`（只能是牢笼内相对路径）会覆盖此默认，仍在牢笼内。
         cmd.arg("--cache-dir").arg(jail.join(".cache"));
         log_info!(
-            "[ytdlp-exec] plugin={} 执行: {} --ignore-config --cache-dir <jail> {}",
+            "[ytdlp-exec] plugin={} 执行: {} --ignore-config --cache-dir <jail> {}{}",
             plugin_id,
             bin.display(),
-            spec.args.join(" ")
+            spec.args.join(" "),
+            if self.ytdlp_proxy_url.is_some() {
+                " --proxy <redacted>"
+            } else {
+                ""
+            },
         );
-        cmd.args(&spec.args)
-            .stdin(Stdio::null())
+        cmd.args(&spec.args);
+        // 宿主注入代理（#401）：放在 spec.args 之后——yt-dlp 同名开关后者生效，
+        // 用户在 App 里配置的代理对子进程权威；未配置代理时不注入，插件自带的
+        // `--proxy`（既有插件的自救路径）仍然可用。
+        if let Some(proxy_url) = &self.ytdlp_proxy_url {
+            cmd.arg("--proxy").arg(proxy_url);
+        }
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -1214,7 +1231,8 @@ fn truncate_utf8(bytes: &[u8], cap: usize) -> (String, bool) {
 }
 
 /// 会执行外部程序 / 加载任意配置或插件 / 读浏览器凭据的 yt-dlp 开关黑名单
-/// （突破沙箱边界，一律拒绝）。
+/// （突破沙箱边界，一律拒绝）；另含 `--ffmpeg-location`——由宿主在 `run_ytdlp`
+/// 中权威注入，插件自带的一律拒绝，防止指向任意二进制。
 const YTDLP_BLOCKED_FLAGS: [&str; 13] = [
     "--exec",
     "--exec-before-download",

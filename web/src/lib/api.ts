@@ -154,6 +154,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ fileName }),
     }),
+  // 更换任务下载源地址（错误码经 body.message 原样透传：invalid-url/
+  // task-active/task-completed/bt-unsupported/protocol-unsupported/
+  // protocol-mismatch/not-found 或引擎原文，由弹窗侧映射文案）
+  changeTaskUrl: (id: string, url: string) =>
+    apiFetch<unknown>(`/api/v1/tasks/${id}/url`, {
+      method: 'PUT',
+      body: JSON.stringify({ url }),
+    }),
 
   // 任务组与前置预解析（多文件下载）
   resolvePreview: (req: ResolvePreviewRequest) =>

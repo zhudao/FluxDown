@@ -3,7 +3,7 @@ title: 服务器部署
 description: 从源码构建并运行 headless FluxDown 服务器,了解全部环境变量并安全地对外暴露。
 section: headless-server
 order: 1
-sourceHash: "5c2760a15f68"
+sourceHash: "1449d3d3dd1b"
 ---
 
 `fluxdown_server` 是 FluxDown 下载引擎的 headless 版本:没有 Flutter 界面,也没有 Rinf/FFI 层。它把同一套 Rust 引擎(HTTP/HTTPS、FTP、BitTorrent、HLS、DASH)通过 HTTP、WebSocket 和一个编译进可执行文件的 Web 界面暴露出来,因此你可以把它跑在 NAS、家庭服务器或 VPS 上,在浏览器里远程管理下载。发行版就是**一个自包含的单二进制**,不用再附带 `web/` 目录。
@@ -55,12 +55,15 @@ cargo build --release -p fluxdown_server   # 把 web/dist 嵌进二进制
 |---|---|---|
 | `FLUXDOWN_BIND` | `0.0.0.0:17800` | HTTP/WebSocket 服务监听的 TCP 地址。 |
 | `FLUXDOWN_DATA_DIR` | 平台自动探测(见下表) | 数据库文件与日志所在目录。 |
+| `FLUXDOWN_SAVE_DIR` | 未设置——平台下载目录 | 首次启动时播种的默认保存目录(仅在库中尚无 `default_save_dir` 时写入)。之后在设置页选过的目录永远优先。群晖套件用它指向安装向导里选定的共享文件夹。 |
 | `FLUXDOWN_DATABASE_URL` | 未设置——使用数据目录下的 SQLite 文件 | 显式连接串:`sqlite:/path/to/file.db` 或 `postgres://user:pass@host/db`。 |
 | `FLUXDOWN_WEBROOT` | 未设置——托管内嵌的 Web 界面 | 可选覆盖:改从该目录托管 SPA,而不用内嵌那份(自定义前端,或热替换 `bun run build` 产物)。**不再**隐式探测可执行文件同级的 `./web`。 |
-| `FLUXDOWN_TOKEN` | 未设置——走 Web 首次运行向导 | 可选的预置管理访问密钥。仅当库中尚未设置密钥时采纳(会 trim 首尾空白;须满足下文密钥规则,否则忽略并打警告)。用于 docker-compose / k8s / CI 等无人值守部署跳过向导。 |
+| `FLUXDOWN_TOKEN` | 未设置——走 Web 首次运行向导 | 可选的预置管理访问密钥。仅当库中尚未设置密钥时采纳(会 trim 首尾空白;须满足下文密钥规则,否则忽略并打警告)。用于 docker-compose / k8s / CI 等无人值守部署跳过向导。若要覆盖已存在的密钥,见下方 `FLUXDOWN_TOKEN_FORCE`。 |
+| `FLUXDOWN_TOKEN_FORCE` | 未设置——`FLUXDOWN_TOKEN` 仅播种空密钥 | 真值(`1`/`true`/`yes`/`on`)时,`FLUXDOWN_TOKEN` 每次启动都覆盖库中已存的密钥,而不仅是库中还没有密钥时才生效。适合把密钥完全交给编排系统(Kubernetes Secret、docker-compose env)管理、不希望 Web 界面改的密钥跨重启保留的场景。 |
 | `FLUXDOWN_DEMO` | 未设置(关闭) | 真值(`1`/`true`/`yes`/`on`)开启演示模式:仅允许下载内置生成的 64 MiB 演示文件,适合公开演示。 |
 | `FLUXDOWN_DEMO_URL` | 未设置(关闭) | 用指定 URL 覆盖演示模式的内置生成文件,仅该 URL 可下载。 |
 | `FLUXDOWN_LANG` | 未设置(回退浏览器语言) | Web 界面默认语言(`en`/`zh`,接受 `zh-CN` 等区域变体)。纯回退值:任何用户在设置页保存过语言后,以保存值为服务器侧默认(实时生效,跨重启保留);在浏览器里显式选过语言的用户始终以本人选择为准。 |
+| `FLUXDOWN_LOG_LEVEL` | 未设置——`info` | 未设置 `RUST_LOG` 时的默认 `tracing` 日志级别(`error`/`warn`/`info`/`debug`/`trace`,大小写不敏感)。`RUST_LOG` 存在时始终优先——简单场景用 `FLUXDOWN_LOG_LEVEL` 一键调级,需要按模块精细控制再用 `RUST_LOG`。启动时读取一次,修改需重启生效。 |
 
 未设置 `FLUXDOWN_DATA_DIR` 时,数据目录探测规则与桌面客户端一致:
 
@@ -119,6 +122,12 @@ stderr 会打印中英双语引导横幅(不会生成密钥):
 
 ```bash
 FLUXDOWN_TOKEN='your-strong-key-here' ./fluxdown-server
+```
+
+若要让环境变量始终生效——即使有人在 Web 界面改过密钥——再加上 `FLUXDOWN_TOKEN_FORCE=1`:
+
+```bash
+FLUXDOWN_TOKEN='your-strong-key-here' FLUXDOWN_TOKEN_FORCE=1 ./fluxdown-server
 ```
 
 ### 安全提示

@@ -5,7 +5,7 @@
 //!    实际发起下载协议判定之前、且 off-actor（见 [`crate::download_manager`] 的
 //!    off-actor resolve 插桩）；命中后失败 fail-closed（进 status=4，绝不静默把网页
 //!    HTML 当视频保存），并暴露「忽略插件重试」逃生舱。
-//! 2. **通知平面**：onStart/onDone/onError/onMetaProbed **全部 fire-and-forget**
+//! 2. **通知平面**：onStart/onDone/onError/onMetaProbed/onCancel **全部 fire-and-forget**
 //!    （失败仅记日志、超时、`try_acquire` 不阻塞，绝不影响任务状态）。
 //! 3. **订阅平面**：manifest 声明 `subscriptions` 后，宿主调用插件的
 //!    `globalThis.subscribe(ctx)`，返回值进入公共订阅调度；插件不直接碰订阅表或建任务。
@@ -36,7 +36,7 @@ pub use manager::{DisabledReason, LoadedPlugin, PluginInfo, PluginLoadStatus, Pl
 pub use manifest::{PluginManifest, SettingField, SettingType, SettingWidget, SubscriptionDecl};
 pub use market::{MarketClient, MarketEntry, MarketError, MarketIndex};
 pub use runtime::{
-    AuthRequest, AuthResult, ExecutionBudget, ManifestItem, ManifestVariant, PluginBridge,
-    PluginError, PluginEvent, PluginLogLevel, ResolveManifest, ResolveRequest, ResolveResult,
-    ResolveVariant, ScriptRuntime, SubscriptionRequest,
+    AuthRequest, AuthResult, CancelReason, ExecutionBudget, ManifestItem, ManifestVariant,
+    PluginBridge, PluginError, PluginEvent, PluginLogLevel, ResolveManifest, ResolveRequest,
+    ResolveResult, ResolveVariant, ScriptRuntime, SubscriptionRequest,
 };

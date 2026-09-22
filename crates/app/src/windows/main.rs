@@ -4,8 +4,9 @@ use std::{rc::Rc, sync::Arc};
 
 use fluxdown_ui_downloads::{DOWNLOAD_ICON_PATH, DownloadHostActions, DownloadView};
 use fluxdown_ui_i18n::keys;
-use fluxdown_ui_rss::RssView;
+use fluxdown_ui_rss::{RSS_ICON_PATH, RssView};
 use fluxdown_ui_shell::{RouteId, ShellAction, ShellRoute, ShellView, main_window_options};
+use fluxdown_ui_theme::{active_theme, toggle_theme};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
 use gpui_component::{Icon, IconName, Root};
 
@@ -56,22 +57,49 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 RouteId::new("rss"),
                 "activity-rss",
                 "activity-rss-tooltip",
-                "rssAddSource",
-                Icon::new(IconName::Globe),
+                "sidebarRss",
+                Icon::empty().path(RSS_ICON_PATH),
                 rss.clone().into(),
+            )
+            .optional(true),
+        ];
+        let actions = vec![
+            ShellAction::with_dynamic_icon(
+                "activity-theme",
+                "activity-theme-tooltip",
+                "activityThemeToggle",
+                |cx| {
+                    if active_theme(cx).mode().is_dark() {
+                        Icon::new(IconName::Sun)
+                    } else {
+                        Icon::new(IconName::Moon)
+                    }
+                },
+                toggle_theme,
+            )
+            .optional(true),
+            ShellAction::new(
+                "activity-settings",
+                "activity-settings-tooltip",
+                keys::SETTINGS,
+                Icon::new(IconName::Settings),
+                move |_, cx| crate::windows::settings::open(cx),
             ),
         ];
-        let actions = vec![ShellAction::new(
-            "activity-settings",
-            "activity-settings-tooltip",
-            keys::SETTINGS,
-            Icon::new(IconName::Settings),
-            move |_, cx| crate::windows::settings::open(cx),
-        )];
         let shell =
             cx.new(|cx| ShellView::new(translator.clone(), routes, actions, Some(menu_bar), cx));
+        // 活动栏可选项的初始可见性：偏好缺省视同 true（与设置页默认值一致）。
+        let show_activity_rss = Desktop::pref(cx, "ui.show_activity_rss")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let show_activity_theme = Desktop::pref(cx, "ui.show_activity_theme")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        shell.update(cx, |shell, cx| {
+            shell.set_route_visible(RouteId::new("rss"), show_activity_rss, cx);
+            shell.set_action_visible("activity-theme", show_activity_theme, cx);
+        });
 
-        let shell_for_nav = shell.downgrade();
         let settings_for_categories = settings_store.clone();
         let translator_for_categories = translator.clone();
         let shutdown_status = crate::power::status(cx);
@@ -89,11 +117,6 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 })),
                 open_queue_manager: Some(Rc::new(|_, cx| {
                     crate::windows::queue_manager::open(cx);
-                })),
-                navigate_rss: Some(Rc::new(move |_, cx| {
-                    let _ = shell_for_nav.update(cx, |shell, cx| {
-                        shell.navigate(RouteId::new("rss"), cx);
-                    });
                 })),
                 open_category_editor: Some(Rc::new(move |id, window, cx| {
                     let translator = translator_for_categories.read(cx).clone();

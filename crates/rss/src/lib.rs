@@ -1,5 +1,9 @@
 //! RSS 订阅、条目、验证与动作 capability。
 
+mod assets;
+
+pub use assets::{RSS_ICON_PATH, RssAssets};
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use fluxdown_ui_i18n::Translator;

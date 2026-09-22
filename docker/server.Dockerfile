@@ -68,9 +68,10 @@ RUN --mount=type=cache,id=fluxdown-cargo-registry-$TARGETARCH,target=/usr/local/
     && cp "target/$(cat /rust-target)/release/fluxdown-server" /usr/local/bin/fluxdown-server
 
 # ── Stage 3: 运行时（目标架构 debian-slim + ca-certificates，rustls 读系统根证书）──
+# xz-utils：托管 ffmpeg 组件在 Linux 上是 .tar.xz，components/ffmpeg.rs 走系统 `tar -xJf` 解压（#649）
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=server /usr/local/bin/fluxdown-server /app/fluxdown-server

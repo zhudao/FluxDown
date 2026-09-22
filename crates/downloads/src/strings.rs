@@ -85,7 +85,6 @@ pub(crate) struct DownloadStrings {
     pub(crate) search_tasks_placeholder: SharedString,
     pub(crate) unsupported_drop_hint: SharedString,
     pub(crate) sidebar_status: SharedString,
-    pub(crate) sidebar_rss: SharedString,
     pub(crate) sidebar_devices: SharedString,
     pub(crate) this_device: SharedString,
     pub(crate) add_category: SharedString,
@@ -96,8 +95,6 @@ pub(crate) struct DownloadStrings {
     pub(crate) manage_queue_action: SharedString,
     pub(crate) delete_queue_action: SharedString,
     pub(crate) queue_delete_confirm_desc: SharedString,
-    pub(crate) rss_refresh_action: SharedString,
-    pub(crate) rss_manage_action: SharedString,
     pub(crate) tab_failed: SharedString,
     pub(crate) empty_title: SharedString,
     pub(crate) empty_subtitle: SharedString,
@@ -192,7 +189,6 @@ impl DownloadStrings {
             search_tasks_placeholder: shared(translator.text("searchTasksPlaceholder")),
             unsupported_drop_hint: shared(translator.text("unsupportedDropHint")),
             sidebar_status: shared(translator.text(keys::SIDEBAR_STATUS)),
-            sidebar_rss: shared(translator.text("sidebarRss")),
             sidebar_devices: shared(translator.text("deviceSection")),
             this_device: shared(translator.text("thisDevice")),
             add_category: shared(translator.text("addCategory")),
@@ -203,8 +199,6 @@ impl DownloadStrings {
             manage_queue_action: shared(translator.text("manageQueueAction")),
             delete_queue_action: shared(translator.text("deleteQueueAction")),
             queue_delete_confirm_desc: shared(translator.text("queueDeleteConfirmDesc")),
-            rss_refresh_action: shared(translator.text("rssRefreshNow")),
-            rss_manage_action: shared(translator.text("rssManageTitle")),
             tab_failed: shared(translator.text("tabError")),
         }
     }

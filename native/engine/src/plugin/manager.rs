@@ -309,7 +309,9 @@ impl PluginManager {
             }
         }
 
-        *self.plugins.write().await = Arc::new(loaded);
+        let deduped = dedup_plugins_by_identity(loaded, &mut failed);
+
+        *self.plugins.write().await = Arc::new(deduped);
         *self.failed_plugins.write().await = Arc::new(failed);
     }
 
@@ -1564,6 +1566,46 @@ async fn load_setting_values_db(db: &Db, identity: &str) -> HashMap<String, Stri
     map
 }
 
+/// 按 identity 去重（476#1）：安装目录扫描与 dev 键扫描互相独立，同一
+/// identity 若既有已安装目录、又有 `plugin.dev.<identity>` 覆盖（或误留了两条
+/// dev 注册），此前会原样塞进快照，让管理页显示两条同标识记录、且卸载其一
+/// 时看起来「删不掉」（另一条仍在快照里）。这里保证同一 identity 只保留
+/// 一条：dev 覆盖优先于安装目录（开发者主动登记的本地调试版本应生效）；
+/// 被顶替的一份转入 `failed`，仍可在管理页看到并允许用户显式卸载清理磁盘/
+/// 配置残留，不静默丢弃。纯函数，独立于 I/O 可测。
+fn dedup_plugins_by_identity(
+    loaded: Vec<LoadedPlugin>,
+    failed: &mut Vec<FailedPlugin>,
+) -> Vec<LoadedPlugin> {
+    let mut identity_index: HashMap<String, usize> = HashMap::with_capacity(loaded.len());
+    let mut deduped: Vec<LoadedPlugin> = Vec::with_capacity(loaded.len());
+    for plugin in loaded {
+        match identity_index.get(&plugin.manifest.identity).copied() {
+            Some(idx) => {
+                // dev 覆盖已安装目录：换入 dev 版本，被顶替的安装目录转入 failed。
+                let displaced = if plugin.dev && !deduped[idx].dev {
+                    std::mem::replace(&mut deduped[idx], plugin)
+                } else {
+                    plugin
+                };
+                failed.push(FailedPlugin {
+                    identity: displaced.manifest.identity.clone(),
+                    dir: displaced.dir.clone().into_boxed_path(),
+                    manifest: Some(Box::new(displaced.manifest.clone())),
+                    dev_mode: displaced.dev,
+                    error: "identity 重复：与另一已加载插件冲突，可在此卸载清理残留目录/配置"
+                        .to_string(),
+                });
+            }
+            None => {
+                identity_index.insert(plugin.manifest.identity.clone(), deduped.len());
+                deduped.push(plugin);
+            }
+        }
+    }
+    deduped
+}
+
 fn identity_from_dev_key(key: &str) -> &str {
     key.strip_prefix("plugin.dev.").unwrap_or(key)
 }
@@ -1913,10 +1955,94 @@ fn validate_manifest_item(item: &ManifestItem) -> Result<(), PluginError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{parse_subscription_output, validate_resolve_output};
+    use super::{
+        FailedPlugin, LoadedPlugin, dedup_plugins_by_identity, parse_subscription_output,
+        validate_resolve_output,
+    };
+    use crate::plugin::PluginManifest;
     use crate::plugin::{
         ManifestItem, ManifestVariant, PluginError, ResolveManifest, ResolveResult, ResolveVariant,
     };
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
+
+    fn test_manifest(identity: &str) -> PluginManifest {
+        PluginManifest {
+            identity: identity.to_string(),
+            name: identity.to_string(),
+            version: "1.0.0".to_string(),
+            description: String::new(),
+            homepage: String::new(),
+            icon: String::new(),
+            min_app_version: String::new(),
+            resolvers: Vec::new(),
+            subscriptions: Vec::new(),
+            hooks: None,
+            auth: None,
+            settings: Vec::new(),
+            permissions: Vec::new(),
+        }
+    }
+
+    fn test_loaded_plugin(identity: &str, dev: bool, dir: &str) -> LoadedPlugin {
+        LoadedPlugin {
+            manifest: test_manifest(identity),
+            dir: PathBuf::from(dir),
+            dev,
+            enabled: true,
+            disabled_reason: super::DisabledReason::None,
+            resolver_entry: None,
+            hooks_entry: None,
+            auth_entry: None,
+            subscription_entry: None,
+            resolver_cache: None,
+            hooks_cache: None,
+            auth_cache: None,
+            subscription_cache: None,
+            timeout_streak: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    // 476#1：同 identity 的安装目录 + dev 注册只保留一条（dev 覆盖安装目录），
+    // 被顶替的一份进入 failed 列表而不是静默丢弃或重复出现在快照里。
+    #[test]
+    fn dedup_plugins_by_identity_prefers_dev_over_installed() {
+        let installed = test_loaded_plugin("acme@demo", false, "/root/acme@demo");
+        let dev = test_loaded_plugin("acme@demo", true, "/home/dev/demo");
+        let mut failed: Vec<FailedPlugin> = Vec::new();
+
+        let deduped = dedup_plugins_by_identity(vec![installed, dev], &mut failed);
+
+        assert_eq!(deduped.len(), 1, "only one entry per identity may survive");
+        assert!(
+            deduped[0].dev,
+            "dev registration must win over installed dir"
+        );
+        assert_eq!(
+            failed.len(),
+            1,
+            "displaced duplicate must be recorded, not dropped"
+        );
+        assert!(
+            !failed[0].dev_mode,
+            "the displaced entry is the installed-dir copy"
+        );
+        assert_eq!(failed[0].identity, "acme@demo");
+    }
+
+    // 两个不同 identity 必须都保留、互不影响。
+    #[test]
+    fn dedup_plugins_by_identity_keeps_distinct_identities() {
+        let a = test_loaded_plugin("acme@demo", false, "/root/acme@demo");
+        let b = test_loaded_plugin("other@demo", false, "/root/other@demo");
+        let mut failed: Vec<FailedPlugin> = Vec::new();
+
+        let deduped = dedup_plugins_by_identity(vec![a, b], &mut failed);
+
+        assert_eq!(deduped.len(), 2);
+        assert!(failed.is_empty());
+    }
 
     fn variant(label: &str, url: &str) -> ResolveVariant {
         ResolveVariant {

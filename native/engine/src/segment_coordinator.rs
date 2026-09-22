@@ -43,9 +43,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cdn::NodePool;
 use crate::db::Db;
-use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo, is_server_rejection};
+use crate::downloader::{
+    DownloadError, ProgressUpdate, SegmentProgressInfo, is_range_not_satisfiable,
+    is_server_rejection,
+};
 use crate::events::{EngineEvent, EventSink};
-use crate::logger::log_info;
+use crate::logger::{log_info, log_warn};
 use crate::output;
 use crate::speed_limiter::SpeedLimiter;
 
@@ -4321,6 +4324,22 @@ async fn do_segment_with_retry(
             {
                 return Err(e);
             }
+            // BUG-HTTP-416-RETRY-EXHAUST：416 Range Not Satisfiable 是服务器对
+            // 当前 Range 的明确拒绝，重试同一区间必然拿到同样的 416——不能像
+            // 瞬时网络错误一样烧完 max_retries 次重试预算才失败。仅当该段自身
+            // 从未确认过任何字节（actual_start == seg_start）才立即短路；已有
+            // 进度的段保留在下方瞬时错误分支重试，一次孤立的 416 不该扔掉整段
+            // 已下的字节。归一为 RangeNotSupported 复用其既有上抛路径
+            // （coordinator 捕获后触发单流回退，清空临时文件从头重下）。
+            Err(e) if is_range_not_satisfiable(&e) && actual_start == seg_start => {
+                log_info!(
+                    "[segment-retry] task {} seg {} 收到 416 Range Not Satisfiable 且该段无\
+                     历史进度，跳过重试直接上报触发单流回退",
+                    task_id,
+                    seg_idx
+                );
+                return Err(DownloadError::RangeNotSupported(format!("416 ({e})")));
+            }
             Err(e) => {
                 // 403/429 是服务器明确拒绝多连接；400 在配额型端点同样意味着
                 // "这条连接不会被服务"（见 is_http_400）——重试只会空烧退避，
@@ -4605,7 +4624,11 @@ async fn do_segment(
     // Verify that this segment's response comes from the same file version as
     // the initial probe.  A mismatch means the server updated the file while
     // we're downloading — the resulting file would be a corrupt splice of two
-    // different versions.
+    // different versions. An ETag mismatch is always fatal (strong validator);
+    // a Last-Modified-only mismatch is tolerated when the response's
+    // `Content-Range` total and start agree with the known total/offset —
+    // that pattern is CDN edge clock/format drift on identical content, not
+    // an actual file change (see [`crate::downloader::validator_mismatch_is_fatal`]).
     //
     // 版本一致性守卫【先于】下方的“真实大小 > 规划”扩容检查执行：文件在下载中途被
     // 替换应被判定为【版本变化】（fail-fast），而不是先触发一次整体扩容重下、再在
@@ -4615,29 +4638,51 @@ async fn do_segment(
     // Only check when the probe returned a non-empty value AND the segment
     // response also provides the header.  Many CDN edge servers strip these
     // headers on Range responses, so a missing header is not an error.
-    if !expected_etag.is_empty()
-        && let Some(resp_etag) = resp.headers().get(reqwest::header::ETAG)
-        && let Ok(resp_etag_str) = resp_etag.to_str()
-        && !resp_etag_str.is_empty()
-        && resp_etag_str != expected_etag
-    {
-        return Err(DownloadError::Other(format!(
-            "segment {}: ETag mismatch — probe=\"{}\", segment=\"{}\". \
-             The file may have changed on the server during download.",
-            seg_idx, expected_etag, resp_etag_str
-        )));
-    }
-    if !expected_last_modified.is_empty()
-        && let Some(resp_lm) = resp.headers().get(reqwest::header::LAST_MODIFIED)
-        && let Ok(resp_lm_str) = resp_lm.to_str()
+    let resp_etag_str = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let resp_lm_str = resp
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let etag_mismatch =
+        !expected_etag.is_empty() && !resp_etag_str.is_empty() && resp_etag_str != expected_etag;
+    let last_modified_mismatch = !expected_last_modified.is_empty()
         && !resp_lm_str.is_empty()
-        && resp_lm_str != expected_last_modified
-    {
-        return Err(DownloadError::Other(format!(
-            "segment {}: Last-Modified mismatch — probe=\"{}\", segment=\"{}\". \
-             The file may have changed on the server during download.",
-            seg_idx, expected_last_modified, resp_lm_str
-        )));
+        && resp_lm_str != expected_last_modified;
+    if etag_mismatch || last_modified_mismatch {
+        let content_range_total = crate::downloader::parse_content_range_total(resp.headers());
+        let known_total = planned_total.load(Ordering::Relaxed);
+        if crate::downloader::validator_mismatch_is_fatal(
+            etag_mismatch,
+            last_modified_mismatch,
+            content_range_total,
+            known_total,
+            cr_start,
+            Some(actual_start),
+        ) {
+            return Err(DownloadError::Other(format!(
+                "segment {seg_idx}: validator mismatch — probe etag=\"{expected_etag}\" \
+                 lm=\"{expected_last_modified}\", segment etag=\"{resp_etag_str}\" \
+                 lm=\"{resp_lm_str}\". The file may have changed on the server during download."
+            )));
+        }
+        log_warn!(
+            "[coordinator] task {} seg {} Last-Modified 跨 CDN edge 不同（probe=\"{}\" 本段=\"{}\"）\
+             但 Content-Range 总大小（{:?}，已知 {}）与请求起点（{:?}，请求 {}）均一致，\
+             判定为时钟/格式差异，继续该段下载",
+            task_id,
+            seg_idx,
+            expected_last_modified,
+            resp_lm_str,
+            content_range_total,
+            known_total,
+            cr_start,
+            actual_start
+        );
     }
 
     // --- hint 模式（无 probe 基线）的跨段版本一致性 latch --------------------
@@ -5123,7 +5168,9 @@ mod tests {
         soft_probe_eval_transition, soft_probe_ready, sustained_shrink_next_state,
         try_proactive_split, try_split_largest, validate_coverage,
     };
-    use crate::downloader::{DownloadError, SegmentProgressInfo, is_server_rejection};
+    use crate::downloader::{
+        DownloadError, SegmentProgressInfo, is_range_not_satisfiable, is_server_rejection,
+    };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex as StdMutex};
 
@@ -5357,6 +5404,15 @@ mod tests {
     fn http_400_ignores_non_request_errors() {
         assert!(!super::is_http_400(&DownloadError::Other(
             "400".to_string()
+        )));
+    }
+
+    #[test]
+    fn range_not_satisfiable_detects_416_in_coordinator_scope() {
+        assert!(is_range_not_satisfiable(&make_status_error(416)));
+        assert!(!is_range_not_satisfiable(&make_status_error(400)));
+        assert!(!is_range_not_satisfiable(&DownloadError::Other(
+            "416".to_string()
         )));
     }
 

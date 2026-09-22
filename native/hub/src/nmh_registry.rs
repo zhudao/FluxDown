@@ -702,6 +702,12 @@ mod inner {
                 .join("NativeMessagingHosts"),
             // Vivaldi (verified via KeePassXC source)
             config.join("vivaldi").join("NativeMessagingHosts"),
+            // Thorium (Chromium fork; user-reported, #360)
+            config.join("thorium").join("NativeMessagingHosts"),
+            // Norton Neo (Chromium-based AI browser; user-reported, #623/#653).
+            // Confirmed via /etc/neo/native-messaging-hosts embedded in the
+            // official Linux .deb (vendor product dir name = "neo").
+            config.join("neo").join("NativeMessagingHosts"),
             // ── Flatpak variants ──
             // Flatpak Chrome
             var_app
@@ -894,6 +900,41 @@ mod inner {
         nmh_dir.parent().is_some_and(|p| p.is_dir())
     }
 
+    /// True when any Firefox-family browser's profile root exists on disk.
+    ///
+    /// `~/.mozilla/native-messaging-hosts` is a compat dir some Firefox-fork
+    /// builds (Zen, LibreWolf) read NMH manifests from instead of their own
+    /// profile root (`~/.zen`, `~/.librewolf`), so it must count as
+    /// "installed" whenever any fork is present, not only Firefox itself (#360).
+    fn firefox_family_present(home: &Path) -> bool {
+        let var_app = home.join(".var").join("app");
+        home.join(".mozilla").is_dir()
+            || home.join(".zen").is_dir()
+            || home.join(".librewolf").is_dir()
+            || var_app
+                .join("org.mozilla.firefox")
+                .join(".mozilla")
+                .is_dir()
+            || var_app
+                .join("io.gitlab.librewolf-community")
+                .join(".librewolf")
+                .is_dir()
+    }
+
+    /// Firefox NMH dir "installed" check: the shared `.mozilla` compat dir
+    /// falls back to [`firefox_family_present`]; every other fork dir keeps
+    /// the plain profile-root check (#360).
+    fn firefox_dir_installed(dir: &Path) -> bool {
+        if browser_installed(dir) {
+            return true;
+        }
+        let Some(home) = home_dir() else {
+            return false;
+        };
+        let mozilla_compat = home.join(".mozilla").join("native-messaging-hosts");
+        dir == mozilla_compat.as_path() && firefox_family_present(&home)
+    }
+
     pub fn needs_update() -> bool {
         let Ok(nmh_exe) = find_nmh_exe() else {
             return true;
@@ -935,7 +976,7 @@ mod inner {
         // Firefox 同规则：装了才要求清单有效（自愈外部删除 / 后装浏览器）。
         let firefox_ok = firefox_nmh_dirs()
             .iter()
-            .filter(|dir| browser_installed(dir))
+            .filter(|dir| firefox_dir_installed(dir))
             .all(|dir| {
                 std::fs::read_to_string(dir.join(MANIFEST_FILENAME_FIREFOX))
                     .map(|c| c.contains(&wrapper_str))
@@ -969,6 +1010,8 @@ mod inner {
             "microsoft-edge" => "Edge",
             "Brave-Browser" => "Brave",
             "vivaldi" => "Vivaldi",
+            "thorium" => "Thorium",
+            "neo" => "Neo",
             ".mozilla" => "Firefox",
             ".librewolf" => "LibreWolf",
             ".zen" => "Zen Browser",
@@ -989,6 +1032,7 @@ mod inner {
     /// itself checks out (manifests point at the wrapper, not the binary).
     fn diagnose_dir(
         dir: &Path,
+        installed: bool,
         manifest_filename: &str,
         wrapper_str: &str,
         require_edge_origin: bool,
@@ -1013,7 +1057,7 @@ mod inner {
         super::NmhTarget {
             label: label_for_dir(dir),
             location,
-            installed: browser_installed(dir),
+            installed,
             ok: issue.is_empty(),
             issue,
         }
@@ -1072,6 +1116,7 @@ mod inner {
         for dir in &chromium_dirs {
             diag.targets.push(diagnose_dir(
                 dir,
+                browser_installed(dir),
                 MANIFEST_FILENAME_CHROMIUM,
                 &wrapper_str,
                 true,
@@ -1081,6 +1126,7 @@ mod inner {
         for dir in &firefox_dirs {
             diag.targets.push(diagnose_dir(
                 dir,
+                firefox_dir_installed(dir),
                 MANIFEST_FILENAME_FIREFOX,
                 &wrapper_str,
                 false,
@@ -1119,7 +1165,7 @@ mod inner {
         }
 
         for dir in firefox_nmh_dirs() {
-            if !browser_installed(&dir) {
+            if !firefox_dir_installed(&dir) {
                 continue;
             }
             match write_firefox_manifest(&wrapper, &dir) {
@@ -1157,6 +1203,44 @@ mod inner {
         }
         log_info!("[nmh_registry] NMH registration removed");
         Ok(())
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
+    mod tests {
+        use super::firefox_family_present;
+        use std::path::PathBuf;
+
+        fn unique_test_home(tag: &str) -> PathBuf {
+            std::env::temp_dir().join(format!(
+                "fluxdown_nmh_test_{tag}_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            ))
+        }
+
+        /// Zen-only 主机（没有 ~/.mozilla，只有 ~/.zen）也要判定为 Firefox 家族
+        /// 已安装，否则 `.mozilla` 兼容目录永远拿不到清单，Zen 读取的正是
+        /// 这个兼容目录（#360）。
+        #[test]
+        fn zen_only_home_counts_as_firefox_family_present() {
+            let home = unique_test_home("zen_only");
+            std::fs::create_dir_all(home.join(".zen")).expect("create .zen");
+            assert!(!home.join(".mozilla").is_dir());
+            assert!(firefox_family_present(&home));
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn empty_home_has_no_firefox_family() {
+            let home = unique_test_home("empty");
+            std::fs::create_dir_all(&home).expect("create home");
+            assert!(!firefox_family_present(&home));
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 }
 
@@ -1284,6 +1368,12 @@ mod inner {
                 .join("NativeMessagingHosts"),
             // Vivaldi (verified via KeePassXC source)
             lib.join("Vivaldi").join("NativeMessagingHosts"),
+            // Thorium (Chromium fork; user-reported, #360)
+            lib.join("Thorium").join("NativeMessagingHosts"),
+            // Norton Neo (Chromium-based AI browser; user-reported, #623/#653).
+            // Confirmed via /Library/Application Support/Neo/NativeMessagingHosts
+            // embedded in the official macOS .pkg (Info.plist CFBundleName = "Neo").
+            lib.join("Neo").join("NativeMessagingHosts"),
         ]
     }
 
@@ -1520,6 +1610,8 @@ mod inner {
             "Arc" => "Arc",
             "Brave-Browser" => "Brave",
             "Vivaldi" => "Vivaldi",
+            "Thorium" => "Thorium",
+            "Neo" => "Neo",
             "Mozilla" => "Firefox",
             "" => "Unknown browser",
             other => other,

@@ -781,7 +781,7 @@ async fn validated_plain_range_rejects_changed_version() {
 
     let error = result.expect_err("validator 变化时不得接受纯 Range 续传");
     assert!(
-        error.to_string().contains("ETag mismatch"),
+        error.to_string().contains("validator mismatch"),
         "应明确报告版本不一致，实际为：{error}"
     );
     assert_eq!(

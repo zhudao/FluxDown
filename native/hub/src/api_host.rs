@@ -90,6 +90,14 @@ pub enum ApiCommand {
         task_id: String,
         ack: oneshot::Sender<()>,
     },
+    /// 更换任务下载源地址。错误为引擎稳定错误码字符串（`invalid-url` /
+    /// `task-active` / `task-completed` / `bt-unsupported` / `not-found` /
+    /// `protocol-unsupported` / `protocol-mismatch`）或 thunder 解码错误原文。
+    ChangeTaskUrl {
+        task_id: String,
+        url: String,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     DeleteTask {
         task_id: String,
         delete_files: bool,
@@ -338,6 +346,25 @@ impl ApiHost for HubApiHost {
             ack,
         })
         .await
+    }
+
+    async fn change_task_url(&self, task_id: &str, url: &str) -> Result<(), ApiError> {
+        self.send_cmd(|ack| ApiCommand::ChangeTaskUrl {
+            task_id: task_id.to_string(),
+            url: url.to_string(),
+            ack,
+        })
+        .await?
+        .map_err(|e| match e.as_str() {
+            "not-found" => ApiError::NotFound,
+            "invalid-url" => ApiError::BadRequest(e),
+            "task-active"
+            | "task-completed"
+            | "bt-unsupported"
+            | "protocol-unsupported"
+            | "protocol-mismatch" => ApiError::Conflict(e),
+            _ => ApiError::Internal(e),
+        })
     }
 
     async fn pause_all(&self) -> Result<(), ApiError> {

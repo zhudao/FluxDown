@@ -149,10 +149,6 @@ impl DownloadsPort for AgentDownloadsPort {
                     method::DAEMON_GROUP_DELETE,
                     json!({ "groupId": group_id, "deleteFiles": delete_files }),
                 ),
-                DownloadsCommand::RssRefresh { source_id } => (
-                    method::DAEMON_RSS_REFRESH_SOURCE,
-                    json!({ "sourceId": source_id }),
-                ),
                 DownloadsCommand::ResolveSelection(params) => {
                     (method::DAEMON_SELECTION_RESOLVE, serialize(params)?)
                 }

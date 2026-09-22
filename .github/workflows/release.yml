@@ -1920,6 +1920,15 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ !contains(github.ref_name, '-') }}
 
+      # 同步到阿里云 OSS（官网 /api/download 优先 302 到 OSS）；失败不阻断 GitHub Release
+      - name: Upload release assets to OSS
+        continue-on-error: true
+        uses: ./.github/actions/oss-upload
+        with:
+          tag: ${{ github.ref_name }}
+          access-key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+
   # ── Release Job 2: 浏览器扩展（独立 tag extension-v*，不抢占 latest）──
   release-extension:
     name: Release Browser Extension
@@ -1967,6 +1976,14 @@ jobs:
           generate_release_notes: false
           draft: false
           make_latest: "false"
+
+      - name: Upload release assets to OSS
+        continue-on-error: true
+        uses: ./.github/actions/oss-upload
+        with:
+          tag: extension-v${{ steps.version.outputs.VERSION }}
+          access-key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
 
   # ── Release Job 3: Headless 服务器（独立 tag server-v*，不抢占 latest）──
   release-server:
@@ -2060,6 +2077,14 @@ jobs:
           make_latest: "false"
           prerelease: ${{ contains(github.ref_name, '-') }}
 
+      - name: Upload release assets to OSS
+        continue-on-error: true
+        uses: ./.github/actions/oss-upload
+        with:
+          tag: server-v${{ steps.version.outputs.VERSION }}
+          access-key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+
   # ── Release Job: CLI（独立 tag cli-v*，不抢占 latest）──
   release-cli:
     name: Release CLI
@@ -2149,6 +2174,14 @@ jobs:
           make_latest: "false"
           prerelease: ${{ contains(github.ref_name, '-') }}
 
+      - name: Upload release assets to OSS
+        continue-on-error: true
+        uses: ./.github/actions/oss-upload
+        with:
+          tag: cli-v${{ steps.version.outputs.VERSION }}
+          access-key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+
   # ── Release Job 4: 移动端（独立 tag mobile-v*，不抢占 latest）──
   release-mobile:
     name: Release Mobile
@@ -2205,6 +2238,14 @@ jobs:
           draft: false
           make_latest: "false"
           prerelease: ${{ contains(needs.changes.outputs.tag, '-') }}
+
+      - name: Upload release assets to OSS
+        continue-on-error: true
+        uses: ./.github/actions/oss-upload
+        with:
+          tag: mobile-v${{ steps.version.outputs.VERSION }}
+          access-key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
 
   # ── 最终 Job: 清理 GitHub Actions Artifact，仅保留当前 tag 这一组 ──
   # 原因：Free 账号 artifact 配额仅 500MB，每次 release 会上传 ~400MB
@@ -2265,38 +2306,3 @@ jobs:
           if [ "$FAIL" -gt 0 ]; then
             echo "⚠️  ${FAIL} deletion(s) failed (will be retried next release)"
           fi
-
-  # ── 最终 Job: 通知国内镜像同步（mirror.qwld.cn）──
-  # 任一组件 release 成功后触发 githubProxy 拉取最新正式版/预览版资产。
-  # 镜像自身有兜底轮询，本步失败仅延迟镜像更新，不阻断发布（continue-on-error）。
-  # 需要仓库 secrets：MIRROR_SYNC_SECRET（与镜像端 FDPROXY_SECRET 一致）；
-  # 可选 MIRROR_SYNC_URL 覆盖默认地址。
-  notify-mirror:
-    name: Notify Download Mirror
-    runs-on: ubuntu-latest
-    needs: [release-app, release-extension, release-server, release-mobile, release-cli]
-    if: ${{ always() && !cancelled() && contains(needs.*.result, 'success') }}
-
-    steps:
-      - name: Trigger mirror sync
-        continue-on-error: true
-        env:
-          MIRROR_SYNC_URL: ${{ secrets.MIRROR_SYNC_URL || 'https://mirror.qwld.cn/sync' }}
-          MIRROR_SYNC_SECRET: ${{ secrets.MIRROR_SYNC_SECRET }}
-        run: |
-          if [ -z "$MIRROR_SYNC_SECRET" ]; then
-            echo "⚠️  MIRROR_SYNC_SECRET not configured, skipping mirror notification"
-            exit 0
-          fi
-          # 最多重试 3 次，每次 15s 超时；镜像端 202 表示已排队同步
-          for i in 1 2 3; do
-            if curl -fsS -m 15 -X POST \
-              -H "Authorization: Bearer ${MIRROR_SYNC_SECRET}" \
-              "$MIRROR_SYNC_URL"; then
-              echo "✅ Mirror sync triggered"
-              exit 0
-            fi
-            echo "⚠️  Attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
-          echo "⚠️  Mirror unreachable after 3 attempts (mirror poll will catch up)"

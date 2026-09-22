@@ -95,6 +95,22 @@ pub trait ApiHost: Send + Sync {
         ))
     }
 
+    /// 更换任务下载源地址（旧链接失效但内容不变，保留已下载进度续传）。
+    ///
+    /// 错误消息为稳定错误码字符串（`invalid-url` / `task-active` /
+    /// `task-completed` / `bt-unsupported` / `not-found` /
+    /// `protocol-unsupported` / `protocol-mismatch`，或 thunder 链接解码
+    /// 失败的原文），宿主实现须按状态映射：`not-found` →
+    /// [`ApiError::NotFound`]、`invalid-url` → [`ApiError::BadRequest`]、
+    /// 其余业务拒绝 → [`ApiError::Conflict`]，且除 `not-found` 外错误码
+    /// 字符串原样保留。默认实现返回不支持错误。
+    async fn change_task_url(&self, task_id: &str, url: &str) -> Result<(), ApiError> {
+        let _ = (task_id, url);
+        Err(ApiError::Internal(
+            "task url change not supported by this host".to_string(),
+        ))
+    }
+
     /// 暂停全部活跃任务。
     async fn pause_all(&self) -> Result<(), ApiError>;
 

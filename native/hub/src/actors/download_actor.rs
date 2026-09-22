@@ -520,9 +520,12 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
         if let Some(v) = cfg.get("use_server_time") {
             engine.manager.set_use_server_time(v == "true");
         }
-        // 文件已存在时的处理方式（"rename"=自动重命名，默认；"overwrite"=覆盖旧文件）。
+        // 文件已存在时的处理方式（"rename"=自动重命名，默认；"overwrite"=
+        // 覆盖旧文件；"skip"=跳过下载）。
         if let Some(v) = cfg.get("file_exists_behavior") {
-            engine.manager.set_file_exists_overwrite(v == "overwrite");
+            engine
+                .manager
+                .set_file_exists_behavior(download_manager::FileExistsBehavior::from_config_str(v));
         }
         // 任务的文件被删除/移动时的动作（"keep"=保留任务记录，默认；
         // "delete"=文件消失后自动删除任务记录）。
@@ -2473,8 +2476,9 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                 let proxy_cfg = ProxyConfig::from_config_map(&all_cfg);
                 match fluxdown_engine::downloader::build_client(&proxy_cfg, "") {
                     Ok(client) => {
+                        let db = engine.db.clone();
                         tokio::spawn(async move {
-                            match fluxdown_engine::components::list_versions(&client).await {
+                            match fluxdown_engine::components::list_versions(&db, &client).await {
                                 Ok(v) => {
                                     FfmpegVersionList {
                                         ok: true,
@@ -2588,8 +2592,11 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
                 let proxy_cfg = ProxyConfig::from_config_map(&all_cfg);
                 match fluxdown_engine::downloader::build_client(&proxy_cfg, "") {
                     Ok(client) => {
+                        let db = engine.db.clone();
                         tokio::spawn(async move {
-                            match fluxdown_engine::components::list_ytdlp_versions(&client).await {
+                            match fluxdown_engine::components::list_ytdlp_versions(&db, &client)
+                                .await
+                            {
                                 Ok(v) => {
                                     YtdlpVersionList {
                                         ok: true,
@@ -2895,6 +2902,10 @@ async fn handle_api_command(
         ApiCommand::ContinueTask { task_id, ack } => {
             engine.manager.resume_task(&task_id).await;
             let _ = ack.send(());
+        }
+        ApiCommand::ChangeTaskUrl { task_id, url, ack } => {
+            let result = engine.manager.change_task_url(&task_id, &url).await;
+            let _ = ack.send(result);
         }
         ApiCommand::DeleteTask {
             task_id,
@@ -3236,9 +3247,10 @@ async fn apply_config_key(
             engine.manager.set_use_server_time(v);
         }
         "file_exists_behavior" => {
-            let v = value == "overwrite";
-            log_info!("[actor] updating file_exists_behavior overwrite to {}", v);
-            engine.manager.set_file_exists_overwrite(v);
+            log_info!("[actor] updating file_exists_behavior to {}", value);
+            engine.manager.set_file_exists_behavior(
+                download_manager::FileExistsBehavior::from_config_str(value),
+            );
         }
         "file_missing_action" => {
             let v = value == "delete";

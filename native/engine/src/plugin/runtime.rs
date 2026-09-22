@@ -261,6 +261,26 @@ pub enum PluginEvent {
         file_name: String,
         total_bytes: i64,
     },
+    /// 任务被取消（用户手动取消 / variants 选择被取消 / 宿主取消）终态通知
+    /// （593#1）。与 onDone/onError 互斥：cancel_task 只在 generation 未被
+    /// on_task_done 接管的路径上发出，同一任务不会重复触发终态钩子。仅用于
+    /// 通知插件释放已转存的临时远程资源，不影响任务状态机、不支持重试。
+    Cancel {
+        task_id: String,
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<CancelReason>,
+    },
+}
+
+/// `onCancel` 载荷的可选取消原因。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelReason {
+    UserCancelled,
+    VariantSelectionCancelled,
+    HostCancelled,
+    Unknown,
 }
 
 impl PluginEvent {
@@ -271,6 +291,7 @@ impl PluginEvent {
             PluginEvent::Error { .. } => "onError",
             PluginEvent::Done { .. } => "onDone",
             PluginEvent::MetaProbed { .. } => "onMetaProbed",
+            PluginEvent::Cancel { .. } => "onCancel",
         }
     }
 
@@ -285,7 +306,8 @@ impl PluginEvent {
             PluginEvent::Start { url, .. }
             | PluginEvent::Error { url, .. }
             | PluginEvent::Done { url, .. }
-            | PluginEvent::MetaProbed { url, .. } => url,
+            | PluginEvent::MetaProbed { url, .. }
+            | PluginEvent::Cancel { url, .. } => url,
         }
     }
 }

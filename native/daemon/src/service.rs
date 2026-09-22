@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use fluxdown_engine::download_manager::{CreateGroupSpec, GroupItemSpec};
+use fluxdown_engine::log_info;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
     ApplicationErrorCode, CdnConfigApplyParams, CdnReportAckParams, CreateGroupRequest,
@@ -384,6 +385,26 @@ impl DaemonService {
                 let count = fluxdown_engine::segment_coordinator::count_domain_conn_policies(&raw);
                 to_value(fluxdown_protocol::ConnPolicySummaryDto {
                     domain_count: u64::try_from(count).unwrap_or(u64::MAX),
+                })
+            }
+            method::DAEMON_CONFIG_SYSTEM_PROXY => {
+                let detected =
+                    tokio::task::spawn_blocking(fluxdown_engine::proxy_config::detect_system_proxy)
+                        .await
+                        .map_err(|error| internal_error(format!("{error:#}")))?;
+                to_value(match detected {
+                    Ok(Some(cfg)) => fluxdown_protocol::SystemProxyDto {
+                        detected: true,
+                        proxy_type: cfg.proxy_type.as_str().to_owned(),
+                        host: cfg.host,
+                        port: cfg.port,
+                        no_list: cfg.no_proxy_list,
+                    },
+                    Ok(None) => fluxdown_protocol::SystemProxyDto::default(),
+                    Err(error) => {
+                        log_info!("[daemon] system proxy detection error: {error:#}");
+                        fluxdown_protocol::SystemProxyDto::default()
+                    }
                 })
             }
             method::DAEMON_CONFIG_CLEAR_CONN_POLICY => {
@@ -1190,13 +1211,13 @@ impl DaemonService {
             .map_err(|error| internal_error(format!("{error:#}")))?;
         match component {
             fluxdown_protocol::ComponentKind::Ffmpeg => {
-                fluxdown_engine::components::list_versions(&client)
+                fluxdown_engine::components::list_versions(&self.db, &client)
                     .await
                     .map(fluxdown_engine_protocol::ffmpeg_versions_to_dto)
                     .map_err(|error| internal_error(error.to_string()))
             }
             fluxdown_protocol::ComponentKind::Ytdlp => {
-                fluxdown_engine::components::list_ytdlp_versions(&client)
+                fluxdown_engine::components::list_ytdlp_versions(&self.db, &client)
                     .await
                     .map(fluxdown_engine_protocol::ytdlp_versions_to_dto)
                     .map_err(|error| internal_error(error.to_string()))
@@ -1408,29 +1429,36 @@ impl DaemonService {
             .filter(|path| !path.as_os_str().is_empty())
             .map(|path| path.to_string_lossy().into_owned());
         let mut dirs = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(base_path).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let Ok(file_type) = entry.file_type().await else {
-                    continue;
-                };
-                if !file_type.is_dir() {
-                    continue;
+        // 受限用户（NAS 套件）浏览到未授权目录时 EACCES：不整体失败，返回
+        // `denied=true` 让 UI 提示授权，parent 仍可用以继续导航。
+        let mut denied = false;
+        match tokio::fs::read_dir(base_path).await {
+            Ok(mut entries) => {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let Ok(file_type) = entry.file_type().await else {
+                        continue;
+                    };
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') {
+                        continue;
+                    }
+                    dirs.push(fluxdown_protocol::FsEntry {
+                        name,
+                        path: entry.path().to_string_lossy().into_owned(),
+                    });
                 }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    continue;
-                }
-                dirs.push(fluxdown_protocol::FsEntry {
-                    name,
-                    path: entry.path().to_string_lossy().into_owned(),
-                });
             }
+            Err(e) => denied = e.kind() == std::io::ErrorKind::PermissionDenied,
         }
         dirs.sort_by_key(|entry| entry.name.to_lowercase());
         Ok(fluxdown_protocol::FsListResponse {
             path: base,
             parent,
             dirs,
+            denied,
         })
     }
 }

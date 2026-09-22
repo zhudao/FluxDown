@@ -51,6 +51,8 @@ pub mod site_auth;
 pub mod speed_limiter;
 /// 通用订阅 provider 接口（RSS 与插件订阅共用）。
 pub mod subscription;
+/// `thunder://` 链接解析（迅雷专有 base64 封装：`AA<真实地址>ZZ`）。
+pub mod thunder;
 pub mod tracker_subscription;
 /// 用户主目录下的系统标准目录（下载目录：Windows 已知文件夹 / XDG user-dirs）。
 pub mod user_dirs;

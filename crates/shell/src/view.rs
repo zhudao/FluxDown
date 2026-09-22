@@ -33,10 +33,13 @@ pub struct ShellRoute {
     label_key: &'static str,
     icon: Icon,
     view: AnyView,
+    /// 可选路由参与活动栏「是否整体渲染」的判定；固定路由（如下载）不参与。
+    optional: bool,
+    visible: bool,
 }
 
 impl ShellRoute {
-    /// 创建一条 shell 路由。
+    /// 创建一条 shell 路由；默认固定显示（非可选、可见）。
     pub fn new(
         id: RouteId,
         button_id: &'static str,
@@ -52,23 +55,35 @@ impl ShellRoute {
             label_key,
             icon,
             view,
+            optional: false,
+            visible: true,
         }
+    }
+
+    /// 标记该路由是否为「可选」：活动栏在没有任何可见可选项时整体收起。
+    pub fn optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
     }
 }
 
 type ShellActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+type ShellActionIcon = Rc<dyn Fn(&App) -> Icon>;
 
 /// 由应用装配并注入 shell 的窗口级活动栏动作。
 pub struct ShellAction {
     button_id: &'static str,
     tooltip_id: &'static str,
     label_key: &'static str,
-    icon: Icon,
+    icon: ShellActionIcon,
     handler: ShellActionHandler,
+    /// 可选动作参与活动栏「是否整体渲染」的判定；固定动作（如设置）不参与。
+    optional: bool,
+    visible: bool,
 }
 
 impl ShellAction {
-    /// 创建不切换主内容路由的活动栏动作。
+    /// 创建不切换主内容路由的活动栏动作；默认固定显示（非可选、可见）。
     pub fn new(
         button_id: &'static str,
         tooltip_id: &'static str,
@@ -76,13 +91,38 @@ impl ShellAction {
         icon: Icon,
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
+        Self::with_dynamic_icon(
+            button_id,
+            tooltip_id,
+            label_key,
+            move |_cx| icon.clone(),
+            handler,
+        )
+    }
+
+    /// 创建图标随运行时状态变化的活动栏动作（例如随主题模式在日/月间切换）。
+    pub fn with_dynamic_icon(
+        button_id: &'static str,
+        tooltip_id: &'static str,
+        label_key: &'static str,
+        icon: impl Fn(&App) -> Icon + 'static,
+        handler: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
         Self {
             button_id,
             tooltip_id,
             label_key,
-            icon,
+            icon: Rc::new(icon),
             handler: Rc::new(handler),
+            optional: false,
+            visible: true,
         }
+    }
+
+    /// 标记该动作是否为「可选」：活动栏在没有任何可见可选项时整体收起。
+    pub fn optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
     }
 }
 
@@ -166,6 +206,14 @@ impl Render for AuxiliaryWindowView {
     }
 }
 
+/// 活动栏轨宽度：40px 按钮居中 + 左右各 4px 留白。
+const ACTIVITY_RAIL_WIDTH: gpui::Pixels = px(48.);
+/// 活动栏每个按钮位所占的行高（等于按钮自身高度，纵向间距由 `gap` 提供）。
+const ACTIVITY_TILE_HEIGHT: gpui::Pixels = px(40.);
+/// 活动栏按钮尺寸。
+const ACTIVITY_BUTTON_SIZE: gpui::Pixels = px(40.);
+/// 活动栏图标尺寸。
+const ACTIVITY_ICON_SIZE: gpui::Pixels = px(20.);
 /// GPUI 窗口外壳：只负责窗口 chrome、活动栏、路由与内容槽位。
 pub struct ShellView {
     translator: Entity<Translator>,
@@ -202,6 +250,38 @@ impl ShellView {
             self.active_route = Some(route);
             cx.notify();
         }
+    }
+
+    /// 设置路由的可见性（宿主偏好回流入口）；隐藏当前活跃路由时自动切到首条可见路由。
+    pub fn set_route_visible(&mut self, route: RouteId, visible: bool, cx: &mut Context<Self>) {
+        let Some(target) = self.routes.iter_mut().find(|r| r.id == route) else {
+            return;
+        };
+        if target.visible == visible {
+            return;
+        }
+        target.visible = visible;
+        if !visible && self.active_route == Some(route) {
+            self.active_route = self.routes.iter().find(|r| r.visible).map(|r| r.id);
+        }
+        cx.notify();
+    }
+
+    /// 设置活动栏动作的可见性（宿主偏好回流入口）。
+    pub fn set_action_visible(
+        &mut self,
+        button_id: &'static str,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.actions.iter_mut().find(|a| a.button_id == button_id) else {
+            return;
+        };
+        if target.visible == visible {
+            return;
+        }
+        target.visible = visible;
+        cx.notify();
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -249,14 +329,15 @@ impl ShellView {
 
     fn route_button(&self, route: &ShellRoute, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.active_route == Some(route.id);
+        let colors = active_theme(cx).tokens().colors;
         let label = SharedString::from(self.translator.read(cx).text(route.label_key).to_owned());
         let tooltip_label = label.clone();
         let route_id = route.id;
 
         div()
             .id(route.tooltip_id)
-            .w(px(38.))
-            .h(px(48.))
+            .w(ACTIVITY_RAIL_WIDTH)
+            .h(ACTIVITY_TILE_HEIGHT)
             .flex()
             .items_center()
             .justify_center()
@@ -265,8 +346,17 @@ impl ShellView {
                 activity_bar_button(
                     route.button_id,
                     label,
-                    route.icon.clone().size(px(21.)),
+                    route
+                        .icon
+                        .clone()
+                        .size(ACTIVITY_ICON_SIZE)
+                        .text_color(if selected {
+                            colors.accent_foreground
+                        } else {
+                            colors.muted_foreground
+                        }),
                     selected,
+                    ACTIVITY_BUTTON_SIZE,
                     cx,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -280,18 +370,25 @@ impl ShellView {
     }
 
     fn route_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().children(self.routes.iter().map(|route| self.route_button(route, cx)))
+        let gap = active_theme(cx).tokens().spacing.xs;
+        v_flex().gap(gap).children(
+            self.routes
+                .iter()
+                .filter(|route| route.visible)
+                .map(|route| self.route_button(route, cx)),
+        )
     }
 
     fn action_button(&self, action: &ShellAction, cx: &mut Context<Self>) -> AnyElement {
         let label = SharedString::from(self.translator.read(cx).text(action.label_key).to_owned());
         let tooltip_label = label.clone();
         let handler = Rc::clone(&action.handler);
+        let icon = (action.icon)(cx);
 
         div()
             .id(action.tooltip_id)
-            .w(px(38.))
-            .h(px(48.))
+            .w(ACTIVITY_RAIL_WIDTH)
+            .h(ACTIVITY_TILE_HEIGHT)
             .flex()
             .items_center()
             .justify_center()
@@ -300,8 +397,9 @@ impl ShellView {
                 activity_bar_button(
                     action.button_id,
                     label,
-                    action.icon.clone().size(px(21.)),
+                    icon.size(ACTIVITY_ICON_SIZE),
                     false,
+                    ACTIVITY_BUTTON_SIZE,
                     cx,
                 )
                 .on_click(move |_, window, cx| handler(window, cx)),
@@ -310,25 +408,47 @@ impl ShellView {
     }
 
     fn action_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex().children(
+        let gap = active_theme(cx).tokens().spacing.xs;
+        v_flex().gap(gap).children(
             self.actions
                 .iter()
+                .filter(|action| action.visible)
                 .map(|action| self.action_button(action, cx)),
         )
     }
 
-    fn render_activity_bar(&self, cx: &mut Context<Self>) -> Div {
-        let colors = active_theme(cx).tokens().colors;
-        v_flex()
-            .h_full()
-            .w(px(38.))
-            .flex_none()
-            .justify_between()
-            .bg(colors.surface)
-            .border_r_1()
-            .border_color(colors.border)
-            .child(self.route_buttons(cx))
-            .child(self.action_buttons(cx))
+    /// 是否存在至少一个可见的「可选」路由或动作；活动栏仅在此为真时渲染。
+    fn has_visible_optional_item(&self) -> bool {
+        self.routes
+            .iter()
+            .any(|route| route.optional && route.visible)
+            || self
+                .actions
+                .iter()
+                .any(|action| action.optional && action.visible)
+    }
+
+    fn render_activity_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.has_visible_optional_item() {
+            return None;
+        }
+        let tokens = active_theme(cx).tokens();
+        let colors = tokens.colors;
+        let spacing = tokens.spacing;
+        Some(
+            v_flex()
+                .h_full()
+                .w(ACTIVITY_RAIL_WIDTH)
+                .flex_none()
+                .justify_between()
+                .bg(colors.surface)
+                .border_r_1()
+                .border_color(colors.border)
+                .pt(spacing.sm)
+                .pb(spacing.sm)
+                .child(self.route_buttons(cx))
+                .child(self.action_buttons(cx)),
+        )
     }
 
     fn active_content(&self) -> AnyElement {
@@ -355,7 +475,7 @@ impl Render for ShellView {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .child(self.render_activity_bar(cx))
+                    .children(self.render_activity_bar(cx))
                     .child(
                         div()
                             .h_full()

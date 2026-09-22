@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use fluxdown_ui_downloads::QueueManagerView;
 use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
-use gpui::{App, AppContext as _, px, size};
+use gpui::{App, AppContext as _, Bounds, WindowBounds, px, size};
 use gpui_component::Root;
 
 use crate::{
@@ -14,7 +14,8 @@ use crate::{
     windows::{WindowKey, WindowRegistry},
 };
 
-const QUEUE_MANAGER_WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(720.), px(520.));
+const QUEUE_MANAGER_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(720.), px(560.));
+const QUEUE_MANAGER_WINDOW_MIN_SIZE: gpui::Size<gpui::Pixels> = size(px(640.), px(480.));
 
 /// 打开或聚焦队列管理窗口。
 pub fn open(cx: &mut App) {
@@ -24,6 +25,11 @@ pub fn open(cx: &mut App) {
     let client = desktop.client.clone();
     let title = translator.read(cx).text("manageQueueAction").to_owned();
     let mut options = auxiliary_window_options(title);
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds::centered(
+        None,
+        QUEUE_MANAGER_WINDOW_SIZE,
+        cx,
+    )));
     options.window_min_size = Some(QUEUE_MANAGER_WINDOW_MIN_SIZE);
 
     WindowRegistry::open_or_focus(cx, WindowKey::QueueManager, options, move |window, cx| {

@@ -3,9 +3,9 @@
 //! gpui-base 提供交互、键盘与无障碍语义；本 crate 只负责从完整主题 token
 //! 组装稳定的 shadcn 风格。业务组件依赖这里，不直接散落颜色和尺寸字面量。
 
-use fluxdown_ui_theme::active_theme;
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    App, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    App, Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels,
     SharedString, StatefulInteractiveElement as _, Styled, div, px, relative,
 };
 pub use gpui_base::Button;
@@ -51,6 +51,38 @@ pub fn button(
         .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
         .accessibility_label(label.clone())
         .child(label)
+}
+
+/// 创建仅图标的方形按钮（`CONTROL_HEIGHT` 尺寸），用于设置行内联的紧凑操作
+/// （复制 / 生成 / 清空等）。`label` 仅用作无障碍标签，不渲染文字；
+/// 视觉悬浮提示由调用方通过 `Button::tooltip` 叠加。
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    icon: impl IntoElement,
+    variant: ButtonVariant,
+    cx: &App,
+) -> Button {
+    let tokens = active_theme(cx).tokens();
+    let palette = ButtonPalette::for_variant(variant, tokens.colors);
+
+    Button::new(id)
+        .size(CONTROL_HEIGHT)
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .rounded(tokens.radius.md)
+        .border_1()
+        .border_color(palette.border)
+        .bg(palette.background)
+        .text_color(palette.foreground)
+        .hover(move |style| style.bg(palette.hover))
+        .active(move |style| style.bg(palette.active))
+        .focus_visible(move |style| style.border_color(tokens.colors.ring))
+        .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
+        .accessibility_label(label)
+        .child(icon)
 }
 /// 创建带前置图标的主要操作按钮。
 pub fn primary_icon_button(
@@ -201,41 +233,53 @@ pub fn sidebar_navigation_button(
 
 /// 创建活动栏按钮。
 ///
-/// 选中态使用淡蓝色强调背景；未选中项仅在悬浮时显示中性灰背景。
+/// 选中态使用低透明度强调色背景与强调色图标；未选中项仅在悬浮时显示中性灰背景。
 pub fn activity_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     icon: impl IntoElement,
     selected: bool,
+    size: Pixels,
     cx: &App,
 ) -> Button {
     let tokens = active_theme(cx).tokens();
     let colors = tokens.colors;
+    // `colors.accent` 已是带透明度的强调底色，`accent_foreground` 才是实色强调色。
+    let selected_background = colors.accent;
     let selected_foreground = colors.accent_foreground;
     let hover_background = if selected {
-        colors.accent
+        with_alpha(colors.accent_foreground, 0.18)
     } else {
         colors.muted
     };
+    let hover_foreground = if selected {
+        selected_foreground
+    } else {
+        colors.foreground
+    };
 
+    let (background, foreground) = if selected {
+        (selected_background, selected_foreground)
+    } else {
+        (transparent(colors.muted), colors.muted_foreground)
+    };
+
+    // 颜色直接落在基础样式上：`styles.selected` 的 text_color 不会传给 svg 图标，
+    // 选中态图标会保持淡灰而看不清。
     Button::new(id)
-        .size(px(32.))
+        .size(size)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(tokens.radius.lg)
-        .bg(transparent(colors.muted))
-        .text_color(colors.muted_foreground)
-        .hover(move |style| style.bg(hover_background))
+        .rounded(tokens.radius.md)
+        .bg(background)
+        .text_color(foreground)
+        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
         .active(move |style| style.bg(hover_background))
         .focus_visible(move |style| style.bg(hover_background))
-        .selected(selected)
-        .styles(|styles| {
-            styles.selected(|style| style.bg(colors.accent).text_color(selected_foreground))
-        })
         .accessibility_label(label)
-        .child(icon)
+        .child(div().text_color(foreground).child(icon))
 }
 
 /// 创建使用 surface、border、radius 与 shadow token 的基础卡片。
@@ -296,6 +340,10 @@ impl ButtonPalette {
 
 fn transparent(color: Hsla) -> Hsla {
     Hsla { a: 0., ..color }
+}
+
+fn with_alpha(color: Hsla, alpha: f32) -> Hsla {
+    Hsla { a: alpha, ..color }
 }
 
 fn shift_toward_contrast(color: Hsla, amount: f32) -> Hsla {

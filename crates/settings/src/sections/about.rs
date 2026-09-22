@@ -280,7 +280,7 @@ fn links_section(ctx: &SectionContext) -> SettingsSection {
         .row(link_item(
             ctx,
             "donateTitle",
-            &[("donateButton", DONATE), ("website", WEBSITE)],
+            &[("donateButton", DONATE), ("officialWebsite", WEBSITE)],
         ))
 }
 

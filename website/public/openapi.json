@@ -2983,6 +2983,96 @@
         ]
       }
     },
+    "/api/v1/tasks/{id}/url": {
+      "put": {
+        "tags": [
+          "management"
+        ],
+        "summary": "更换任务下载源地址。",
+        "operationId": "api_change_task_url",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "任务 ID（UUID）",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeTaskUrlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "已更换",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "地址非法（message 为错误码 `invalid-url` 或 thunder 解码错误原文）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultMessage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "token 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultMessage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "任务不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultMessage"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "业务拒绝（message 为错误码 `task-active` / `task-completed` / `bt-unsupported` / `protocol-unsupported` / `protocol-mismatch`）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultMessage"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "tokenHeader": []
+          }
+        ]
+      }
+    },
     "/download": {
       "post": {
         "tags": [
@@ -3179,6 +3269,19 @@
           },
           "version": {
             "type": "string"
+          }
+        }
+      },
+      "ChangeTaskUrlRequest": {
+        "type": "object",
+        "description": "更换任务下载源地址请求体。",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "新下载地址（http(s)/ftp，或待解封装的 `thunder://` 链接）。"
           }
         }
       },

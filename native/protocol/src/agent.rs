@@ -119,11 +119,14 @@ fn default_true() -> bool {
     true
 }
 
-/// 当前账户资料与套餐快照。
+/// 当前账户资料与套餐快照（`GET /me`）。FluxCloud 把用户字段平铺在顶层，
+/// `entitlements` / `currentPlan` / `purchaseCreditMinor` 为同级字段（与 Flutter
+/// `CloudProfile.fromJson` 一致），因此 `user` 用 `flatten` 映射。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CloudProfile {
+    #[serde(flatten)]
     pub user: CloudUser,
     #[serde(default)]
     pub entitlements: Entitlements,
@@ -413,6 +416,25 @@ pub struct SyncStatusDto {
     pub revision: u64,
     pub dirty_keys: Vec<String>,
     pub last_error: Option<String>,
+}
+
+/// FluxCloud 服务地址；`editable=false`（正式构建）时 `base_url` 恒等于 `default_base_url`。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CloudEndpointDto {
+    pub base_url: String,
+    pub default_base_url: String,
+    pub editable: bool,
+}
+
+/// `agent.cloud.endpointSet` 参数；`base_url` 为空即恢复默认地址。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CloudEndpointSetParams {
+    #[serde(default)]
+    pub base_url: String,
 }
 
 /// agent 自有偏好设置及其原子版本。
@@ -784,5 +806,35 @@ mod capture_dto_tests {
         assert_eq!(capture.transaction_id, "tx-2");
         assert_eq!(capture.file_size, 0);
         assert_eq!(capture.referrer, "");
+    }
+}
+
+#[cfg(test)]
+mod cloud_profile_tests {
+    use serde_json::json;
+
+    use super::CloudProfile;
+
+    /// FluxCloud `GET /me` 把用户字段平铺在顶层（同 Flutter `CloudProfile.fromJson`）。
+    #[test]
+    fn profile_parses_flat_me_payload() {
+        let profile: CloudProfile = serde_json::from_value(json!({
+            "id": "u1",
+            "email": "user@example.com",
+            "nickname": "User",
+            "plan": "founder",
+            "originId": 88888888,
+            "membershipOrdinal": 18,
+            "entitlements": { "originIdEdit": true },
+            "currentPlan": { "code": "founder", "name": "创始会员", "badge": "创始会员" },
+            "purchaseCreditMinor": 0
+        }))
+        .expect("flat /me payload");
+        assert_eq!(profile.user.email, "user@example.com");
+        assert_eq!(profile.user.origin_id, Some(88888888));
+        assert_eq!(
+            profile.current_plan.as_ref().map(|plan| plan.code.as_str()),
+            Some("founder")
+        );
     }
 }

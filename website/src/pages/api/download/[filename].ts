@@ -1,23 +1,26 @@
 /**
- * GET /api/download/:filename?tag=v1.2.3&source=mirror|github
+ * GET /api/download/:filename?tag=v1.2.3&source=github
  *
  * Release 资产的下载路由（仓库已开源，asset 可公开直连）。
  * - 若提供 ?tag= 参数，则在对应 tag 的 release 中查找 asset
  * - 若不提供 tag，则在最新的正式 release 中查找 asset
  *
  * 路由策略（302 重定向，本服务不中转下载流量）：
- * - 中国大陆请求（x-vercel-ip-country / cf-ipcountry == CN）且镜像清单
- *   （mirror.qwld.cn/manifest.json，60s 内存缓存 + 2.5s 超时）确认持有
- *   该 tag+asset 时，302 到镜像；镜像端本地缺失时自身还会再 302 回 GitHub。
- * - 其余地域、镜像不可达或未持有该资产：302 到 GitHub 官方 CDN 直连。
- * - ?source=mirror|github 可显式覆盖地域判定（调试/用户手动切换源）。
+ * - 优先阿里云 OSS：发布流水线把每个组件 release 的资产同步到
+ *   `oss://<bucket>/<prefix>/<版本>/<组件>/<file>`（.github/actions/oss-upload）；bucket
+ *   私有，本路由用预签名 HEAD 探测（60s 内存缓存 + 2.5s 超时）确认对象存在后，
+ *   302 到 1 小时有效的预签名 GET URL。
+ * - OSS 未配置 / 不可达 / 未持有该资产：302 到 GitHub 官方 CDN 直连。
+ * - ?source=github 强制 GitHub 直连（调试/用户手动切换源）。
  *
  * 桌面 App 自升级同样经由本端点（/api/release 返回的 download_url 指向这里）。
- * GitHub CDN 与镜像端均支持 Range（206），App 的多线程分段升级下载透过 302 正常工作。
+ * OSS 与 GitHub CDN 均支持 Range（206）；App 的每个分段各自请求本端点拿到新鲜的
+ * 302，预签名过期不影响分段升级下载。
  */
 
 import type { APIRoute } from "astro";
-import { GITHUB_TOKEN, GITHUB_REPO, MIRROR_BASE_URL } from "astro:env/server";
+import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
+import { ossConfigured, presignOssUrl, releaseObjectKey } from "@/lib/oss";
 
 export const prerender = false;
 
@@ -42,38 +45,33 @@ const GITHUB_HEADERS: Record<string, string> = {
   ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
 };
 
-// ── 镜像清单缓存：60s 内存 TTL，探测失败视为镜像不可用（回退 GitHub）──
-interface MirrorManifest {
-  releases?: { tag: string; assets?: { name: string }[] }[];
-}
-let mirrorCache: { at: number; manifest: MirrorManifest | null } | null = null;
-const MIRROR_CACHE_TTL = 60 * 1000;
+// ── OSS 探测缓存：对象一经上传不可变，命中缓存 1h；未命中/不可达 60s 后重探 ──
+const ossProbeCache = new Map<string, { until: number; present: boolean }>();
+const OSS_PROBE_HIT_TTL = 60 * 60 * 1000;
+const OSS_PROBE_MISS_TTL = 60 * 1000;
+/** 预签名下载 URL 有效期（秒）。 */
+const OSS_URL_TTL_SEC = 60 * 60;
 
-/** 拉取镜像清单（带缓存与 2.5s 超时）；任何失败返回 null。 */
-async function fetchMirrorManifest(): Promise<MirrorManifest | null> {
+/** OSS 是否持有该对象（预签名 HEAD，带缓存与 2.5s 超时）；任何失败视为未持有。 */
+async function ossHasAsset(key: string): Promise<boolean> {
   const now = Date.now();
-  if (mirrorCache && now - mirrorCache.at < MIRROR_CACHE_TTL) {
-    return mirrorCache.manifest;
-  }
-  let manifest: MirrorManifest | null = null;
+  const cached = ossProbeCache.get(key);
+  if (cached && now < cached.until) return cached.present;
+  let present = false;
   try {
-    const res = await fetch(`${MIRROR_BASE_URL}/manifest.json`, {
+    const res = await fetch(presignOssUrl("HEAD", key, 60), {
+      method: "HEAD",
       signal: AbortSignal.timeout(2500),
     });
-    if (res.ok) manifest = (await res.json()) as MirrorManifest;
+    present = res.ok;
   } catch {
-    // 镜像不可达 → null，调用方回退 GitHub
+    // OSS 不可达 → false，调用方回退 GitHub
   }
-  mirrorCache = { at: now, manifest };
-  return manifest;
-}
-
-/** 镜像是否已持有指定 tag 的指定资产。 */
-async function mirrorHasAsset(tag: string, filename: string): Promise<boolean> {
-  const manifest = await fetchMirrorManifest();
-  if (!manifest?.releases) return false;
-  const rel = manifest.releases.find((r) => r.tag === tag);
-  return !!rel?.assets?.some((a) => a.name === filename);
+  ossProbeCache.set(key, {
+    until: now + (present ? OSS_PROBE_HIT_TTL : OSS_PROBE_MISS_TTL),
+    present,
+  });
+  return present;
 }
 
 /**
@@ -135,7 +133,7 @@ function redirectTo(location: string, source: string): Response {
   });
 }
 
-export const GET: APIRoute = async ({ params, url, request }) => {
+export const GET: APIRoute = async ({ params, url }) => {
   const { filename } = params;
 
   if (!filename) {
@@ -197,22 +195,14 @@ export const GET: APIRoute = async ({ params, url, request }) => {
     // 仓库已公开，browser_download_url 无需 token 签名即可直连
     const githubUrl = asset.browser_download_url;
 
-    // ── 3. 地域分流：CN → 国内镜像（mirror.qwld.cn），其余 → GitHub ──
-    // ?source= 显式覆盖：mirror 强制镜像，github 强制直连。
-    const source = url.searchParams.get("source");
-    const country =
-      request.headers.get("x-vercel-ip-country") ??
-      request.headers.get("cf-ipcountry") ??
-      "";
-    const preferMirror =
-      source === "mirror" || (source !== "github" && country === "CN");
-
-    if (preferMirror && (await mirrorHasAsset(release.tag_name, filename))) {
-      const mirrorUrl = `${MIRROR_BASE_URL}/releases/${encodeURIComponent(release.tag_name)}/${encodeURIComponent(filename)}`;
-      return redirectTo(mirrorUrl, "mirror");
+    // ── 3. 优先 OSS，缺失/不可达回退 GitHub；?source=github 强制直连 ──
+    if (url.searchParams.get("source") !== "github" && ossConfigured) {
+      const key = releaseObjectKey(release.tag_name, filename);
+      if (await ossHasAsset(key)) {
+        return redirectTo(presignOssUrl("GET", key, OSS_URL_TTL_SEC), "oss");
+      }
     }
 
-    // 镜像未持有该资产 / 镜像不可达 / 非 CN 地域：GitHub 官方 CDN 直连
     return redirectTo(githubUrl, "github");
   } catch (err) {
     return new Response(

@@ -228,6 +228,28 @@ impl ApiHost for ServerApiHost {
         })
     }
 
+    /// 更换任务下载源地址：经 actor 串行化到引擎，引擎错误码按 HTTP 语义
+    /// 映射（`not-found`→404、`invalid-url`→400、其余业务拒绝→409），除
+    /// `not-found` 外错误码字符串原样透传给客户端做 i18n 映射。
+    async fn change_task_url(&self, task_id: &str, url: &str) -> Result<(), ApiError> {
+        self.send_cmd(|ack| ActorCmd::ChangeTaskUrl {
+            task_id: task_id.to_string(),
+            url: url.to_string(),
+            ack,
+        })
+        .await?
+        .map_err(|e| match e.as_str() {
+            "not-found" => ApiError::NotFound,
+            "invalid-url" => ApiError::BadRequest(e),
+            "task-active"
+            | "task-completed"
+            | "bt-unsupported"
+            | "protocol-unsupported"
+            | "protocol-mismatch" => ApiError::Conflict(e),
+            _ => ApiError::Internal(e),
+        })
+    }
+
     async fn pause_all(&self) -> Result<(), ApiError> {
         self.send_cmd(|ack| ActorCmd::PauseAll { ack }).await
     }

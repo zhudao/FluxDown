@@ -59,7 +59,7 @@ pub const MAX_TASK_WINDOWS_PER_ACTION: usize = 8;
 pub type NewDownloadOpener = Rc<dyn Fn(NewDownloadContext, &mut Window, &mut App)>;
 /// 以 id 打开一个窗口 / 编辑器（任务窗口、组窗口、分类编辑）。
 pub type IdOpener = Rc<dyn Fn(String, &mut Window, &mut App)>;
-/// 无参数窗口入口（队列管理、RSS 页面）。
+/// 无参数窗口入口（队列管理）。
 pub type PlainOpener = Rc<dyn Fn(&mut Window, &mut App)>;
 /// 分类编辑入口：`Some(id)` 编辑现有分类，`None` 新建。
 pub type CategoryEditorOpener = Rc<dyn Fn(Option<String>, &mut Window, &mut App)>;
@@ -71,7 +71,6 @@ pub struct DownloadHostActions {
     pub open_task_window: Option<IdOpener>,
     pub open_group_window: Option<IdOpener>,
     pub open_queue_manager: Option<PlainOpener>,
-    pub navigate_rss: Option<PlainOpener>,
     /// `Some(id)` 编辑现有分类，`None` 新建。
     pub open_category_editor: Option<CategoryEditorOpener>,
     /// 完成后关机的只读状态投影（`None` = Resident 未装配）。

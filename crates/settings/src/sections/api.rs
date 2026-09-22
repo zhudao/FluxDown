@@ -1,16 +1,16 @@
 //! API 服务：本机网关的功能开关、端口、访问令牌与 LAN 暴露。
 
 use fluxdown_protocol::GatewayPatchParams;
-use fluxdown_ui_components::{ButtonVariant, button};
+use fluxdown_ui_components::{ButtonVariant, button, icon_button};
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    App, AppContext as _, ClipboardItem, Entity, ParentElement, SharedString, Styled, Window, div,
-    px,
+    App, AppContext as _, ClipboardItem, Entity, ParentElement, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 use gpui_component::{
-    IconName, Sizable as _, Size, h_flex,
+    Icon, IconName, Sizable as _, Size, h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex,
+    tooltip::Tooltip,
 };
 
 use super::SectionContext;
@@ -75,14 +75,11 @@ fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
             Some("apiServiceLanEnableDesc"),
             gateway_switch(ctx, GatewayFlag::Lan),
         ))
-        .row(
-            ctx.item(
-                "apiServiceToken",
-                Some("apiServiceTokenDesc"),
-                token_field(ctx),
-            )
-            .vertical(),
-        )
+        .row(ctx.item(
+            "apiServiceToken",
+            Some("apiServiceTokenDesc"),
+            token_field(ctx),
+        ))
 }
 
 fn features_section(ctx: &SectionContext) -> SettingsSection {
@@ -240,104 +237,100 @@ fn token_field(ctx: &SectionContext) -> Control {
         let copy_token = token.clone();
         let generate_store = store.clone();
         let clear_store = store.clone();
-        v_flex()
-            .w(px(360.))
-            .max_w_full()
-            .gap(tokens.spacing.xs)
-            .items_end()
+        let copy_tooltip = if just_copied {
+            copied.clone()
+        } else {
+            copy.clone()
+        };
+        let generate_tooltip = generate.clone();
+        let clear_tooltip = clear.clone();
+        h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(tokens.spacing.sm)
             .child(
                 Input::new(&input)
                     .with_size(Size::Medium)
-                    .w_full()
+                    .flex_1()
+                    .min_w(px(220.))
+                    .max_w(px(360.))
                     .disabled(disabled || busy),
             )
             .child(
-                h_flex()
-                    .w_full()
-                    .justify_end()
-                    .gap(tokens.spacing.sm)
-                    .child(
-                        button(
-                            "api-token-copy",
-                            if just_copied {
-                                copied.clone()
-                            } else {
-                                copy.clone()
+                icon_button(
+                    "api-token-copy",
+                    copy.clone(),
+                    Icon::new(IconName::Copy).size(px(13.)),
+                    ButtonVariant::Secondary,
+                    cx,
+                )
+                .disabled(token.is_empty())
+                .tooltip(move |window, cx| Tooltip::new(copy_tooltip.clone()).build(window, cx))
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_token.to_string()));
+                    copy_store.update(cx, |store, cx| {
+                        store.set_transient("gateway_token_copied", serde_json::json!(true), cx);
+                    });
+                    let reset = copy_store.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_secs(2))
+                            .await;
+                        reset.update(cx, |store, cx| {
+                            store.set_transient(
+                                "gateway_token_copied",
+                                serde_json::json!(false),
+                                cx,
+                            );
+                        });
+                    })
+                    .detach();
+                }),
+            )
+            .child(
+                icon_button(
+                    "api-token-generate",
+                    generate.clone(),
+                    Icon::new(IconName::Replace).size(px(13.)),
+                    ButtonVariant::Secondary,
+                    cx,
+                )
+                .disabled(disabled || busy)
+                .tooltip(move |window, cx| Tooltip::new(generate_tooltip.clone()).build(window, cx))
+                .on_click(move |_, _, cx| {
+                    generate_store.update(cx, |store, cx| {
+                        store.patch_gateway(
+                            GatewayPatchParams {
+                                regenerate_user_token: true,
+                                ..Default::default()
                             },
-                            ButtonVariant::Secondary,
                             cx,
-                        )
-                        .h(CONTROL_HEIGHT)
-                        .disabled(token.is_empty())
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                copy_token.to_string(),
-                            ));
-                            copy_store.update(cx, |store, cx| {
-                                store.set_transient(
-                                    "gateway_token_copied",
-                                    serde_json::json!(true),
-                                    cx,
-                                );
-                            });
-                            let reset = copy_store.clone();
-                            cx.spawn(async move |cx| {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_secs(2))
-                                    .await;
-                                reset.update(cx, |store, cx| {
-                                    store.set_transient(
-                                        "gateway_token_copied",
-                                        serde_json::json!(false),
-                                        cx,
-                                    );
-                                });
-                            })
-                            .detach();
-                        }),
-                    )
-                    .child(
-                        button(
-                            "api-token-generate",
-                            generate.clone(),
-                            ButtonVariant::Primary,
+                        );
+                    });
+                }),
+            )
+            .child(
+                icon_button(
+                    "api-token-clear",
+                    clear.clone(),
+                    Icon::new(IconName::Delete).size(px(13.)),
+                    ButtonVariant::Destructive,
+                    cx,
+                )
+                .disabled(disabled || busy || token.is_empty())
+                .tooltip(move |window, cx| Tooltip::new(clear_tooltip.clone()).build(window, cx))
+                .on_click(move |_, _, cx| {
+                    clear_store.update(cx, |store, cx| {
+                        store.patch_gateway(
+                            GatewayPatchParams {
+                                user_token: Some(String::new()),
+                                ..Default::default()
+                            },
                             cx,
-                        )
-                        .h(CONTROL_HEIGHT)
-                        .disabled(disabled || busy)
-                        .on_click(move |_, _, cx| {
-                            generate_store.update(cx, |store, cx| {
-                                store.patch_gateway(
-                                    GatewayPatchParams {
-                                        regenerate_user_token: true,
-                                        ..Default::default()
-                                    },
-                                    cx,
-                                );
-                            });
-                        }),
-                    )
-                    .child(
-                        button(
-                            "api-token-clear",
-                            clear.clone(),
-                            ButtonVariant::Destructive,
-                            cx,
-                        )
-                        .h(CONTROL_HEIGHT)
-                        .disabled(disabled || busy || token.is_empty())
-                        .on_click(move |_, _, cx| {
-                            clear_store.update(cx, |store, cx| {
-                                store.patch_gateway(
-                                    GatewayPatchParams {
-                                        user_token: Some(String::new()),
-                                        ..Default::default()
-                                    },
-                                    cx,
-                                );
-                            });
-                        }),
-                    ),
+                        );
+                    });
+                }),
             )
     })
 }

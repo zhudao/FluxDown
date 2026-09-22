@@ -1,4 +1,4 @@
-//! 通用：启动与托盘、系统集成、界面可见性、自定义分类。
+//! 通用：启动与托盘、系统集成、侧边栏与活动栏可见性、自定义分类。
 
 use gpui::App;
 use gpui_component::IconName;
@@ -22,7 +22,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         startup_section(ctx, cx),
         system_section(ctx, cx),
         sidebar_section(ctx),
-        titlebar_section(ctx),
+        activity_bar_section(ctx),
         categories::group(ctx, cx),
     ])
 }
@@ -134,13 +134,8 @@ fn sidebar_section(ctx: &SectionContext) -> SettingsSection {
             ctx.pref_switch("ui.show_sidebar_queues", true),
         ))
         .row(ctx.item(
-            "showSidebarRss",
-            Some("showSidebarRssDesc"),
-            ctx.pref_switch("ui.show_sidebar_rss", true),
-        ))
-        .row(ctx.item(
             "showSidebarCategory",
-            Some("showSidebarCategoryDesc"),
+            Some("showSidebarCategoryNestedDesc"),
             ctx.pref_switch("ui.show_sidebar_category", true),
         ))
         .row(ctx.item(
@@ -150,7 +145,7 @@ fn sidebar_section(ctx: &SectionContext) -> SettingsSection {
         ))
 }
 
-/// `show_sidebar_device` 三态：未设置 = 登录后自动显示。开关显示有效值。
+/// `ui.show_sidebar_devices` 三态：未设置 = 登录后自动显示。开关显示有效值。
 fn show_sidebar_device_field(ctx: &SectionContext) -> Control {
     let get = ctx.store();
     let set = ctx.store();
@@ -158,41 +153,31 @@ fn show_sidebar_device_field(ctx: &SectionContext) -> Control {
         move |cx: &App| {
             let store = get.read(cx);
             store
-                .pref("show_sidebar_device")
+                .pref("ui.show_sidebar_devices")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or_else(|| store.session().is_some())
         },
         move |value, cx: &mut App| {
             set.update(cx, |store, cx| {
-                store.set_pref_bool("show_sidebar_device", value, cx)
+                store.set_pref_bool("ui.show_sidebar_devices", value, cx)
             });
         },
     )
 }
 
-fn titlebar_section(ctx: &SectionContext) -> SettingsSection {
+fn activity_bar_section(ctx: &SectionContext) -> SettingsSection {
     SettingsSection::new()
-        .title(ctx.t("titlebarButtons"))
-        .subtitle(ctx.t("titlebarButtonsDesc"))
+        .title(ctx.t("activityBarSection"))
+        .subtitle(ctx.t("activityBarSectionDesc"))
         .row(ctx.item(
-            "showTitlebarPauseAll",
-            Some("showTitlebarPauseAllDesc"),
-            ctx.pref_switch("ui.show_titlebar_pause_all", true),
+            "showActivityRss",
+            Some("showActivityRssDesc"),
+            ctx.pref_switch("ui.show_activity_rss", true),
         ))
         .row(ctx.item(
-            "showTitlebarResumeAll",
-            Some("showTitlebarResumeAllDesc"),
-            ctx.pref_switch("ui.show_titlebar_resume_all", true),
-        ))
-        .row(ctx.item(
-            "showTitlebarSettings",
-            Some("showTitlebarSettingsDesc"),
-            ctx.pref_switch("ui.show_titlebar_settings", true),
-        ))
-        .row(ctx.item(
-            "showTitlebarTheme",
-            Some("showTitlebarThemeDesc"),
-            ctx.pref_switch("ui.show_titlebar_theme", true),
+            "showActivityTheme",
+            Some("showActivityThemeDesc"),
+            ctx.pref_switch("ui.show_activity_theme", true),
         ))
 }
 

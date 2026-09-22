@@ -23,7 +23,11 @@ Dart 与 Rust 两端写**同一目录同一文件**，统一格式 `HH:MM:SS.mmm
 
 构建矩阵：Windows（x64+arm64，Inno 安装器+便携 zip）、扩展（Chrome+Firefox，预发布 tag 不打包扩展）、Linux（AppImage/deb/arch/tar.gz）、macOS（x64+arm64，DMG+便携）、Android（split-per-abi + universal APK，cargokit 编各 ABI cdylib）、Web SPA（一次复用）、server 多平台二进制（musl 静态）、server NAS 包（OpenWrt/QNAP/群晖）、CLI 六平台、server Docker（ghcr.io，QEMU arm64）。每个 release job 各用自己的组件 tag，跑 git-cliff（`--include-path <组件目录>`）后经 Claude Code CLI 翻译为中英双语（`<!-- fluxdown:lang:zh/en -->` 标记，失败回退原始 cliff）。
 
+**下载分发**：每个 release job 在 GitHub Release 创建后经 `.github/actions/oss-upload`（固定版 ossutil 2.x）把 `release-assets/*` 同步到阿里云 OSS `oss://zerx-lab/FluxDownRelease/<版本>/<组件>/<文件>`（如 `v0.4.8/app/`、`v0.4.8/server/`；tag→路径规则在 `website/src/lib/oss.ts::releaseObjectKey` 与 action bash 各一份，须同步。bucket 私有；secrets `OSS_ACCESS_KEY_ID`/`OSS_ACCESS_KEY_SECRET`，未配则跳过，`continue-on-error` 不阻断发布）。官网 `website/src/pages/api/download/[filename].ts` 优先做预签名 HEAD 探测后 302 到 1h 预签名 GET（V1 签名），OSS 缺失/不可达回退 GitHub CDN；`?source=github` 强制直连。不再有 CN 地域分流与 githubProxy 镜像。
+
 构建期 dart-define：`APP_VERSION`、`ANALYTICS_APP_KEY`、`FLUXCLOUD_BASE_URL`、`STATS_*`。
+
+`fluxdown-agent` 的 FluxCloud 地址解析（`native/agent/src/runtime.rs`）：运行期 env `FLUXCLOUD_BASE_URL` > 编译期同名 env（`option_env!`，正式包应在 `cargo build` 时注入，与 dart-define 同源）> `http://127.0.0.1:8720`。**仅调试构建**再叠加 agent 私有状态里的用户覆盖（`agent.cloud.endpointGet/Set`，GPUI 账户页「服务器地址」卡片；对齐 Flutter `CloudApiConfig` 的 `kDebugMode` 门控），正式构建忽略残留覆盖并拒绝 `endpointSet`。
 
 ---
 

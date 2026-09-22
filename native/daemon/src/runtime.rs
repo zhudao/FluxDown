@@ -285,10 +285,11 @@ fn apply_manager_settings(engine: &mut Engine, config: &HashMap<String, String>)
     engine
         .manager
         .set_use_server_time(bool_config(config, "use_server_time", false));
-    engine.manager.set_file_exists_overwrite(
+    engine.manager.set_file_exists_behavior(
         config
             .get("file_exists_behavior")
-            .is_some_and(|value| value == "overwrite"),
+            .map(|value| download_manager::FileExistsBehavior::from_config_str(value))
+            .unwrap_or(download_manager::FileExistsBehavior::Rename),
     );
     engine.manager.set_missing_file_auto_delete(
         config

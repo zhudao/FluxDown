@@ -63,6 +63,14 @@ export default defineContentScript({
     let inlineDashScanTimer: number | undefined;
     const scannedInlineScripts = new WeakSet<HTMLScriptElement>();
 
+    // #288：单页面已上报资源数上限——B 站首页等长列表页可产生数百个可下载
+    // 资源，无节制上报/扫描会导致页面卡顿。达到上限后停止统计新资源、断开
+    // MutationObserver；SPA 路由切换（fluxdown-page-url-changed）时重置并重新
+    // 连接观察。
+    const MAX_RESOURCES_PER_PAGE = 200;
+    let reportedResourceCount = 0;
+    let resourceCapReached = false;
+
     function reportPageUrlChange(): void {
       browser.runtime.sendMessage({
         action: "pageUrlChanged",
@@ -131,53 +139,139 @@ export default defineContentScript({
       }
     }
 
-    // ===== 2. MutationObserver 持续监听 =====
-    const observer = new MutationObserver((mutations) => {
+    // ===== 2. MutationObserver 持续监听（合批 + 空闲期处理，#288） =====
+    // B 站首页等长列表页一次性/持续插入大量节点时，若每条 mutation record 都
+    // 同步扫描，会阻塞主线程导致页面卡顿。这里把新增节点 / 属性变化目标先缓冲，
+    // 用 requestIdleCallback（不支持时退化为 200ms 防抖 setTimeout）合并成一批
+    // 再统一扫描上报。
+    const MUTATION_FLUSH_DELAY_MS = 200;
+    const MUTATION_OBSERVER_OPTIONS: MutationObserverInit = {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["src", "href", "data"],
+    };
+    const pendingAddedNodes = new Set<HTMLElement>();
+    const pendingAttributeTargets = new Set<HTMLElement>();
+    let mutationFlushHandle: number | undefined;
+    let mutationFlushIsIdleCallback = false;
+
+    function flushPendingMutations(): void {
+      mutationFlushHandle = undefined;
+      mutationFlushIsIdleCallback = false;
+
+      if (resourceCapReached) {
+        pendingAddedNodes.clear();
+        pendingAttributeTargets.clear();
+        return;
+      }
+
       const found: ResourceMessagePayload[] = [];
+      let scriptAdded = false;
 
-      for (const mutation of mutations) {
-        let scriptAdded = false;
-
-        // 新增节点
-        for (const node of mutation.addedNodes) {
-          if (!(node instanceof HTMLElement)) continue;
-          if (node instanceof HTMLScriptElement) scriptAdded = true;
-          found.push(...checkElement(node));
-          // 检查子元素
-          const children = node.querySelectorAll(
-            "video, audio, source, track[src], a[href], embed, object",
-          );
-          for (const child of children) {
-            found.push(...checkElement(child as HTMLElement));
-          }
-        }
-
-        if (scriptAdded) scheduleInlineDashScan();
-
-        // 属性变化（如 video.src 被 JS 修改）
-        if (
-          mutation.type === "attributes" &&
-          mutation.target instanceof HTMLElement
-        ) {
-          found.push(...checkElement(mutation.target));
+      for (const node of pendingAddedNodes) {
+        if (node instanceof HTMLScriptElement) scriptAdded = true;
+        found.push(...checkElement(node));
+        const children = node.querySelectorAll(
+          "video, audio, source, track[src], a[href], embed, object",
+        );
+        for (const child of children) {
+          found.push(...checkElement(child as HTMLElement));
         }
       }
+      pendingAddedNodes.clear();
+
+      for (const target of pendingAttributeTargets) {
+        found.push(...checkElement(target));
+      }
+      pendingAttributeTargets.clear();
+
+      if (scriptAdded) scheduleInlineDashScan();
 
       if (found.length > 0) {
         reportResources(found);
       }
+
+      if (resourceCapReached) {
+        observer.disconnect();
+      }
+    }
+
+    function scheduleMutationFlush(): void {
+      if (mutationFlushHandle !== undefined) return;
+      if (typeof requestIdleCallback === "function") {
+        mutationFlushIsIdleCallback = true;
+        mutationFlushHandle = requestIdleCallback(flushPendingMutations, {
+          timeout: MUTATION_FLUSH_DELAY_MS,
+        });
+      } else {
+        mutationFlushIsIdleCallback = false;
+        mutationFlushHandle = window.setTimeout(
+          flushPendingMutations,
+          MUTATION_FLUSH_DELAY_MS,
+        );
+      }
+    }
+
+    function cancelScheduledMutationFlush(): void {
+      if (mutationFlushHandle === undefined) return;
+      if (mutationFlushIsIdleCallback && typeof cancelIdleCallback === "function") {
+        cancelIdleCallback(mutationFlushHandle);
+      } else if (!mutationFlushIsIdleCallback) {
+        window.clearTimeout(mutationFlushHandle);
+      }
+      mutationFlushHandle = undefined;
+      mutationFlushIsIdleCallback = false;
+    }
+
+    // 属性变化仅在目标是媒体类/可下载类元素时才有意义（其余元素的 src/href/data
+    // 变化与资源探测无关），缩小 MutationObserver 属性分支的处理面。
+    function isMediaishElement(el: HTMLElement): boolean {
+      const tag = el.tagName.toLowerCase();
+      if (
+        tag === "video" ||
+        tag === "audio" ||
+        tag === "source" ||
+        tag === "track" ||
+        tag === "embed" ||
+        tag === "object"
+      ) {
+        return true;
+      }
+      return tag === "a" && el.hasAttribute("href");
+    }
+
+    const observer = new MutationObserver((mutations) => {
+      if (resourceCapReached) return;
+
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node instanceof HTMLElement) pendingAddedNodes.add(node);
+        }
+
+        // 属性变化（如 video.src 被 JS 修改）
+        if (
+          mutation.type === "attributes" &&
+          mutation.target instanceof HTMLElement &&
+          isMediaishElement(mutation.target)
+        ) {
+          pendingAttributeTargets.add(mutation.target);
+        }
+      }
+
+      if (pendingAddedNodes.size > 0 || pendingAttributeTargets.size > 0) {
+        scheduleMutationFlush();
+      }
     });
 
-    if (sniffingEnabled) {
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ["src", "href", "data"],
-      });
+    if (sniffingEnabled && !resourceCapReached) {
+      observer.observe(document.documentElement, MUTATION_OBSERVER_OPTIONS);
 
       // 扩展失效时断开观察
-      ctx.onInvalidated(() => observer.disconnect());
+      ctx.onInvalidated(() => {
+        observer.disconnect();
+        cancelScheduledMutationFlush();
+      });
       ctx.onInvalidated(() => {
         if (inlineDashScanTimer !== undefined) {
           window.clearTimeout(inlineDashScanTimer);
@@ -185,6 +279,28 @@ export default defineContentScript({
         }
       });
     }
+
+    // SPA 路由切换时重置单页资源上限计数器；若此前因触顶而断开了观察，
+    // 重新连接 MutationObserver（新页面重新计数）。
+    const handleResourceCapReset = (): void => {
+      reportedResourceCount = 0;
+      if (resourceCapReached) {
+        resourceCapReached = false;
+        if (sniffingEnabled) {
+          observer.observe(document.documentElement, MUTATION_OBSERVER_OPTIONS);
+        }
+      }
+    };
+    document.addEventListener(
+      "fluxdown-page-url-changed",
+      handleResourceCapReset,
+    );
+    ctx.onInvalidated(() => {
+      document.removeEventListener(
+        "fluxdown-page-url-changed",
+        handleResourceCapReset,
+      );
+    });
 
     // ===== 3. 注入 Main World 拦截脚本 =====
     if (sniffingEnabled) {
@@ -544,6 +660,8 @@ export default defineContentScript({
      * 上报资源给 Background Service Worker
      */
     function reportResources(resources: ResourceMessagePayload[]): void {
+      if (resourceCapReached) return;
+
       // 去重
       const fresh = resources.filter((r) => {
         if (reportedUrls.has(r.url)) return false;
@@ -558,6 +676,13 @@ export default defineContentScript({
       }
 
       if (fresh.length === 0) return;
+
+      // #288：单页面上报资源数达到上限后停止统计，MutationObserver 由调用方
+      // （flushPendingMutations）在检测到 resourceCapReached 后断开。
+      reportedResourceCount += fresh.length;
+      if (reportedResourceCount >= MAX_RESOURCES_PER_PAGE) {
+        resourceCapReached = true;
+      }
 
       // 补充 pageUrl
       for (const r of fresh) {

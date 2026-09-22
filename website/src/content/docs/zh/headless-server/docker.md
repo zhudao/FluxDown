@@ -3,7 +3,7 @@ title: Docker 与 NAS
 description: 用预编译 Docker 镜像运行 headless FluxDown 服务器，支持 Docker Compose、CasaOS/ZimaOS、Unraid 与群晖 DSM 原生套件。
 section: headless-server
 order: 2
-sourceHash: "7a29bd5ed557"
+sourceHash: "73f1d8f25d48"
 ---
 
 运行 headless 服务器最快的方式是使用预编译 Docker 镜像——无需 Cargo 构建，也无需单独构建 Web 界面。镜像内置了服务器二进制和 Web 界面，全部通过一个端口（`17800`）暴露，并把数据库、日志和访问密钥持久化到卷。
@@ -29,7 +29,7 @@ docker run -d \
 
 首次访问 `http://<host>:17800/` 时，Web 界面会进入初始化向导，由你自行设置访问密钥（至少 8 位，须同时包含字母和数字）。用该密钥登录 Web 界面，以及为管理 API 和 MCP 端点鉴权（`Authorization: Bearer <token>`）。
 
-在 docker-compose 或其它编排场景中，可用 `FLUXDOWN_TOKEN` 预置密钥并跳过向导。仅在实例尚未设置过密钥时生效：
+在 docker-compose 或其它编排场景中，可用 `FLUXDOWN_TOKEN` 预置密钥并跳过向导。仅在实例尚未设置过密钥时生效；若还设置了 `FLUXDOWN_TOKEN_FORCE=1`，则每次重启都会用它覆盖库中已存的密钥（见[环境变量](/docs/zh/headless-server/setup/#环境变量)）：
 
 ```bash
 docker run -d \
@@ -102,7 +102,7 @@ Unraid Community Applications 模板见 [zerx-lab/unraid-templates](https://gith
 ### 安装
 
 1. 打开**套件中心 → 设置 → 常规**，把**信任层级**设为**任何发行者**。这一步是必需的：套件未经签名——DSM 7 已彻底移除第三方套件签名机制，只有通过群晖官方套件中心分发的套件才带「已验证」状态。
-2. **套件中心 → 手动安装**，选择 `.spk`，按向导完成。
+2. **套件中心 → 手动安装**，选择 `.spk`，按向导完成。DSM 7 上向导会询问**用于下载的共享文件夹**（默认 `FluxDown`）：不存在则自动创建，并在每次启动时把读写权限授予套件用户，装完即可直接作为保存目录使用。
 3. 启动套件后，在套件中心点**打开**——直达端口 `17800` 的 Web 界面（`http://<NAS-IP>:17800`）。
 
 ### 首次运行访问密钥
@@ -111,9 +111,9 @@ Unraid Community Applications 模板见 [zerx-lab/unraid-templates](https://gith
 
 ### 权限与数据位置
 
-- **DSM 7** 上服务以专属低权限套件用户运行（DSM 7 平台强制要求——套件不允许再以 root 运行）；**DSM 6** 上以 root 运行。
-- 数据库、日志与访问密钥位于 `/var/packages/FluxDown/var`；下载默认也落在该目录。
-- DSM 7 上要下载到共享文件夹，需先给套件用户授权：**控制面板 → 共享文件夹 → 编辑 → 权限**，把用户下拉切到**系统内部用户**，给 **FluxDown** 读写权限。DSM 6 以 root 运行，无需授权。
+- **DSM 7** 上服务以专属低权限套件用户 `sc-fluxdown` 运行（DSM 7 平台强制要求——套件不允许再以 root 运行）；**DSM 6** 上以 root 运行。
+- 数据库、日志与访问密钥位于 `/var/packages/FluxDown/var`。DSM 7 上下载默认落到安装向导里选定的共享文件夹；DSM 6 上默认为平台下载目录。
+- 套件用户默认**对其他任何共享文件夹都没有权限**。如果保存目录选择器进入 `/volume1/<共享文件夹>` 时提示「服务进程无权读取此目录」（或看起来是空的），先授权：**控制面板 → 共享文件夹 → 编辑 → 权限**，把用户下拉切到**系统内部用户**，给 **sc-fluxdown** 读写权限。DSM 6 以 root 运行，无需授权。
 
 ### 升级与卸载
 

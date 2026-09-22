@@ -6,7 +6,7 @@ use fluxdown_protocol::{AgentEvent, DaemonEvent, DaemonRuntimeStatsDto, ServiceE
 use fluxdown_ui_downloads::DownloadView;
 use fluxdown_ui_i18n::{I18nCatalog, I18nError, Translator};
 use fluxdown_ui_settings::{SettingsStore, component_locale};
-use fluxdown_ui_shell::ShellView;
+use fluxdown_ui_shell::{RouteId, ShellView};
 use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
 use gpui_component::menu::AppMenuBar;
 use tokio::sync::mpsc;
@@ -152,6 +152,7 @@ pub(crate) fn run() -> Result<(), I18nError> {
         }
 
         gpui_component::init(cx);
+        crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
@@ -320,6 +321,7 @@ fn apply_preferences(cx: &mut App) {
     let values = Desktop::global(cx).preferences.clone();
     let translator = Desktop::global(cx).translator.clone();
     fluxdown_ui_theme::apply_appearance_preferences(&values, cx);
+    apply_activity_bar_preferences(&values, cx);
     if let Some(locale) = values
         .get("general.locale")
         .and_then(serde_json::Value::as_str)
@@ -336,6 +338,25 @@ fn apply_preferences(cx: &mut App) {
             }
         });
     }
+}
+
+/// 偏好快照/事件 → 活动栏可选项可见性（RSS 路由、主题切换动作）。
+fn apply_activity_bar_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
+    let Some(shell) = Desktop::global(cx).main_shell.clone() else {
+        return;
+    };
+    let show_activity_rss = values
+        .get("ui.show_activity_rss")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let show_activity_theme = values
+        .get("ui.show_activity_theme")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let _ = shell.update(cx, |shell, cx| {
+        shell.set_route_visible(RouteId::new("rss"), show_activity_rss, cx);
+        shell.set_action_visible("activity-theme", show_activity_theme, cx);
+    });
 }
 
 /// 外部链接 / `.torrent` 文件 → agent 捕获入口的 RPC 列表。

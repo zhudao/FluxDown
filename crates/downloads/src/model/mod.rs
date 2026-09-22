@@ -133,19 +133,17 @@ impl DownloadFilter {
 pub(crate) enum SidebarSection {
     Status,
     Queues,
-    Rss,
     Devices,
 }
 
 impl SidebarSection {
-    pub(crate) const ALL: [Self; 4] = [Self::Status, Self::Queues, Self::Rss, Self::Devices];
+    pub(crate) const ALL: [Self; 3] = [Self::Status, Self::Queues, Self::Devices];
 
     /// 分区可见性偏好键（`sync:true`，与其余 `ui.*` 同规则）。
     pub(crate) fn visibility_pref(self) -> &'static str {
         match self {
             Self::Status => "ui.show_sidebar_status",
             Self::Queues => "ui.show_sidebar_queues",
-            Self::Rss => "ui.show_sidebar_rss",
             Self::Devices => "ui.show_sidebar_devices",
         }
     }
@@ -156,7 +154,6 @@ impl SidebarSection {
 pub(crate) enum SidebarSelection {
     Download(DownloadFilter),
     Queue(String),
-    RssSource(String),
     /// `"local"` = 本机，其余为云设备 id / 配对设备指纹。
     Device(String),
 }
@@ -287,7 +284,6 @@ pub(crate) struct DownloadTaskView {
     pub(crate) referrer: String,
     pub(crate) save_dir: String,
     pub(crate) group_id: String,
-    pub(crate) rss_source_id: String,
     pub(crate) error_message: String,
     pub(crate) file_missing: bool,
     pub(crate) seeding_status: i32,
@@ -320,7 +316,6 @@ impl DownloadTaskView {
         view.referrer.clone_from(&task.referrer);
         view.save_dir.clone_from(&task.save_dir);
         view.group_id.clone_from(&task.group_id);
-        view.rss_source_id.clone_from(&task.rss_source_id);
         view.error_message.clone_from(&task.error_message);
         view.file_missing = task.file_missing;
         view.seeding_status = task.seeding_status;
@@ -415,7 +410,6 @@ impl DownloadTaskView {
             referrer: String::new(),
             save_dir: String::new(),
             group_id: String::new(),
-            rss_source_id: String::new(),
             error_message: String::new(),
             file_missing: false,
             seeding_status: 0,

@@ -39,6 +39,7 @@ pub const DAEMON_CONFIG_PATCH: &str = "daemon.config.patch";
 pub const DAEMON_CONFIG_PROXY_TEST: &str = "daemon.config.proxyTest";
 pub const DAEMON_CONFIG_CONN_POLICY: &str = "daemon.config.connPolicy";
 pub const DAEMON_CONFIG_CLEAR_CONN_POLICY: &str = "daemon.config.clearConnPolicy";
+pub const DAEMON_CONFIG_SYSTEM_PROXY: &str = "daemon.config.systemProxy";
 pub const DAEMON_SITE_AUTH_LIST: &str = "daemon.siteAuth.list";
 pub const DAEMON_SITE_AUTH_DELETE: &str = "daemon.siteAuth.delete";
 pub const DAEMON_SITE_AUTH_CLEAR: &str = "daemon.siteAuth.clear";
@@ -119,6 +120,10 @@ pub const AGENT_SYNC_GET: &str = "agent.sync.get";
 pub const AGENT_SYNC_ENABLE: &str = "agent.sync.enable";
 pub const AGENT_SYNC_DISABLE: &str = "agent.sync.disable";
 pub const AGENT_SYNC_NOW: &str = "agent.sync.now";
+/// FluxCloud 服务地址读取；正式构建 `editable=false`，地址恒为构建期固定值。
+pub const AGENT_CLOUD_ENDPOINT_GET: &str = "agent.cloud.endpointGet";
+/// 仅调试构建可用（对齐 Flutter `CloudApiConfig`）：覆盖/恢复 FluxCloud 服务地址，立即生效。
+pub const AGENT_CLOUD_ENDPOINT_SET: &str = "agent.cloud.endpointSet";
 pub const AGENT_REMOTE_LIST: &str = "agent.remote.list";
 pub const AGENT_REMOTE_DISPATCH: &str = "agent.remote.dispatch";
 pub const AGENT_REMOTE_COMMAND: &str = "agent.remote.command";
@@ -213,6 +218,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_CONFIG_PROXY_TEST,
     DAEMON_CONFIG_CONN_POLICY,
     DAEMON_CONFIG_CLEAR_CONN_POLICY,
+    DAEMON_CONFIG_SYSTEM_PROXY,
     DAEMON_SITE_AUTH_LIST,
     DAEMON_SITE_AUTH_DELETE,
     DAEMON_SITE_AUTH_CLEAR,
@@ -285,6 +291,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_SYNC_ENABLE,
     AGENT_SYNC_DISABLE,
     AGENT_SYNC_NOW,
+    AGENT_CLOUD_ENDPOINT_GET,
+    AGENT_CLOUD_ENDPOINT_SET,
     AGENT_REMOTE_LIST,
     AGENT_REMOTE_DISPATCH,
     AGENT_REMOTE_COMMAND,

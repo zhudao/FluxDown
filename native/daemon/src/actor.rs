@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use fluxdown_engine::Engine;
-use fluxdown_engine::download_manager::{CreateGroupSpec, NewTaskSpec, TaskDone};
+use fluxdown_engine::download_manager::{
+    CreateGroupSpec, FileExistsBehavior, NewTaskSpec, TaskDone,
+};
 #[cfg(feature = "plugins")]
 use fluxdown_engine::download_manager::{ResolveOutcome, ResolvePreviewOutcome};
 use fluxdown_engine::rss::RssValidateOutcome;
@@ -1406,9 +1408,10 @@ async fn apply_live_config<'a>(
         );
     }
     if keys.contains(&"file_exists_behavior") {
-        engine.manager.set_file_exists_overwrite(
+        engine.manager.set_file_exists_behavior(
             all.get("file_exists_behavior")
-                .is_some_and(|value| value == "overwrite"),
+                .map(|value| FileExistsBehavior::from_config_str(value))
+                .unwrap_or(FileExistsBehavior::Rename),
         );
     }
     if keys.contains(&"file_missing_action") {

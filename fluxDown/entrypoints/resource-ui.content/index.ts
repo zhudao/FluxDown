@@ -72,6 +72,7 @@ const SVG_CLOSE = '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="
 const SVG_LOGO = '<path d="M12 3v11M8 10l4 4 4-4"/><path d="M5 17h14"/>';
 const SVG_EMPTY = '<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/>';
 const SVG_EYE_OFF = '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/>';
+const SVG_TRASH = '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>';
 
 const STORAGE_KEY = 'fluxdown_dot_pos';
 const DOT_VISIBLE_KEY = 'fluxdown_dot_visible';
@@ -482,6 +483,24 @@ export default defineContentScript({
         exportDebugBtnEl.addEventListener('click', exportResourceDebugLog);
         headerActions.appendChild(exportDebugBtnEl);
       }
+
+      // #559：清空当前 tab 嗅探资源列表（抖音等长会话 SPA 反复切换播放会
+      // 不断累积资源，提供一键清空；清空后新嗅探到的资源仍会正常加入）。
+      const clearBtn = h('button', 'btn-close');
+      clearBtn.title = t('panel.clearResourcesTitle');
+      clearBtn.innerHTML = svg(SVG_TRASH);
+      clearBtn.addEventListener('click', () => {
+        browser.runtime.sendMessage({ action: 'clearResources' }).catch(() => {});
+        resources = [];
+        dashManifests = [];
+        dashManifest = null;
+        resourceVersion += 1;
+        manifestVersion += 1;
+        candidateCache = null;
+        selectedIds.clear();
+        render();
+      });
+      headerActions.appendChild(clearBtn);
 
       const hideBtn = h('button', 'btn-close');
       hideBtn.title = t('panel.hideDot');

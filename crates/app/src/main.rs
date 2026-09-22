@@ -4,6 +4,7 @@ mod account_port;
 mod actions;
 mod agent_client;
 mod app;
+mod app_icon;
 mod assets;
 mod capability_ports;
 mod clipboard_watch;

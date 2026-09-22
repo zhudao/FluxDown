@@ -1,8 +1,13 @@
 //! FluxCloud HTTPS 客户端、并发 401 单飞刷新与一次重放。
+//!
+//! 服务地址：`default_base_url` 由启动环境固定；仅调试构建允许经
+//! [`CloudClient::set_endpoint`] 覆盖（持久化在 agent 私有状态），与 Flutter
+//! `CloudApiConfig` 同一策略——正式包锁定默认地址，避免残留覆盖值指向失效地址。
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use fluxdown_protocol::{AgentEvent, CloudEndpointDto};
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -10,16 +15,24 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use super::models::{AuthResponse, CloudErrorBody, RefreshRequest};
+use crate::event_hub::AgentEventHub;
 use crate::state::{AgentState, CloudCredentials, StateStore};
+
+/// 是否允许运行期覆盖 FluxCloud 地址；与 Flutter `kDebugMode` 门控一致。
+const ENDPOINT_EDITABLE: bool = cfg!(debug_assertions);
 
 #[derive(Clone)]
 pub struct CloudClient {
-    base_url: String,
+    default_base_url: String,
+    base_url: Arc<RwLock<String>>,
     http: reqwest::Client,
     stream_http: reqwest::Client,
     state: Arc<Mutex<AgentState>>,
     store: Arc<StateStore>,
     refresh: Arc<Mutex<()>>,
+    /// 会话被清除（退出 / 刷新令牌被拒 / 远端撤销）时投影 `SessionChanged(None)`，
+    /// 让 UI 与 agent 私有状态永不脱节。
+    events: Option<AgentEventHub>,
 }
 
 impl CloudClient {
@@ -40,14 +53,101 @@ impl CloudClient {
             .pool_idle_timeout(Duration::from_secs(90))
             .build()
             .map_err(|error| CloudError::transport(error.to_string()))?;
+        let default_base_url = normalize_base_url(&base_url);
         Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_owned(),
+            base_url: Arc::new(RwLock::new(default_base_url.clone())),
+            default_base_url,
             http,
             stream_http,
             state,
             store,
             refresh: Arc::new(Mutex::new(())),
+            events: None,
         })
+    }
+
+    /// 接入事件枢纽；生产运行链路必须调用，否则会话清除不会通知 UI。
+    #[must_use]
+    pub fn with_events(mut self, events: AgentEventHub) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// 启动时套用已持久化的地址覆盖；正式构建或覆盖值非法时保持默认地址。
+    pub async fn restore_endpoint_override(&self) {
+        if !ENDPOINT_EDITABLE {
+            return;
+        }
+        let Some(base_url) = self.state.lock().await.cloud_base_url_override.clone() else {
+            return;
+        };
+        match validate_base_url(&base_url) {
+            Ok(()) => {
+                self.swap_base_url(normalize_base_url(&base_url));
+                tracing::info!(base_url = %base_url, "using FluxCloud endpoint override");
+            }
+            Err(error) => {
+                tracing::warn!(base_url = %base_url, %error, "ignoring invalid FluxCloud endpoint override");
+            }
+        }
+    }
+
+    /// 当前生效地址、构建期默认地址与是否可改。
+    pub fn endpoint(&self) -> CloudEndpointDto {
+        CloudEndpointDto {
+            base_url: self.current_base_url(),
+            default_base_url: self.default_base_url.clone(),
+            editable: ENDPOINT_EDITABLE,
+        }
+    }
+
+    /// 覆盖（空串 = 恢复默认）FluxCloud 地址并持久化；后续请求立即使用新地址。
+    /// 正式构建拒绝调用。
+    pub async fn set_endpoint(&self, base_url: &str) -> Result<CloudEndpointDto, CloudError> {
+        if !ENDPOINT_EDITABLE {
+            return Err(CloudError::unsupported());
+        }
+        let trimmed = base_url.trim();
+        let next = if trimmed.is_empty() {
+            None
+        } else {
+            validate_base_url(trimmed)?;
+            Some(normalize_base_url(trimmed)).filter(|url| *url != self.default_base_url)
+        };
+        {
+            let mut state = self.state.lock().await;
+            state.cloud_base_url_override.clone_from(&next);
+            self.store
+                .save(&state)
+                .await
+                .map_err(|error| CloudError::transport(error.to_string()))?;
+        }
+        self.swap_base_url(next.unwrap_or_else(|| self.default_base_url.clone()));
+        Ok(self.endpoint())
+    }
+
+    fn current_base_url(&self) -> String {
+        self.base_url
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn swap_base_url(&self, base_url: String) {
+        *self
+            .base_url
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = base_url;
+    }
+
+    /// 本机设备身份 `(device_id, device_name, platform)`，供认证请求体与请求头共用。
+    pub(crate) async fn device_identity(&self) -> (String, String, String) {
+        let state = self.state.lock().await;
+        (
+            state.device_id.clone(),
+            state.device_name.clone(),
+            state.platform.clone(),
+        )
     }
 
     /// 无登录端点调用。
@@ -139,14 +239,20 @@ impl CloudClient {
         Ok(updated)
     }
 
-    /// 仅显式退出或已确认撤销时清除完整会话。
+    /// 清除完整会话（显式退出 / 刷新令牌被拒 / 远端撤销）并投影 `SessionChanged(None)`。
     pub async fn clear_session(&self) -> Result<(), CloudError> {
-        let mut state = self.state.lock().await;
-        state.credentials = None;
-        self.store
-            .save(&state)
-            .await
-            .map_err(|error| CloudError::transport(error.to_string()))
+        {
+            let mut state = self.state.lock().await;
+            state.credentials = None;
+            self.store
+                .save(&state)
+                .await
+                .map_err(|error| CloudError::transport(error.to_string()))?;
+        }
+        if let Some(events) = &self.events {
+            events.publish(AgentEvent::SessionChanged(Box::new(None)));
+        }
+        Ok(())
     }
 
     async fn refresh_session(&self) -> Result<String, CloudError> {
@@ -235,16 +341,9 @@ impl CloudClient {
         path: &str,
         bearer: &str,
     ) -> Result<reqwest::Response, CloudError> {
-        let (device_id, device_name, platform) = {
-            let state = self.state.lock().await;
-            (
-                state.device_id.clone(),
-                state.device_name.clone(),
-                state.platform.clone(),
-            )
-        };
+        let (device_id, device_name, platform) = self.device_identity().await;
         self.stream_http
-            .get(format!("{}{}", self.base_url, path))
+            .get(format!("{}{}", self.current_base_url(), path))
             .bearer_auth(bearer)
             .header("Accept", "text/event-stream")
             .header("X-FluxDown-Device-Id", device_id)
@@ -263,17 +362,10 @@ impl CloudClient {
         body: Option<Value>,
         bearer: Option<&str>,
     ) -> Result<reqwest::Response, CloudError> {
-        let (device_id, device_name, platform) = {
-            let state = self.state.lock().await;
-            (
-                state.device_id.clone(),
-                state.device_name.clone(),
-                state.platform.clone(),
-            )
-        };
+        let (device_id, device_name, platform) = self.device_identity().await;
         let mut request = self
             .http
-            .request(method, format!("{}{}", self.base_url, path))
+            .request(method, format!("{}{}", self.current_base_url(), path))
             .header("X-FluxDown-Device-Id", device_id)
             .header("X-FluxDown-Device-Name", device_name)
             .header("X-FluxDown-Platform", platform)
@@ -342,6 +434,10 @@ fn validate_base_url(base_url: &str) -> Result<(), CloudError> {
     }
 }
 
+fn normalize_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_owned()
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -363,6 +459,15 @@ impl CloudError {
             status: Some(401),
             code: Some("unauthorized".to_owned()),
             message: "authentication required".to_owned(),
+            retryable: false,
+        }
+    }
+
+    fn unsupported() -> Self {
+        Self {
+            status: None,
+            code: Some("unsupported".to_owned()),
+            message: "FluxCloud endpoint is fixed in release builds".to_owned(),
             retryable: false,
         }
     }
@@ -556,6 +661,95 @@ mod tests {
                 .is_none()
         );
         drop(client);
+        drop(state);
+        drop(store);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    async fn whoami(State(name): State<&'static str>) -> Response {
+        axum::Json(json!({ "server": name })).into_response()
+    }
+
+    async fn spawn_named(name: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind named mock");
+        let address = listener.local_addr().expect("named mock address");
+        let app = Router::new()
+            .route("/api/v1/whoami", get(whoami))
+            .with_state(name);
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn endpoint_override_persists_routes_and_resets() {
+        let default_url = spawn_named("default").await;
+        let override_url = spawn_named("override").await;
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_cloud_endpoint_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let store = Arc::new(StateStore::open(dir.clone()).await.expect("state store"));
+        let state = Arc::new(Mutex::new(AgentState::default()));
+        let client = CloudClient::new(default_url.clone(), state.clone(), store.clone())
+            .expect("cloud client");
+
+        let endpoint = client.endpoint();
+        assert!(endpoint.editable, "tests run under debug_assertions");
+        assert_eq!(endpoint.base_url, default_url);
+        assert_eq!(endpoint.default_base_url, default_url);
+
+        let set = client
+            .set_endpoint(&format!("{override_url}/"))
+            .await
+            .expect("override accepted");
+        assert_eq!(set.base_url, override_url);
+        assert_eq!(set.default_base_url, default_url);
+        let persisted = store.load().await.expect("reload state");
+        assert_eq!(
+            persisted.cloud_base_url_override.as_deref(),
+            Some(override_url.as_str())
+        );
+        let who = client
+            .public::<Value, Value>(reqwest::Method::GET, "/api/v1/whoami", None)
+            .await
+            .expect("override reachable");
+        assert_eq!(who["server"], "override");
+
+        let restored = CloudClient::new(default_url.clone(), state.clone(), store.clone())
+            .expect("second client");
+        restored.restore_endpoint_override().await;
+        assert_eq!(restored.endpoint().base_url, override_url);
+
+        let rejected = client
+            .set_endpoint("http://example.com")
+            .await
+            .expect_err("non-loopback http must be rejected");
+        assert_eq!(rejected.code.as_deref(), Some("invalidArgument"));
+        assert_eq!(client.endpoint().base_url, override_url);
+
+        let reset = client.set_endpoint("  ").await.expect("reset accepted");
+        assert_eq!(reset.base_url, default_url);
+        assert!(
+            store
+                .load()
+                .await
+                .expect("reload after reset")
+                .cloud_base_url_override
+                .is_none()
+        );
+        let who = client
+            .public::<Value, Value>(reqwest::Method::GET, "/api/v1/whoami", None)
+            .await
+            .expect("default reachable");
+        assert_eq!(who["server"], "default");
+
+        drop(client);
+        drop(restored);
         drop(state);
         drop(store);
         let _ = tokio::fs::remove_dir_all(dir).await;

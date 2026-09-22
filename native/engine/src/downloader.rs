@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
 use crate::events::EventSink;
-use crate::logger::log_info;
+use crate::logger::{log_info, log_warn};
 use crate::output;
 use crate::speed_limiter::SpeedLimiter;
 
@@ -39,11 +39,15 @@ pub enum DownloadError {
     /// single-stream mode.
     #[error("server does not support Range requests (returned {0} instead of 206 Partial Content)")]
     RangeNotSupported(String),
-    /// 服务器在 probe 与分段/续传请求之间【更换了文件】：Range 响应的
-    /// validator（ETag/Last-Modified）与已落盘版本不一致。与
-    /// [`RangeNotSupported`] 严格区分：后者是服务器根本不支持 Range；本变体
-    /// 意味着旧数据已不能与当前响应拼接，必须清空临时文件后重新下载。文件变化
-    /// 与服务器 Range 能力无关，因此绝不记录主机单连接缓存。
+    /// 服务器在 probe 与分段/续传请求之间【更换了文件】：Range 响应的强
+    /// validator（ETag）与已落盘版本不一致，或 Last-Modified 不一致且响应
+    /// `Content-Range` 总大小与已知总大小【也】不一致（分段路径下起点还须
+    /// 不一致）——见 [`crate::downloader::validator_mismatch_is_fatal`]。
+    /// 与 [`RangeNotSupported`] 严格区分：后者是服务器根本不支持 Range；本
+    /// 变体意味着旧数据已不能与当前响应拼接，必须清空临时文件后重新下载。
+    /// 文件变化与服务器 Range 能力无关，因此绝不记录主机单连接缓存。仅
+    /// Last-Modified 不同但总大小（及分段起点）一致时视为跨 CDN edge 的
+    /// 时钟/格式差异，不触发本变体，改为记录一条警告后继续。
     #[error("file changed on server during download (validator mismatch, server returned {0})")]
     VersionChanged(String),
     /// 服务器对 `Range: bytes=X-Y` 请求回了 `206 Partial Content`，但响应的
@@ -93,6 +97,15 @@ pub enum DownloadError {
     /// 调度层据此把违规 peer 拉黑（贯穿整个下载调用），而非仅退避。
     #[error("ed2k integrity violation: {0}")]
     Ed2kIntegrity(String),
+    /// URL 仅因 `.m3u8`/`.m3u` 扩展名被 [`crate::hls_downloader::is_hls_url`]
+    /// 判定为 HLS，但拉取到的内容根本不是合法 M3U8 播放列表——典型场景是
+    /// WebDAV/网盘把普通文本文件（曲目列表等）恰好命名为 `.m3u8`。
+    /// 与其它变体不同：该错误只可能在 HLS 下载器**拉取并解析 playlist**这
+    /// 一最早阶段产生，此时尚未创建任何临时文件、写入任何字节——调度层
+    /// （`download_manager::do_start_task` / `do_resume_task`）捕获后不落
+    /// 终态失败，而是把任务原样交给普通 HTTP 下载器按字面文件保存。
+    #[error("not an HLS playlist: {0}")]
+    NotAnHlsPlaylist(String),
     #[error("{0}")]
     Other(String),
 }
@@ -110,6 +123,21 @@ pub(crate) fn is_server_rejection(e: &DownloadError) -> bool {
             } else {
                 false
             }
+        }
+        _ => false,
+    }
+}
+
+/// 检测下载错误是否为 HTTP 416 Range Not Satisfiable。
+///
+/// BUG-HTTP-416-RETRY-EXHAUST：服务器对当前 Range 明确拒绝（典型于续传偏移
+/// 越界——临时文件被外部截断，或服务器文件在两次探测间缩小）。重试同一
+/// Range 必然拿到同样的 416，与瞬时网络错误不同；调用方应据此短路重试，
+/// 而不是空烧完整的重试预算后才失败。
+pub(crate) fn is_range_not_satisfiable(e: &DownloadError) -> bool {
+    match e {
+        DownloadError::Request(req_err) => {
+            req_err.status() == Some(reqwest::StatusCode::RANGE_NOT_SATISFIABLE)
         }
         _ => false,
     }
@@ -670,7 +698,14 @@ pub fn unsupported_content_encoding(headers: &reqwest::header::HeaderMap) -> Opt
             // 字符编码错填进 Content-Encoding 头，响应体实际未压缩。按未知
             // 编码拒绝会把这类误写永久挡在下载之外（#413），故与 "none" 一样
             // 按 no-op 放行。
-            "identity" | "none" | "" | "utf-8" | "utf8" => {}
+            // "aws-chunked"（S3/兼容对象存储的分块签名传输封装，如 UFile/
+            // 阿里 OSS）是【传输层】framing token，不是 body 内容编码——
+            // 该封装本就发生在 chunk-size/签名 trailer 这一层，等到 HTTP
+            // 客户端把 body 交给我们时已经是普通字节流，不需要（也没有
+            // 额外可反转的）解压步骤。个别源站/CDN 把它错填进
+            // Content-Encoding 而不是 Transfer-Encoding，若按未知编码
+            // 处理会导致这条本可正常下载的响应被永久拒绝并报“无法解码”。
+            "identity" | "none" | "" | "utf-8" | "utf8" | "aws-chunked" => {}
             "gzip" | "x-gzip" | "br" | "brotli" | "deflate" | "zstd" => layers.push(lower),
             other => {
                 has_unknown = true;
@@ -758,6 +793,46 @@ pub(crate) fn is_range_response_misaligned(cr_start: Option<i64>, actual_start: 
         Some(s) => s != actual_start,
         None => actual_start > 0,
     }
+}
+
+/// 单次 Range 响应的 validator 不一致是否构成【致命】版本变化。
+///
+/// - ETag 在两侧均非空且不同 → 致命：ETag 是强 validator，不同即不同版本，
+///   任何情况下都不可容忍。
+/// - 仅 Last-Modified 不同：响应 `Content-Range` 的总大小（分母，见
+///   [`parse_content_range_total`]）与本任务已知总大小一致——需要校验起点
+///   时（分段路径）起点也与请求偏移一致——判定为同一份内容在不同 CDN edge
+///   间的时钟/格式差异，不致命；否则致命。
+/// - 两侧均无差异 → 不致命。
+///
+/// `content_range_total` / `known_total`：`known_total <= 0` 表示总大小
+/// 未知，此时无法佐证"同一份内容"，按致命处理。
+/// `content_range_start` / `requested_start`：仅分段路径传 `Some` 校验起点；
+/// 单流续传传 `None` 跳过——该路径的起点错位由
+/// [`is_range_response_misaligned`] 另行处理，走安全的全量回退而非报错。
+pub(crate) fn validator_mismatch_is_fatal(
+    etag_mismatch: bool,
+    last_modified_mismatch: bool,
+    content_range_total: Option<i64>,
+    known_total: i64,
+    content_range_start: Option<i64>,
+    requested_start: Option<i64>,
+) -> bool {
+    if etag_mismatch {
+        return true;
+    }
+    if !last_modified_mismatch {
+        return false;
+    }
+    if known_total <= 0 || content_range_total != Some(known_total) {
+        return true;
+    }
+    if let Some(requested_start) = requested_start
+        && content_range_start != Some(requested_start)
+    {
+        return true;
+    }
+    false
 }
 
 /// Wrap a response byte stream with transparent decompression if the server
@@ -2485,37 +2560,102 @@ pub async fn run_download(params: DownloadParams) {
     }
 }
 
-/// Verify that a file at `path` matches the checksum in `spec`.
-///
-/// `spec` format: `"algo=hexhash"`, e.g. `"sha-256=abc123..."` or `"md5=d41d8c..."`.
-/// Supported algorithms: `sha-256`/`sha256`, `sha-512`/`sha512`, `sha-1`/`sha1`, `md5`.
-/// Returns `Ok(())` if the digest matches, or `Err(DownloadError::ChecksumMismatch)` if not.
-async fn verify_checksum(path: &Path, spec: &str) -> Result<(), DownloadError> {
-    let sep = spec.find('=').ok_or_else(|| {
-        DownloadError::Other(format!(
-            "invalid checksum format (expected algo=hash): {}",
-            spec
-        ))
-    })?;
-    let algo_raw = spec[..sep].trim().to_lowercase();
-    let expected_hex = spec[sep + 1..].trim().to_lowercase();
+/// Hex-digit length expected for each supported checksum algorithm's digest.
+/// Must stay in lockstep with the hashers dispatched in [`verify_checksum`].
+fn checksum_hex_len(algo: &str) -> Option<usize> {
+    match algo {
+        "md5" => Some(32),
+        "sha1" => Some(40),
+        "sha256" => Some(64),
+        "sha512" => Some(128),
+        _ => None,
+    }
+}
 
-    // Normalize algorithm aliases to a canonical key.
+/// Normalize a user-provided checksum spec into the canonical `algo=hex`
+/// form consumed by [`verify_checksum`].
+///
+/// BUG-CHECKSUM-PREFIX：用户常把从下载页复制来的、自带算法前缀的哈希值
+/// （如 `sha256:abcdef...`）整段粘进哈希输入框，拼出 `sha256=sha256:abcdef...`
+/// 这样的 spec；旧实现直接把 `sha256:abcdef...` 当哈希值参与比较，永远校验
+/// 失败。本函数：
+/// - 识别 `algo=hash` 中的 `algo`（含 `sha-256`/`sha256` 等别名）；
+/// - 若 `hash` 自身带 `<prefix>:` 前缀，且该前缀归一化（去掉 `-`、转小写）
+///   后与已选定的 `algo` 相同，剥离该前缀——**绝不**猜测/剥离与所选算法
+///   不符的前缀，那是真实的输入错误，必须报错而非静默按错误算法比对；
+/// - 校验剥离后的哈希是纯十六进制、且长度与算法匹配（md5=32, sha1=40,
+///   sha256=64, sha512=128）。
+///
+/// 返回规范化后的 `algo=hex`（小写），或描述具体问题的错误字符串。
+pub fn normalize_checksum_spec(spec: &str) -> Result<String, String> {
+    let spec = spec.trim();
+    let sep = spec
+        .find('=')
+        .ok_or_else(|| format!("invalid checksum format (expected algo=hash): {}", spec))?;
+    let algo_raw = spec[..sep].trim().to_lowercase();
+    let hash_raw = spec[sep + 1..].trim();
+
     let algo = match algo_raw.as_str() {
         "sha-256" | "sha256" => "sha256",
         "sha-512" | "sha512" => "sha512",
         "sha-1" | "sha1" => "sha1",
         "md5" => "md5",
-        other => {
-            return Err(DownloadError::Other(format!(
-                "unsupported checksum algorithm: {}",
-                other
-            )));
-        }
+        other => return Err(format!("unsupported checksum algorithm: {}", other)),
     };
 
-    let path_owned = path.to_path_buf();
+    // Strip a redundant "<algo>:" prefix pasted onto the hash itself — only
+    // when it names the *same* algorithm already selected via `algo=`.
+    let hash = if let Some((prefix, rest)) = hash_raw.split_once(':') {
+        let normalized_prefix = prefix.trim().to_lowercase().replace('-', "");
+        if normalized_prefix == algo {
+            rest.trim()
+        } else {
+            return Err(format!(
+                "checksum hash prefix does not match algorithm: expected {}, got {}",
+                algo,
+                prefix.trim()
+            ));
+        }
+    } else {
+        hash_raw
+    };
+
+    let hash = hash.to_lowercase();
+    if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("checksum hash is not valid hex: {}", hash));
+    }
+    let expected_len = checksum_hex_len(algo).unwrap_or(0);
+    if hash.len() != expected_len {
+        return Err(format!(
+            "checksum hash length mismatch for {}: expected {} hex chars, got {}",
+            algo,
+            expected_len,
+            hash.len()
+        ));
+    }
+
+    Ok(format!("{}={}", algo, hash))
+}
+
+/// Verify that a file at `path` matches the checksum in `spec`.
+///
+/// `spec` format: `"algo=hexhash"`, e.g. `"sha-256=abc123..."` or `"md5=d41d8c..."`.
+/// Supported algorithms: `sha-256`/`sha256`, `sha-512`/`sha512`, `sha-1`/`sha1`, `md5`.
+/// `spec` is passed through [`normalize_checksum_spec`] first, which also
+/// strips a redundant `<algo>:` prefix pasted onto the hash value.
+/// Returns `Ok(())` if the digest matches, or `Err(DownloadError::ChecksumMismatch)` if not.
+async fn verify_checksum(path: &Path, spec: &str) -> Result<(), DownloadError> {
+    let normalized = normalize_checksum_spec(spec).map_err(DownloadError::Other)?;
+    let (algo, expected_hex) = normalized.split_once('=').ok_or_else(|| {
+        DownloadError::Other(format!(
+            "internal: normalized checksum spec missing separator: {}",
+            normalized
+        ))
+    })?;
     let algo_owned = algo.to_string();
+    let expected_hex = expected_hex.to_string();
+
+    let path_owned = path.to_path_buf();
 
     let actual_hex = tokio::task::spawn_blocking(move || -> Result<String, DownloadError> {
         use std::io::Read;
@@ -3843,7 +3983,24 @@ async fn download_single_once(
         // 版本安全由下方对 206 响应的 ETag/Last-Modified 后验校验保证。
         resp = resp.header("Range", &range);
     }
-    let mut resp = resp.send().await?.error_for_status()?;
+    let mut resp = resp.send().await?;
+    // BUG-HTTP-416-RETRY-EXHAUST：续传 Range 偏移越界时服务器回 416（临时文件
+    // 被外部截断、或服务器文件在两次探测间缩小）。error_for_status() 会把它
+    // 变成不可恢复的错误直接终止任务；416 语义明确——重试同一 Range 必然拿到
+    // 同样的响应，唯一出路是放弃续传偏移，不带 Range 重新请求从头下载整个
+    // 文件（与下方"Range-on-206 压缩"回退同一手法：丢弃当前响应重新发送）。
+    if want_resume && resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        log_info!(
+            "[download-single] task {} 续传 Range 请求收到 416 Range Not Satisfiable，\
+             放弃续传偏移 {} 重新从头请求完整文件",
+            task_id,
+            existing_len
+        );
+        drop(resp);
+        let full_req = build_request(client, url, spec.method.clone(), spec);
+        resp = full_req.send().await?;
+    }
+    let mut resp = resp.error_for_status()?;
 
     if want_resume && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         let resp_etag = resp
@@ -3856,14 +4013,35 @@ async fn download_single_once(
             .get(reqwest::header::LAST_MODIFIED)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
-        if (!expected_etag.is_empty() && !resp_etag.is_empty() && resp_etag != expected_etag)
-            || (!expected_last_modified.is_empty()
-                && !resp_lm.is_empty()
-                && resp_lm != expected_last_modified)
-        {
-            return Err(DownloadError::VersionChanged(
-                "validator mismatch on resumed Range response".to_string(),
-            ));
+        let etag_mismatch =
+            !expected_etag.is_empty() && !resp_etag.is_empty() && resp_etag != expected_etag;
+        let last_modified_mismatch = !expected_last_modified.is_empty()
+            && !resp_lm.is_empty()
+            && resp_lm != expected_last_modified;
+        if etag_mismatch || last_modified_mismatch {
+            let content_range_total = parse_content_range_total(resp.headers());
+            if validator_mismatch_is_fatal(
+                etag_mismatch,
+                last_modified_mismatch,
+                content_range_total,
+                total_bytes,
+                None,
+                None,
+            ) {
+                return Err(DownloadError::VersionChanged(
+                    "validator mismatch on resumed Range response".to_string(),
+                ));
+            }
+            log_warn!(
+                "[download-single] task {} 续传响应 Last-Modified 不同（probe=\"{}\" 本次=\"{}\"）\
+                 但 Content-Range 总大小（{:?}）与已知总大小（{}）一致，判定为跨 CDN edge 的\
+                 时钟/格式差异，继续续传",
+                task_id,
+                expected_last_modified,
+                resp_lm,
+                content_range_total,
+                total_bytes
+            );
         }
     }
 
@@ -5643,6 +5821,20 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_content_encoding_aws_chunked_is_supported() {
+        // BUG-AWS-CHUNKED-FALSE-REJECT：S3 兼容对象存储把请求侧的分块签名
+        // framing token 误填进响应 Content-Encoding；body 到达我们手里时
+        // 早已是普通字节流，按未知编码拒绝会把可正常下载的响应挡在外面。
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("aws-chunked"),
+        );
+        assert!(super::unsupported_content_encoding(&headers).is_none());
+        assert!(super::detect_content_encoding(&headers).is_none());
+    }
+
+    #[test]
     fn unsupported_content_encoding_gzip_is_supported() {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
@@ -5891,6 +6083,98 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // validator_mismatch_is_fatal（CDN edge Last-Modified 漂移容差）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validator_mismatch_last_modified_only_same_total_is_tolerated() {
+        // 仅 Last-Modified 不同，但 Content-Range 总大小与已知总大小一致——
+        // 同一份内容在不同 CDN edge 间的时钟/格式差异，不应判定为致命。
+        assert!(!super::validator_mismatch_is_fatal(
+            false,
+            true,
+            Some(639494994),
+            639494994,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn validator_mismatch_etag_differs_is_fatal() {
+        // ETag 是强 validator，不同即不同版本——即使总大小一致也必须致命，
+        // 不受 Last-Modified 容差规则影响。
+        assert!(super::validator_mismatch_is_fatal(
+            true,
+            true,
+            Some(639494994),
+            639494994,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn validator_mismatch_last_modified_and_total_differ_is_fatal() {
+        // 总大小也不一致——不是同一份内容，必须致命。
+        assert!(super::validator_mismatch_is_fatal(
+            false,
+            true,
+            Some(4747867),
+            639494994,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn validator_mismatch_no_mismatch_is_not_fatal() {
+        assert!(!super::validator_mismatch_is_fatal(
+            false, false, None, 0, None, None,
+        ));
+    }
+
+    #[test]
+    fn validator_mismatch_unknown_total_is_fatal() {
+        // 已知总大小未知（<= 0）时无法佐证"同一份内容"，保守判定致命。
+        assert!(super::validator_mismatch_is_fatal(
+            false,
+            true,
+            Some(639494994),
+            0,
+            None,
+            None,
+        ));
+    }
+
+    #[test]
+    fn validator_mismatch_segment_start_mismatch_is_fatal() {
+        // 分段路径：总大小一致但 Content-Range 起点与请求偏移不符——同样
+        // 不能排除内容错位，必须致命。
+        assert!(super::validator_mismatch_is_fatal(
+            false,
+            true,
+            Some(639494994),
+            639494994,
+            Some(0),
+            Some(508073519),
+        ));
+    }
+
+    #[test]
+    fn validator_mismatch_segment_start_match_is_tolerated() {
+        // 分段路径：总大小与起点均一致——容忍。
+        assert!(!super::validator_mismatch_is_fatal(
+            false,
+            true,
+            Some(639494994),
+            639494994,
+            Some(508073519),
+            Some(508073519),
+        ));
+    }
+
+    // -----------------------------------------------------------------------
     // is_server_rejection
     // -----------------------------------------------------------------------
 
@@ -5938,6 +6222,87 @@ mod tests {
         assert!(!super::is_server_rejection(&super::DownloadError::Other(
             "403 forbidden".to_string()
         )));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_range_not_satisfiable
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn range_not_satisfiable_detects_416() {
+        assert!(super::is_range_not_satisfiable(&make_status_error(416)));
+    }
+
+    #[test]
+    fn range_not_satisfiable_ignores_other_statuses() {
+        assert!(!super::is_range_not_satisfiable(&make_status_error(403)));
+        assert!(!super::is_range_not_satisfiable(&make_status_error(404)));
+        assert!(!super::is_range_not_satisfiable(&make_status_error(500)));
+    }
+
+    #[test]
+    fn range_not_satisfiable_ignores_non_request_errors() {
+        assert!(!super::is_range_not_satisfiable(
+            &super::DownloadError::Cancelled
+        ));
+        assert!(!super::is_range_not_satisfiable(
+            &super::DownloadError::Other("416 range not satisfiable".to_string())
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_checksum_spec
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_checksum_plain_form_still_ok() {
+        let hash = "a".repeat(64);
+        let spec = format!("sha256={hash}");
+        assert_eq!(
+            super::normalize_checksum_spec(&spec).as_deref(),
+            Ok(spec.as_str())
+        );
+    }
+
+    #[test]
+    fn normalize_checksum_strips_matching_algo_prefix_and_lowercases() {
+        let hash = "AB".repeat(32); // 64 hex chars, uppercase
+        let spec = format!("sha256=sha256:{hash}");
+        let normalized = super::normalize_checksum_spec(&spec).expect("must normalize");
+        assert_eq!(normalized, format!("sha256={}", hash.to_lowercase()));
+    }
+
+    #[test]
+    fn normalize_checksum_mismatched_prefix_is_error() {
+        let hash = "a".repeat(64);
+        let spec = format!("sha256=md5:{hash}");
+        let err = super::normalize_checksum_spec(&spec).expect_err("mismatched prefix must fail");
+        assert!(
+            err.contains("md5") && err.contains("sha256"),
+            "error should name both algorithms: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_checksum_wrong_length_is_error() {
+        let spec = format!("sha256={}", "a".repeat(63)); // one short of 64
+        assert!(super::normalize_checksum_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn normalize_checksum_non_hex_is_error() {
+        let spec = format!("md5={}", "z".repeat(32));
+        assert!(super::normalize_checksum_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn normalize_checksum_unsupported_algo_is_error() {
+        assert!(super::normalize_checksum_spec("crc32=deadbeef").is_err());
+    }
+
+    #[test]
+    fn normalize_checksum_missing_separator_is_error() {
+        assert!(super::normalize_checksum_spec("sha256deadbeef").is_err());
     }
 
     // -----------------------------------------------------------------------

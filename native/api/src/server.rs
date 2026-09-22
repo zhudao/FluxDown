@@ -371,6 +371,7 @@ fn register_core(state: AppState) -> Router<AppState> {
             .route(routes::API_TASK_PAUSE, put(api_pause_task))
             .route(routes::API_TASK_CONTINUE, put(api_continue_task))
             .route(routes::API_TASK_RENAME, post(api_rename_task))
+            .route(routes::API_TASK_URL, put(api_change_task_url))
             .route(routes::API_QUEUES, get(api_list_queues))
             .route(
                 routes::API_SITE_AUTH,
@@ -1493,6 +1494,41 @@ pub(crate) async fn api_rename_task(
         }
     };
     ack(state.host.rename_task(&id, &req.file_name).await)
+}
+
+/// 更换任务下载源地址。
+#[utoipa::path(put, path = "/api/v1/tasks/{id}/url", tag = "management",
+    params(("id" = String, Path, description = "任务 ID（UUID）")),
+    request_body = fluxdown_protocol::daemon::ChangeTaskUrlRequest,
+    responses(
+        (status = 200, description = "已更换", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 400, description = "地址非法（message 为错误码 `invalid-url` 或 thunder 解码错误原文）", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 404, description = "任务不存在", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 409, description = "业务拒绝（message 为错误码 `task-active` / `task-completed` / `bt-unsupported` / `protocol-unsupported` / `protocol-mismatch`）", body = fluxdown_protocol::daemon::ResultMessage),
+        (status = 401, description = "token 无效", body = fluxdown_protocol::daemon::ResultMessage),
+    ),
+    security(("bearerAuth" = []), ("tokenHeader" = []))
+)]
+pub(crate) async fn api_change_task_url(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers) {
+        return *resp;
+    }
+    let req: fluxdown_protocol::daemon::ChangeTaskUrlRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return result_response(
+                StatusCode::BAD_REQUEST,
+                false,
+                &format!("invalid payload: {e}"),
+            );
+        }
+    };
+    ack(state.host.change_task_url(&id, &req.url).await)
 }
 
 /// 暂停全部活跃任务（pending / downloading / preparing）。

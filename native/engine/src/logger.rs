@@ -488,6 +488,42 @@ pub fn init_with_dir(data_dir: &Path) -> Result<(), LoggerInitError> {
     init_at(data_dir.join("logs"))
 }
 
+/// 默认日志级别决定优先级（474#1）：
+/// 1. `RUST_LOG` 环境变量——由下方 `EnvFilter::from_env_lossy()` 处理，
+///    始终优先于本函数返回的默认指令；
+/// 2. `FLUXDOWN_LOG_LEVEL` 环境变量（`error`/`warn`/`info`/`debug`/`trace`，
+///    大小写不敏感）——未设置 `RUST_LOG` 时的默认级别，供 headless
+///    server/CLI 无需改代码即可临时调高日志粒度排查问题；
+/// 3. 以上均未设置 → `INFO`（桌面端 UI 侧的等级选择留待后续迭代，当前只做
+///    环境变量这一层，见 474 讨论）。
+fn resolve_default_level_filter() -> tracing_subscriber::filter::LevelFilter {
+    parse_level_filter(std::env::var("FLUXDOWN_LOG_LEVEL").ok().as_deref())
+}
+
+/// [`resolve_default_level_filter`] 的纯实现，值显式传入以便测试
+/// （不依赖/不修改进程级 `std::env` 状态）。
+fn parse_level_filter(value: Option<&str>) -> tracing_subscriber::filter::LevelFilter {
+    use tracing_subscriber::filter::LevelFilter;
+    let Some(raw) = value else {
+        return LevelFilter::INFO;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "error" => LevelFilter::ERROR,
+        "warn" => LevelFilter::WARN,
+        "info" => LevelFilter::INFO,
+        "debug" => LevelFilter::DEBUG,
+        "trace" => LevelFilter::TRACE,
+        other => {
+            if !other.is_empty() {
+                eprintln!(
+                    "[logger] 忽略未知 FLUXDOWN_LOG_LEVEL='{other}'（合法值：error/warn/info/debug/trace），回退 info"
+                );
+            }
+            LevelFilter::INFO
+        }
+    }
+}
+
 fn init_at(log_dir: PathBuf) -> Result<(), LoggerInitError> {
     if let Some(existing) = LOGGER.get() {
         existing.write_impl("[logger] init skipped (already initialized)", false);
@@ -515,7 +551,7 @@ fn init_at(log_dir: PathBuf) -> Result<(), LoggerInitError> {
     }
 
     let filter = tracing_subscriber::EnvFilter::builder()
-        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .with_default_directive(resolve_default_level_filter().into())
         .from_env_lossy();
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -891,7 +927,7 @@ mod tests {
 
     use super::{
         AppLogWriterFactory, AppLogger, LoggerInitError, format_error_chain, install_panic_hook,
-        list_log_files_in, parse_log_name, report_error, spawn_logged,
+        list_log_files_in, parse_level_filter, parse_log_name, report_error, spawn_logged,
     };
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -902,6 +938,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fluxdown_logtest_{tag}_{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    // 474#1：FLUXDOWN_LOG_LEVEL 决定未设置 RUST_LOG 时的默认级别。
+    #[test]
+    fn parse_level_filter_recognizes_all_levels() {
+        use tracing_subscriber::filter::LevelFilter;
+        assert_eq!(parse_level_filter(Some("error")), LevelFilter::ERROR);
+        assert_eq!(parse_level_filter(Some("WARN")), LevelFilter::WARN);
+        assert_eq!(parse_level_filter(Some(" info ")), LevelFilter::INFO);
+        assert_eq!(parse_level_filter(Some("Debug")), LevelFilter::DEBUG);
+        assert_eq!(parse_level_filter(Some("trace")), LevelFilter::TRACE);
+    }
+
+    #[test]
+    fn parse_level_filter_falls_back_to_info_when_unset_or_invalid() {
+        use tracing_subscriber::filter::LevelFilter;
+        assert_eq!(parse_level_filter(None), LevelFilter::INFO);
+        assert_eq!(parse_level_filter(Some("")), LevelFilter::INFO);
+        assert_eq!(parse_level_filter(Some("verbose")), LevelFilter::INFO);
     }
 
     #[test]

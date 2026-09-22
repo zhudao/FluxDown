@@ -1776,5 +1776,14 @@
   "btSeedTimeLimitUnit": "做种时长单位",
   "btSeedInactiveTimeLimitUnit": "无活动做种时长单位",
   "settingsSiteAuthClearAll": "全部清除",
-  "doctorCheckDaemon": "下载守护进程"
+  "doctorCheckDaemon": "下载守护进程",
+  "revealFileCmdShortDesc": "打开文件/目录时调用的自定义命令，留空使用平台默认",
+  "showSidebarCategoryNestedDesc": "在状态文件夹内显示分类子项",
+  "activityBarSection": "活动栏",
+  "activityBarSectionDesc": "选择活动栏显示哪些入口；全部关闭后活动栏自动隐藏",
+  "showActivityRss": "RSS 订阅",
+  "showActivityRssDesc": "在活动栏显示 RSS 订阅入口",
+  "showActivityTheme": "主题切换",
+  "showActivityThemeDesc": "在活动栏底部显示明暗主题切换按钮",
+  "activityThemeToggle": "切换主题"
 }

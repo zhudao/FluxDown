@@ -106,6 +106,12 @@ const zhCN = {
   "options.rules.mimeInvalid": "格式无效，示例：application/epub+zip 或 video/",
   "options.rules.resetMime": "恢复默认",
   "options.rules.mimeResetDone": "已恢复默认 MIME 列表",
+  "options.rules.excludeExtTitle": "排除扩展名",
+  "options.rules.excludeExtDesc":
+    "命中这些扩展名的下载永不拦截，即使同时命中上方的包含规则（如 .torrent、.crx）",
+  "options.rules.excludeExtPlaceholder": "如 .torrent",
+  "options.rules.minFileSizeCustom": "自定义",
+  "options.rules.minFileSizeCustomPlaceholder": "自定义大小（MB）",
 
 
   // Domain exclusion
@@ -137,6 +143,12 @@ const zhCN = {
   "notify.fallbackBrowser": "已回退到浏览器下载",
   "notify.fallbackBrowserDetail":
     "无法发送到 FluxDown，已交由浏览器继续下载: {url}",
+  "notify.videoSourceUnavailableTitle": "无法下载此视频/音频",
+  "notify.videoSourceUnavailableDetail":
+    "该来源无法直接下载（可能是 blob:/MSE 流），请改用资源嗅探面板",
+  "notify.selectionInvalidTitle": "未识别到可下载链接",
+  "notify.selectionInvalidDetail":
+    "选中内容不是完整的 magnet:/ed2k:/http(s) 链接",
   "notify.appUnavailable": "未检测到 FluxDown 应用",
   "notify.appUnavailableDetail":
     "已暂时改用浏览器自带下载。请确认 FluxDown 桌面端已启动，稍后将自动恢复接管。",
@@ -193,9 +205,11 @@ const zhCN = {
   "panel.clearFailed": "清理预览失败项",
   "panel.clearFailedHint": "把预览失败的资源从列表隐藏（不影响其他资源，也不代表无法下载）",
   "panel.exportDebugLog": "导出调试日志",
+  "panel.exportDebugLogFailed": "导出嗅探调试日志失败",
+  "panel.clearResources": "清空",
+  "panel.clearResourcesTitle": "清空当前页面的嗅探资源列表",
   "panel.exportDebugLogTitle": "导出当前页面的原始嗅探资源、播放清单和聚合关系",
   "panel.exportDebugLogDone": "嗅探调试日志已导出",
-  "panel.exportDebugLogFailed": "导出嗅探调试日志失败",
 
   // Shortcut toggle
   "shortcut.toggleTitle": "拦截切换",
@@ -204,8 +218,9 @@ const zhCN = {
 
   // Context menu
   "contextMenu.sendToFluxDown": "使用 FluxDown 下载此链接",
-  "contextMenu.sendImageToFluxDown": "使用 FluxDown 下载此图片",
   "contextMenu.sendVideoToFluxDown": "使用 FluxDown 下载此视频/音频",
+  "contextMenu.sendSelectionToFluxDown": "使用 FluxDown 下载选中内容",
+  "contextMenu.sendImageToFluxDown": "使用 FluxDown 下载此图片",
   "contextMenu.sendPageToFluxDown": "使用 FluxDown 下载此页面",
 
   // Manifest

@@ -9,8 +9,8 @@ use std::rc::Rc;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, ElementId, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, Window, div,
-    prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Icon, IconName, Sizable as _, Size,
@@ -18,6 +18,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
     menu::{DropdownMenu as _, PopupMenuItem},
     switch::Switch,
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -121,6 +122,8 @@ impl Control {
 pub(crate) struct SettingsRow {
     pub(crate) title: SharedString,
     pub(crate) description: Option<SharedString>,
+    /// 标题旁的信息图标；悬浮显示完整说明（描述过长时的补充展开）。
+    help: Option<SharedString>,
     keywords: Vec<SharedString>,
     disabled: bool,
     vertical: bool,
@@ -136,6 +139,7 @@ impl SettingsRow {
         Self {
             title: title.into(),
             description: None,
+            help: None,
             keywords: Vec::new(),
             disabled: false,
             vertical: false,
@@ -154,6 +158,7 @@ impl SettingsRow {
         Self {
             title: SharedString::default(),
             description: None,
+            help: None,
             keywords: Vec::new(),
             disabled: false,
             vertical: false,
@@ -194,6 +199,13 @@ impl SettingsRow {
         self
     }
 
+    /// 标题旁附加一个信息图标；悬浮显示 `text`（描述过长时用于展开完整说明）。
+    #[must_use]
+    pub(crate) fn help(mut self, text: impl Into<SharedString>) -> Self {
+        self.help = Some(text.into());
+        self
+    }
+
     fn matches(&self, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -201,6 +213,7 @@ impl SettingsRow {
         let hit = |text: &SharedString| text.to_lowercase().contains(query);
         hit(&self.title)
             || self.description.as_ref().is_some_and(hit)
+            || self.help.as_ref().is_some_and(hit)
             || self.keywords.iter().any(hit)
     }
 
@@ -242,13 +255,31 @@ impl SettingsRow {
         let label = v_flex()
             .gap(px(2.))
             .min_w_0()
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors.foreground)
-                    .child(self.title.clone()),
-            )
+            .child({
+                let mut title_row = div().flex().items_center().gap(px(4.)).child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(colors.foreground)
+                        .child(self.title.clone()),
+                );
+                if let Some(help) = self.help.clone() {
+                    title_row = title_row.child(
+                        div()
+                            .id(ElementId::from(SharedString::from(format!("{key}-help"))))
+                            .flex()
+                            .items_center()
+                            .cursor_pointer()
+                            .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
+                            .child(
+                                Icon::new(IconName::Info)
+                                    .size(px(13.))
+                                    .text_color(colors.muted_foreground),
+                            ),
+                    );
+                }
+                title_row
+            })
             .when_some(self.description.clone(), |this, description| {
                 this.child(
                     div()
@@ -311,43 +342,57 @@ fn render_control(
             *min, *max, *step, get, set, disabled, key, vertical, window, cx,
         ),
         Control::Input { get, set } => render_input(get, set, disabled, key, vertical, window, cx),
-        Control::Dropdown { options, get, set } => {
-            let current = get(cx);
-            let label = options
-                .iter()
-                .find(|(value, _)| *value == current)
-                .map_or_else(|| current.clone(), |(_, label)| label.clone());
-            let options = options.clone();
-            let set = set.clone();
-            Button::new(ElementId::from(SharedString::from(format!(
-                "{key}-dropdown"
-            ))))
-            .outline()
-            // small 取 text_sm 字号（Medium 会用 text_base，字号偏大），
-            // 高度另行拉到与 Input / NumberInput 一致的 28px。
-            .small()
-            .h(CONTROL_HEIGHT)
-            .label(label)
-            .dropdown_caret(true)
-            .disabled(disabled)
-            .when(vertical, |this| this.w_full())
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let current = current.clone();
-                let set = set.clone();
-                options.iter().fold(menu, |menu, (value, label)| {
-                    let checked = *value == current;
-                    let value = value.clone();
-                    let set = set.clone();
-                    menu.item(
-                        PopupMenuItem::new(label.clone())
-                            .checked(checked)
-                            .on_click(move |_, _, cx| set(value.clone(), cx)),
-                    )
-                })
-            })
-            .into_any_element()
-        }
+        Control::Dropdown { options, get, set } => dropdown_button(
+            format!("{key}-dropdown"),
+            options,
+            get(cx),
+            disabled,
+            vertical,
+            set.clone(),
+        ),
     }
+}
+
+/// 下拉选择按钮：当前值显示为 label，菜单项带勾选态；供 [`Control::Dropdown`]
+/// 与需要自定义值映射的分区（如 User-Agent 预设）共用同一视觉。
+pub(crate) fn dropdown_button(
+    id: impl Into<SharedString>,
+    options: &[(SharedString, SharedString)],
+    current: SharedString,
+    disabled: bool,
+    full_width: bool,
+    set: Setter<SharedString>,
+) -> AnyElement {
+    let label = options
+        .iter()
+        .find(|(value, _)| *value == current)
+        .map_or_else(|| current.clone(), |(_, label)| label.clone());
+    let options = options.to_vec();
+    Button::new(ElementId::from(id.into()))
+        .outline()
+        // small 取 text_sm 字号（Medium 会用 text_base，字号偏大），
+        // 高度另行拉到与 Input / NumberInput 一致的 28px。
+        .small()
+        .h(CONTROL_HEIGHT)
+        .label(label)
+        .dropdown_caret(true)
+        .disabled(disabled)
+        .when(full_width, |this| this.w_full())
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            let current = current.clone();
+            let set = set.clone();
+            options.iter().fold(menu, |menu, (value, label)| {
+                let checked = *value == current;
+                let value = value.clone();
+                let set = set.clone();
+                menu.item(
+                    PopupMenuItem::new(label.clone())
+                        .checked(checked)
+                        .on_click(move |_, _, cx| set(value.clone(), cx)),
+                )
+            })
+        })
+        .into_any_element()
 }
 
 struct InputSlot {

@@ -2085,15 +2085,21 @@ struct CompletionLayout {
 ///   merge/replace children only in this mode.
 ///
 /// Layout decisions:
-/// - **All-selected multi-file torrent** → preserve rqbit's default
+/// - **All-selected multi-file torrent, or a partial multi-file selection
+///   that still contains a sub-directory** → preserve rqbit's default
 ///   `save_dir/<torrent name>/...` layout even though FluxDown downloads into
 ///   a task-scoped staging dir.  The torrent root is always the outer final
-///   container; selected relative paths remain the content paths inside it.
-/// - **Single file (partial or otherwise)** → single-file flat move (basename
-///   only, no container, optional `custom_name` rename).
-/// - **Partial selection of multiple files** → per-file flat move; basenames
-///   are deduped against save_dir AND against in-batch siblings.  `custom_name`
-///   does not apply (no obvious "container" to rename).
+///   container; selected relative paths (including any sub-directories, even
+///   when only some sibling files were selected) remain the content paths
+///   inside it.  (#543: a flat per-basename move previously dropped every
+///   sub-directory whenever the selection was partial.)
+/// - **Single file selected from a single-file torrent (or a multi-file
+///   torrent whose one selected file sits at the top level)** → single-file
+///   flat move (basename only, no container, optional `custom_name` rename).
+/// - **Partial selection of multiple files that are all top-level (no
+///   sub-directory among them)** → per-file flat move; basenames are deduped
+///   against save_dir AND against in-batch siblings.  `custom_name` does not
+///   apply (no obvious "container" to rename).
 ///
 /// The reason completion is driven by selected metadata paths (and never by reading
 /// staging dir contents) is that BT pieces span file boundaries, so librqbit
@@ -2178,7 +2184,18 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
     // here and preserve every torrent-relative path below it. If a valid
     // torrent happens to contain an inner directory with the same name as the
     // torrent root, that inner component must remain (`Root/Root/file`).
-    if all_selected && is_multi_file_torrent {
+    //
+    // #543: this must also trigger for a *partial* multi-file selection as
+    // long as at least one selected file lives under a sub-directory —
+    // otherwise the flat per-basename branch below silently drops that
+    // sub-directory structure. A partial selection whose files are all
+    // top-level keeps the flat-move behavior (no container to build).
+    let has_selected_subdir = selected_files.iter().any(|file| {
+        file.relative_path
+            .parent()
+            .is_some_and(|p| !p.as_os_str().is_empty())
+    });
+    if is_multi_file_torrent && (all_selected || has_selected_subdir) {
         let final_top = match reuse_top {
             Some(n) if !save_dir.join(n).exists() || save_dir.join(n).is_dir() => n.to_string(),
             _ => dedup_name_in_dir(save_dir, desired_container, claimed, allow_overwrite),
@@ -2199,7 +2216,9 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
         });
     }
 
-    // Single-file flat move (single selected file regardless of all_selected).
+    // Single-file flat move: reached only when the container branch above
+    // did not fire — i.e. a genuinely single-file torrent, or a multi-file
+    // torrent whose one selected file sits at the top level (no sub-dir).
     if selected_files.len() == 1 {
         let file = &selected_files[0];
         let rel = &file.relative_path;
@@ -2232,7 +2251,9 @@ fn compute_completion_layout(input: CompletionLayoutInput<'_>) -> Option<Complet
         });
     }
 
-    // Per-file flat move: covers all-selected flat torrent + partial multi.
+    // Per-file flat move: covers an all-top-level flat torrent (all
+    // selected or partial) — no selected file has a sub-directory, so
+    // there is nothing for the container branch above to preserve.
     // Dedup each basename against save_dir AND against names already chosen
     // in this batch so two staged files cannot collide on the same dst.
     // `taken` 存小写折叠名:批内两个仅大小写不同的 basename(种子内合法)
@@ -5352,24 +5373,23 @@ mod tests {
 
     #[test]
     fn completion_layout_dedup_uses_numeric_suffix() {
-        // Two selected files with the same basename in different sub-dirs:
-        // their flat destinations collide and must be deduped as
-        // "file.txt" + "file (1).txt", not "_file.txt".
-        let tmp = std::env::temp_dir().join(format!(
-            "fluxdown_bt_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        let _ = std::fs::create_dir_all(&tmp);
-        let stage = tmp.join(".stage");
+        // Two top-level selected files whose basenames only differ by case
+        // collide (case-insensitive filesystems / Windows) once folded to
+        // lowercase, and must be deduped as "File.txt" + "file (1).txt",
+        // not "_file.txt". (Previously this test used two same-basename
+        // files in different sub-dirs to force the collision, but #543 made
+        // a partial multi-file selection containing a sub-directory take the
+        // container branch instead, where the sub-dirs no longer collide —
+        // so the case-fold collision below is used to keep exercising this
+        // in-batch numeric-suffix dedup path.)
+        let save = unique_test_dir("dedup_numeric_suffix");
+        let stage = save.join(".stage");
         let _ = std::fs::create_dir_all(&stage);
 
-        let selected = completion_files(&["dirA/file.txt", "dirB/file.txt"]);
+        let selected = completion_files(&["File.txt", "file.txt"]);
         let claims = HashSet::new();
         let layout = super::compute_completion_layout(super::CompletionLayoutInput {
-            save_dir: &tmp,
+            save_dir: &save,
             stage_dir: &stage,
             selected_files: &selected,
             all_selected: false,
@@ -5380,7 +5400,7 @@ mod tests {
             allow_overwrite: false,
             claimed: &claims,
         });
-        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&save);
 
         // Avoid `.unwrap()`/`.expect()` (denied by clippy) — match explicitly.
         let moves = match layout {
@@ -5398,10 +5418,55 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        assert_eq!(dst0, "file.txt");
+        assert_eq!(dst0, "File.txt");
         assert_eq!(dst1, "file (1).txt");
         // No underscore-prefixed name should ever be produced.
         assert!(!dst1.starts_with('_'), "must not stack underscore prefixes");
+    }
+
+    /// #543: a *partial* multi-file selection that still contains a
+    /// sub-directory must preserve that sub-directory under the task's
+    /// container, not flatten it to a bare basename.
+    #[test]
+    fn completion_layout_partial_selection_with_subdir_preserves_container() {
+        let save = unique_test_dir("partial_subdir_container");
+        let stage = save.join(".stage");
+        let _ = std::fs::create_dir_all(&stage);
+        // Torrent has 3 files; user only selected 2, one of which sits under
+        // "sub/dir/".
+        let selected = completion_files(&["top.txt", "sub/dir/inner.bin"]);
+
+        let claims = HashSet::new();
+        let layout = super::compute_completion_layout(super::CompletionLayoutInput {
+            save_dir: &save,
+            stage_dir: &stage,
+            selected_files: &selected,
+            all_selected: false,
+            is_multi_file_torrent: true,
+            custom_name: "",
+            torrent_root_name: "Pack",
+            reuse_top: None,
+            allow_overwrite: false,
+            claimed: &claims,
+        });
+        let layout = match layout {
+            Some(v) => v,
+            None => panic!("layout should be Some"),
+        };
+
+        assert_eq!(layout.top_level_name, "Pack");
+        assert!(
+            layout.task_owned_container,
+            "partial selection with a sub-dir must still own its container"
+        );
+        assert_eq!(layout.moves.len(), 2);
+        assert_eq!(layout.moves[0].dst, save.join("Pack").join("top.txt"));
+        assert_eq!(
+            layout.moves[1].dst,
+            save.join("Pack").join("sub").join("dir").join("inner.bin")
+        );
+
+        let _ = std::fs::remove_dir_all(&save);
     }
 
     #[test]

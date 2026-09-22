@@ -11,8 +11,8 @@ use fluxdown_protocol::{
     ConnPolicySummaryDto, DaemonConfigPatch, DaemonConfigSnapshot, DaemonEvent,
     DiagnosticsReportDto, GatewayPatchParams, GatewayStatusDto, PlatformIntegrationDto, PluginDto,
     QueueDto, RpcErrorData, ServiceEvent, SettingOwner, SiteAuthEntryDto, SyncStatusDto,
-    UpdateCheckResultDto, WebhookDeliveryDto, method, setting_spec, setting_value_kind,
-    value_to_daemon_config,
+    SystemProxyDto, UpdateCheckResultDto, WebhookDeliveryDto, method, setting_spec,
+    setting_value_kind, value_to_daemon_config,
 };
 use gpui::{Context, SharedString};
 use serde_json::{Value, json};
@@ -94,6 +94,7 @@ pub struct SettingsStore {
     diagnostics: Option<DiagnosticsReportDto>,
     site_auth: Vec<SiteAuthEntryDto>,
     conn_policy: Option<ConnPolicySummaryDto>,
+    system_proxy: Option<SystemProxyDto>,
     update_check: Option<UpdateCheckResultDto>,
     busy: BTreeSet<&'static str>,
     last_error: Option<SettingsError>,
@@ -130,6 +131,7 @@ impl SettingsStore {
             diagnostics: None,
             site_auth: Vec::new(),
             conn_policy: None,
+            system_proxy: None,
             update_check: None,
             busy: BTreeSet::new(),
             last_error: None,
@@ -282,6 +284,10 @@ impl SettingsStore {
     #[must_use]
     pub fn conn_policy(&self) -> Option<&ConnPolicySummaryDto> {
         self.conn_policy.as_ref()
+    }
+    #[must_use]
+    pub fn system_proxy(&self) -> Option<&SystemProxyDto> {
+        self.system_proxy.as_ref()
     }
     #[must_use]
     pub fn update_check(&self) -> Option<&UpdateCheckResultDto> {
@@ -710,6 +716,27 @@ impl SettingsStore {
             && let Ok(summary) = serde_json::from_value::<ConnPolicySummaryDto>(value)
         {
             self.conn_policy = Some(summary);
+        }
+    }
+
+    pub fn load_system_proxy(&mut self, cx: &mut Context<Self>) {
+        self.call_with(
+            "systemProxy",
+            method::DAEMON_CONFIG_SYSTEM_PROXY,
+            json!({}),
+            cx,
+            Self::absorb_system_proxy,
+        );
+    }
+    fn absorb_system_proxy(
+        &mut self,
+        result: Result<Value, RpcErrorData>,
+        _cx: &mut Context<Self>,
+    ) {
+        if let Ok(value) = result
+            && let Ok(dto) = serde_json::from_value::<SystemProxyDto>(value)
+        {
+            self.system_proxy = Some(dto);
         }
     }
 

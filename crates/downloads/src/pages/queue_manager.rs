@@ -8,22 +8,28 @@ use fluxdown_protocol::{
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    App, AppContext as _, ClickEvent, Context, Entity, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, Size, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     checkbox::Checkbox,
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputState},
+    scroll::ScrollableElement as _,
     switch::Switch,
     v_flex,
 };
 
 use crate::controller::{DownloadsCommand, DownloadsPort, QueueFields};
+
+/// 左列队列列表宽度。
+const LIST_WIDTH: gpui::Pixels = px(184.);
+/// 定时时间输入宽度（`HH:MM`）。
+const TIME_INPUT_WIDTH: gpui::Pixels = px(112.);
 
 /// 星期位掩码单日切换：`bit_index` 0 = 周一 … 6 = 周日。
 fn toggle_day_bit(days: i32, bit: i32, checked: bool) -> i32 {
@@ -106,8 +112,12 @@ impl QueueForm {
         }
     }
 
-    fn is_builtin_main(&self) -> bool {
-        self.queue_id.as_deref() == Some(MAIN_QUEUE_ID)
+    /// 内置队列（主队列 / 稍后下载）：引擎侧拒绝改名与删除。
+    fn is_builtin(&self) -> bool {
+        matches!(
+            self.queue_id.as_deref(),
+            Some(MAIN_QUEUE_ID) | Some(LATER_QUEUE_ID)
+        )
     }
 }
 
@@ -401,75 +411,269 @@ impl QueueManagerView {
         .detach();
     }
 
-    fn render_list(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tokens = active_theme(cx).tokens().clone();
+    fn label(&self, key: &str, cx: &App) -> gpui::Div {
+        let tokens = active_theme(cx).tokens();
+        div()
+            .text_xs()
+            .font_weight(tokens.typography.sm.weight)
+            .text_color(tokens.colors.muted_foreground)
+            .child(self.t(key, cx))
+    }
+
+    fn hint(&self, key: &str, cx: &App) -> gpui::Div {
+        let tokens = active_theme(cx).tokens();
+        div()
+            .text_xs()
+            .text_color(tokens.colors.muted_foreground)
+            .child(self.t(key, cx))
+    }
+
+    fn render_list_row(
+        &self,
+        id: SharedString,
+        selected: bool,
+        leading: impl IntoElement,
+        label: SharedString,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let colors = active_theme(cx).tokens().colors;
+        div()
+            .id(id)
+            .w_full()
+            .mb(px(2.))
+            .px(px(10.))
+            .py(px(7.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .rounded(px(6.))
+            .when(selected, |this| this.bg(colors.accent))
+            .when(!selected, |this| {
+                this.hover(move |style| style.bg(colors.muted.opacity(0.7)))
+            })
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                on_click(this, window, cx);
+            }))
+            .child(leading)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(if selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(if selected {
+                        colors.accent_foreground
+                    } else {
+                        colors.foreground
+                    })
+                    .child(label),
+            )
+    }
+
+    fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let colors = active_theme(cx).tokens().colors;
+        let creating = self
+            .form
+            .as_ref()
+            .is_some_and(|form| form.queue_id.is_none());
         let selected_id = self.form.as_ref().and_then(|form| form.queue_id.clone());
-        let mut list = v_flex()
-            .w(px(200.))
+
+        let mut rows = v_flex().flex_1().min_h_0().w_full();
+        for queue in &self.queues {
+            let id = queue.queue_id.clone();
+            let selected = selected_id.as_deref() == Some(id.as_str());
+            let dot = div()
+                .flex_none()
+                .size(px(7.))
+                .rounded_full()
+                .bg(if queue.is_running {
+                    cx.theme().success
+                } else {
+                    colors.muted_foreground.opacity(0.6)
+                });
+            rows = rows.child(self.render_list_row(
+                SharedString::from(format!("queue-manager-row-{id}")),
+                selected,
+                dot,
+                self.queue_label(queue, cx),
+                move |this, window, cx| this.select_queue(id.clone(), window, cx),
+                cx,
+            ));
+        }
+        if creating {
+            rows = rows.child(
+                self.render_list_row(
+                    SharedString::from("queue-manager-row-draft"),
+                    true,
+                    Icon::new(IconName::Plus)
+                        .size(px(12.))
+                        .text_color(colors.accent_foreground),
+                    self.t("createQueueAction", cx),
+                    |_, _, _| {},
+                    cx,
+                ),
+            );
+        }
+
+        v_flex()
             .flex_none()
+            .w(LIST_WIDTH)
             .h_full()
             .min_h_0()
+            .px(px(8.))
+            .py(px(12.))
+            .bg(colors.background)
             .border_r_1()
-            .border_color(tokens.colors.border)
+            .border_color(colors.border.opacity(0.8))
             .child(
                 h_flex()
-                    .p(tokens.spacing.sm)
+                    .w_full()
+                    .pl(px(10.))
+                    .pr(px(4.))
+                    .pb(px(8.))
                     .justify_between()
                     .items_center()
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_weight(tokens.typography.sm.weight)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(self.t("sidebarQueues", cx)),
-                    )
+                    .child(self.label("sidebarQueues", cx))
                     .child(
                         Button::new("queue-manager-new")
                             .ghost()
-                            .small()
-                            .h(CONTROL_HEIGHT)
-                            .label(self.t("createQueueAction", cx))
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .tooltip(self.t("createQueueAction", cx))
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.new_queue(window, cx);
                             })),
                     ),
-            );
-        for queue in self.queues.clone() {
-            let id = queue.queue_id.clone();
-            let selected = selected_id.as_deref() == Some(id.as_str());
-            let label = self.queue_label(&queue, cx);
-            let running = queue.is_running;
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("queue-manager-row-{id}")))
-                    .px(tokens.spacing.sm)
-                    .py(tokens.spacing.xs)
-                    .mx(tokens.spacing.xs)
-                    .rounded(tokens.radius.md)
-                    .cursor_pointer()
-                    .when(selected, |this| this.bg(tokens.colors.accent))
-                    .hover(move |style| style.bg(tokens.colors.muted))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.select_queue(id.clone(), window, cx);
-                    }))
-                    .child(
-                        h_flex()
-                            .gap(tokens.spacing.xs)
-                            .items_center()
-                            .child(div().size(px(6.)).rounded_full().bg(if running {
-                                cx.theme().success
-                            } else {
-                                tokens.colors.muted_foreground
-                            }))
-                            .child(div().text_sm().truncate().child(label)),
-                    ),
-            );
-        }
-        let _ = window;
-        list
+            )
+            .child(rows.overflow_y_scrollbar())
     }
 
+    /// 标题行：队列显示名 + 运行状态徽标（新建时只有标题）。
+    fn render_header(&self, form: &QueueForm, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = active_theme(cx).tokens().clone();
+        let colors = tokens.colors;
+        let title = match &form.queue_id {
+            None => self.t("createQueueAction", cx),
+            Some(id) => self
+                .queues
+                .iter()
+                .find(|queue| &queue.queue_id == id)
+                .map(|queue| self.queue_label(queue, cx))
+                .unwrap_or_default(),
+        };
+        let badge = form.queue_id.as_ref().map(|_| {
+            let (text, color) = if form.is_running {
+                (self.t("queueRunningBadge", cx), cx.theme().success)
+            } else {
+                (self.t("queueStoppedBadge", cx), colors.muted_foreground)
+            };
+            div()
+                .flex_none()
+                .px(tokens.spacing.sm)
+                .py(px(2.))
+                .rounded(tokens.radius.full)
+                .bg(color.opacity(0.12))
+                .text_xs()
+                .text_color(color)
+                .child(text)
+        });
+        h_flex()
+            .w_full()
+            .flex_none()
+            .px(tokens.spacing.lg)
+            .pt(px(16.))
+            .pb(px(12.))
+            .gap(tokens.spacing.sm)
+            .items_center()
+            .border_b_1()
+            .border_color(colors.border.opacity(0.5))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.foreground)
+                    .child(title),
+            )
+            .children(badge)
+    }
+
+    /// 等宽栅格单元：标签 + 输入 + 可选说明；并排时 `items_start` 保证输入框对齐。
     fn render_field(
+        &self,
+        label_key: &str,
+        input: &Entity<InputState>,
+        hint_key: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = active_theme(cx).tokens().clone();
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(tokens.spacing.xs)
+            .child(self.label(label_key, cx))
+            .child(Input::new(input).with_size(Size::Medium).w_full())
+            .when_some(hint_key, |this, key| this.child(self.hint(key, cx)))
+    }
+
+    fn render_name_field(
+        &self,
+        form: &QueueForm,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        if form.is_builtin() {
+            // 内置队列名称固定：标题已显示本地化名，这里只留说明。
+            return self.hint("builtinQueueRenameHint", cx).into_any_element();
+        }
+        self.render_field("queueNameLabel", &form.name, None, cx)
+            .into_any_element()
+    }
+
+    fn render_save_dir_field(
+        &self,
+        form: &QueueForm,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = active_theme(cx).tokens().clone();
+        let picking = form.picking_dir;
+        v_flex()
+            .gap(tokens.spacing.xs)
+            .child(self.label("queueSaveDir", cx))
+            .child(
+                h_flex()
+                    .gap(tokens.spacing.sm)
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&form.save_dir).with_size(Size::Medium).w_full()),
+                    )
+                    .child(
+                        Button::new("queue-manager-browse-dir")
+                            .outline()
+                            .small()
+                            .h(CONTROL_HEIGHT)
+                            .label(self.t("browse", cx))
+                            .disabled(picking)
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.pick_save_dir(window, cx);
+                            })),
+                    ),
+            )
+            .child(self.hint("queueDirInheritHint", cx))
+    }
+
+    fn render_time_field(
         &self,
         label_key: &str,
         input: &Entity<InputState>,
@@ -478,78 +682,56 @@ impl QueueManagerView {
         let tokens = active_theme(cx).tokens().clone();
         v_flex()
             .gap(tokens.spacing.xs)
+            .child(self.label(label_key, cx))
             .child(
-                div()
-                    .text_xs()
-                    .font_weight(tokens.typography.sm.weight)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t(label_key, cx)),
+                Input::new(input)
+                    .with_size(Size::Medium)
+                    .w(TIME_INPUT_WIDTH),
             )
-            .child(Input::new(input).with_size(Size::Medium).w_full())
-    }
-
-    fn render_save_dir_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tokens = active_theme(cx).tokens().clone();
-        let Some(form) = &self.form else {
-            return div();
-        };
-        let picking = form.picking_dir;
-        div().child(
-            v_flex()
-                .gap(tokens.spacing.xs)
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(tokens.typography.sm.weight)
-                        .text_color(tokens.colors.muted_foreground)
-                        .child(self.t("queueSaveDir", cx)),
-                )
-                .child(
-                    h_flex()
-                        .gap(tokens.spacing.sm)
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(Input::new(&form.save_dir).with_size(Size::Medium).w_full()),
-                        )
-                        .child(
-                            Button::new("queue-manager-browse-dir")
-                                .secondary()
-                                .small()
-                                .h(CONTROL_HEIGHT)
-                                .label(self.t("browse", cx))
-                                .disabled(picking)
-                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                    this.pick_save_dir(window, cx);
-                                })),
-                        ),
-                ),
-        )
     }
 
     fn render_schedule(
         &self,
-        form_enabled: bool,
-        days: i32,
+        form: &QueueForm,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = active_theme(cx).tokens().clone();
-        let weekday_labels: Vec<String> = self
-            .t("weekdaysShort", cx)
-            .split(',')
-            .map(str::to_owned)
-            .collect();
-        let mut days_row = h_flex().gap(tokens.spacing.xs);
-        for (index, label) in weekday_labels.into_iter().enumerate() {
+        let enabled = form.schedule_enabled;
+        let days = form.schedule_days;
+        let column = v_flex().gap(tokens.spacing.md).child(
+            h_flex()
+                .gap(tokens.spacing.lg)
+                .items_start()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(tokens.spacing.xxs)
+                        .child(div().text_sm().child(self.t("queueScheduleEnable", cx)))
+                        .child(self.hint("queueScheduleDesc", cx)),
+                )
+                .child(
+                    Switch::new("queue-schedule-enabled")
+                        .checked(enabled)
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            if let Some(form) = &mut this.form {
+                                form.schedule_enabled = *checked;
+                            }
+                            cx.notify();
+                        })),
+                ),
+        );
+        if !enabled {
+            return column;
+        }
+
+        let mut days_row = h_flex().flex_wrap().gap(tokens.spacing.md);
+        for (index, label) in self.t("weekdaysShort", cx).split(',').enumerate() {
             let bit = 1 << index;
-            let checked = days & bit != 0;
             days_row = days_row.child(
                 Checkbox::new(("queue-schedule-day", index))
-                    .label(label)
-                    .checked(checked)
-                    .disabled(!form_enabled)
+                    .label(label.to_owned())
+                    .checked(days & bit != 0)
                     .on_click(cx.listener(move |this, checked: &bool, _, cx| {
                         if let Some(form) = &mut this.form {
                             form.schedule_days = toggle_day_bit(form.schedule_days, bit, *checked);
@@ -558,120 +740,118 @@ impl QueueManagerView {
                     })),
             );
         }
+        column
+            .child(
+                v_flex()
+                    .gap(tokens.spacing.xs)
+                    .child(
+                        h_flex()
+                            .gap(tokens.spacing.md)
+                            .items_start()
+                            .child(self.render_time_field(
+                                "queueScheduleStartLabel",
+                                &form.schedule_start,
+                                cx,
+                            ))
+                            .child(self.render_time_field(
+                                "queueScheduleStopLabel",
+                                &form.schedule_stop,
+                                cx,
+                            )),
+                    )
+                    .child(self.hint("queueScheduleTimeHint", cx)),
+            )
+            .child(
+                v_flex()
+                    .gap(tokens.spacing.xs)
+                    .child(self.label("queueScheduleDays", cx))
+                    .child(days_row),
+            )
+    }
+
+    fn render_body(&self, form: &QueueForm, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = active_theme(cx).tokens().clone();
         v_flex()
-            .gap(tokens.spacing.sm)
+            .id("queue-manager-body")
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .px(tokens.spacing.lg)
+            .pt(px(16.))
+            .pb(px(20.))
+            .gap(tokens.spacing.md)
+            .overflow_y_scrollbar()
+            .child(self.render_name_field(form, cx))
             .child(
                 h_flex()
-                    .items_center()
-                    .gap(tokens.spacing.sm)
-                    .child(
-                        Switch::new("queue-schedule-enabled")
-                            .checked(form_enabled)
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                if let Some(form) = &mut this.form {
-                                    form.schedule_enabled = *checked;
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().text_sm().child(self.t("queueScheduleEnable", cx))),
+                    .gap(tokens.spacing.md)
+                    .items_start()
+                    .child(self.render_field(
+                        "queueSpeedLimit",
+                        &form.speed_limit,
+                        Some("queueSpeedLimitHint"),
+                        cx,
+                    ))
+                    .child(self.render_field(
+                        "queueUploadLimit",
+                        &form.upload_limit,
+                        Some("queueUploadLimitDesc"),
+                        cx,
+                    )),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t("queueScheduleDesc", cx)),
+                h_flex()
+                    .gap(tokens.spacing.md)
+                    .items_start()
+                    .child(self.render_field(
+                        "queueMaxConcurrent",
+                        &form.max_concurrent,
+                        Some("queueMaxConcurrentHint"),
+                        cx,
+                    ))
+                    .child(self.render_field(
+                        "queueDefaultSegments",
+                        &form.segments,
+                        Some("queueDefaultSegmentsHint"),
+                        cx,
+                    )),
             )
-            .when(form_enabled, |this| {
-                let this = this.child(
-                    h_flex()
-                        .gap(tokens.spacing.md)
-                        .child(self.render_start_stop_field("queueScheduleStartLabel", true, cx))
-                        .child(self.render_start_stop_field("queueScheduleStopLabel", false, cx)),
-                );
+            .child(self.render_save_dir_field(form, cx))
+            .child(self.render_field(
+                "queueDefaultUserAgent",
+                &form.user_agent,
+                Some("queueUaHint"),
+                cx,
+            ))
+            .child(
+                div()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(tokens.colors.border.opacity(0.5)),
+            )
+            .child(self.render_schedule(form, cx))
+            .when_some(self.error.clone(), |this, error| {
                 this.child(
-                    v_flex()
-                        .gap(tokens.spacing.xs)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(tokens.colors.muted_foreground)
-                                .child(self.t("queueScheduleDays", cx)),
-                        )
-                        .child(days_row),
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors.destructive)
+                        .child(error),
                 )
             })
     }
 
-    fn render_start_stop_field(
-        &self,
-        label_key: &str,
-        is_start: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    fn render_footer(&self, form: &QueueForm, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = active_theme(cx).tokens().clone();
-        let Some(form) = &self.form else {
-            return div();
-        };
-        let input = if is_start {
-            &form.schedule_start
-        } else {
-            &form.schedule_stop
-        };
-        div().child(
-            v_flex()
-                .gap(tokens.spacing.xs)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.colors.muted_foreground)
-                        .child(self.t(label_key, cx)),
-                )
-                .child(Input::new(input).with_size(Size::Medium).w(px(120.))),
-        )
-    }
-
-    fn render_form(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tokens = active_theme(cx).tokens().clone();
-        let Some(form) = &self.form else {
-            return v_flex()
-                .flex_1()
-                .p(tokens.spacing.lg)
-                .child(div().text_sm().child(self.t("queueNoPendingTasks", cx)))
-                .into_any_element();
-        };
         let is_creating = form.queue_id.is_none();
-        let is_main = form.is_builtin_main();
-        let is_running = form.is_running;
-        let schedule_enabled = form.schedule_enabled;
-        let schedule_days = form.schedule_days;
-        let name_field = self.render_field("queueNameLabel", &form.name, cx);
-        let max_concurrent_field = {
-            let field = self.render_field("queueMaxConcurrent", &form.max_concurrent, cx);
-            v_flex().gap(tokens.spacing.xs).child(field).child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t("queueMaxConcurrentHint", cx)),
-            )
-        };
-        let speed_field = self.render_field("queueSpeedLimit", &form.speed_limit, cx);
-        let upload_field = {
-            let field = self.render_field("queueUploadLimit", &form.upload_limit, cx);
-            v_flex().gap(tokens.spacing.xs).child(field).child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t("queueUploadLimitDesc", cx)),
-            )
-        };
-        let segments_field = self.render_field("queueDefaultSegments", &form.segments, cx);
-        let save_dir_field = self.render_save_dir_field(cx);
-        let user_agent_field = self.render_field("queueDefaultUserAgent", &form.user_agent, cx);
-        let schedule_section = self.render_schedule(schedule_enabled, schedule_days, cx);
-
-        let mut footer = h_flex().w_full().items_center().gap(tokens.spacing.sm);
-        if !is_creating && !is_main {
+        let mut footer = h_flex()
+            .w_full()
+            .flex_none()
+            .p(tokens.spacing.md)
+            .items_center()
+            .gap(tokens.spacing.xs)
+            .border_t_1()
+            .border_color(tokens.colors.border);
+        if !is_creating && !form.is_builtin() {
             footer = footer.child(
                 Button::new("queue-manager-delete")
                     .danger()
@@ -686,10 +866,10 @@ impl QueueManagerView {
         if !is_creating {
             footer = footer.child(
                 Button::new("queue-manager-toggle-run")
-                    .secondary()
+                    .outline()
                     .small()
                     .h(CONTROL_HEIGHT)
-                    .label(if is_running {
+                    .label(if form.is_running {
                         self.t("stopQueueAction", cx)
                     } else {
                         self.t("startQueueAction", cx)
@@ -699,7 +879,7 @@ impl QueueManagerView {
                     })),
             );
         }
-        footer = footer.child(div().flex_1()).child(
+        footer.child(div().flex_1()).child(
             Button::new("queue-manager-save")
                 .primary()
                 .small()
@@ -708,40 +888,44 @@ impl QueueManagerView {
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.save(window, cx);
                 })),
-        );
+        )
+    }
 
-        let mut column = v_flex()
+    fn render_content(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = active_theme(cx).tokens().clone();
+        let column = v_flex()
             .flex_1()
+            .h_full()
             .min_w_0()
             .min_h_0()
-            .p(tokens.spacing.lg)
-            .gap(tokens.spacing.md)
-            .child(name_field)
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.md)
-                    .child(speed_field)
-                    .child(upload_field),
-            )
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.md)
-                    .child(max_concurrent_field)
-                    .child(segments_field),
-            )
-            .child(save_dir_field)
-            .child(user_agent_field)
-            .child(schedule_section);
-        if let Some(error) = self.error.clone() {
-            column = column.child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.destructive)
-                    .child(error),
-            );
-        }
-        let _ = window;
-        column.child(footer).into_any_element()
+            .bg(tokens.colors.surface);
+        let Some(form) = &self.form else {
+            // 只有断连且快照尚未到达时才会没有表单：给出只读提示而不是空白面板。
+            return column
+                .items_center()
+                .justify_center()
+                .p(tokens.spacing.lg)
+                .when(self.stale, |this| {
+                    this.child(self.hint("localServiceDisconnected", cx))
+                })
+                .into_any_element();
+        };
+        column
+            .when(self.stale, |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .px(tokens.spacing.lg)
+                        .py(tokens.spacing.sm)
+                        .text_xs()
+                        .text_color(tokens.colors.muted_foreground)
+                        .child(self.t("localServiceDisconnected", cx)),
+                )
+            })
+            .child(self.render_header(form, cx))
+            .child(self.render_body(form, cx))
+            .child(self.render_footer(form, cx))
+            .into_any_element()
     }
 }
 
@@ -752,9 +936,11 @@ impl Render for QueueManagerView {
         h_flex()
             .size_full()
             .min_h_0()
+            // `h_flex` 默认交叉轴居中；两列都要撑满高度。
+            .items_stretch()
             .bg(tokens.colors.surface)
-            .child(self.render_list(window, cx))
-            .child(self.render_form(window, cx))
+            .child(self.render_list(cx))
+            .child(self.render_content(cx))
     }
 }
 

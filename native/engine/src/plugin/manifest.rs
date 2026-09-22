@@ -219,7 +219,7 @@ pub struct PluginManifest {
 }
 
 /// 合法事件名（manifest `hooks.events`）。
-pub const VALID_EVENTS: [&str; 4] = ["onStart", "onError", "onDone", "onMetaProbed"];
+pub const VALID_EVENTS: [&str; 5] = ["onStart", "onError", "onDone", "onMetaProbed", "onCancel"];
 
 /// ffmpeg 能力权限名（manifest `permissions`）。
 pub const PERMISSION_FFMPEG: &str = "ffmpeg";

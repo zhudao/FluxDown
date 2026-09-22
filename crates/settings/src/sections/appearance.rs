@@ -434,6 +434,7 @@ fn custom_color_picker(
                     appearance.color_scheme = AccentScheme::Custom;
                     appearance.custom_color = argb;
                     set_appearance(appearance, None, cx);
+                    // 云同步目录（Flutter `Color.toARGB32()`）约定整数 ARGB。
                     store.update(cx, |store, cx| {
                         store.set_pref_i64(CUSTOM_COLOR_KEY, i64::from(argb), cx);
                     });
@@ -455,13 +456,13 @@ fn custom_color_picker(
         }
     });
     let picker = slot.read(cx).picker.clone();
+    // 不传 featured colors：gpui-component 用 `color-{hex}` 作为色块 ElementId，且特色行与
+    // 调色板行同处一个无 id 的父级；预设色（如 #3b82f6 / #22c55e）与调色板色重复时会产生
+    // 重复的 a11y 节点 id，调试构建直接 panic。预设色已由上方色点提供，这里只保留调色板。
     div().when(disabled, |this| this.opacity(0.5)).child(
-        ColorPicker::new(&picker).label(label).featured_colors(
-            AccentScheme::ALL
-                .into_iter()
-                .map(|scheme| argb_color(scheme.preset_argb()))
-                .collect(),
-        ),
+        ColorPicker::new(&picker)
+            .label(label)
+            .featured_colors(Vec::new()),
     )
 }
 

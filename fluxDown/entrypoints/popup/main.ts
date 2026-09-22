@@ -106,6 +106,7 @@ const resourceBadge = $('#resourceBadge')!;
 // 资源面板
 const resTypeTabsEl = $('#resTypeTabs')!;
 const resExportDebugBtn = $<HTMLButtonElement>('#resExportDebugBtn');
+const resClearBtn = $<HTMLButtonElement>('#resClearBtn');
 const resEmptyEl = $('#resEmpty')!;
 const resListEl = $('#resList')!;
 const resFooterEl = $('#resFooter')!;
@@ -1383,6 +1384,23 @@ resBatchBtn.addEventListener('click', async () => {
   } catch {
     showToast(t('popup.quickDownload.failed'), 'error');
     resBatchBtn.disabled = false;
+  }
+});
+
+// #559：清空当前 tab 的嗅探资源列表（抖音等长会话 SPA 反复切换播放会不断
+// 累积资源，提供一键清空；清空后新嗅探到的资源仍会正常加入）。
+resClearBtn.addEventListener('click', async () => {
+  if (typeof resourceTabId !== 'number') return;
+  resClearBtn.disabled = true;
+  try {
+    await browser.runtime.sendMessage({
+      action: 'clearResources',
+      tabId: resourceTabId,
+    });
+    resSelectedIds.clear();
+    await refreshResources();
+  } finally {
+    resClearBtn.disabled = false;
   }
 });
 

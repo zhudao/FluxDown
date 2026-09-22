@@ -1776,5 +1776,14 @@
   "btSeedTimeLimitUnit": "Seeding time unit",
   "btSeedInactiveTimeLimitUnit": "Inactive seeding time unit",
   "settingsSiteAuthClearAll": "Clear all",
-  "doctorCheckDaemon": "Download daemon"
+  "doctorCheckDaemon": "Download daemon",
+  "revealFileCmdShortDesc": "Custom command used to reveal files; leave empty for the platform default",
+  "showSidebarCategoryNestedDesc": "Show category sub-items nested inside the status folders",
+  "activityBarSection": "Activity Bar",
+  "activityBarSectionDesc": "Choose which entries appear in the activity bar; it hides when all optional entries are off",
+  "showActivityRss": "RSS subscriptions",
+  "showActivityRssDesc": "Show the RSS subscriptions entry in the activity bar",
+  "showActivityTheme": "Theme toggle",
+  "showActivityThemeDesc": "Show the light/dark toggle at the bottom of the activity bar",
+  "activityThemeToggle": "Toggle theme"
 }

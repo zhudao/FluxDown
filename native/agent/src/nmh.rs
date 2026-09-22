@@ -640,6 +640,10 @@ pub mod registry {
                     .join("Brave-Browser")
                     .join("NativeMessagingHosts"),
                 lib.join("Vivaldi").join("NativeMessagingHosts"),
+                // Thorium (Chromium fork; user-reported, #360)
+                lib.join("Thorium").join("NativeMessagingHosts"),
+                // Norton Neo (Chromium-based AI browser; user-reported, #623/#653).
+                lib.join("Neo").join("NativeMessagingHosts"),
             ]
         }
 
@@ -672,6 +676,8 @@ pub mod registry {
                 "Microsoft Edge Beta" => "Edge Beta",
                 "Brave-Browser" => "Brave",
                 "Mozilla" => "Firefox",
+                "Thorium" => "Thorium",
+                "Neo" => "Neo",
                 "" => "Unknown browser",
                 other => other,
             }
@@ -695,6 +701,9 @@ pub mod registry {
                     .join("Brave-Browser")
                     .join("NativeMessagingHosts"),
                 config.join("vivaldi").join("NativeMessagingHosts"),
+                config.join("thorium").join("NativeMessagingHosts"),
+                // Norton Neo (Chromium-based AI browser; user-reported, #623/#653).
+                config.join("neo").join("NativeMessagingHosts"),
                 var_app
                     .join("com.google.Chrome")
                     .join("config")
@@ -724,14 +733,37 @@ pub mod registry {
             ]
         }
 
+        /// True when any Firefox-family browser's profile root exists on disk.
+        ///
+        /// `~/.mozilla/native-messaging-hosts` is a compat dir some Firefox-fork
+        /// builds (Zen, LibreWolf) read NMH manifests from instead of their own
+        /// profile root, so it must count as "installed" whenever any fork is
+        /// present, not only Firefox itself (#360).
+        #[cfg(not(target_os = "macos"))]
+        fn firefox_family_present(home: &Path) -> bool {
+            let var_app = home.join(".var").join("app");
+            home.join(".mozilla").is_dir()
+                || home.join(".zen").is_dir()
+                || home.join(".librewolf").is_dir()
+                || var_app
+                    .join("org.mozilla.firefox")
+                    .join(".mozilla")
+                    .is_dir()
+                || var_app
+                    .join("io.gitlab.librewolf-community")
+                    .join(".librewolf")
+                    .is_dir()
+        }
+
         #[cfg(not(target_os = "macos"))]
         fn firefox_targets() -> Vec<(PathBuf, bool)> {
             let Some(home) = home_dir() else {
                 return Vec::new();
             };
             let var_app = home.join(".var").join("app");
+            let mozilla_compat = home.join(".mozilla").join("native-messaging-hosts");
             [
-                home.join(".mozilla").join("native-messaging-hosts"),
+                mozilla_compat.clone(),
                 var_app
                     .join("org.mozilla.firefox")
                     .join(".mozilla")
@@ -745,7 +777,14 @@ pub mod registry {
             ]
             .into_iter()
             .map(|dir| {
-                let installed = browser_installed(&dir);
+                // `.mozilla` 是多个 Firefox 分支共用的兼容目录；Zen / LibreWolf
+                // 部分构建从这里而非各自 profile 根读取 NMH 清单，任一分支已装
+                // 都算安装（#360）。
+                let installed = if dir == mozilla_compat {
+                    browser_installed(&dir) || firefox_family_present(&home)
+                } else {
+                    browser_installed(&dir)
+                };
                 (dir, installed)
             })
             .collect()
@@ -771,6 +810,8 @@ pub mod registry {
                 "microsoft-edge" => "Edge",
                 "Brave-Browser" => "Brave",
                 "vivaldi" => "Vivaldi",
+                "thorium" => "Thorium",
+                "neo" => "Neo",
                 ".mozilla" => "Firefox",
                 ".librewolf" => "LibreWolf",
                 ".zen" => "Zen Browser",

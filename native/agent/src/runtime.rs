@@ -101,10 +101,15 @@ pub async fn run(
         (config, switches, token)
     };
     let cloud_client = crate::cloud::CloudClient::new(
-        std::env::var("FLUXCLOUD_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:8720".to_owned()),
+        std::env::var("FLUXCLOUD_BASE_URL")
+            .ok()
+            .or_else(|| option_env!("FLUXCLOUD_BASE_URL").map(str::to_owned))
+            .unwrap_or_else(|| "http://127.0.0.1:8720".to_owned()),
         shared_state.clone(),
         store.clone(),
-    )?;
+    )?
+    .with_events(events.clone());
+    cloud_client.restore_endpoint_override().await;
     let auth = Arc::new(crate::cloud::CloudAuthService::new(
         cloud_client.clone(),
         events.clone(),

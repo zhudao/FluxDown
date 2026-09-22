@@ -229,7 +229,6 @@ struct GroupBucket {
 pub(crate) enum TableFilter {
     Download(DownloadFilter),
     Queue(String),
-    RssSource(String),
     Device(String),
     Group(String),
 }
@@ -239,7 +238,6 @@ impl From<&SidebarSelection> for TableFilter {
         match selection {
             SidebarSelection::Download(filter) => Self::Download(filter.clone()),
             SidebarSelection::Queue(id) => Self::Queue(id.clone()),
-            SidebarSelection::RssSource(id) => Self::RssSource(id.clone()),
             SidebarSelection::Device(id) => Self::Device(id.clone()),
         }
     }
@@ -631,7 +629,6 @@ impl DownloadTableDelegate {
             TableFilter::Queue(queue_id) => {
                 task.source == TaskSource::Local && task.queue_id == *queue_id
             }
-            TableFilter::RssSource(source_id) => task.rss_source_id == *source_id,
             TableFilter::Device(device) => {
                 if device == SidebarSelection::LOCAL_DEVICE {
                     task.source == TaskSource::Local
