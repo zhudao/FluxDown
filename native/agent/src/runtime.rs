@@ -14,14 +14,24 @@ use crate::api_host::AgentApiHost;
 use crate::daemon_client::{DaemonClient, DaemonClientConfig, DaemonClientEvent};
 use crate::event_hub::AgentEventHub;
 use crate::gateway::{GatewayService, load_or_create_bearer};
-use crate::state::{AgentState, StateStore};
+use crate::state::{AgentState, StateError, StateStore};
 use crate::supervisor::DaemonSupervisor;
 
 pub async fn run(
     cancel: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let paths = AgentPaths::resolve()?;
-    let store = Arc::new(StateStore::open(paths.agent_data_dir.clone()).await?);
+    let store = match StateStore::open(paths.agent_data_dir.clone()).await {
+        Ok(store) => Arc::new(store),
+        Err(StateError::Locked) => {
+            tracing::info!(
+                data_dir = %paths.agent_data_dir.display(),
+                "another fluxdown-agent owns the data directory"
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let mut state = store.load().await?;
     initialize_device_identity(&mut state, &store).await?;
 
@@ -39,7 +49,8 @@ pub async fn run(
     }
     tracing::info!(address = %bound, "fluxdown-agent gateway listening");
 
-    let supervisor = Arc::new(DaemonSupervisor::new());
+    let daemon_address = daemon_socket_address(&paths.daemon_rpc_url)?;
+    let supervisor = Arc::new(DaemonSupervisor::new(daemon_address));
     let daemon_bearer = load_daemon_bearer(&paths, &supervisor).await?;
     let daemon_config = DaemonClientConfig {
         rpc_url: paths.daemon_rpc_url.clone(),

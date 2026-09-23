@@ -15,11 +15,12 @@
 - `downloads` / `settings` / `account` / `rss` / `extensions`：各自拥有视图模型、controller 与 capability-local port；只消费 `fluxdown_protocol` DTO。
 - `app`：创建唯一 `AgentClient`；`session.rs` 的 `Entity<AgentSession>` 是快照/事件唯一入口（`EventEmitter<SessionSignal>`），任何视图实现 `SessionConsumer` 后 `attach()` 即可：先用最近全量快照秒开首帧，再 `system.snapshot` 重对齐游标并回放缓冲事件，订阅随视图销毁解除（主窗口关闭不影响其他窗口）。事件泵在 `application.run` 顶层按帧批处理（≤256 条一次 `update`）。
 - `app/windows/`：`WindowRegistry`（`Global`）按 `WindowKey{Main, Settings, NewDownload, QueueManager, QuickCapture, Selection(id), TaskDetail(id), GroupDetail(id)}` 去重、`on_window_closed` 清理；**退出判定唯一入口**：无用户窗口且非 Resident（托盘未装）→ `cx.quit()`。主窗口/设置窗口边界 500ms 防抖写 `desktop.window.<main|settings>`（`agent.preferences.patch` + `sync:false`），恢复时校验可见区域 ≥100×100。主窗口关闭策略 `main::should_close`：`close_to_tray && resident` → 直接关；有活跃任务 → `confirm_active_tasks` 提示后关（同窗口提示中不叠第二个对话框，⌘Q 复用同一提示）。原生关闭按钮走 `on_window_should_close`，⌘W / 菜单「关闭窗口」走 `WindowRegistry::close_active_window` 再调同一判定——gpui 的 `remove_window` 不触发 `windowShouldClose:`，两条路径必须共用一份策略。
-- 窗口分级：主窗口 / 设置 / 新建下载 / 队列管理 `Normal`；引擎发起的选择（HLS/BT/变体）每 request 一个 `Floating` 窗口；外部捕获确认单例 `PopUp`（置顶、无任务栏、不抢焦点）；任务窗口 `TaskDetail(id)` 任意数量并存（AB Download 式紧凑进度头，替代 Flutter 悬浮球）。
-- 单实例：`launch.rs` 文件锁 + `instance_ipc.rs` 激活通道（Unix socket / Windows 命名管道，一行 JSON `{urls,files,activate}`）；次实例交给主实例后退出，主实例激活/重建主窗口。`--capture` 由 agent 拉起只开捕获窗口；`--minimized` 等首个快照按 `start_minimized_to_tray` 决定托盘驻留或最小化主窗口。
+- 窗口分级：主窗口 / 设置 / 新建下载 / 队列管理 `Normal`；引擎发起的选择（HLS/BT/变体）每 request 一个 `Floating` 窗口；外部捕获确认单例 `PopUp`（首次在主窗口所在显示器居中，无主窗口时使用默认显示器；置顶、无任务栏、不抢焦点），用户点击「更多选项」后显式激活新建下载窗口；任务窗口 `TaskDetail(id)` 任意数量并存（AB Download 式紧凑进度头，替代 Flutter 悬浮球）。捕获行数变化只对原句柄 `resize`，保留窗口、视图及已编辑字段；禁止从 `RowsChanged` 回调重建窗口，否则首帧尺寸差异会导致重建循环及原生/Metal 资源持续增长。窗口级事件绑定具体句柄，旧视图的延迟回调不得操作新窗口。
+- 单实例：`launch.rs` 文件锁 + `instance_ipc.rs` 激活通道（Unix socket / Windows 命名管道，一行 JSON `{urls,files,activate}`）；次实例等待主实例处理并确认后退出，主实例激活/重建主窗口。锁错误不放行第二个 UI；端点未就绪可有界重试，写出请求后的确认失败不重放捕获。`--activate-existing` 只激活（成功 0、无主实例 3、失败非零），不启动 UI 或后台。`--capture` 由 agent 拉起只开捕获窗口；`--minimized` 等首个快照按 `start_minimized_to_tray` 决定托盘驻留或最小化主窗口。
 - 动作/菜单：`crates/downloads/src/actions.rs` + `crates/app/src/actions.rs`（`actions!`）；键位与菜单树在 `app/menus.rs`（macOS `cx.set_menus` 原生，Windows/Linux `AppMenuBar` 注入 shell 标题栏）；字母键只在 `"DownloadView"` 上下文且无聚焦输入框时生效。**gpui 不自带 macOS 标准窗口键位**（⌘W/⌘M/⌘H/⌥⌘H/⌃⌘F/⌘Q 都得像 Zed 一样显式 `KeyBinding` + 菜单项，AppKit 只是从 keymap 读出 key equivalent 显示在菜单上）；macOS 菜单树镜像 Flutter `_buildMacMenus`：App 菜单含 隐藏/隐藏其他/全部显示，File 含「关闭窗口」，View 含「切换全屏」，独立「窗口」菜单（最小化/缩放/前置全部窗口）。**全局 `cx.on_action` 里操作活动窗口必须 `cx.defer`**：键盘触发的动作跑在该窗口自己的 update 栈内（窗口已从 `cx.windows` 取走），同步 `handle.update` 返回 Err 静默失败；菜单点击不在栈内所以「菜单能用、快捷键不能用」就是这个坑。取焦点窗口用 `WindowRegistry::focused_window`（macOS `cx.active_window()` 不认 `NSPanel`，`Floating`/`PopUp` 窗口会返回 `None`）。
 - 下载数据层：`DownloadsController` 持 `Rc<TaskStore>`（哈希索引 + 逐行增量 + `generation`），表格代理只在 generation/筛选/排序/分组变化时重算 `visible`（含分组头），`render_td` 借 `Ref` 不克隆行。视图偏好（密度/分组/排序/列/详情面板/侧栏宽）全局单套存 `desktop.downloads.view`（设备本地）。
 - 运行链路：`fluxdown-desktop` 探活/单飞启动 `fluxdown-agent`；agent 探活/单飞启动 `fluxdownd`。关闭全部窗口不终止后两者。
+- 开发入口：根目录 `cargo desktop-dev`（`scripts/desktop-dev`，无额外依赖）序列化开发构建；已有 UI 时只唤起，否则先构建三个二进制再启动。`--build-only` 不启动或激活窗口。后台保留常驻/复用语义，不强杀或热替换；运行代码变更需先退出对应进程，详情见 `CONTRIBUTING.md`。
 - 三个二进制作为同级文件进入 Windows/macOS/Linux app 包；agent/daemon 使用独立 bearer 文件，云 Token 只保存在 agent 私有状态。
 - gpui-base 尚未发布，依赖暂走固定 gpui-component git commit；Zed workspace 必须在 `Cargo.lock` 统一为单一提交，否则 `gpui` 类型会分裂。
 
@@ -70,7 +71,7 @@ SharedPreferences 门面，**便携模式**（`portable` 标记）写 `<exe>/por
 
 ### 扩展（WXT，Chrome + Firefox MV3）
 - **通信**：全平台走 NMH。扩展 →（stdin/stdout）→ `fluxdown_nmh` →（Windows Named Pipe / Linux-mac UDS）→ App。消息 = 4 字节 LE 长度 + JSON。action：`ping`（只探不拉起）/`download`/`batch_download`（换行 join 单确认，按 700KB+1000 条分块防 1MB 帧上限，旧 App 回退逐条）/`warmup`（本地应答重叠冷启动）。
-- **三层拦截**：`onHeadersReceived`（缓存元数据 + Firefox `webRequestBlocking` cancel）→ `onDeterminingFilename`（Chrome 主拦截 `suggest({cancel:true})`）→ `onCreated+onChanged`（兜底，Firefox 唯一路径）+ 页面态 `fetch-interceptor.ts`。
+- **三层拦截**：`onHeadersReceived`（缓存元数据 + Firefox `webRequestBlocking` cancel）→ `onDeterminingFilename`（Chrome 先发起 `downloads.cancel`，再调用 `suggest()` 释放文件名管线；取消成功才投递客户端）→ `onCreated+onChanged` 兜底 + 页面态 `fetch-interceptor.ts`。`suggest` 不支持 `cancel` 字段；取消失败保留原生下载，投递失败仍走既有浏览器回退。重定向下载以 `finalUrl` 为目标，原始 URL 保留用于请求事务缓存查找。
 - **资源嗅探**（`media-sniff.ts`）：视频/音频/HLS/DASH/大文件，按 tabId 分组 + badge。
 - Chrome ID 经 manifest key 钉住（匹配 NMH `allowed_origins`）；Alt+Shift+D 切换拦截；`Alt+Click` 15s 放行；声明零数据采集。
 

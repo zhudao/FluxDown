@@ -1,6 +1,13 @@
 //! composition root：一个 agent 会话、一个窗口注册表、全局菜单与动作；各窗口按需装配。
 
-use std::{borrow::Cow, collections::BTreeMap, env, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::BTreeMap,
+    env,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use fluxdown_protocol::{AgentEvent, DaemonEvent, DaemonRuntimeStatsDto, ServiceEvent};
 use fluxdown_ui_downloads::DownloadView;
@@ -11,14 +18,14 @@ use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
 use gpui_component::menu::AppMenuBar;
 use tokio::sync::mpsc;
 
-use crate::agent_client::{AgentClient, AgentClientConfig};
+use crate::agent_client::{AgentClient, AgentClientConfig, AgentClientError};
 use crate::assets::DesktopAssets;
-use crate::instance_ipc::{self, ActivateMessage, Endpoint};
+use crate::instance_ipc::{self, ActivateMessage, ActivationRequest, Endpoint};
 use crate::launch::{self, LaunchOptions};
 use crate::service_bootstrap::ServiceBootstrap;
 use crate::session::{AgentSession, SessionSignal, attach};
 use crate::settings_port::AgentSettingsPort;
-use crate::windows::{WindowKey, WindowRegistry};
+use crate::windows::WindowRegistry;
 
 const MI_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Regular.ttf");
 const MI_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Medium.ttf");
@@ -26,6 +33,37 @@ const MI_SANS_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Sem
 
 /// 事件泵单次批量上限。
 const EVENT_BATCH: usize = 256;
+/// 次实例等待刚启动主实例的 IPC 端点就绪、或等待旧主实例释放锁的最长时间。
+const ACTIVATION_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// 桌面入口完成后的进程语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunOutcome {
+    Completed,
+    NoPrimary,
+}
+
+/// 任何协调故障都必须阻止第二个 UI 启动。
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AppError {
+    #[error(transparent)]
+    I18n(#[from] I18nError),
+    #[error("FluxDown desktop instance lock unavailable")]
+    InstanceLock(#[source] std::io::Error),
+    #[error("FluxDown desktop activation unavailable")]
+    Activation(#[source] instance_ipc::SendError),
+    #[error("FluxDown desktop activation listener unavailable")]
+    ActivationListener(#[source] std::io::Error),
+    #[error("FluxDown agent client could not start")]
+    AgentClient(#[source] AgentClientError),
+}
+
+enum LaunchDisposition {
+    Primary(launch::InstanceLock),
+    Activated,
+    NoPrimary,
+}
 
 /// 跨窗口共享的应用状态（composition root 独有）。
 pub(crate) struct Desktop {
@@ -71,57 +109,50 @@ impl Desktop {
     }
 }
 
-pub(crate) fn run() -> Result<(), I18nError> {
+pub(crate) fn run() -> Result<RunOutcome, AppError> {
     let launch = LaunchOptions::from_args(env::args().skip(1));
     let token_path = agent_token_path();
     let instance_dir = launch::instance_dir(&token_path);
     let endpoint = Endpoint::for_instance_dir(&instance_dir);
-    let instance_lock = match launch::InstanceLock::try_acquire(&instance_dir) {
-        Ok(Some(lock)) => Some(lock),
-        Ok(None) => None,
-        Err(error) => {
-            eprintln!("FluxDown desktop instance lock unavailable: {error:#}");
-            None
-        }
+    let message = ActivateMessage {
+        urls: launch.urls.clone(),
+        files: launch.torrent_files.clone(),
+        activate: launch.activate_existing || !launch.capture_only,
     };
+    let _instance_lock =
+        match acquire_or_activate(&instance_dir, &endpoint, &message, launch.activate_existing)? {
+            LaunchDisposition::Primary(lock) => lock,
+            LaunchDisposition::Activated => return Ok(RunOutcome::Completed),
+            LaunchDisposition::NoPrimary => return Ok(RunOutcome::NoPrimary),
+        };
+    let (activate_tx, mut activate_rx) = mpsc::channel::<ActivationRequest>(16);
+    // Unix sockets can bind before Tokio starts, so parallel starters are queued immediately.
+    #[cfg(unix)]
+    let listener =
+        instance_ipc::Listener::bind(endpoint.clone()).map_err(AppError::ActivationListener)?;
     let agent_config = AgentClientConfig {
         rpc_url: env::var("FLUXDOWN_AGENT_URL")
             .unwrap_or_else(|_| "ws://127.0.0.1:17800/rpc".to_owned()),
         bearer_path: token_path,
     };
-    if instance_lock.is_none() {
-        // 已有实例：先经激活通道交给主实例（可激活已有窗口），不可达再直接交给 agent。
-        let message = ActivateMessage {
-            urls: launch.urls.clone(),
-            files: launch.torrent_files.clone(),
-            activate: !launch.capture_only,
-        };
-        if !instance_ipc::try_send_to_primary(&endpoint, &message) {
-            forward_urls_and_exit(&agent_config, &launch.urls, &launch.torrent_files);
-        }
-        return Ok(());
-    }
-    let _instance_lock = instance_lock;
 
     let catalog = Arc::new(I18nCatalog::load_embedded()?);
     let translator = catalog.translator(&system_locale());
     let locale = component_locale(translator.locale()).to_owned();
 
     let bootstrap = Arc::new(ServiceBootstrap::new());
-    let (agent_client, mut agent_events) = match AgentClient::start(agent_config, bootstrap) {
-        Ok(client) => client,
-        Err(error) => {
-            eprintln!("failed to start FluxDown agent client: {error:#}");
-            return Ok(());
-        }
-    };
+    let (agent_client, mut agent_events) =
+        AgentClient::start(agent_config, bootstrap).map_err(AppError::AgentClient)?;
+    #[cfg(unix)]
+    agent_client.spawn_background(listener.listen(activate_tx));
+    #[cfg(windows)]
+    start_windows_listener(&agent_client, endpoint, activate_tx)
+        .map_err(AppError::ActivationListener)?;
     submit_captures_detached(
         &agent_client,
         launch.urls.clone(),
         launch.torrent_files.clone(),
     );
-    let (activate_tx, mut activate_rx) = mpsc::channel::<ActivateMessage>(16);
-    agent_client.spawn_background(instance_ipc::listen(endpoint, activate_tx));
     let open_urls_client = agent_client.clone();
 
     let application = gpui_platform::application().with_assets(DesktopAssets);
@@ -137,8 +168,8 @@ pub(crate) fn run() -> Result<(), I18nError> {
         submit_captures_detached(&open_urls_client, urls, files);
     });
     application.on_reopen(|cx| {
-        if cx.has_global::<Desktop>() && !WindowRegistry::is_open(cx, &WindowKey::Main) {
-            crate::windows::main::open(cx);
+        if cx.has_global::<Desktop>() {
+            crate::windows::main::reveal(cx);
         }
     });
     application.run(move |cx| {
@@ -248,17 +279,16 @@ pub(crate) fn run() -> Result<(), I18nError> {
         })
         .detach();
 
-        // 单实例激活通道：链接交给 agent，`activate` 重建 / 聚焦主窗口。
+        // 单实例激活通道：链接交给 agent，激活时重建 / 恢复 / 聚焦主窗口。
         let activate_client = agent_client.clone();
         cx.spawn(async move |cx| {
-            while let Some(message) = activate_rx.recv().await {
+            while let Some(request) = activate_rx.recv().await {
+                let (message, acknowledgement) = request.into_parts();
                 submit_captures_detached(&activate_client, message.urls, message.files);
                 if message.activate {
-                    cx.update(|cx| {
-                        crate::windows::main::open(cx);
-                        cx.activate(true);
-                    });
+                    cx.update(crate::windows::main::reveal);
                 }
+                let _ = acknowledgement.send(());
             }
         })
         .detach();
@@ -281,13 +311,60 @@ pub(crate) fn run() -> Result<(), I18nError> {
             open_main_after_first_snapshot(cx);
             return;
         }
-        crate::windows::main::open(cx);
-        cx.activate(true);
+        crate::windows::main::reveal(cx);
     });
 
-    Ok(())
+    Ok(RunOutcome::Completed)
+}
+fn acquire_or_activate(
+    instance_dir: &Path,
+    endpoint: &Endpoint,
+    message: &ActivateMessage,
+    activate_existing: bool,
+) -> Result<LaunchDisposition, AppError> {
+    let deadline = Instant::now() + ACTIVATION_RETRY_TIMEOUT;
+    loop {
+        match launch::InstanceLock::try_acquire(instance_dir).map_err(AppError::InstanceLock)? {
+            Some(_lock) if activate_existing => return Ok(LaunchDisposition::NoPrimary),
+            Some(lock) => return Ok(LaunchDisposition::Primary(lock)),
+            None => match instance_ipc::send_to_primary(endpoint, message) {
+                Ok(()) => return Ok(LaunchDisposition::Activated),
+                Err(error) if error.is_retryable() && Instant::now() < deadline => {
+                    std::thread::sleep(ACTIVATION_RETRY_INTERVAL);
+                }
+                Err(error) => return Err(AppError::Activation(error)),
+            },
+        }
+    }
 }
 
+#[cfg(windows)]
+fn start_windows_listener(
+    client: &Arc<AgentClient>,
+    endpoint: Endpoint,
+    tx: mpsc::Sender<ActivationRequest>,
+) -> Result<(), std::io::Error> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    client.spawn_background(async move {
+        match instance_ipc::Listener::bind(endpoint) {
+            Ok(listener) => {
+                let _ = ready_tx.send(Ok(()));
+                listener.listen(tx).await;
+            }
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+            }
+        }
+    });
+    ready_rx
+        .recv_timeout(ACTIVATION_RETRY_TIMEOUT)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("activation listener did not start: {error}"),
+            )
+        })?
+}
 /// `--minimized`：首个快照到达后按 `start_minimized_to_tray` 决定是否开主窗口。
 fn open_main_after_first_snapshot(cx: &mut App) {
     let session = Desktop::global(cx).session.clone();
@@ -309,6 +386,7 @@ fn open_main_minimized(cx: &mut App) {
     let to_tray =
         WindowRegistry::is_resident(cx) && Desktop::pref_bool(cx, "start_minimized_to_tray", false);
     if to_tray {
+        crate::app_icon::set_dock_visible(false);
         return;
     }
     if let Some(handle) = crate::windows::main::open(cx) {
@@ -404,33 +482,6 @@ pub(crate) fn submit_captures_detached(
     });
 }
 
-/// 次实例且主实例激活通道不可达：不开窗口，只把链接交给 agent 后退出。
-fn forward_urls_and_exit(
-    config: &AgentClientConfig,
-    urls: &[String],
-    files: &[std::path::PathBuf],
-) {
-    if urls.is_empty() && files.is_empty() {
-        return;
-    }
-    let bootstrap = Arc::new(ServiceBootstrap::new());
-    let Ok((client, _events)) = AgentClient::start(config.clone(), bootstrap) else {
-        eprintln!("failed to reach the running FluxDown instance");
-        return;
-    };
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return;
-    };
-    for (source, future) in capture_calls(&client, urls.to_vec(), files.to_vec()) {
-        if let Err(error) = runtime.block_on(future) {
-            eprintln!("failed to forward {source}: {:?}", error.code);
-        }
-    }
-}
-
 fn agent_token_path() -> std::path::PathBuf {
     if let Some(path) = env::var_os("FLUXDOWN_AGENT_TOKEN_FILE") {
         return path.into();
@@ -452,4 +503,46 @@ pub(crate) fn system_locale() -> String {
         }
     }
     "en".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("fluxdown-app-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn activate_existing_never_claims_a_free_lock() {
+        let dir = test_dir("activate-only");
+        let endpoint = Endpoint::for_instance_dir(&dir);
+        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), true)
+            .expect("coordinate launch");
+        assert!(matches!(outcome, LaunchDisposition::NoPrimary));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn retries_and_claims_lock_after_previous_primary_exits() {
+        let dir = test_dir("takeover");
+        let endpoint = Endpoint::for_instance_dir(&dir);
+        let held = launch::InstanceLock::try_acquire(&dir)
+            .expect("acquire initial lock")
+            .expect("initial primary");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            drop(held);
+        });
+        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), false)
+            .expect("take over after release");
+        releaser.join().expect("release thread");
+        match outcome {
+            LaunchDisposition::Primary(lock) => drop(lock),
+            LaunchDisposition::Activated | LaunchDisposition::NoPrimary => {
+                panic!("expected primary takeover")
+            }
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

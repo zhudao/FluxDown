@@ -1,6 +1,8 @@
 //! daemon 进程装配、引擎启动顺序与控制面生命周期。
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,6 +37,17 @@ pub async fn run(
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+
+    let _process_lease = match DaemonProcessLease::acquire(&data_dir)? {
+        Some(lease) => lease,
+        None => {
+            tracing::info!(
+                data_dir = %data_dir.display(),
+                "another fluxdownd owns the daemon process lease"
+            );
+            return Ok(());
+        }
+    };
 
     let (boot_db, write_guard) = open_database(&process_config, &data_dir).await?;
     let default_save_dir = fluxdown_engine::user_dirs::download_dir_or_cwd();
@@ -157,6 +170,29 @@ pub async fn run(
     result.map_err(Into::into)
 }
 
+/// An OS-backed process lease that identifies an already-running fluxdownd for this data dir.
+/// It is intentionally distinct from the engine writer lease: another host may legitimately hold
+/// the latter, which remains a startup error for this daemon.
+struct DaemonProcessLease {
+    _file: File,
+}
+
+impl DaemonProcessLease {
+    fn acquire(data_dir: &Path) -> Result<Option<Self>, std::io::Error> {
+        std::fs::create_dir_all(data_dir)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(data_dir.join("daemon.lock"))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+}
 async fn open_database(
     config: &DaemonConfig,
     data_dir: &std::path::Path,

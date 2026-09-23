@@ -379,9 +379,9 @@ export default defineContentScript({
 
     if (sniffingEnabled) scanInlineDashManifest();
 
-    // ===== 5. 一次性 CDN 下载 URL 预抢占 =====
-    // 监听 Main World 脚本检测到的"AJAX 生成一次性 CDN URL"事件，
-    // 立刻转发给 background，在浏览器发起 CDN GET 之前通知 FluxDown。
+    // ===== 5. 一次性 CDN 下载 URL 预识别 =====
+    // Main World 脚本将 AJAX 生成的一次性 URL 转发给 background，用于标记
+    // 需要页面继续执行的中转链接；实际下载仍由通用下载事件链路决定。
     const handlePreemptEvent = (event: Event) => {
       const detail = (event as CustomEvent).detail as
         | { url: string; filename: string; referrer: string }

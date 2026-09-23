@@ -136,7 +136,7 @@ async fn run_client(
                 }
             }
             Err(ConnectError::Refused) => {
-                if bootstrap.ensure_running().await.is_err() {
+                if bootstrap.ensure_running(&config.rpc_url).await.is_err() {
                     let _ = events.try_send(AgentClientEvent::Stale);
                 }
             }

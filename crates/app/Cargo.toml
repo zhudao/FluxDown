@@ -41,5 +41,5 @@ tray-icon = "0.24.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSDockTile", "NSImage", "NSImageView", "NSView", "NSResponder", "NSControl", "NSCell"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSRunningApplication", "NSDockTile", "NSImage", "NSImageView", "NSView", "NSResponder", "NSControl", "NSCell"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSGeometry", "NSObject"] }

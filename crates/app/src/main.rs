@@ -22,11 +22,26 @@ mod windows;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    match app::run() {
-        Ok(()) => ExitCode::SUCCESS,
+    exit_code(app::run())
+}
+
+fn exit_code(result: Result<app::RunOutcome, app::AppError>) -> ExitCode {
+    match result {
+        Ok(app::RunOutcome::Completed) => ExitCode::SUCCESS,
+        Ok(app::RunOutcome::NoPrimary) => ExitCode::from(3),
         Err(error) => {
             eprintln!("failed to start FluxDown desktop client: {error:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activate_existing_without_a_primary_uses_exit_code_three() {
+        assert_eq!(exit_code(Ok(app::RunOutcome::NoPrimary)), ExitCode::from(3));
     }
 }

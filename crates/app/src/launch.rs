@@ -2,7 +2,7 @@
 //!
 //! 开机自启以 `--minimized` 拉起；系统把 `magnet:` / `ed2k:` / `fluxdown:` 链接或
 //! 直链交给本进程时，统一经 `agent.capture.submit` 交由 agent 建任务：
-//! 主实例自己提交，后续实例提交后立即退出，因此不依赖任何进程间通道。
+//! 主实例自己提交，后续实例经本机激活通道交给主实例后退出。
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -14,6 +14,8 @@ pub struct LaunchOptions {
     pub minimized: bool,
     /// 由 agent 为外部捕获拉起：不开主窗口，只开快速捕获窗口。
     pub capture_only: bool,
+    /// 仅唤起已有 UI；绝不新建 UI 或启动本机后台服务。
+    pub activate_existing: bool,
     /// 需要交给 agent 的外部链接。
     pub urls: Vec<String>,
     /// 需要经 agent 上传后建任务的本机 `.torrent` 文件。
@@ -28,6 +30,7 @@ impl LaunchOptions {
             match arg.as_str() {
                 "--minimized" | "--start-minimized" => options.minimized = true,
                 "--capture" => options.capture_only = true,
+                "--activate-existing" => options.activate_existing = true,
                 value if is_capture_url(value) => options.urls.push(value.to_owned()),
                 value if value.starts_with("--") => {}
                 value => {
@@ -149,6 +152,7 @@ mod tests {
         let options = LaunchOptions::from_args(
             [
                 "--minimized",
+                "--activate-existing",
                 "magnet:?xt=urn:btih:abc",
                 "/tmp/x.torrent",
                 "--foo",
@@ -156,6 +160,7 @@ mod tests {
             .map(str::to_owned),
         );
         assert!(options.minimized);
+        assert!(options.activate_existing);
         assert_eq!(options.urls, vec!["magnet:?xt=urn:btih:abc"]);
         assert!(options.torrent_files.is_empty());
         let file = std::env::temp_dir().join(format!("fluxdown-{}.torrent", std::process::id()));
@@ -190,6 +195,9 @@ mod tests {
         let second = InstanceLock::try_acquire(&dir).expect("lock");
         assert!(second.is_none());
         drop(first);
+        let replacement = InstanceLock::try_acquire(&dir).expect("replacement lock");
+        assert!(replacement.is_some());
+        drop(replacement);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

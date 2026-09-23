@@ -1,5 +1,6 @@
 //! agent 对同级 `fluxdownd` 的单飞启动与异步回收。
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -25,19 +26,15 @@ struct SupervisorState {
 /// 只在连接拒绝路径调用的 daemon 单飞启动器。
 pub struct DaemonSupervisor {
     state: Arc<Mutex<SupervisorState>>,
-}
-
-impl Default for DaemonSupervisor {
-    fn default() -> Self {
-        Self::new()
-    }
+    bind_addr: SocketAddr,
 }
 
 impl DaemonSupervisor {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(bind_addr: SocketAddr) -> Self {
         Self {
             state: Arc::new(Mutex::new(SupervisorState::default())),
+            bind_addr,
         }
     }
 
@@ -51,6 +48,7 @@ impl DaemonSupervisor {
         let executable = daemon_executable()?;
         let mut command = std::process::Command::new(&executable);
         command
+            .env("FLUXDOWN_DAEMON_BIND", self.bind_addr.to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

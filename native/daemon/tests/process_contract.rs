@@ -22,6 +22,9 @@ fn daemon_process_enforces_wire_auth_conflict_body_limit_and_shutdown() {
 
     let mut daemon = ProcessGuard::spawn(address, &data_dir);
     wait_until_listening(address, Duration::from_secs(30));
+    let mut duplicate = ProcessGuard::spawn(address, &data_dir);
+    duplicate.wait_for_success(Duration::from_secs(10));
+    wait_until_listening(address, Duration::from_secs(10));
 
     let unauthorized = http_request(
         address,
@@ -134,19 +137,8 @@ impl ProcessGuard {
         Self { child: Some(child) }
     }
 
-    fn terminate(&mut self, timeout: Duration) {
+    fn wait_for_success(&mut self, timeout: Duration) {
         let child = self.child.as_mut().expect("daemon child");
-        #[cfg(unix)]
-        {
-            let status = Command::new("kill")
-                .args(["-TERM", &child.id().to_string()])
-                .status()
-                .expect("send SIGTERM to fluxdownd");
-            assert!(status.success(), "kill -TERM failed: {status}");
-        }
-        #[cfg(not(unix))]
-        child.kill().expect("terminate fluxdownd");
-
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(status) = child.try_wait().expect("wait for fluxdownd") {
@@ -160,6 +152,22 @@ impl ProcessGuard {
             assert!(Instant::now() < deadline, "fluxdownd did not stop in time");
             thread::sleep(Duration::from_millis(20));
         }
+    }
+    fn terminate(&mut self, timeout: Duration) {
+        {
+            let child = self.child.as_mut().expect("daemon child");
+            #[cfg(unix)]
+            {
+                let status = Command::new("kill")
+                    .args(["-TERM", &child.id().to_string()])
+                    .status()
+                    .expect("send SIGTERM to fluxdownd");
+                assert!(status.success(), "kill -TERM failed: {status}");
+            }
+            #[cfg(not(unix))]
+            child.kill().expect("terminate fluxdownd");
+        }
+        self.wait_for_success(timeout);
     }
 }
 

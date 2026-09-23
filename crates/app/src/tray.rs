@@ -151,6 +151,15 @@ mod imp {
             windows_icons,
             appearance: Cell::new(appearance),
         });
+        let translator = Desktop::global(cx).translator.clone();
+        cx.observe(&translator, move |translator, cx| {
+            let translator = translator.read(cx);
+            show_item.set_text(translator.text("trayShowWindow"));
+            pause_item.set_text(translator.text("pauseAll"));
+            resume_item.set_text(translator.text("resumeAll"));
+            quit_item.set_text(translator.text("trayExit"));
+        })
+        .detach();
         WindowRegistry::set_resident(cx, true);
         spawn_event_pump(cx);
     }

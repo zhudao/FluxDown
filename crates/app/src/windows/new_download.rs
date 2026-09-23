@@ -45,14 +45,7 @@ pub fn open(cx: &mut App, context: NewDownloadContext) {
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let title = translator.read(cx).text(keys::NEW_DOWNLOAD).to_owned();
-    let display_id = WindowRegistry::handle(cx, &WindowKey::Main)
-        .and_then(|handle| {
-            handle
-                .update(cx, |_, window, cx| window.display(cx))
-                .ok()
-                .flatten()
-        })
-        .map(|display| display.id());
+    let display_id = WindowRegistry::main_display_id(cx);
     let bounds = Bounds::centered(display_id, NEW_DOWNLOAD_WINDOW_SIZE, cx);
     let mut options = auxiliary_window_options(title);
     options.display_id = display_id;
@@ -60,48 +53,55 @@ pub fn open(cx: &mut App, context: NewDownloadContext) {
     options.window_min_size = Some(NEW_DOWNLOAD_WINDOW_MIN_SIZE);
     options.is_resizable = true;
 
-    WindowRegistry::open_or_focus(cx, WindowKey::NewDownload, options, move |window, cx| {
-        let on_submit = Rc::new(move |submission, window: &mut gpui::Window, cx: &mut App| {
-            let Some(downloads) = Desktop::global(cx)
-                .main_downloads
-                .as_ref()
-                .and_then(|weak| weak.upgrade())
-            else {
-                return;
-            };
-            let task = downloads.update(cx, |downloads, cx| {
-                downloads.create_download(submission, cx)
-            });
-            let translator = Desktop::global(cx).translator.clone();
-            window
-                .spawn(cx, async move |cx| {
-                    let ok = task.await;
-                    let _ = cx.update(|window, cx| {
-                        let translator = translator.read(cx);
-                        if ok {
-                            let message = translator.text("taskCreatedToast").to_owned();
-                            if let Some(main) = WindowRegistry::handle(cx, &WindowKey::Main) {
-                                let _ = main.update(cx, |_, window, cx| {
-                                    window.push_notification(message, cx);
-                                });
+    let handle =
+        WindowRegistry::open_or_focus(cx, WindowKey::NewDownload, options, move |window, cx| {
+            let on_submit = Rc::new(move |submission, window: &mut gpui::Window, cx: &mut App| {
+                let Some(downloads) = Desktop::global(cx)
+                    .main_downloads
+                    .as_ref()
+                    .and_then(|weak| weak.upgrade())
+                else {
+                    return;
+                };
+                let task = downloads.update(cx, |downloads, cx| {
+                    downloads.create_download(submission, cx)
+                });
+                let translator = Desktop::global(cx).translator.clone();
+                window
+                    .spawn(cx, async move |cx| {
+                        let ok = task.await;
+                        let _ = cx.update(|window, cx| {
+                            let translator = translator.read(cx);
+                            if ok {
+                                let message = translator.text("taskCreatedToast").to_owned();
+                                if let Some(main) = WindowRegistry::handle(cx, &WindowKey::Main) {
+                                    let _ = main.update(cx, |_, window, cx| {
+                                        window.push_notification(message, cx);
+                                    });
+                                }
+                                window.remove_window();
+                            } else {
+                                let message =
+                                    translator.text("localServiceActionFailed").to_owned();
+                                window.push_notification(
+                                    gpui_component::notification::Notification::error(message),
+                                    cx,
+                                );
                             }
-                            window.remove_window();
-                        } else {
-                            let message = translator.text("localServiceActionFailed").to_owned();
-                            window.push_notification(
-                                gpui_component::notification::Notification::error(message),
-                                cx,
-                            );
-                        }
-                    });
-                })
-                .detach();
+                        });
+                    })
+                    .detach();
+            });
+            let form = cx.new(|cx| {
+                NewDownloadView::new(translator.clone(), context.clone(), on_submit, window, cx)
+            });
+            let window_view = cx.new(|cx| {
+                AuxiliaryWindowView::new(translator, keys::NEW_DOWNLOAD, form.into(), cx)
+            });
+            cx.new(|cx| Root::new(window_view, window, cx))
         });
-        let form = cx.new(|cx| {
-            NewDownloadView::new(translator.clone(), context.clone(), on_submit, window, cx)
-        });
-        let window_view =
-            cx.new(|cx| AuxiliaryWindowView::new(translator, keys::NEW_DOWNLOAD, form.into(), cx));
-        cx.new(|cx| Root::new(window_view, window, cx))
-    });
+    // 「更多选项」是明确的用户操作：macOS 后台时也要将新建窗口及应用置前。
+    if let Some(handle) = handle {
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+    }
 }

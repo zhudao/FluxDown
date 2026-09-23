@@ -20,8 +20,16 @@ use crate::{
 
 const MAIN_WINDOW_SIZE: gpui::Size<gpui::Pixels> = size(px(1120.), px(760.));
 
+/// 显示 / 恢复 / 聚焦主窗口；窗口已关闭时重建。
+pub fn reveal(cx: &mut App) {
+    open(cx);
+    cx.activate(true);
+}
+
 /// 打开或聚焦主窗口。返回新建窗口句柄（已开时 `None`）。
 pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
+    // 关窗驻留托盘时 Dock 图标已隐藏；主窗口出现前恢复，保证激活后菜单栏与 Dock 就位。
+    crate::app_icon::set_dock_visible(true);
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let session = desktop.session.clone();

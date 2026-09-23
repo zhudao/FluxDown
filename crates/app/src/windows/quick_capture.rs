@@ -7,8 +7,8 @@ use std::sync::Arc;
 use fluxdown_protocol::{AgentEvent, ServiceEvent};
 use fluxdown_ui_downloads::{QuickCaptureEvent, QuickCaptureView, bind_quick_capture_keys};
 use gpui::{
-    App, AppContext as _, Entity, Styled as _, WindowDecorations, WindowKind, WindowOptions, point,
-    px,
+    AnyWindowHandle, App, AppContext as _, Bounds, Entity, WindowBounds, WindowDecorations,
+    WindowKind, WindowOptions, px,
 };
 use gpui_component::Root;
 
@@ -16,7 +16,7 @@ use crate::{
     app::Desktop,
     downloads_port::AgentDownloadsPort,
     session::{AgentSession, SessionSignal, agent_body, attach},
-    windows::{WindowKey, WindowRegistry, bottom_right_bounds},
+    windows::{WindowKey, WindowRegistry},
 };
 
 /// 订阅会话：捕获队列非空 → 打开/聚焦弹窗；清空 → 关闭；启动时回放快照。
@@ -66,51 +66,48 @@ fn window_size(rows: usize) -> gpui::Size<gpui::Pixels> {
     )
 }
 
-/// 行数变化 → 按新高度重开窗口（gpui 只有 `resize` 没有移动窗口的 API，原地 resize
-/// 会以左上角为锚向下长出屏幕；重开可保持右下角贴边）。
-fn apply_rows(rows: usize, cx: &mut App) {
-    let Some(handle) = WindowRegistry::handle(cx, &WindowKey::QuickCapture) else {
-        return;
-    };
-    let wanted = QuickCaptureView::preferred_height_for(rows);
-    let current = handle
-        .update(cx, |_, window, _| f32::from(window.viewport_size().height))
-        .unwrap_or(wanted);
-    if (current - wanted).abs() < 0.5 {
-        return;
-    }
-    open_window(cx, rows, true);
+// 首帧尺寸可能被平台调整；只能原地 resize，不能从 RowsChanged 回调重建视图。
+// 重建会重置 last_rows，并在新窗口首次绘制时再次触发同一回调。
+fn apply_rows(handle: AnyWindowHandle, rows: usize, cx: &mut App) {
+    let wanted = window_size(rows);
+    let _ = handle.update(cx, |_, window, _| {
+        if window.viewport_size() != wanted {
+            window.resize(wanted);
+        }
+    });
 }
 
-/// 已开则跳过；否则贴屏幕右下角开一个不抢焦点的置顶弹窗，高度按行数自适应。
+/// 已开则跳过；否则在主窗口所在显示器居中开一个不抢焦点的置顶弹窗，高度按行数自适应。
 fn open(cx: &mut App, rows: usize) {
     if WindowRegistry::is_open(cx, &WindowKey::QuickCapture) {
         return;
     }
-    open_window(cx, rows, false);
+    open_window(cx, rows);
 }
 
-fn open_window(cx: &mut App, rows: usize, replace: bool) {
+fn open_window(cx: &mut App, rows: usize) {
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let client = desktop.client.clone();
     let session = desktop.session.clone();
 
-    let mut options = WindowOptions {
+    let display_id = WindowRegistry::main_display_id(cx);
+    let options = WindowOptions {
+        display_id,
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            display_id,
+            window_size(rows),
+            cx,
+        ))),
         titlebar: None,
         window_decorations: Some(WindowDecorations::Client),
         focus: false,
         is_resizable: false,
         is_minimizable: false,
         kind: WindowKind::PopUp,
-        window_background: gpui::WindowBackgroundAppearance::Transparent,
+        window_background: gpui::WindowBackgroundAppearance::Opaque,
         ..Default::default()
     };
-    options.window_bounds = Some(gpui::WindowBounds::Windowed(bottom_right_bounds(
-        window_size(rows),
-        point(px(16.), px(48.)),
-        cx,
-    )));
 
     let build = move |window: &mut gpui::Window, cx: &mut App| {
         let port = Arc::new(AgentDownloadsPort::new(client.clone()));
@@ -121,17 +118,16 @@ fn open_window(cx: &mut App, rows: usize, replace: bool) {
         let content =
             cx.new(|cx| QuickCaptureView::new(translator.clone(), port, more_options, window, cx));
         attach(&session, &content, cx);
-        cx.subscribe(&content, |_, event, cx| match event {
-            QuickCaptureEvent::Empty => WindowRegistry::close(cx, &WindowKey::QuickCapture),
-            QuickCaptureEvent::RowsChanged(rows) => apply_rows(*rows, cx),
+        let handle = window.window_handle();
+        cx.subscribe(&content, move |_, event, cx| match event {
+            QuickCaptureEvent::Empty => {
+                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            }
+            QuickCaptureEvent::RowsChanged(rows) => apply_rows(handle, *rows, cx),
         })
         .detach();
-        // 窗口背景透明只为圆角；Root 不铺底色，卡片自己画背景。
-        cx.new(|cx| Root::new(content, window, cx).bg(gpui::transparent_black()))
+        // 原生窗口负责外轮廓与阴影；完整铺底，避免透明内容参与动态阴影轮廓。
+        cx.new(|cx| Root::new(content, window, cx))
     };
-    if replace {
-        WindowRegistry::reopen(cx, WindowKey::QuickCapture, options, build);
-    } else {
-        WindowRegistry::open_or_focus(cx, WindowKey::QuickCapture, options, build);
-    }
+    WindowRegistry::open_or_focus(cx, WindowKey::QuickCapture, options, build);
 }

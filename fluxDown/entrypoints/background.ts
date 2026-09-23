@@ -18,7 +18,7 @@
  *   - 为后续 onCreated 兜底提供可靠的元数据来源
  *
  * 第二层（主拦截）: downloads.onDeterminingFilename
- *   - 浏览器弹出「另存为」之前触发，suggest() 释放管线 + downloads.cancel() 取消下载
+ *   - 浏览器弹出「另存为」之前触发，先请求取消，再 suggest() 释放文件名管线
  *   - 最优先、最干净的拦截方式
  *   - 但对 JS location.href / meta refresh 触发的"导航转下载"存在 MV3 时序问题
  *
@@ -51,6 +51,7 @@ import type {
 } from "@/utils/native-messaging";
 import { loadSettings, shouldIntercept } from "@/utils/settings";
 import type { DownloadItemInfo } from "@/utils/settings";
+import { cancelBeforeFilenameResolution } from "@/utils/download-cancellation";
 import { initI18n, t } from "@/utils/i18n";
 import {
   matchSniffRule,
@@ -1743,460 +1744,236 @@ export default defineBackground(() => {
     downloadItem,
     suggest,
   ) => {
-        const url = downloadItem.url;
-        // 使用 finalUrl（重定向后的真实 URL）作为下载 URL。
-        // 蓝奏云等 CDN 对浏览器 302 重定向到真实文件 URL，但对非浏览器客户端返回 HTML。
-        // 使用 finalUrl 让 Rust 下载器请求重定向后的真实 URL，绕过 CDN 反爬。
-        const downloadUrl = (downloadItem as any).finalUrl || url;
+    const url = downloadItem.url;
+    // finalUrl covers every ordinary href redirected through an API/CDN, not just
+    // a site-specific preempted URL.
+    const downloadUrl = (downloadItem as any).finalUrl || url;
+    let filenameResolved = false;
 
-        // 跳过 blob 和 data URL：FluxDown 无法处理，交给浏览器/其他扩展决定
-        // 文件名，不带参数调用 suggest() 避免显式"确定"文件名与其他扩展冲突
-        if (url.startsWith("blob:") || url.startsWith("data:")) {
-          suggest();
-          return;
-        }
+    const resolveFilename = () => {
+      if (filenameResolved) return;
+      filenameResolved = true;
+      suggest();
+    };
+    const releaseToBrowser = () => {
+      handledDownloads.delete(downloadItem.id);
+      resolveFilename();
+    };
+    const cancelBeforeResolvingFilename = () =>
+      cancelBeforeFilenameResolution(
+        downloadItem.id,
+        (id) => browser.downloads.cancel(id),
+        (query) => browser.downloads.erase(query),
+        resolveFilename,
+      );
+    const collectItemInfo = (): {
+      itemInfo: DownloadItemInfo;
+      referrer: string | undefined;
+    } => {
+      const cached = downloadItemCache.get(downloadItem.id);
+      const mime = downloadItem.mime || cached?.mime || undefined;
+      const fileSize =
+        (downloadItem.fileSize > 0 ? downloadItem.fileSize : undefined) ??
+        (cached && cached.fileSize > 0 ? cached.fileSize : undefined) ??
+        -1;
+      const filename = downloadItem.filename || cached?.filename || undefined;
+      const referrer = cached?.referrer || undefined;
+      return {
+        itemInfo: { url, fileSize, mime, filename, referrerUrl: referrer },
+        referrer,
+      };
+    };
 
-        // 如果已被兜底层处理，直接取消（不重复发送）
-        if (handledDownloads.get(downloadItem.id) === "fallback") {
-          console.log(
-            "[FluxDown] onDeterminingFilename: already handled by fallback, cancelling:",
+    const interceptAfterCancellation = async (
+      itemInfo: DownloadItemInfo,
+      referrer: string | undefined,
+    ) => {
+      let cancellationSucceeded = false;
+      let cleanFilename: string | undefined;
+      try {
+        // Chrome only settles downloads.cancel after this listener advances. The
+        // helper requests cancel first, then releases suggest immediately.
+        cancellationSucceeded = await cancelBeforeResolvingFilename();
+        if (!cancellationSucceeded) {
+          // Browser cancellation did not happen: retain its native download and
+          // do not also create a FluxDown capture window.
+          console.debug(
+            "[FluxDown] onDeterminingFilename: cancellation did not complete; leaving browser download intact:",
             downloadItem.id,
           );
-          // Chrome API 的 suggest() 不支持 cancel 属性，
-          // 无参数调用释放文件名决策管线，再通过 downloads.cancel() 取消下载
-          suggest();
-          browser.downloads.cancel(downloadItem.id).catch(() => {});
-          browser.downloads.erase({ id: downloadItem.id }).catch(() => {});
           return;
         }
 
-        // 预抢占 URL 检查：该 URL 已由 AJAX 拦截器检测为蓝奏云等中转页 URL。
-        // 中转页 URL 可能 302 重定向到真实文件 URL。如果 finalUrl 与原始 URL 不同，
-        // 说明重定向已发生，使用 finalUrl 正常拦截。如果相同，放行让浏览器处理。
-        const preemptEntry = preemptedUrls.get(url);
-        if (preemptEntry && preemptEntry.expiry > Date.now()) {
-          if (downloadUrl === url) {
-            // 未发生重定向 — 放行让浏览器继续下载（CDN 中转页或直传）
-            console.log(
-              "[FluxDown] onDeterminingFilename: preempted URL, no redirect detected, letting browser handle:",
-              url,
-            );
-            handledDownloads.delete(downloadItem.id);
-            suggest();
-            return;
-          }
-          // 发生重定向 — finalUrl 是真实文件 URL，继续走正常拦截流程
-          console.log(
-            "[FluxDown] onDeterminingFilename: preempted URL redirected, intercepting finalUrl:",
-            downloadUrl,
-          );
-        }
-
-        // P0 关键修复：立即预标记为 'primary-pending'，
-        // 阻止第三层（onCreated 兜底计时器）在我们异步处理期间竞态抢先执行。
-        // 若最终判断不需拦截，在放行时删除此标记。
-        handledDownloads.set(downloadItem.id, "primary");
-
-        // ===== 同步快速路径（修复 Linux 下载栏闪现问题） =====
-        // Linux Chrome 在 onCreated 触发时（即 suggest() 异步等待期间）就立即显示下载栏。
-        // 若设置缓存已热身，可同步调用 suggest() 释放管线，
-        // 在 onCreated 触发前完成，从而彻底避免下载栏出现。
-        // 注：同步调用 suggest 后无需 return true，Chrome 不会再等待异步 suggest。
-        const _syncSettings = _settingsCache;
-        if (_syncSettings !== null) {
-          if (hasActiveBypass(url)) {
-            handledDownloads.delete(downloadItem.id);
-            suggest();
-            downloadItemCache.delete(downloadItem.id);
-            return;
-          }
-          if (!_syncSettings.enabled) {
-            handledDownloads.delete(downloadItem.id);
-            suggest();
-            downloadItemCache.delete(downloadItem.id);
-            return;
-          }
-          // App 熔断期内：直接放行给浏览器原生下载，跳过拦截，避免弹窗风暴。
-          if (isAppKnownDown()) {
-            handledDownloads.delete(downloadItem.id);
-            suggest();
-            downloadItemCache.delete(downloadItem.id);
-            return;
-          }
-          const _syncCached = downloadItemCache.get(downloadItem.id);
-          const _syncMime = downloadItem.mime || _syncCached?.mime || undefined;
-          const _syncFileSize =
-            (downloadItem.fileSize > 0 ? downloadItem.fileSize : undefined) ??
-            (_syncCached && _syncCached.fileSize > 0
-              ? _syncCached.fileSize
-              : undefined) ??
-            -1;
-          const _syncFilename =
-            downloadItem.filename || _syncCached?.filename || undefined;
-          const _syncReferrer = _syncCached?.referrer || undefined;
-          const _syncItemInfo: DownloadItemInfo = {
-            url,
-            fileSize: _syncFileSize,
-            mime: _syncMime,
-            filename: _syncFilename,
-            referrerUrl: _syncReferrer,
-          };
-          if (shouldIntercept(_syncItemInfo, _syncSettings)) {
-            // 同步释放文件名决策管线——在 onCreated 触发前完成，Linux 不会显示下载栏
-            // Chrome API 的 suggest() 不支持 cancel 属性，
-            // 无参数调用释放管线，再通过 downloads.cancel() 实际取消下载
-            suggest();
-            console.log("[FluxDown] Intercepting download (sync-path):", {
-              url,
-              downloadUrl,
-              mime: _syncMime,
-              filename: _syncFilename,
-              fileSize: _syncFileSize,
-              mode: _syncSettings.interceptMode,
-            });
-            (async () => {
-              try {
-                try {
-                  await browser.downloads.cancel(downloadItem.id);
-                } catch {
-                  console.debug(
-                    "[FluxDown] sync-path: cancel after suggest (expected)",
-                  );
-                }
-                try {
-                  await browser.downloads.erase({ id: downloadItem.id });
-                } catch {
-                  console.debug(
-                    "[FluxDown] sync-path: erase after cancel (expected)",
-                  );
-                }
-                // 优先使用 responseDownloadCache 中的 Content-Disposition 文件名
-                // 同时检查 url 和 downloadUrl（重定向场景下两者不同）
-                const _syncDisposition =
-                  responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
-                  responseDownloadCache.get(url)?.dispositionFilename ||
-                  "";
-                const _syncClean =
-                  _syncDisposition ||
-                  extractCleanFilename(_syncFilename, downloadUrl);
-                const sendOk = await sendToFluxDown(
-                  downloadUrl,
-                  _syncReferrer,
-                  _syncClean,
-                  _syncFileSize,
-                  _syncMime,
-                  // 重定向场景：传入原始 URL，让 sendToFluxDown 可回退查找 headers 缓存
-                  downloadUrl !== url ? url : undefined,
-                );
-                if (!sendOk) {
-                  // 发送失败，先 ping 确认 App 是否在线再决定是否回退
-                  await fallbackAfterSendFailure(downloadUrl, _syncClean);
-                }
-              } catch (e) {
-                console.error("[FluxDown] sync-path: sendToFluxDown error:", e);
-                // 异常情况：先 ping 确认 App 是否在线再决定是否回退
-                await fallbackAfterSendFailure(downloadUrl).catch(() => {});
-              } finally {
-                downloadItemCache.delete(downloadItem.id);
-              }
-            })();
-            return; // 同步 suggest 已调用，无需 return true
-          }
-          // shouldIntercept=false：若已有足够信息可以确定，同步放行
-          if (_syncMime || _syncFilename) {
-            handledDownloads.delete(downloadItem.id);
-            suggest();
-            downloadItemCache.delete(downloadItem.id);
-            return;
-          }
-          // mime 和 filename 均为空（极少见）→ 降级到下方异步路径
-        }
-
-        // ===== 冷启动预防拦截（同类产品 IDM/Motrix/FDM 调研后的最优策略） =====
-        // 当 MV3 Service Worker 刚被唤醒、settings 缓存尚未热身时（_syncSettings === null），
-        // 默认按"拦截"处理：先同步 suggest() 释放文件名管线阻止浏览器弹出任何下载 UI，
-        // 然后异步加载设置判断是否真正需要拦截。
-        // 核心原则：宁可误拦截后通过 fallbackToBrowserDownload 回退（用户无感），
-        //           也不要让浏览器下载 UI 闪现（用户可见且体验差）。
-        if (_syncSettings === null) {
-          // 同步释放文件名决策管线 — 在 onCreated 触发前完成，
-          // 彻底阻止下载栏和另存为对话框的出现
-          suggest();
-          console.log(
-            "[FluxDown] Cold-start pre-emptive intercept (settings cache not warmed):",
-            { url, downloadUrl },
-          );
-          (async () => {
-            try {
-              // 立即取消浏览器下载
-              try {
-                await browser.downloads.cancel(downloadItem.id);
-              } catch {
-                console.debug("[FluxDown] cold-start: cancel (expected)");
-              }
-              try {
-                await browser.downloads.erase({ id: downloadItem.id });
-              } catch {
-                console.debug("[FluxDown] cold-start: erase (expected)");
-              }
-
-              // 加载设置（这会同时预热缓存，后续下载走同步快速路径）
-              const settings = await getCachedSettings();
-
-              // 检查 bypass 令牌（基于时间，不消费）
-              if (hasActiveBypass(url)) {
-                handledDownloads.delete(downloadItem.id);
-                await fallbackToBrowserDownload(
-                  downloadUrl,
-                  undefined,
-                  true,
-                ).catch(() => {});
-                return;
-              }
-
-              // 拦截未启用 → 回退让浏览器重新下载
-              if (!settings.enabled) {
-                handledDownloads.delete(downloadItem.id);
-                await fallbackToBrowserDownload(
-                  downloadUrl,
-                  undefined,
-                  true,
-                ).catch(() => {});
-                return;
-              }
-
-              // App 熔断期内 → 静默回退浏览器下载，不再尝试发送，避免弹窗风暴。
-              if (isAppKnownDown()) {
-                handledDownloads.delete(downloadItem.id);
-                await fallbackToBrowserDownload(
-                  downloadUrl,
-                  undefined,
-                  true,
-                ).catch(() => {});
-                return;
-              }
-
-              // 收集元数据做拦截判断
-              const cached = downloadItemCache.get(downloadItem.id);
-              const mime = downloadItem.mime || cached?.mime || undefined;
-              const fileSize =
-                (downloadItem.fileSize > 0
-                  ? downloadItem.fileSize
-                  : undefined) ??
-                (cached && cached.fileSize > 0
-                  ? cached.fileSize
-                  : undefined) ??
-                -1;
-              const filename =
-                downloadItem.filename || cached?.filename || undefined;
-              const referrer = cached?.referrer || undefined;
-              const itemInfo: DownloadItemInfo = {
-                url,
-                fileSize,
-                mime,
-                filename,
-                referrerUrl: referrer,
-              };
-
-              if (!shouldIntercept(itemInfo, settings)) {
-                // 不应拦截 → 回退让浏览器重新下载（用户无感，静默不弹通知）
-                handledDownloads.delete(downloadItem.id);
-                await fallbackToBrowserDownload(
-                  downloadUrl,
-                  extractCleanFilename(filename, downloadUrl),
-                  true,
-                ).catch(() => {});
-                return;
-              }
-
-              // 应该拦截 → 发送给 FluxDown
-              const dispositionFilename =
-                responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
-                responseDownloadCache.get(url)?.dispositionFilename ||
-                "";
-              const cleanFilename =
-                dispositionFilename ||
-                extractCleanFilename(filename, downloadUrl);
-              const sendOk = await sendToFluxDown(
-                downloadUrl,
-                referrer,
-                cleanFilename,
-                fileSize,
-                mime,
-                downloadUrl !== url ? url : undefined,
-              );
-              if (!sendOk) {
-                // 发送失败 — 清除 primary 标记，先 ping 确认 App 是否在线再决定是否回退
-                handledDownloads.delete(downloadItem.id);
-                await fallbackAfterSendFailure(
-                  downloadUrl,
-                  cleanFilename,
-                ).catch(() => {});
-              }
-            } catch (e) {
+        const dispositionFilename =
+          responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
+          responseDownloadCache.get(url)?.dispositionFilename ||
+          "";
+        cleanFilename =
+          dispositionFilename ||
+          extractCleanFilename(itemInfo.filename, downloadUrl);
+        const sendOk = await sendToFluxDown(
+          downloadUrl,
+          referrer,
+          cleanFilename,
+          itemInfo.fileSize,
+          itemInfo.mime,
+          // finalUrl is the engine target; original url remains a cache fallback
+          // for request headers and captured form transactions.
+          downloadUrl !== url ? url : undefined,
+        );
+        if (!sendOk) {
+          handledDownloads.delete(downloadItem.id);
+          await fallbackAfterSendFailure(downloadUrl, cleanFilename).catch(
+            (error) =>
               console.error(
-                "[FluxDown] Cold-start pre-emptive intercept error:",
-                e,
-              );
-              handledDownloads.delete(downloadItem.id);
-              // 异常情况：先 ping 确认 App 是否在线再决定是否回退
-              await fallbackAfterSendFailure(downloadUrl).catch(() => {});
-            } finally {
-              downloadItemCache.delete(downloadItem.id);
-            }
-          })();
-          return; // 同步 suggest 已调用，无需 return true
+                "[FluxDown] failed to restore browser download after send failure:",
+                error,
+              ),
+          );
+        }
+      } catch (error) {
+        console.error(
+          "[FluxDown] onDeterminingFilename interception failed:",
+          error,
+        );
+        if (cancellationSucceeded) {
+          handledDownloads.delete(downloadItem.id);
+          await fallbackAfterSendFailure(downloadUrl, cleanFilename).catch(
+            (fallbackError) =>
+              console.error(
+                "[FluxDown] failed to restore browser download after interception error:",
+                fallbackError,
+              ),
+          );
+        } else if (!filenameResolved) {
+          releaseToBrowser();
+        }
+      }
+    };
+
+    const resolveWithLoadedSettings = async () => {
+      try {
+        const settings = await getCachedSettings();
+        if (!settings.enabled || hasActiveBypass(url) || isAppKnownDown()) {
+          releaseToBrowser();
+          return;
         }
 
-        // 异步判断（metadata 暂缺时的兜底路径 — 缓存已热但 mime/filename 均为空的极少见情况）
-        (async () => {
-          // Bug 2+5 修复：用 suggestCalled 保证 suggest 全局只调用一次。
-          // catch 块 + 正常路径都可能调用 suggest，两次调用会导致浏览器行为异常。
-          let suggestCalled = false;
-          // Bug R4-2 修复：追踪下载是否已被取消（suggest + cancel 已调用），
-          // 防止 sendToFluxDown 失败时 catch 块误删 handledDownloads 标记导致重复发送。
-          let downloadCancelled = false;
-          // Chrome API 的 suggest() 不支持 cancel 属性（FilenameSuggestion 只有 filename 和 conflictAction）。
-          // 正确的取消方式：suggest() 无参数释放管线 + downloads.cancel() 实际取消。
-          // 放行时：传入有效 filename 或 undefined（让浏览器使用默认文件名）。
-          const callSuggest = () => {
-            if (suggestCalled) return;
-            suggestCalled = true;
-            suggest();
-          };
-          const callSuggestCancel = async () => {
-            downloadCancelled = true;
-            callSuggest(); // 无参数释放文件名决策管线
-            try {
-              await browser.downloads.cancel(downloadItem.id);
-            } catch {
-              console.debug(
-                "[FluxDown] async-path: cancel after suggest (expected)",
-              );
-            }
-            try {
-              await browser.downloads.erase({ id: downloadItem.id });
-            } catch {
-              console.debug(
-                "[FluxDown] async-path: erase after cancel (expected)",
-              );
-            }
-          };
+        const { itemInfo, referrer } = collectItemInfo();
+        if (!shouldIntercept(itemInfo, settings)) {
+          releaseToBrowser();
+          return;
+        }
 
-          try {
-            // 再次检查兜底状态（极少数情况：兜底层在预标记之前已完成）
-            if (handledDownloads.get(downloadItem.id) === "fallback") {
-              await callSuggestCancel();
-              return;
-            }
+        console.log("[FluxDown] Intercepting download (onDeterminingFilename):", {
+          url,
+          downloadUrl,
+          mime: itemInfo.mime,
+          filename: itemInfo.filename,
+          fileSize: itemInfo.fileSize,
+          mode: settings.interceptMode,
+        });
+        await interceptAfterCancellation(itemInfo, referrer);
+      } catch (error) {
+        console.error(
+          "[FluxDown] failed while resolving interception settings:",
+          error,
+        );
+        if (!filenameResolved) releaseToBrowser();
+      } finally {
+        downloadItemCache.delete(downloadItem.id);
+      }
+    };
 
-            // P3：使用内存缓存，避免每次拦截都 await storage.sync.get
-            const settings = await getCachedSettings();
-            if (!settings.enabled) {
-              // 不拦截，删除预标记，放行
-              handledDownloads.delete(downloadItem.id);
-              callSuggest();
-              return;
-            }
+    // FluxDown cannot replay blob/data sources; do not compete with other
+    // download extensions for their filename decision.
+    if (url.startsWith("blob:") || url.startsWith("data:")) {
+      resolveFilename();
+      return;
+    }
 
-            // 检查 Alt+Click 绕过令牌（基于时间，不消费）
-            if (hasActiveBypass(url)) {
-              // Bug R2-1 修复：删除预标记，让浏览器正常下载
-              handledDownloads.delete(downloadItem.id);
-              callSuggest();
-              return;
-            }
+    // The onCreated fallback already owns this item. Cancel first here as well,
+    // otherwise suggest could launch Save As while that capture is in flight.
+    if (handledDownloads.get(downloadItem.id) === "fallback") {
+      console.log(
+        "[FluxDown] onDeterminingFilename: already handled by fallback, cancelling:",
+        downloadItem.id,
+      );
+      void cancelBeforeResolvingFilename().then((cancelled) => {
+        if (!cancelled) {
+          console.debug(
+            "[FluxDown] fallback download had already ended before filename cancellation:",
+            downloadItem.id,
+          );
+        }
+      });
+      return true;
+    }
 
-            // App 熔断期内：删除预标记，放行给浏览器原生下载，跳过拦截。
-            if (isAppKnownDown()) {
-              handledDownloads.delete(downloadItem.id);
-              callSuggest();
-              return;
-            }
+    // One-time transit URLs must first execute their page script. Direct URLs and
+    // all ordinary redirects take the generic cancellation path below.
+    const preemptEntry = preemptedUrls.get(url);
+    if (preemptEntry && preemptEntry.expiry > Date.now()) {
+      if (downloadUrl === url) {
+        console.log(
+          "[FluxDown] onDeterminingFilename: preempted URL has not redirected; letting browser handle:",
+          url,
+        );
+        resolveFilename();
+        return;
+      }
+      console.log(
+        "[FluxDown] onDeterminingFilename: preempted URL redirected, intercepting finalUrl:",
+        downloadUrl,
+      );
+    }
 
-            // 合并 onCreated 缓存的额外信息
-            const cached = downloadItemCache.get(downloadItem.id);
-            const mime = downloadItem.mime || cached?.mime || undefined;
-            const fileSize =
-              (downloadItem.fileSize > 0 ? downloadItem.fileSize : undefined) ??
-              (cached && cached.fileSize > 0 ? cached.fileSize : undefined) ??
-              -1;
-            const referrer = cached?.referrer || undefined;
+    // Claim before any await so onCreated cannot send a second capture while
+    // Chrome waits for the filename decision.
+    handledDownloads.set(downloadItem.id, "primary");
 
-            const itemInfo: DownloadItemInfo = {
-              url,
-              fileSize,
-              mime,
-              filename: downloadItem.filename || undefined,
-              referrerUrl: referrer,
-            };
+    const cachedSettings = _settingsCache;
+    if (cachedSettings !== null) {
+      if (
+        !cachedSettings.enabled ||
+        hasActiveBypass(url) ||
+        isAppKnownDown()
+      ) {
+        releaseToBrowser();
+        downloadItemCache.delete(downloadItem.id);
+        return;
+      }
 
-            if (!shouldIntercept(itemInfo, settings)) {
-              // 不拦截，删除预标记，放行
-              handledDownloads.delete(downloadItem.id);
-              callSuggest();
-              return;
-            }
-
-            console.log(
-              "[FluxDown] Intercepting download (onDeterminingFilename):",
-              {
-                url,
-                downloadUrl,
-                mime,
-                filename: downloadItem.filename,
-                fileSize,
-                mode: settings.interceptMode,
-              },
-            );
-
-            // 先取消浏览器下载，再发送到 FluxDown（防止双下载）
-            // 与 sync 快速路径和 executeFallbackIntercept 保持一致策略：
-            // cancel-first 避免异步发送期间浏览器下载持续进行导致小文件已完成
-            await callSuggestCancel();
-
-            // 优先使用 responseDownloadCache 中的 Content-Disposition 文件名
-            // 同时检查 downloadUrl 和 url（重定向场景下两者不同）
-            const dispositionFilename =
-              responseDownloadCache.get(downloadUrl)?.dispositionFilename ||
-              responseDownloadCache.get(url)?.dispositionFilename ||
-              "";
-            const cleanFilename =
-              dispositionFilename ||
-              extractCleanFilename(downloadItem.filename, downloadUrl);
-            const sendOk = await sendToFluxDown(
-              downloadUrl,
-              referrer,
-              cleanFilename,
-              fileSize,
-              mime,
-              // 重定向场景：传入原始 URL，让 sendToFluxDown 可回退查找 headers 缓存
-              downloadUrl !== url ? url : undefined,
-            );
-
-            if (!sendOk) {
-              // 发送失败，先 ping 确认 App 是否在线再决定是否回退
-              handledDownloads.delete(downloadItem.id);
-              await fallbackAfterSendFailure(downloadUrl, cleanFilename);
-            }
-          } catch (e) {
-            console.error(
-              "[FluxDown] Error in onDeterminingFilename handler:",
-              e,
-            );
-            // Bug R4-2 修复：只有在下载尚未被取消（判断阶段出错）时，才清除预标记让兜底层接管。
-            // 若下载已被取消，保留 'primary' 标记，阻止兜底层重复拦截并重复发送。
-            if (!downloadCancelled) {
-              handledDownloads.delete(downloadItem.id);
-              callSuggest();
-            }
-          } finally {
-            downloadItemCache.delete(downloadItem.id);
-          }
-        })();
-
-        // 返回 true 表示 suggest 将被异步调用
+      const { itemInfo, referrer } = collectItemInfo();
+      if (shouldIntercept(itemInfo, cachedSettings)) {
+        console.log("[FluxDown] Intercepting download (sync settings):", {
+          url,
+          downloadUrl,
+          mime: itemInfo.mime,
+          filename: itemInfo.filename,
+          fileSize: itemInfo.fileSize,
+          mode: cachedSettings.interceptMode,
+        });
+        void interceptAfterCancellation(itemInfo, referrer).finally(() => {
+          downloadItemCache.delete(downloadItem.id);
+        });
         return true;
+      }
+
+      // Complete metadata lets us immediately hand non-matching downloads back.
+      // Otherwise wait for the same metadata/settings path used during cold start.
+      if (itemInfo.mime || itemInfo.filename) {
+        releaseToBrowser();
+        downloadItemCache.delete(downloadItem.id);
+        return;
+      }
+    }
+
+    // Chrome may surface Save As before onCreated. Keep the filename pipeline
+    // pending for cold-start/metadata-empty decisions; it is the only path that
+    // can cancel before the chooser is scheduled.
+    void resolveWithLoadedSettings();
+    return true;
   };
 
   if (browser.downloads.onDeterminingFilename) {

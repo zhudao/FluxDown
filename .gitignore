@@ -47,7 +47,8 @@ app.*.map.json
 /android/app/release
 
 # Rust related
-/.cargo/
+/.cargo/*
+!/.cargo/config.toml
 /target/
 
 # Generated signals

@@ -327,6 +327,7 @@ impl QuickCaptureView {
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
         v_flex()
+            .flex_shrink_0()
             .gap(tokens.spacing.sm)
             .px(tokens.spacing.md)
             .pt(tokens.spacing.md)
@@ -428,6 +429,7 @@ impl QuickCaptureView {
         let url = SharedString::from(row.dto.url.clone());
         let url_for_tooltip = url.clone();
         v_flex()
+            .flex_shrink_0()
             .gap(tokens.spacing.xs)
             .mx(tokens.spacing.md)
             .my(tokens.spacing.xs)
@@ -506,6 +508,7 @@ impl QuickCaptureView {
     fn render_footer(&self, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
         h_flex()
+            .flex_shrink_0()
             .items_center()
             .justify_between()
             .px(tokens.spacing.md)
@@ -548,12 +551,11 @@ impl QuickCaptureView {
             })
     }
 
-    /// 超过此行数后列表区固定高度并滚动。
+    // 窗口首选高度最多按四行估算；滚动始终按实际内容溢出启用。
     const MAX_VISIBLE_ROWS: usize = 4;
     const ROW_HEIGHT: f32 = 76.;
     const HEADER_HEIGHT: f32 = 92.;
     const FOOTER_HEIGHT: f32 = 44.;
-    const MAX_LIST_HEIGHT: f32 = Self::ROW_HEIGHT * 4.;
 
     /// 给定行数的窗口高度：头部 + 卡片行（最多 4 行）+ 底栏。
     #[must_use]
@@ -565,19 +567,20 @@ impl QuickCaptureView {
 
     fn render_rows(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let tokens = active_theme(cx).tokens().clone();
-        let list = v_flex()
+        // 是否滚动由实际溢出决定，不能用行数推断控件和主题的实际高度。
+        div()
             .w_full()
             .flex_1()
             .min_h_0()
-            .py(tokens.spacing.xs)
-            .children(self.rows.iter().map(|row| self.render_row(row, cx)));
-        if self.rows.len() > Self::MAX_VISIBLE_ROWS {
-            list.h(px(Self::MAX_LIST_HEIGHT))
-                .overflow_y_scrollbar()
-                .into_any_element()
-        } else {
-            list.into_any_element()
-        }
+            .overflow_hidden()
+            .child(
+                v_flex()
+                    .size_full()
+                    .py(tokens.spacing.xs)
+                    .children(self.rows.iter().map(|row| self.render_row(row, cx)))
+                    .overflow_y_scrollbar(),
+            )
+            .into_any_element()
     }
 }
 
@@ -595,6 +598,7 @@ impl Render for QuickCaptureView {
         v_flex()
             .key_context(KEY_CONTEXT)
             .size_full()
+            .overflow_hidden()
             .bg(tokens.colors.background)
             .rounded(tokens.radius.lg)
             .border_1()
@@ -604,7 +608,13 @@ impl Render for QuickCaptureView {
             }))
             .child(self.render_header(cx))
             .child(self.render_rows(cx))
-            .child(div().h(px(1.)).w_full().bg(tokens.colors.border))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .h(px(1.))
+                    .w_full()
+                    .bg(tokens.colors.border),
+            )
             .child(self.render_footer(cx))
     }
 }

@@ -13,6 +13,23 @@
 4. 提交 PR 前确保相关 crate 的测试通过（例如 `cargo test -p fluxdown_engine`）。
    Make sure the tests for the affected crates pass before opening a PR (e.g. `cargo test -p fluxdown_engine`).
 
+## GPUI 桌面开发 / GPUI Desktop Development
+
+```bash
+cargo desktop-dev
+cargo desktop-dev --build-only
+```
+
+首次启动先构建 UI、agent 和 daemon，全部成功后才打开 UI。重复执行时优先唤起已有 UI，不再构建或创建第二个窗口进程；多个启动命令并发执行时会串行处理构建。`--build-only` 只构建，不启动或唤起任何窗口。
+The first launch builds the UI, agent and daemon before opening the UI. Repeated invocations activate the existing UI without rebuilding or creating another UI process; concurrent development builds are serialized. `--build-only` neither launches nor activates a window.
+
+UI、agent 和 daemon 按各自数据目录保持单实例；已有后台服务直接复用，不会被开发命令强制结束。退出 UI 不等于停止后台下载服务。终端 Ctrl+C 的作用取决于进程组，不能当作可靠的整套服务停止操作。
+The UI, agent and daemon enforce one instance per respective data directory. Existing services are reused, never forcibly terminated by this command. Exiting the UI does not stop background download services. Terminal Ctrl+C affects the foreground process group and is not a reliable full-stack shutdown command.
+
+修改运行中的代码后，需先退出对应旧进程，再重新执行命令；重新编译不会热替换已有 UI 或后台服务。Windows 不允许覆盖正在运行的二进制，构建前应先退出对应进程。使用同一引擎数据目录的 Flutter 版必须先退出。自定义 `FLUXDOWN_AGENT_BIN` / `FLUXDOWN_DAEMON_BIN` 仍优先于同目录二进制。
+After editing running code, exit the affected processes before launching again; rebuilding does not hot-replace an existing UI or service. On Windows, exit affected processes before rebuilding their executables. Quit Flutter first if it uses the same engine data directory. `FLUXDOWN_AGENT_BIN` / `FLUXDOWN_DAEMON_BIN` overrides still take precedence over sibling executables.
+
+
 ## 反馈问题 / Reporting Issues
 
 请通过 [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) 或官网 [反馈页面](https://fluxdown.zerx.dev/feedback) 提交问题。

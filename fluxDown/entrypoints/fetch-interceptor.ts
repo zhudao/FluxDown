@@ -451,11 +451,11 @@ export default defineUnlistedScript(() => {
     return originalSend.apply(this, args);
   };
 
-  // ===== 一次性 CDN 下载 URL 抢先拦截 =====
+  // ===== 一次性 CDN 下载 URL 预识别 =====
   // 针对使用 AJAX 获取一次性签名 URL 再跳转下载的网站（如蓝奏云）。
-  // 通过拦截 AJAX 响应，在浏览器发起 CDN GET 之前将 URL 发给 FluxDown，
-  // 并由 background 通过 declarativeNetRequest 阻断浏览器的 CDN 请求，
-  // 确保 FluxDown 是第一个（也是唯一的）请求方。
+  // 此脚本只将 URL 标记给 background，用于识别需要页面继续执行的中转链接；
+  // 它不取消请求，也不会提前创建下载任务。最终的通用接管由
+  // downloads.onDeterminingFilename 在已知最终 URL 后完成。
   //
   // 目前支持的规则：
   //   - 蓝奏云系列 (/ajaxm.php)：响应 {zt:1, dom:"https://...", url:"/file/?token", inf:"filename"}

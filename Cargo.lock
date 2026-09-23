@@ -2848,6 +2848,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxdown-desktop-dev"
+version = "0.1.0"
+
+[[package]]
 name = "fluxdown_agent"
 version = "0.1.0"
 dependencies = [
