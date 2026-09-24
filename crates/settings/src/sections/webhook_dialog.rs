@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fluxdown_protocol::{RpcErrorData, WebhookDeliveriesResponse, WebhookPresetDto, method};
-use fluxdown_ui_components::{ButtonVariant, button};
+use fluxdown_ui_components::ButtonVariant;
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
@@ -24,7 +24,7 @@ use gpui_component::{
 };
 use serde_json::{Value, json};
 
-use super::webhook::{EndpointSpec, WEBHOOK_EVENTS, read_endpoints, write_endpoints};
+use super::webhook::{EndpointSpec, WEBHOOK_EVENTS, button, read_endpoints, write_endpoints};
 use crate::store::SettingsStore;
 
 const PRESET_CUSTOM: &str = "custom";
@@ -629,7 +629,7 @@ impl WebhookDialog {
 
     fn render_preset_grid(&self, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
-        let mut grid = h_flex().flex_wrap().gap(tokens.spacing.sm);
+        let mut grid = h_flex().flex_wrap().gap(tokens.spacing.xs);
         for preset in &self.presets {
             let selected = preset.id == self.preset;
             let id = preset.id.clone();
@@ -644,6 +644,7 @@ impl WebhookDialog {
                     },
                     cx,
                 )
+                .selected(selected)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     this.preset = id.clone();
                     cx.notify();
@@ -807,7 +808,6 @@ impl WebhookDialog {
                             ButtonVariant::Ghost,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .on_click(cx.listener(
                             move |this, _: &ClickEvent, _, cx| {
                                 this.headers.retain(|row| row.id != row_id);
@@ -825,7 +825,6 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     let mut seq = this.header_seq;
                     let translator = this.translator.clone();
@@ -850,6 +849,9 @@ impl WebhookDialog {
                     ButtonVariant::Ghost,
                     cx,
                 )
+                .h(px(24.))
+                .px(px(6.))
+                .text_size(px(11.))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.insert_variable(&insert, window, cx);
                 })),
@@ -915,7 +917,6 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     let secret = generate_secret();
                     this.secret
@@ -935,7 +936,6 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.copy_secret(cx))),
             )
     }
@@ -1146,7 +1146,6 @@ impl WebhookDialog {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(!can_test)
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.send_test(cx))),
             );
@@ -1174,7 +1173,6 @@ impl WebhookDialog {
                 ButtonVariant::Ghost,
                 cx,
             )
-            .h(CONTROL_HEIGHT)
             .on_click(|_, window, cx| window.close_dialog(cx)),
         )
         .child(
@@ -1184,7 +1182,6 @@ impl WebhookDialog {
                 ButtonVariant::Primary,
                 cx,
             )
-            .h(CONTROL_HEIGHT)
             .disabled(!can_save)
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.save(window, cx))),
         )

@@ -423,6 +423,11 @@ async fn run_actor(
     }
 
     engine.manager.shutdown().await;
+    match tokio::time::timeout(Duration::from_secs(5), engine.flush_task_activity()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "daemon task activity flush failed"),
+        Err(_) => tracing::error!("daemon task activity flush timed out"),
+    }
     selections.resolve_all_defaults();
     commands.close();
     while let Some(command) = commands.recv().await {

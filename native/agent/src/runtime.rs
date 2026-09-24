@@ -64,13 +64,17 @@ pub async fn run(
         .map_err(|error| {
             std::io::Error::other(format!("daemon startup failed: {:?}", error.code))
         })?;
-    let initial_daemon =
-        match tokio::time::timeout(Duration::from_secs(5), daemon_events.recv()).await {
-            Ok(Some(DaemonClientEvent::Snapshot(snapshot))) => snapshot,
-            Ok(Some(_)) | Ok(None) | Err(_) => {
-                return Err(std::io::Error::other("daemon returned no initial snapshot").into());
-            }
-        };
+    let initial_daemon = match tokio::time::timeout(Duration::from_secs(5), daemon_events.recv())
+        .await
+    {
+        Ok(Some(DaemonClientEvent::Snapshot(snapshot))) => match snapshot.body {
+            fluxdown_protocol::SnapshotBody::Daemon(daemon) => *daemon,
+            _ => return Err(std::io::Error::other("daemon returned wrong snapshot role").into()),
+        },
+        Ok(Some(_)) | Ok(None) | Err(_) => {
+            return Err(std::io::Error::other("daemon returned no initial snapshot").into());
+        }
+    };
 
     let initial = AgentSnapshot {
         daemon: initial_daemon,
@@ -241,7 +245,8 @@ fn spawn_daemon_projection(
                     let Some(event) = event else { break; };
                     match event {
                         DaemonClientEvent::Snapshot(snapshot) => {
-                            events.replace_daemon_snapshot(snapshot);
+                            let fluxdown_protocol::SnapshotBody::Daemon(snapshot) = snapshot.body else { continue };
+                            events.replace_daemon_snapshot(*snapshot);
                             events.publish(
                                 fluxdown_protocol::AgentEvent::DaemonConnectionChanged(true),
                             );

@@ -37,6 +37,7 @@ fn with_output_context(operation: &str, path: &Path, source: io::Error) -> io::E
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{ensure_dir, ensure_dir_sync, ensure_parent};
 

@@ -51,6 +51,7 @@ use crate::events::{EngineEvent, EventSink};
 use crate::logger::{log_info, log_warn};
 use crate::output;
 use crate::speed_limiter::SpeedLimiter;
+use crate::transfer_activity::{TaskRuntime, TaskSegment, TransferGuard, TransferTracker};
 
 // ---------------------------------------------------------------------------
 // 就地扩容（BUG-HTTP-HINT-UNDERSIZED）
@@ -1081,6 +1082,12 @@ impl LiveSegment {
 
 /// Sent by a worker to the coordinator when its segment finishes or fails.
 enum WorkerEvent {
+    /// A failed segment attempt is entering backoff for another request.
+    Retrying {
+        seg_index: i32,
+        attempt: u32,
+        error: String,
+    },
     /// Segment completed successfully.
     Done {
         worker_id: usize,
@@ -1185,10 +1192,49 @@ impl ReportScope {
                 start_byte: 0,
                 end_byte: self.base - 1,
                 downloaded_bytes: self.base,
+                active: None,
             },
         );
         snapshot
     }
+}
+fn sampled_http_runtime(
+    task_id: &str,
+    total_bytes: i64,
+    parallelism_limit: u32,
+    seg_states: &StdMutex<Vec<SegmentProgressInfo>>,
+    scope: ReportScope,
+    tracker: &TransferTracker,
+) -> (Vec<SegmentProgressInfo>, TaskRuntime) {
+    let sample_sequence = crate::transfer_activity::next_sample_sequence();
+    let snapshot = seg_states.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut snapshot = scope.map_snapshot(snapshot);
+    let (active_transfers, active_indices) = tracker.snapshot();
+    for segment in &mut snapshot {
+        if segment.index >= 0 {
+            segment.active = Some(active_indices.contains(&segment.index));
+        }
+    }
+    let runtime = TaskRuntime {
+        task_id: task_id.to_owned(),
+        sampled_at_ms: chrono::Utc::now().timestamp_millis(),
+        sample_sequence,
+        active_transfers: Some(active_transfers),
+        connected_peers: None,
+        parallelism_limit: Some(parallelism_limit),
+        total_bytes,
+        segments: snapshot
+            .iter()
+            .map(|s| TaskSegment {
+                index: s.index,
+                start_byte: s.start_byte,
+                end_byte: s.end_byte,
+                downloaded_bytes: s.downloaded_bytes,
+                active: s.active,
+            })
+            .collect(),
+    };
+    (snapshot, runtime)
 }
 
 /// 本次 coordinator generation 中仍在读取 body 的已验证响应数。
@@ -1198,33 +1244,20 @@ impl ReportScope {
 /// validator、大小和编码校验的存活响应并存时才可学习。
 #[derive(Default)]
 struct GenerationEvidence {
-    active_responses: AtomicI64,
+    tracker: TransferTracker,
 }
 
 impl GenerationEvidence {
     fn has_active_response(&self) -> bool {
-        self.active_responses.load(Ordering::Relaxed) > 0
+        self.tracker.active() > 0
     }
 
     fn can_learn_conn_cap(&self, server_rejection: bool) -> bool {
         server_rejection && self.has_active_response()
     }
 
-    fn response_started(&self) -> ActiveResponseGuard<'_> {
-        self.active_responses.fetch_add(1, Ordering::Relaxed);
-        ActiveResponseGuard {
-            counter: &self.active_responses,
-        }
-    }
-}
-
-struct ActiveResponseGuard<'a> {
-    counter: &'a AtomicI64,
-}
-
-impl Drop for ActiveResponseGuard<'_> {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Relaxed);
+    fn response_started(&self, index: i32) -> TransferGuard {
+        self.tracker.start(index)
     }
 }
 
@@ -1868,6 +1901,19 @@ pub async fn run_coordinated_download(
                 let _ = h.await;
             }
         }
+        let (_, runtime) = sampled_http_runtime(
+            task_id,
+            if scope.total_override > 0 {
+                scope.total_override
+            } else {
+                effective_total_bytes
+            },
+            worker_cap as u32,
+            &seg_states,
+            scope,
+            &generation_evidence.tracker,
+        );
+        sink.emit(EngineEvent::TaskRuntimeChanged(runtime));
         return Ok(effective_total_bytes);
     }
 
@@ -1948,6 +1994,14 @@ pub async fn run_coordinated_download(
 
             event = event_rx.recv() => {
                 match event {
+                    Some(WorkerEvent::Retrying { seg_index, attempt, error }) => {
+                        if let Err(e) = crate::task_activity::record(
+                            db, sink, task_id, "retry",
+                            format!("HTTP 分段 {seg_index} 第 {attempt} 次重试：{error}"), Some(1),
+                        ).await {
+                            tracing::error!(task_id, error = %e, "failed to persist HTTP segment retry");
+                        }
+                    }
                     Some(WorkerEvent::Done { worker_id, seg_index, downloaded_bytes }) => {
                         if open_ended_streaming == Some(seg_index) {
                             open_ended_streaming = None;
@@ -3080,15 +3134,15 @@ pub async fn run_coordinated_download(
             // total_override 或 planned_total、segment_details 经 map_snapshot）。
             _ = ui_interval.tick() => {
                 let current_total = total_downloaded.load(Ordering::Relaxed);
-                let snapshot = seg_states
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
                 let report_total = if scope.total_override > 0 {
                     scope.total_override
                 } else {
                     planned_total.load(Ordering::Relaxed)
                 };
+                let (snapshot, runtime) = sampled_http_runtime(
+                    task_id, report_total, worker_cap as u32, &seg_states, scope,
+                    &generation_evidence.tracker,
+                );
                 let _ = progress_tx
                     .send(ProgressUpdate {
                         task_id: task_id.to_string(),
@@ -3097,7 +3151,8 @@ pub async fn run_coordinated_download(
                         status: 1,
                         error_message: String::new(),
                         file_name: String::new(),
-                        segment_details: Some(scope.map_snapshot(snapshot)),
+                        segment_details: Some(snapshot),
+                        runtime: Some(runtime),
                         ..Default::default()
                     })
                     .await;
@@ -3130,6 +3185,20 @@ pub async fn run_coordinated_download(
             let _ = h.await;
         }
     }
+    // Preserve range geometry after the last body reader leaves.
+    let (_, runtime) = sampled_http_runtime(
+        task_id,
+        if scope.total_override > 0 {
+            scope.total_override
+        } else {
+            planned_total.load(Ordering::Relaxed)
+        },
+        worker_cap as u32,
+        &seg_states,
+        scope,
+        &generation_evidence.tracker,
+    );
+    sink.emit(EngineEvent::TaskRuntimeChanged(runtime));
 
     // 抽干剩余 durable 水位（循环退出后 interval 不再 tick）。
     {
@@ -3186,6 +3255,32 @@ pub async fn run_coordinated_download(
             e
         );
     }
+    // The coordinator's last geometry must reach the reporter before the caller's
+    // completion frame; a fast download may never have hit the periodic tick.
+    let report_total = if scope.total_override > 0 {
+        scope.total_override
+    } else {
+        planned_total.load(Ordering::Relaxed)
+    };
+    let (snapshot, runtime) = sampled_http_runtime(
+        task_id,
+        report_total,
+        worker_cap as u32,
+        &seg_states,
+        scope,
+        &generation_evidence.tracker,
+    );
+    let _ = progress_tx
+        .send(ProgressUpdate {
+            task_id: task_id.to_owned(),
+            downloaded_bytes: seg_total + scope.base,
+            total_bytes: report_total,
+            status: 1,
+            segment_details: Some(snapshot),
+            runtime: Some(runtime),
+            ..Default::default()
+        })
+        .await;
 
     // ----- 9. 正面域名学习 --------------------------------------------------
     // 任务全程无拒绝/降级/连接敏感信号且以多连接规模真实运行过 → 把
@@ -3761,6 +3856,7 @@ fn build_seg_state_vec(segments: &BTreeMap<i32, LiveSegment>) -> Vec<SegmentProg
             start_byte: s.start_byte,
             end_byte: s.end_byte,
             downloaded_bytes: s.downloaded_bytes,
+            active: None,
         })
         .collect()
 }
@@ -4401,6 +4497,13 @@ async fn do_segment_with_retry(
                     _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
                     _ = tokio::time::sleep(delay) => {}
                 }
+                let _ = event_tx
+                    .send(WorkerEvent::Retrying {
+                        seg_index: seg_idx,
+                        attempt: attempts,
+                        error: e.to_string(),
+                    })
+                    .await;
             }
         }
     }
@@ -4847,7 +4950,7 @@ async fn do_segment(
     // 到这里响应已通过状态、Range、validator、大小与编码校验；在 body 流存活
     // 期间登记为“当前 generation 正在被服务”。403/429 只有与这份同时成功证据
     // 并存，才有资格学习域名连接上限。
-    let _active_response = generation_evidence.response_started();
+    let _active_response = generation_evidence.response_started(seg_idx);
 
     let mut stream = resp.bytes_stream();
 
@@ -5044,6 +5147,7 @@ async fn do_segment(
         }
     }
 
+    drop(_active_response);
     // 段完成态落库前必须有覆盖式 fdatasync（BUG-COORD-FSYNC）：
     // coordinator 把 Completed 段视为永久完成、resume 时绝不重取——若此处不
     // 持久化，崩溃/掉电后会留下 "DB 完成但磁盘为 0" 的空洞且通过完整性检查。
@@ -5479,6 +5583,7 @@ mod tests {
                 start_byte: 0,
                 end_byte: 999,
                 downloaded_bytes: 700,
+                active: None,
             }]));
 
         rebuild_seg_states(&segs, &seg_states);
@@ -5508,6 +5613,7 @@ mod tests {
                 start_byte: 0,
                 end_byte: 999,
                 downloaded_bytes: 300,
+                active: None,
             }]));
 
         rebuild_seg_states(&segs, &seg_states);
@@ -6361,6 +6467,60 @@ mod tests {
     }
 
     #[test]
+    fn http_runtime_counts_only_body_readers_and_maps_physical_ranges() {
+        use super::{ReportScope, sampled_http_runtime};
+        use crate::downloader::SegmentProgressInfo;
+        use crate::transfer_activity::TransferTracker;
+        use std::sync::Mutex;
+
+        let segments = Mutex::new(vec![
+            SegmentProgressInfo {
+                index: 0,
+                start_byte: 0,
+                end_byte: 499,
+                downloaded_bytes: 300,
+                active: None,
+            },
+            SegmentProgressInfo {
+                index: 1,
+                start_byte: 500,
+                end_byte: 999,
+                downloaded_bytes: 20,
+                active: None,
+            },
+        ]);
+        let scope = ReportScope {
+            base: 200,
+            total_override: 1200,
+            owns_task_total: false,
+            strict_total: true,
+        };
+        let tracker = TransferTracker::new();
+        let reading = tracker.start(1);
+        let (_, live) = sampled_http_runtime("track-pair", 1200, 8, &segments, scope, &tracker);
+        assert_eq!(live.active_transfers, Some(1));
+        assert_eq!(
+            live.segments.iter().map(|s| s.active).collect::<Vec<_>>(),
+            vec![None, Some(false), Some(true)]
+        );
+        assert_eq!(
+            live.segments
+                .iter()
+                .map(|s| (s.start_byte, s.end_byte))
+                .collect::<Vec<_>>(),
+            vec![(0, 199), (200, 699), (700, 1199)]
+        );
+        drop(reading);
+        let (_, idle) = sampled_http_runtime("track-pair", 1200, 8, &segments, scope, &tracker);
+        assert_eq!(idle.active_transfers, Some(0));
+        assert_eq!(
+            idle.segments.iter().map(|s| s.active).collect::<Vec<_>>(),
+            vec![None, Some(false), Some(false)]
+        );
+        assert_eq!(idle.segments[2].downloaded_bytes, 20);
+    }
+
+    #[test]
     fn conn_cap_learning_requires_concurrent_validated_response() {
         use super::GenerationEvidence;
 
@@ -6371,7 +6531,7 @@ mod tests {
         );
 
         {
-            let _active = evidence.response_started();
+            let _active = evidence.response_started(0);
             assert!(
                 evidence.can_learn_conn_cap(true),
                 "拒绝与另一个已验证响应同时存在时才构成连接压力证据"

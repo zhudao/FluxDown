@@ -900,19 +900,24 @@ class _FluxDownAppState extends State<FluxDownApp>
 
       // 便携模式下 KvStore 写入有防抖，退出前强制落盘，避免刚改的设置丢失。
       await KvStore.instance.flush();
-      logInfo('FluxDownApp', 'destroying window...');
       await LogService.instance.dispose();
-      await windowManager.destroy();
     } catch (e, stack) {
       logError('FluxDownApp', '_performGracefulExit error', e, stack);
-      // 兜底：无论如何都尝试销毁窗口
-      try {
-        await windowManager.destroy();
-      } catch (_) {}
     } finally {
-      // Linux 上 windowManager.destroy() 只销毁 GTK 窗口，进程不会自动退出
-      // 需要显式终止 Dart 进程（含 Rust 线程）
-      exit(0);
+      try {
+        // finalizeRust 同步等待 Rust 主函数返回；必须在销毁窗口/exit 前调用，
+        // 否则下载停止帧和活动历史还在后台队列里就会被强制终止。
+        finalizeRust();
+      } catch (e, stack) {
+        logError('FluxDownApp', 'finalizeRust error', e, stack);
+      } finally {
+        try {
+          await windowManager.destroy();
+        } finally {
+          // Linux 销毁 GTK 窗口不会自动退出进程。
+          exit(0);
+        }
+      }
     }
   }
 

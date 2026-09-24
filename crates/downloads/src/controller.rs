@@ -8,7 +8,8 @@ use std::{
 
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, CloudDevice, DaemonEvent, DaemonRuntimeStatsDto, DaemonSnapshot,
-    GroupDto, LinkDeviceInfo, QueueDto, RemoteTaskDto, ServiceEvent, TaskDto, WsServerMsg,
+    GroupDto, LinkDeviceInfo, QueueDto, RemoteTaskDto, ServiceEvent, TaskActivityPage,
+    TaskActivityQuery, TaskDto, TaskRuntimeDto, WsServerMsg,
 };
 
 use crate::model::{CategoryIndex, DownloadTaskView, TaskState, TaskStore};
@@ -44,6 +45,8 @@ pub struct SeedLimits {
 }
 
 pub enum DownloadsCommand {
+    /// 分页读取 daemon 持久活动历史。
+    TaskActivity(TaskActivityQuery),
     Create(Box<fluxdown_protocol::DaemonCreateTaskParams>),
     Pause {
         task_id: String,
@@ -145,6 +148,7 @@ pub enum DownloadsCommand {
 pub enum DownloadsResult {
     Unit,
     Value(serde_json::Value),
+    TaskActivity(TaskActivityPage),
 }
 
 pub trait DownloadsPort: Send + Sync {
@@ -171,6 +175,7 @@ pub struct DownloadsController {
     remote: Vec<RemoteTaskDto>,
     store: Rc<TaskStore>,
     live_speeds: HashMap<String, i64>,
+    task_runtime: BTreeMap<String, Rc<TaskRuntimeDto>>,
     boosted: Option<String>,
     queues: Vec<QueueDto>,
     groups: Vec<GroupDto>,
@@ -195,6 +200,7 @@ impl DownloadsController {
             remote: Vec::new(),
             store: Rc::new(TaskStore::default()),
             live_speeds: HashMap::new(),
+            task_runtime: BTreeMap::new(),
             boosted: None,
             queues: Vec::new(),
             groups: Vec::new(),
@@ -219,7 +225,10 @@ impl DownloadsController {
         self.linked_devices.clone_from(&snapshot.linked_devices);
         self.absorb_daemon_context(&snapshot.daemon);
         self.set_preferences(&snapshot.preferences.values);
-        self.stale = false;
+        self.stale = !snapshot.daemon_connected;
+        if self.stale {
+            self.task_runtime.clear();
+        }
         self.rebuild_all();
         self.rebuild_remote();
     }
@@ -240,7 +249,12 @@ impl DownloadsController {
             }
             AgentEvent::DaemonConnectionChanged(connected) => {
                 self.stale = !connected;
-                false
+                if !connected {
+                    self.live_speeds.clear();
+                    self.task_runtime.clear();
+                }
+                self.rebuild_all();
+                true
             }
             AgentEvent::RemoteTasksChanged(tasks) => {
                 self.remote.clone_from(tasks);
@@ -266,6 +280,9 @@ impl DownloadsController {
 
     pub fn mark_stale(&mut self) {
         self.stale = true;
+        self.task_runtime.clear();
+        self.live_speeds.clear();
+        self.rebuild_all();
     }
 
     #[must_use]
@@ -287,6 +304,10 @@ impl DownloadsController {
             .and_then(|ix| self.local.get(ix))
     }
 
+    #[must_use]
+    pub(crate) fn task_runtime(&self, task_id: &str) -> Option<&TaskRuntimeDto> {
+        self.task_runtime.get(task_id).map(Rc::as_ref)
+    }
     #[must_use]
     pub(crate) fn categories(&self) -> &Rc<CategoryIndex> {
         &self.categories
@@ -406,6 +427,16 @@ impl DownloadsController {
         self.config.clone_from(&snapshot.config.values);
         self.config_revision = snapshot.config.revision;
         self.runtime_stats.clone_from(&snapshot.runtime_stats);
+        self.task_runtime = snapshot
+            .task_runtime
+            .iter()
+            .map(|(id, runtime)| (id.clone(), Rc::new(runtime.clone())))
+            .collect();
+        for task in &snapshot.tasks {
+            if !matches!(task.status, 1 | 5) {
+                self.stop_runtime(&task.task_id);
+            }
+        }
         self.boosted = snapshot.priority.first().cloned();
     }
 
@@ -438,11 +469,44 @@ impl DownloadsController {
             }
             DaemonEvent::RssChanged { .. } => false,
             DaemonEvent::TaskChanged(task) => {
+                if !matches!(task.status, 1 | 5) {
+                    self.live_speeds.remove(&task.task_id);
+                    self.stop_runtime(&task.task_id);
+                }
                 self.upsert(task.clone());
                 true
             }
+            DaemonEvent::TaskRuntimeChanged(runtime) => {
+                let task_id = &runtime.task_id;
+                if self.task_runtime.get(task_id).is_some_and(|previous| {
+                    previous.sample_sequence != 0
+                        && runtime.sample_sequence <= previous.sample_sequence
+                }) {
+                    return false;
+                }
+                let row = self.store.find_local(task_id);
+                let mut runtime = runtime.clone();
+                if runtime.segments.is_empty()
+                    && let Some(previous) = self.task_runtime.get(task_id)
+                {
+                    runtime.segments.clone_from(&previous.segments);
+                }
+                self.task_runtime.insert(task_id.clone(), Rc::new(runtime));
+                if let Some(ix) = row {
+                    if !matches!(self.local[ix].status, 1 | 5) {
+                        self.stop_runtime(task_id);
+                    }
+                    self.rebuild_row(ix);
+                    true
+                } else {
+                    // 任务元数据事件可能紧随其后；先保留样本供新行直接显示。
+                    false
+                }
+            }
+            DaemonEvent::TaskActivityAdded(_) => false,
             DaemonEvent::TaskDeleted { task_id } => {
                 self.live_speeds.remove(task_id);
+                self.task_runtime.remove(task_id);
                 if let Some(ix) = self.store.find_local(task_id) {
                     self.local.swap_remove(ix);
                     self.store.swap_remove_local(ix);
@@ -453,7 +517,20 @@ impl DownloadsController {
                 self.local.clone_from(tasks);
                 self.live_speeds
                     .retain(|task_id, _| tasks.iter().any(|task| task.task_id == *task_id));
+                self.task_runtime
+                    .retain(|task_id, _| tasks.iter().any(|task| task.task_id == *task_id));
+                for task in tasks.iter().filter(|task| !matches!(task.status, 1 | 5)) {
+                    self.stop_runtime(&task.task_id);
+                }
                 self.rebuild_all();
+                true
+            }
+            DaemonEvent::Engine(WsServerMsg::TaskQueueChanged { task_id, queue_id }) => {
+                let Some(ix) = self.store.find_local(task_id) else {
+                    return false;
+                };
+                self.local[ix].queue_id.clone_from(queue_id);
+                self.rebuild_row(ix);
                 true
             }
             DaemonEvent::Engine(WsServerMsg::TaskProgress {
@@ -482,9 +559,10 @@ impl DownloadsController {
                     if !file_name.is_empty() {
                         task.file_name.clone_from(file_name);
                     }
-                    if !error_message.is_empty() {
-                        task.error_message.clone_from(error_message);
-                    }
+                    task.error_message.clone_from(error_message);
+                }
+                if !matches!(*status, 1 | 5) {
+                    self.stop_runtime(task_id);
                 }
                 self.rebuild_row(ix);
                 true
@@ -511,11 +589,34 @@ impl DownloadsController {
     }
 
     fn view_of(&self, task: &TaskDto) -> DownloadTaskView {
-        DownloadTaskView::local(
+        let mut view = DownloadTaskView::local(
             task,
             self.live_speeds.get(&task.task_id).copied(),
             self.boosted.as_deref() == Some(task.task_id.as_str()),
-        )
+        );
+        view.runtime = self.task_runtime.get(&task.task_id).cloned();
+        view.runtime_connected = !self.stale;
+        view
+    }
+
+    fn stop_runtime(&mut self, task_id: &str) {
+        if let Some(runtime) = self.task_runtime.get_mut(task_id) {
+            if runtime.active_transfers == Some(0)
+                && runtime.connected_peers == Some(0)
+                && runtime
+                    .segments
+                    .iter()
+                    .all(|segment| segment.active == Some(false))
+            {
+                return;
+            }
+            let runtime = Rc::make_mut(runtime);
+            runtime.active_transfers = Some(0);
+            runtime.connected_peers = Some(0);
+            for segment in &mut runtime.segments {
+                segment.active = Some(false);
+            }
+        }
     }
 
     fn upsert(&mut self, task: TaskDto) {
@@ -620,6 +721,22 @@ mod tests {
     }
 
     #[test]
+    fn task_queue_delta_moves_visible_row_without_reloading_tasks() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        controller.local.push(task("task-1"));
+        controller.rebuild_all();
+
+        assert!(controller.apply_daemon_event(&DaemonEvent::Engine(
+            WsServerMsg::TaskQueueChanged {
+                task_id: "task-1".to_owned(),
+                queue_id: "work".to_owned(),
+            },
+        )));
+        assert_eq!(controller.store().local()[0].queue_id, "work");
+        assert_eq!(controller.task_dto("task-1").unwrap().queue_id, "work");
+    }
+
+    #[test]
     fn metadata_probe_replaces_loading_row_name_and_size() {
         let mut controller = DownloadsController::new(Arc::new(NullPort));
         controller.local.push(task("task-1"));
@@ -690,5 +807,163 @@ mod tests {
         assert_eq!(controller.store().find_local("b"), Some(1));
         assert_eq!(controller.local[0].task_id, "c");
         assert_eq!(controller.store().local()[0].key.task_id(), "c");
+    }
+    #[test]
+    fn late_snapshot_contains_segments_and_pausing_clears_active_without_erasing_bytes() {
+        let mut snapshot = fluxdown_protocol::AgentSnapshot::default();
+        snapshot.daemon_connected = true;
+        let mut initial = task("t");
+        initial.status = 1;
+        initial.total_bytes = 100;
+        snapshot.daemon.tasks.push(initial);
+        snapshot.daemon.task_runtime.insert(
+            "t".to_owned(),
+            fluxdown_protocol::TaskRuntimeDto {
+                task_id: "t".to_owned(),
+                total_bytes: 100,
+                active_transfers: Some(1),
+                segments: vec![fluxdown_protocol::TaskSegmentDto {
+                    start_byte: 0,
+                    end_byte: 99,
+                    downloaded_bytes: 23,
+                    active: Some(true),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(controller.store().local()[0].active_transfers(), Some(1));
+        assert_eq!(
+            controller.store().local()[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .segments[0]
+                .downloaded_bytes,
+            23
+        );
+
+        let mut paused = snapshot.daemon.tasks[0].clone();
+        paused.status = 2;
+        controller.apply_daemon_event(&DaemonEvent::TaskChanged(paused));
+        {
+            let row = &controller.store().local()[0];
+            assert_eq!(row.active_transfers(), Some(0));
+            assert_eq!(
+                row.runtime.as_ref().unwrap().segments[0].downloaded_bytes,
+                23
+            );
+            assert_eq!(
+                row.runtime.as_ref().unwrap().segments[0].active,
+                Some(false)
+            );
+        }
+
+        controller.mark_stale();
+        assert_eq!(controller.store().local()[0].active_transfers(), None);
+        assert!(controller.store().local()[0].runtime.is_none());
+    }
+    #[test]
+    fn runtime_source_sequence_prevents_regression_and_paused_transfer_revival() {
+        let mut snapshot = fluxdown_protocol::AgentSnapshot::default();
+        snapshot.daemon_connected = true;
+        let mut task = task("t");
+        task.status = 1;
+        snapshot.daemon.tasks.push(task.clone());
+        let current = fluxdown_protocol::TaskRuntimeDto {
+            task_id: "t".to_owned(),
+            sampled_at_ms: 100,
+            sample_sequence: 10,
+            total_bytes: 100,
+            active_transfers: Some(2),
+            segments: vec![fluxdown_protocol::TaskSegmentDto {
+                start_byte: 0,
+                end_byte: 99,
+                downloaded_bytes: 30,
+                active: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        snapshot
+            .daemon
+            .task_runtime
+            .insert("t".to_owned(), current.clone());
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        controller.replace_snapshot(&snapshot);
+
+        let mut older = current.clone();
+        older.sampled_at_ms = 10_000; // 墙上时间即使更新也不得决定顺序。
+        older.sample_sequence = 9;
+        older.segments[0].downloaded_bytes = 10;
+        older.active_transfers = Some(7);
+        assert!(!controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(older.clone())));
+        older.sample_sequence = 10;
+        assert!(!controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(older)));
+        {
+            let row = &controller.store().local()[0];
+            assert_eq!(row.active_transfers(), Some(2));
+            assert_eq!(
+                row.runtime.as_ref().unwrap().segments[0].downloaded_bytes,
+                30
+            );
+        }
+        let mut count_only = current.clone();
+        count_only.sample_sequence = 11;
+        count_only.segments.clear();
+        count_only.active_transfers = Some(3);
+        assert!(controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(count_only)));
+        {
+            let row = &controller.store().local()[0];
+            assert_eq!(row.active_transfers(), Some(3));
+            assert_eq!(
+                row.runtime.as_ref().unwrap().segments[0].downloaded_bytes,
+                30
+            );
+        }
+
+        task.status = 2;
+        controller.apply_daemon_event(&DaemonEvent::TaskChanged(task));
+        let mut later = current;
+        later.sample_sequence = 12;
+        later.sampled_at_ms = 1;
+        later.segments[0].downloaded_bytes = 45;
+        later.active_transfers = Some(3);
+        assert!(controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(later)));
+        let row = &controller.store().local()[0];
+        assert_eq!(row.active_transfers(), Some(0));
+        let runtime = row.runtime.as_ref().unwrap();
+        assert_eq!(runtime.segments[0].downloaded_bytes, 45);
+        assert_eq!(runtime.segments[0].active, Some(false));
+    }
+
+    #[test]
+    fn empty_progress_error_clears_previous_failure() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let mut initial = task("t");
+        initial.status = 4;
+        initial.error_message = "transient failure".to_owned();
+        controller.local.push(initial);
+        controller.rebuild_all();
+        controller.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::TaskProgress {
+            task_id: "t".to_owned(),
+            status: 1,
+            downloaded_bytes: 0,
+            total_bytes: 100,
+            speed: 0,
+            upload_speed: 0,
+            file_name: String::new(),
+            save_dir: "/tmp".to_owned(),
+            url: "https://example.com/download".to_owned(),
+            error_message: String::new(),
+            uploaded_bytes: 0,
+            seeding_status: 0,
+            seeding_message: String::new(),
+            seeding_time_secs: 0,
+        }));
+        assert!(controller.store().local()[0].error_message.is_empty());
+        assert!(controller.task_dto("t").unwrap().error_message.is_empty());
     }
 }

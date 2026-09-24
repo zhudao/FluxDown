@@ -85,13 +85,14 @@ pub async fn run(
     .await?;
     apply_manager_settings(&mut engine, &all_config);
 
-    if let Some(progress) = engine.manager.take_progress_rx() {
+    let activity_journal = engine.activity_journal();
+    let progress_task = engine.manager.take_progress_rx().map(|progress| {
         tokio::spawn(download_manager::progress_reporter(
             progress,
             engine.db.clone(),
-            sink,
-        ));
-    }
+            engine.activity_sink.clone(),
+        ))
+    });
     let service_db = engine.db.clone();
     #[cfg(any(feature = "plugins", feature = "components"))]
     let service_data_dir = data_dir.clone();
@@ -160,6 +161,24 @@ pub async fn run(
         actor_task.abort();
         let _ = actor_task.await;
     }
+    if let Some(mut progress_task) = progress_task {
+        match tokio::time::timeout(Duration::from_secs(10), &mut progress_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "progress reporter stopped before journal flush")
+            }
+            Err(_) => {
+                progress_task.abort();
+                let _ = progress_task.await;
+                tracing::error!("progress reporter did not drain before journal flush");
+            }
+        }
+    }
+    match tokio::time::timeout(Duration::from_secs(10), activity_journal.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::error!(%error, "task activity journal final flush failed"),
+        Err(_) => tracing::error!("task activity journal final flush timed out"),
+    }
     if !startup_maintenance_task.is_finished() {
         startup_maintenance_task.abort();
     }
@@ -208,6 +227,7 @@ async fn initial_snapshot(
     config: &HashMap<String, String>,
 ) -> Result<DaemonSnapshot, fluxdown_engine::db::DbError> {
     Ok(DaemonSnapshot {
+        task_runtime: Default::default(),
         tasks: db
             .load_all_tasks()
             .await?

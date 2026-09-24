@@ -10,6 +10,10 @@ pub mod event;
 pub mod method;
 pub mod rpc;
 pub mod settings;
+pub mod task_activity;
+pub use task_activity::{
+    TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
+};
 
 pub use agent::{
     AgentLoginResult, AgentPreferencesDto, AgentSessionDto, AuthVerificationDto,
@@ -64,7 +68,7 @@ pub use error::{
 };
 pub use event::{
     AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, EventFrame, ServiceEvent, Snapshot,
-    SnapshotBody,
+    SnapshotBody, accepted_runtime_status, apply_agent_event, apply_daemon_event,
 };
 pub use rpc::{
     ClientHello, JSONRPC_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, RequestId,

@@ -20,7 +20,7 @@
 | **新增本机 RPC 能力** | `native/protocol` 先加唯一 method/DTO/event/error → owner 进程（下载事实进 daemon actor；账户/云/UI Gateway 进 agent）实现 → `crates/app` 单会话 adapter 映射到 capability-local port；二进制 body 留专用鉴权 HTTP 端点 |
 | **新增 aria2 方法** | `aria2.rs` `METHOD_NAMES` + `jsonrpc.rs` dispatch | 
 | **新增 MCP 工具** | `mcp.rs` tool_definitions + call_tool |
-| **新增引擎事件** | `events.rs` `EngineEvent` 变体 + `EventSink`；`rinf_sink`/`ws_hub` 各接线一处 |
+| **新增引擎事件** | `events.rs` 的 `EngineEvent` + `EventSink`；legacy `rinf_sink`/`ws_hub` 接线；本机链路在 `native/daemon/src/event_hub.rs` 映射规范 `DaemonEvent`，同步 daemon/agent 快照投影与 GPUI 消费者（含重连快照），验证真实 sink 广播，避免仅更新快照而已有窗口漏刷 |
 | **新增 Doctor 诊断项** | `hub/src/diagnostics.rs` 加探针 fn（返回 `DiagnosticCheck`，wire `id` 稳定、`level` 取 `ok`/`warn`/`error`/`info`、`hint` 取既有 code）→ 接进 `probe_sync()` 或 `run()` 的顺序里 → Dart `translations.dart` 的 `S.doctorCheckLabel` 加一臂 + `assets/i18n/{en,zh}.json` 加 `doctorCheckXxx`（新 hint 再加 `doctorHintXxx`）；要能就地修复则在 `doctor_report_view.dart` 的 `_actionFor` 加一臂 + `doctorActionXxx` 文案。**信号无需改动**：`DiagnosticCheck` 是通用行，加检查项不动 wire schema、不用 `rinf gen`。诊断与修复动作走 `download_actor` 里的独立 Doctor 泵（不碰 Engine、不进主 `select!`） |
 | **新增 webhook 事件** | `engine/src/webhook.rs` 的 `WebhookEventKind` 加变体（`wire()`/`title()` 同步）+ 在 `download_manager` 对应生命周期点位 `self.webhook.emit(...)`；UI 侧事件芯片自动跟随 `WebhookEvents.all`（Dart）/ `WEBHOOK_EVENTS`（TS），**三处 wire 名必须逐字一致** |
 | **新增 webhook 服务预设** | 只改 `engine/src/webhook.rs`：`Preset` 加变体 + `wire`/`label`/`content_type`/`escape`/`default_template`/`url_placeholder` 六个 match 各补一臂。模板由引擎下发，UI 零改动（只有品牌字标 `WebhookPresetMark`/`PRESET_MARKS` 想美化时才加） |

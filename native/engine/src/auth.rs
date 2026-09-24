@@ -311,6 +311,7 @@ pub fn now_unix() -> i64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

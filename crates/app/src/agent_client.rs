@@ -99,11 +99,6 @@ impl AgentClient {
         })
     }
 
-    /// 主动拉取一次全量快照（晚开窗口对齐游标用）。
-    pub fn call_snapshot(&self) -> AgentFuture<Snapshot> {
-        self.call::<(), Snapshot>(method::SYSTEM_SNAPSHOT, None)
-    }
-
     /// 在客户端自有 tokio 运行时上运行后台任务（单实例激活监听等）。
     pub fn spawn_background<F>(&self, future: F)
     where
@@ -123,29 +118,39 @@ async fn run_client(
     let mut attempt = 0_usize;
     loop {
         match connect(&config).await {
-            Ok((socket, snapshot)) => {
+            Ok((socket, snapshot, buffered)) => {
                 attempt = 0;
+                let cursor = (snapshot.epoch.clone(), snapshot.sequence);
                 if events
-                    .try_send(AgentClientEvent::Snapshot(Box::new(snapshot)))
+                    .send(AgentClientEvent::Snapshot(Box::new(snapshot)))
+                    .await
                     .is_err()
                 {
                     return;
                 }
-                if run_connected(socket, &mut commands, &events).await.is_err() {
-                    let _ = events.try_send(AgentClientEvent::Stale);
+                if run_connected(socket, &mut commands, &events, cursor, buffered)
+                    .await
+                    .is_err()
+                    && events.send(AgentClientEvent::Stale).await.is_err()
+                {
+                    return;
                 }
             }
             Err(ConnectError::Refused) => {
-                if bootstrap.ensure_running(&config.rpc_url).await.is_err() {
-                    let _ = events.try_send(AgentClientEvent::Stale);
+                if bootstrap.ensure_running(&config.rpc_url).await.is_err()
+                    && events.send(AgentClientEvent::Stale).await.is_err()
+                {
+                    return;
                 }
             }
             Err(ConnectError::Fatal(error)) => {
-                let _ = events.try_send(AgentClientEvent::Fatal(error));
+                let _ = events.send(AgentClientEvent::Fatal(error)).await;
                 return;
             }
             Err(ConnectError::Transient) => {
-                let _ = events.try_send(AgentClientEvent::Stale);
+                if events.send(AgentClientEvent::Stale).await.is_err() {
+                    return;
+                }
             }
         }
         let delay = backoff[attempt.min(backoff.len() - 1)];
@@ -154,7 +159,9 @@ async fn run_client(
     }
 }
 
-async fn connect(config: &AgentClientConfig) -> Result<(Socket, Snapshot), ConnectError> {
+async fn connect(
+    config: &AgentClientConfig,
+) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
     let bearer = tokio::fs::read_to_string(&config.bearer_path)
         .await
         .map_err(|_| ConnectError::Refused)?;
@@ -175,6 +182,7 @@ async fn connect(config: &AgentClientConfig) -> Result<(Socket, Snapshot), Conne
     let (mut socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(classify_connect_error)?;
+    let mut buffered = Vec::new();
     let hello = serde_json::json!({
         "clientName": "fluxdown-desktop",
         "clientVersion": env!("CARGO_PKG_VERSION"),
@@ -183,7 +191,14 @@ async fn connect(config: &AgentClientConfig) -> Result<(Socket, Snapshot), Conne
         "requestedRole": "agent",
         "capabilities": [method::CAPABILITY_CLIENT_SELECTIONS]
     });
-    let hello_value = call_on_socket(&mut socket, 1, method::SYSTEM_HELLO, Some(hello)).await?;
+    let hello_value = call_on_socket(
+        &mut socket,
+        1,
+        method::SYSTEM_HELLO,
+        Some(hello),
+        &mut buffered,
+    )
+    .await?;
     let service = serde_json::from_value::<ServiceHello>(hello_value)
         .map_err(|_| ConnectError::Fatal(protocol_error()))?;
     if service.role != ServiceRole::Agent
@@ -191,22 +206,31 @@ async fn connect(config: &AgentClientConfig) -> Result<(Socket, Snapshot), Conne
     {
         return Err(ConnectError::Fatal(protocol_error()));
     }
-    let snapshot_value = call_on_socket(&mut socket, 2, method::SYSTEM_SNAPSHOT, None).await?;
+    let snapshot_value =
+        call_on_socket(&mut socket, 2, method::SYSTEM_SNAPSHOT, None, &mut buffered).await?;
     let snapshot = serde_json::from_value::<Snapshot>(snapshot_value)
         .map_err(|_| ConnectError::Fatal(protocol_error()))?;
     if !matches!(snapshot.body, SnapshotBody::Agent(_)) {
         return Err(ConnectError::Fatal(protocol_error()));
     }
-    Ok((socket, snapshot))
+    Ok((socket, snapshot, buffered))
 }
 
 async fn run_connected(
     mut socket: Socket,
     commands: &mut mpsc::Receiver<ClientCommand>,
     events: &mpsc::Sender<AgentClientEvent>,
+    snapshot_cursor: (String, u64),
+    buffered: Vec<EventFrame>,
 ) -> Result<(), ()> {
     let mut next_id = 10_i64;
     let mut pending = HashMap::<i64, oneshot::Sender<Result<Value, RpcErrorData>>>::new();
+    let mut cursor = snapshot_cursor;
+    for frame in buffered {
+        if frame.epoch == cursor.0 {
+            forward_event(frame, &mut cursor, events).await?;
+        }
+    }
     loop {
         tokio::select! {
             command = commands.recv() => {
@@ -223,12 +247,9 @@ async fn run_connected(
                 if let Ok(notification) = serde_json::from_str::<RpcNotification>(&text)
                     && notification.method == method::SERVICE_EVENT
                 {
-                    if let Some(params) = notification.params
-                        && let Ok(frame) = serde_json::from_value::<EventFrame>(params)
-                        && events.try_send(AgentClientEvent::Event(Box::new(frame))).is_err()
-                    {
-                        break;
-                    }
+                    let Some(params) = notification.params else { break; };
+                    let Ok(frame) = serde_json::from_value::<EventFrame>(params) else { break; };
+                    forward_event(frame, &mut cursor, events).await?;
                     continue;
                 }
                 let response = serde_json::from_str::<RpcResponse>(&text).map_err(|_| ())?;
@@ -257,11 +278,33 @@ async fn run_connected(
     Err(())
 }
 
+async fn forward_event(
+    frame: EventFrame,
+    cursor: &mut (String, u64),
+    events: &mpsc::Sender<AgentClientEvent>,
+) -> Result<(), ()> {
+    if frame.epoch != cursor.0 {
+        return Err(());
+    }
+    if frame.sequence <= cursor.1 {
+        return Ok(());
+    }
+    if frame.sequence != cursor.1.saturating_add(1) {
+        return Err(());
+    }
+    cursor.1 = frame.sequence;
+    events
+        .send(AgentClientEvent::Event(Box::new(frame)))
+        .await
+        .map_err(|_| ())
+}
+
 async fn call_on_socket(
     socket: &mut Socket,
     id: i64,
     method_name: &str,
     params: Option<Value>,
+    buffered: &mut Vec<EventFrame>,
 ) -> Result<Value, ConnectError> {
     let request = RpcRequest::new(RequestId::Integer(id), method_name, params);
     let text = serde_json::to_string(&request).map_err(|_| ConnectError::Transient)?;
@@ -274,6 +317,20 @@ async fn call_on_socket(
         let Message::Text(text) = message else {
             continue;
         };
+        if let Ok(notification) = serde_json::from_str::<RpcNotification>(&text)
+            && notification.method == method::SERVICE_EVENT
+        {
+            let Some(params) = notification.params else {
+                return Err(ConnectError::Fatal(protocol_error()));
+            };
+            let frame = serde_json::from_value::<EventFrame>(params)
+                .map_err(|_| ConnectError::Fatal(protocol_error()))?;
+            if buffered.len() >= 1024 {
+                return Err(ConnectError::Transient);
+            }
+            buffered.push(frame);
+            continue;
+        }
         let response =
             serde_json::from_str::<RpcResponse>(&text).map_err(|_| ConnectError::Transient)?;
         match response {

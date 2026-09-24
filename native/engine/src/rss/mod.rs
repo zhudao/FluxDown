@@ -1392,6 +1392,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deleting_download_task_prevents_refetch_dispatch_but_allows_manual_redownload() {
+        let mut m = manager().await;
+        let id = subscribe(
+            &mut m,
+            RssSourceInfo {
+                url: "https://feed.test/rss".to_string(),
+                ..Default::default()
+            },
+        )
+        .await;
+        fetched(&mut m, &id, Vec::new()).await;
+        assert_eq!(
+            fetched(&mut m, &id, vec![parsed("episode", "Episode", 100, 10)]).await,
+            vec!["episode"]
+        );
+        m.db.insert_task(
+            "task-episode",
+            "https://feed.test/dl/episode",
+            "episode",
+            "/tmp",
+            3,
+            0,
+            "",
+            "",
+            "",
+            0,
+        )
+        .await
+        .expect("persist download task");
+        assert_eq!(
+            m.db.delete_task("task-episode").await.expect("delete"),
+            vec![id.clone()]
+        );
+        let old =
+            m.db.rss_item(&id, "episode")
+                .await
+                .expect("query")
+                .expect("item");
+        assert_eq!(old.status, RssItemStatus::Ignored);
+        assert!(old.task_id.is_empty());
+        assert_eq!(
+            fetched(
+                &mut m,
+                &id,
+                vec![
+                    parsed("episode", "Episode", 100, 10),
+                    parsed("next", "Next", 100, 20)
+                ]
+            )
+            .await,
+            vec!["next"],
+            "existing episode stays read while a genuinely new item still dispatches"
+        );
+        assert!(m.manual_download(&id, "episode").await.is_some());
+    }
+
+    #[tokio::test]
     async fn per_round_cap_defers_the_remainder_oldest_first() {
         let mut m = manager().await;
         let id = subscribe(

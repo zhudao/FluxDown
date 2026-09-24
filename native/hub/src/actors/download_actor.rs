@@ -385,7 +385,10 @@ async fn open_db_with_lease_retry(
     }
 }
 
-pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
+pub async fn run(
+    db_dir: PathBuf,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> Result<(), ActorError> {
     let (db, write_guard) = open_db_with_lease_retry(&db_dir).await?;
 
     // Initialize default config values in DB (no-op if already set)
@@ -534,13 +537,13 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
         }
     }
 
-    if let Some(rx) = engine.manager.take_progress_rx() {
+    let progress_task = engine.manager.take_progress_rx().map(|rx| {
         tokio::spawn(download_manager::progress_reporter(
             rx,
             engine.db.clone(),
-            sink.clone(),
-        ));
-    }
+            engine.activity_sink.clone(),
+        ))
+    });
 
     // Load named queue settings into the in-memory cache so that
     // per-queue speed limits and concurrency limits take effect immediately.
@@ -1051,6 +1054,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
         Test(TestWebhookEndpoint),
     }
     enum AuxSignal {
+        Shutdown,
         Group(GroupSignal),
         Rss(RssSignal),
         Webhook(WebhookSignal),
@@ -1065,6 +1069,11 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
         CopyPath(CopyPathToClipboard),
     }
     let (aux_tx, mut aux_rx) = mpsc::unbounded_channel::<AuxSignal>();
+    let shutdown_tx = aux_tx.clone();
+    tokio::spawn(async move {
+        shutdown.cancelled().await;
+        let _ = shutdown_tx.send(AuxSignal::Shutdown);
+    });
     // 文件丢失自动清理泵：引擎 detached 扫描 → mpsc → aux_tx → 主循环单分支。
     if let Some(mut rx) = missing_cleanup_rx {
         let cleanup_tx = aux_tx.clone();
@@ -1446,6 +1455,7 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
             // 主 select! 因此停在 64 分支上限之内。
             Some(aux) = aux_rx.recv() => {
                 match aux {
+                AuxSignal::Shutdown => break,
                 AuxSignal::Group(group_signal) => match group_signal {
                     GroupSignal::Preview(msg) => {
                         engine.manager
@@ -2710,6 +2720,9 @@ pub async fn run(db_dir: PathBuf) -> Result<(), ActorError> {
             }
         }
     }
+    api_server_handle.shutdown();
+    super::shutdown_engine(engine, progress_task).await;
+    Ok(())
 }
 
 #[cfg(hub_plugins)]

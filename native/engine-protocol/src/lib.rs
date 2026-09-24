@@ -33,6 +33,48 @@ pub fn request_body_to_engine(body: RequestBody) -> CapturedRequestBody {
     }
 }
 
+/// 将引擎实际传输采样转换成 wire DTO，不推测未知并发。
+#[must_use]
+pub fn task_runtime_to_dto(
+    runtime: fluxdown_engine::transfer_activity::TaskRuntime,
+) -> fluxdown_protocol::TaskRuntimeDto {
+    fluxdown_protocol::TaskRuntimeDto {
+        task_id: runtime.task_id,
+        sampled_at_ms: runtime.sampled_at_ms,
+        sample_sequence: runtime.sample_sequence,
+        active_transfers: runtime.active_transfers,
+        connected_peers: runtime.connected_peers,
+        parallelism_limit: runtime.parallelism_limit,
+        total_bytes: runtime.total_bytes,
+        segments: runtime
+            .segments
+            .into_iter()
+            .map(|segment| fluxdown_protocol::TaskSegmentDto {
+                index: segment.index,
+                start_byte: segment.start_byte,
+                end_byte: segment.end_byte,
+                downloaded_bytes: segment.downloaded_bytes,
+                active: segment.active,
+            })
+            .collect(),
+    }
+}
+
+/// 将已提交的源端日志转换成 wire DTO。
+#[must_use]
+pub fn task_activity_to_dto(
+    activity: fluxdown_engine::task_activity::TaskActivity,
+) -> fluxdown_protocol::TaskActivityDto {
+    fluxdown_protocol::TaskActivityDto {
+        id: activity.id,
+        task_id: activity.task_id,
+        timestamp_ms: activity.timestamp_ms,
+        kind: activity.kind,
+        message: activity.message,
+        status: activity.status,
+    }
+}
+
 /// 将引擎任务投影转换为 wire DTO。
 #[must_use]
 pub fn task_info_to_dto(task: TaskInfo) -> TaskDto {

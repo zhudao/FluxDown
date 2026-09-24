@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, DaemonSnapshot, EventFrame, RequestId, RpcErrorData, RpcNotification,
-    RpcRequest, RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
+    ApplicationErrorCode, EventFrame, RequestId, RpcErrorData, RpcNotification, RpcRequest,
+    RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -56,8 +56,8 @@ impl DaemonClientConfig {
 
 /// daemon 连接产生的有序状态流。
 pub enum DaemonClientEvent {
-    Snapshot(DaemonSnapshot),
-    Event(EventFrame),
+    Snapshot(Snapshot),
+    Event(Box<EventFrame>),
     Stale,
     Fatal(RpcErrorData),
 }
@@ -173,10 +173,11 @@ async fn run_client(
     let mut attempt = 0_usize;
     loop {
         match connect(&config).await {
-            Ok((socket, snapshot)) => {
+            Ok((socket, snapshot, buffered)) => {
                 attempt = 0;
                 connected.store(true, Ordering::Release);
                 ready.notify_waiters();
+                let snapshot_cursor = (snapshot.epoch.clone(), snapshot.sequence);
                 if events
                     .send(DaemonClientEvent::Snapshot(snapshot))
                     .await
@@ -185,7 +186,10 @@ async fn run_client(
                     connected.store(false, Ordering::Release);
                     return;
                 }
-                if run_connected(socket, &mut commands, &events).await.is_err() {
+                if run_connected(socket, &mut commands, &events, snapshot_cursor, buffered)
+                    .await
+                    .is_err()
+                {
                     let _ = events.send(DaemonClientEvent::Stale).await;
                 }
                 connected.store(false, Ordering::Release);
@@ -218,7 +222,9 @@ fn fail_queued_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
     }
 }
 
-async fn connect(config: &DaemonClientConfig) -> Result<(Socket, DaemonSnapshot), ConnectError> {
+async fn connect(
+    config: &DaemonClientConfig,
+) -> Result<(Socket, Snapshot, Vec<EventFrame>), ConnectError> {
     let mut request = config
         .rpc_url
         .clone()
@@ -232,6 +238,7 @@ async fn connect(config: &DaemonClientConfig) -> Result<(Socket, DaemonSnapshot)
     let (mut socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(classify_connect_error)?;
+    let mut buffered = Vec::new();
     let hello = serde_json::json!({
         "clientName": "fluxdown-agent",
         "clientVersion": env!("CARGO_PKG_VERSION"),
@@ -240,7 +247,14 @@ async fn connect(config: &DaemonClientConfig) -> Result<(Socket, DaemonSnapshot)
         "requestedRole": "daemon",
         "capabilities": []
     });
-    let hello_value = call_on_socket(&mut socket, 1, method::SYSTEM_HELLO, Some(hello)).await?;
+    let hello_value = call_on_socket(
+        &mut socket,
+        1,
+        method::SYSTEM_HELLO,
+        Some(hello),
+        &mut buffered,
+    )
+    .await?;
     let service = serde_json::from_value::<ServiceHello>(hello_value)
         .map_err(|_| ConnectError::Fatal(protocol_error()))?;
     if service.role != ServiceRole::Daemon
@@ -248,22 +262,31 @@ async fn connect(config: &DaemonClientConfig) -> Result<(Socket, DaemonSnapshot)
     {
         return Err(ConnectError::Fatal(protocol_error()));
     }
-    let snapshot_value = call_on_socket(&mut socket, 2, method::SYSTEM_SNAPSHOT, None).await?;
+    let snapshot_value =
+        call_on_socket(&mut socket, 2, method::SYSTEM_SNAPSHOT, None, &mut buffered).await?;
     let snapshot = serde_json::from_value::<Snapshot>(snapshot_value)
         .map_err(|_| ConnectError::Fatal(protocol_error()))?;
-    let SnapshotBody::Daemon(snapshot) = snapshot.body else {
+    if !matches!(snapshot.body, SnapshotBody::Daemon(_)) {
         return Err(ConnectError::Fatal(protocol_error()));
-    };
-    Ok((socket, *snapshot))
+    }
+    Ok((socket, snapshot, buffered))
 }
 
 async fn run_connected(
     mut socket: Socket,
     commands: &mut mpsc::Receiver<ClientCommand>,
     events: &mpsc::Sender<DaemonClientEvent>,
+    snapshot_cursor: (String, u64),
+    buffered: Vec<EventFrame>,
 ) -> Result<(), ()> {
     let mut next_id = 10_i64;
     let mut pending = HashMap::<i64, oneshot::Sender<Result<Value, RpcErrorData>>>::new();
+    let mut cursor = snapshot_cursor;
+    for frame in buffered {
+        if frame.epoch == cursor.0 {
+            forward_event(frame, &mut cursor, events).await?;
+        }
+    }
     loop {
         tokio::select! {
             command = commands.recv() => {
@@ -280,12 +303,9 @@ async fn run_connected(
                 if let Ok(notification) = serde_json::from_str::<RpcNotification>(&text)
                     && notification.method == method::SERVICE_EVENT
                 {
-                    if let Some(params) = notification.params
-                        && let Ok(frame) = serde_json::from_value::<EventFrame>(params)
-                        && events.send(DaemonClientEvent::Event(frame)).await.is_err()
-                    {
-                        return Ok(());
-                    }
+                    let Some(params) = notification.params else { break; };
+                    let Ok(frame) = serde_json::from_value::<EventFrame>(params) else { break; };
+                    forward_event(frame, &mut cursor, events).await?;
                     continue;
                 }
                 let Ok(response) = serde_json::from_str::<RpcResponse>(&text) else { break; };
@@ -315,11 +335,34 @@ async fn run_connected(
     Err(())
 }
 
+/// 快照以前的通知可跳过；快照以后的缺口或 epoch 更换必须重新握手。
+async fn forward_event(
+    frame: EventFrame,
+    cursor: &mut (String, u64),
+    events: &mpsc::Sender<DaemonClientEvent>,
+) -> Result<(), ()> {
+    if frame.epoch != cursor.0 {
+        return Err(());
+    }
+    if frame.sequence <= cursor.1 {
+        return Ok(());
+    }
+    if frame.sequence != cursor.1.saturating_add(1) {
+        return Err(());
+    }
+    cursor.1 = frame.sequence;
+    events
+        .send(DaemonClientEvent::Event(Box::new(frame)))
+        .await
+        .map_err(|_| ())
+}
+
 async fn call_on_socket(
     socket: &mut Socket,
     id: i64,
     method_name: &str,
     params: Option<Value>,
+    buffered: &mut Vec<EventFrame>,
 ) -> Result<Value, ConnectError> {
     let request = RpcRequest::new(RequestId::Integer(id), method_name, params);
     let text = serde_json::to_string(&request)
@@ -333,6 +376,22 @@ async fn call_on_socket(
         let Message::Text(text) = message else {
             continue;
         };
+        if let Ok(notification) = serde_json::from_str::<RpcNotification>(&text)
+            && notification.method == method::SERVICE_EVENT
+        {
+            let Some(params) = notification.params else {
+                return Err(ConnectError::Fatal(protocol_error()));
+            };
+            let frame = serde_json::from_value::<EventFrame>(params)
+                .map_err(|_| ConnectError::Fatal(protocol_error()))?;
+            if buffered.len() >= 1024 {
+                return Err(ConnectError::Transient(
+                    "handshake event backlog".to_owned(),
+                ));
+            }
+            buffered.push(frame);
+            continue;
+        }
         let response = serde_json::from_str::<RpcResponse>(&text)
             .map_err(|error| ConnectError::Transient(error.to_string()))?;
         match response {
@@ -414,5 +473,147 @@ mod tests {
         let error = result.expect_err("disconnected command must fail");
         assert_eq!(error.code, ApplicationErrorCode::Unavailable);
         assert!(error.retryable);
+    }
+
+    #[tokio::test]
+    async fn handshake_buffers_notifications_filters_old_frames_and_reconnects_after_gap() {
+        use fluxdown_protocol::{
+            DaemonEvent, DaemonSnapshot, EventFrame, RequestId, RpcNotification, RpcResponse,
+            ServiceEvent, ServiceHello, ServiceRole, Snapshot, SnapshotBody, TaskRuntimeDto,
+        };
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        fn notification(epoch: &str, sequence: u64) -> Message {
+            let frame = EventFrame {
+                epoch: epoch.into(),
+                sequence,
+                event: ServiceEvent::Daemon(DaemonEvent::TaskRuntimeChanged(TaskRuntimeDto {
+                    task_id: "task".into(),
+                    active_transfers: Some(sequence as u32),
+                    ..Default::default()
+                })),
+            };
+            let notification = RpcNotification::new(
+                fluxdown_protocol::method::SERVICE_EVENT,
+                Some(serde_json::to_value(frame).unwrap()),
+            );
+            Message::Text(serde_json::to_string(&notification).unwrap().into())
+        }
+
+        async fn serve_once(
+            listener: &tokio::net::TcpListener,
+            epoch: &str,
+            sequence: u64,
+            gap: bool,
+        ) {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            ws.next().await.expect("hello request").unwrap();
+            if gap {
+                ws.send(notification("previous", 3)).await.unwrap();
+            }
+            let hello =
+                ServiceHello::new(ServiceRole::Daemon, "daemon", "test", "instance", vec![]);
+            ws.send(Message::Text(
+                serde_json::to_string(&RpcResponse::success(
+                    RequestId::Integer(1),
+                    serde_json::to_value(hello).unwrap(),
+                ))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            ws.next().await.expect("snapshot request").unwrap();
+            ws.send(notification(epoch, sequence.saturating_sub(1)))
+                .await
+                .unwrap();
+            ws.send(notification(epoch, sequence + 1)).await.unwrap();
+            let snapshot = Snapshot {
+                epoch: epoch.into(),
+                sequence,
+                body: SnapshotBody::Daemon(Box::new(DaemonSnapshot::default())),
+            };
+            ws.send(Message::Text(
+                serde_json::to_string(&RpcResponse::success(
+                    RequestId::Integer(2),
+                    serde_json::to_value(snapshot).unwrap(),
+                ))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            if gap {
+                ws.send(notification(epoch, sequence + 2)).await.unwrap();
+                ws.send(notification(epoch, sequence + 4)).await.unwrap();
+            }
+            ws.close(None).await.unwrap();
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}/rpc", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                serve_once(&listener, "a", 5, true).await;
+                serve_once(&listener, "b", 20, false).await;
+            });
+            let config = super::DaemonClientConfig {
+                rpc_url: url,
+                bearer: "test".into(),
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+            let (command_tx, mut commands) = tokio::sync::mpsc::channel(1);
+            let (socket, snapshot, buffered) = super::connect(&config)
+                .await
+                .unwrap_or_else(|_| panic!("connect"));
+            assert_eq!((snapshot.epoch.as_str(), snapshot.sequence), ("a", 5));
+            assert!(
+                super::run_connected(
+                    socket,
+                    &mut commands,
+                    &tx,
+                    (snapshot.epoch, snapshot.sequence),
+                    buffered
+                )
+                .await
+                .is_err()
+            );
+            let first = rx.recv().await.expect("buffered next event");
+            let second = rx.recv().await.expect("live next event");
+            let [
+                super::DaemonClientEvent::Event(first),
+                super::DaemonClientEvent::Event(second),
+            ] = [first, second]
+            else {
+                panic!("events")
+            };
+            assert_eq!((first.sequence, second.sequence), (6, 7));
+            assert!(rx.try_recv().is_err(), "gap event must not be delivered");
+            let (socket, snapshot, buffered) = super::connect(&config)
+                .await
+                .unwrap_or_else(|_| panic!("reconnect"));
+            assert_eq!((snapshot.epoch.as_str(), snapshot.sequence), ("b", 20));
+            super::run_connected(
+                socket,
+                &mut commands,
+                &tx,
+                (snapshot.epoch, snapshot.sequence),
+                buffered,
+            )
+            .await
+            .ok();
+            let super::DaemonClientEvent::Event(recovered) =
+                rx.recv().await.expect("recovered event")
+            else {
+                panic!("event")
+            };
+            assert_eq!((recovered.epoch.as_str(), recovered.sequence), ("b", 21));
+            drop(command_tx);
+            server.await.unwrap();
+        })
+        .await
+        .expect("websocket handshake and recovery");
     }
 }

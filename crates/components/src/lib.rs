@@ -124,12 +124,13 @@ pub fn primary_icon_button(
         )
 }
 
-/// 创建任务列表工具栏的紧凑图标操作按钮。
+/// 创建任务列表工具栏的紧凑图标操作按钮；`disabled` 时不响应点击且无悬停反馈。
 pub fn toolbar_action_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     icon: impl IntoElement,
     destructive: bool,
+    disabled: bool,
     cx: &App,
 ) -> Button {
     let tokens = active_theme(cx).tokens();
@@ -139,20 +140,25 @@ pub fn toolbar_action_button(
         tokens.colors.muted_foreground
     };
 
-    Button::new(id)
+    let button = Button::new(id)
         .size(px(30.))
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .rounded(tokens.radius.md)
         .bg(transparent(tokens.colors.muted))
         .text_color(foreground)
+        .disabled(disabled)
+        .accessibility_label(label)
+        .child(icon);
+    if disabled {
+        return button.opacity(0.4).cursor_default();
+    }
+    button
+        .cursor_pointer()
         .hover(move |style| style.bg(tokens.colors.muted))
         .active(move |style| style.bg(tokens.colors.secondary))
         .focus_visible(move |style| style.bg(tokens.colors.muted))
-        .accessibility_label(label)
-        .child(icon)
 }
 
 /// 创建侧栏导航按钮；选中态由调用方控制。

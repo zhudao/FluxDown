@@ -12,12 +12,15 @@ Dart 与 Rust 两端写**同一目录同一文件**，统一格式 `HH:MM:SS.mmm
 - Dart：`import '../services/log_service.dart'; logInfo(_tag, msg); logError(...)`。
 - Rust：`use crate::logger::log_info; log_info!("[mod] ...")`（Rust 2024 无 `#[macro_use]`，每文件显式 use）。
 - 导出：设置「关于」→ ZIP（纯 Dart 标准库，零依赖）。
+- GPUI 任务「日志」另走引擎数据库中的结构化活动历史（`engine/task_activity.rs`、`db.rs`），不是全局滚动文本文件：源端时间、跨重启 ID、查询分页与实时通知配合。当前保留七天且全库最多五万条，两者先到先清理；页面显示保留截断。同步事件入有界队列，持久化失败不广播成功记录，队列溢出/失败形成显式 `journal_overflow` 缺口；关机冲刷有界，不能因日志数据库不可用永久挂住。
 
 ---
 
 ## 发布与 CI（`.github/workflows/release.yml`）
 
 **组件变更检测**流水线，`v*` tag 触发。`changes` job diff `PREV..TAG` 映射路径→输出（`app`/`extension`/`server`/`mobile`/`cli`），首个 tag 全量构建。**分支守卫**：稳定 `vX.Y.Z` 必须是 `origin/stable` 祖先；预览 `vX.Y.Z-rc.N` 必须在 `origin/main`；否则整条失败。
+
+**单组件补发**：`gh workflow run release.yml --ref main -f tag=<已有 v* tag> -f component=server`（也支持 `mobile`）。构建源码固定在输入 tag；Server Docker 仅从 workflow 提交覆盖 `.dockerignore` 与 `docker/server.Dockerfile`，以便修复打包而不移动已发布标签。只上传对应组件 Release，不重跑其余组件。Server 的版本号、预发布标记与 release notes 都取输入 tag；预览镜像不更新 `latest`。
 
 路径→组件映射（要点）：`fluxDown/*`→extension；`web|native/server|docker|packaging/*`→server；`native/cli/*`→cli；`native/api/*`→server+cli；`native/engine/*`→app+server+mobile+cli；`android|lib/src/mobile/*`→mobile；`lib/*`→app+mobile；`website/*`/`docs/*`/`*.md`→不构建。
 

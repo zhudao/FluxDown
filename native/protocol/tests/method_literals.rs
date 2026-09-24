@@ -12,6 +12,7 @@ fn canonical_method_literals_are_exact_and_unique() {
         "system.snapshot",
         "daemon.task.list",
         "daemon.task.get",
+        "daemon.task.activity",
         "daemon.task.create",
         "daemon.task.pause",
         "daemon.task.resume",

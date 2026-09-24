@@ -46,6 +46,7 @@ use tokio_util::sync::CancellationToken;
 use crate::bt_seeding::{SeedingManager, SeedingRegistration, UnregisteredSeed};
 use crate::db::Db;
 use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo};
+use crate::events::EventSink;
 use crate::logger::{log_error, log_info};
 use crate::model::{BtFileEntry, TorrentMetaResult};
 use crate::output;
@@ -1399,6 +1400,7 @@ pub struct BtDownloadParams {
     pub save_dir: String,
     pub db: Db,
     pub progress_tx: mpsc::Sender<ProgressUpdate>,
+    pub sink: Arc<dyn EventSink>,
     pub cancel_token: CancellationToken,
     /// Handle to the shared BT session.
     pub session: Arc<Session>,
@@ -1480,6 +1482,7 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
     });
 
     let progress_tx = params.progress_tx.clone();
+    let sink = params.sink.clone();
     let db = params.db.clone();
     let torrent_source = params.torrent_source.clone();
     let save_dir = params.save_dir.clone();
@@ -1504,6 +1507,7 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         save_dir,
         db,
         progress_tx,
+        sink,
         cancelled: cancelled_clone,
         session,
         shared_bt,
@@ -1589,6 +1593,7 @@ struct BtInnerParams {
     save_dir: String,
     db: Db,
     progress_tx: mpsc::Sender<ProgressUpdate>,
+    sink: Arc<dyn EventSink>,
     cancelled: Arc<AtomicBool>,
     session: Arc<Session>,
     shared_bt: Arc<SharedBtSession>,
@@ -2631,6 +2636,24 @@ fn build_bt_segments(
     )
 }
 
+/// BT peers come from librqbit live statistics; virtual geometry is not concurrency.
+fn bt_runtime(
+    task_id: &str,
+    total_bytes: i64,
+    connected_peers: Option<u32>,
+) -> crate::transfer_activity::TaskRuntime {
+    crate::transfer_activity::TaskRuntime {
+        task_id: task_id.to_owned(),
+        sampled_at_ms: chrono::Utc::now().timestamp_millis(),
+        sample_sequence: crate::transfer_activity::next_sample_sequence(),
+        active_transfers: None,
+        connected_peers,
+        parallelism_limit: None,
+        total_bytes,
+        segments: Vec::new(),
+    }
+}
+
 /// Multi-file torrent: map each file to a segment.
 fn build_multi_file_segments(
     total_bytes: i64,
@@ -2668,6 +2691,7 @@ fn build_multi_file_segments(
             // Clamp into `[0, span]` so a subset/total mismatch can never yield
             // a negative downloaded count.
             downloaded_bytes: (dl_bytes as i64).clamp(0, span),
+            active: None,
         });
     }
     segs
@@ -2729,6 +2753,7 @@ fn build_piece_scatter_segments(
                 start_byte: start,
                 end_byte: end,
                 downloaded_bytes: seg_dl.clamp(0, end - start + 1),
+                active: None,
             });
         }
         // Correction: ensure total visual bytes match actual downloaded_bytes
@@ -2809,6 +2834,7 @@ fn build_piece_scatter_segments(
             start_byte: start,
             end_byte: end,
             downloaded_bytes: dl.clamp(0, seg_size),
+            active: None,
         });
     }
 
@@ -3211,6 +3237,8 @@ async fn apply_only_files_after_init(
     only: &HashSet<usize>,
     task_id: &str,
     cancelled: &AtomicBool,
+    db: &Db,
+    sink: &dyn EventSink,
 ) -> bool {
     const MAX_ATTEMPTS: u32 = 5;
     for attempt in 1..=MAX_ATTEMPTS {
@@ -3261,6 +3289,19 @@ async fn apply_only_files_after_init(
                     MAX_ATTEMPTS,
                     e
                 );
+                if attempt < MAX_ATTEMPTS
+                    && let Err(journal_error) = crate::task_activity::record(
+                        db,
+                        sink,
+                        task_id,
+                        "retry",
+                        format!("BT 文件选择第 {attempt}/{MAX_ATTEMPTS} 次应用失败，即将重试：{e}"),
+                        None,
+                    )
+                    .await
+                {
+                    crate::log_error!("[task-activity] failed to persist retry: {}", journal_error);
+                }
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
@@ -3275,6 +3316,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         save_dir,
         db,
         progress_tx,
+        sink,
         cancelled,
         session,
         shared_bt,
@@ -3982,7 +4024,16 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     .filter(|&i| i >= 0)
                     .map(|i| i as usize)
                     .collect();
-                if apply_only_files_after_init(&session, &handle, &only, &task_id, &cancelled).await
+                if apply_only_files_after_init(
+                    &session,
+                    &handle,
+                    &only,
+                    &task_id,
+                    &cancelled,
+                    &db,
+                    sink.as_ref(),
+                )
+                .await
                 {
                     log_info!(
                         "[BT] task={} file selection applied post-add ({} file(s))",
@@ -4159,6 +4210,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 &file_offsets,
                 total_pieces,
                 init_pieces,
+            )),
+            runtime: Some(bt_runtime(
+                &task_id,
+                total_bytes,
+                stats.live.as_ref().map(|l| l.snapshot.peer_stats.live),
             )),
             ..Default::default()
         })
@@ -4920,6 +4976,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     error_message: String::new(),
                     file_name: completed_name,
                     segment_details: Some(finished_segs),
+                    runtime: Some(bt_runtime(
+                        &task_id,
+                        final_total,
+                        stats.live.as_ref().map(|l| l.snapshot.peer_stats.live),
+                    )),
                     upload_speed_bps: completed_upload_speed_bps,
                     bt_data_finished: false,
                     uploaded_bytes: completed_uploaded_bytes,
@@ -5082,6 +5143,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     error_message: String::new(),
                     file_name: String::new(),
                     segment_details: Some(seg_details),
+                    runtime: Some(bt_runtime(
+                        &task_id,
+                        total,
+                        stats.live.as_ref().map(|l| l.snapshot.peer_stats.live),
+                    )),
                     upload_speed_bps,
                     uploaded_bytes: cumulative_upload,
                     ..Default::default()

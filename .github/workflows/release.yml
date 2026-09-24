@@ -19,6 +19,7 @@ on:
         type: choice
         options:
           - mobile
+          - server
 
 permissions:
   contents: write
@@ -1416,6 +1417,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changes.outputs.tag }}
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -1476,11 +1479,15 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changes.outputs.tag }}
 
       - name: Get version from tag
         id: version
         shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${{ needs.changes.outputs.tag }}"
+          echo "VERSION=${V#v}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -1599,10 +1606,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changes.outputs.tag }}
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${{ needs.changes.outputs.tag }}"
+          echo "VERSION=${V#v}" >> "$GITHUB_OUTPUT"
 
       - name: Download linux server tarballs
         uses: actions/download-artifact@v4
@@ -1811,10 +1822,23 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.changes.outputs.tag }}
+
+      # 补发仍构建原 tag 的源码，仅 Docker 构建配置取本次 workflow 提交的修复。
+      - name: Apply Docker build configuration for manual re-release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags origin "$WORKFLOW_SHA"
+          git restore --source="$WORKFLOW_SHA" -- .dockerignore docker/server.Dockerfile
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${{ needs.changes.outputs.tag }}"
+          echo "VERSION=${V#v}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU (arm64 runtime layer)
         uses: docker/setup-qemu-action@v3
@@ -1839,7 +1863,7 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/fluxdown-server
           tags: |
             type=raw,value=${{ steps.version.outputs.VERSION }}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ !contains(needs.changes.outputs.tag, '-') }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -1989,7 +2013,7 @@ jobs:
   release-server:
     name: Release Server
     runs-on: ubuntu-latest
-    needs: [build-server-docker, build-server-binaries, build-server-nas-packages]
+    needs: [changes, build-server-docker, build-server-binaries, build-server-nas-packages]
 
     steps:
       - name: Checkout repository
@@ -2000,7 +2024,10 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          V="${{ needs.changes.outputs.tag }}"
+          echo "VERSION=${V#v}" >> "$GITHUB_OUTPUT"
+          echo "COMMIT=$(git rev-parse "$V^{commit}")" >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes
         uses: ./.github/actions/release-notes
@@ -2008,6 +2035,7 @@ jobs:
           component: Headless 服务器（含 Web 控制台）
           fallback-title: Server Release v${{ steps.version.outputs.VERSION }}
           paths: native/server/** web/** native/engine/** native/api/** docker/** packaging/**
+          tag: ${{ needs.changes.outputs.tag }}
           claude-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 
       # 附加下载方式说明（直接下载二进制 + Docker）
@@ -2069,13 +2097,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: server-v${{ steps.version.outputs.VERSION }}
+          target_commitish: ${{ steps.version.outputs.COMMIT }}
           name: FluxDown Server v${{ steps.version.outputs.VERSION }}
           files: release-assets/*
           body_path: RELEASE_NOTES.md
           generate_release_notes: false
           draft: false
           make_latest: "false"
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(needs.changes.outputs.tag, '-') }}
 
       - name: Upload release assets to OSS
         continue-on-error: true

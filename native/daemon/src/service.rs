@@ -15,7 +15,7 @@ use fluxdown_protocol::{
     ApplicationErrorCode, CdnConfigApplyParams, CdnReportAckParams, CreateGroupRequest,
     CreateQueueRequest, DaemonConfigPatch, DaemonCreateTaskParams, MigrationAckParams,
     RpcErrorData, RpcErrorObject, RpcRequest, RpcResponse, SelectionResolutionDto, ServiceHello,
-    SiteAuthDeleteParams, SnapshotBody,
+    SiteAuthDeleteParams, SnapshotBody, TaskActivityQuery,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -163,6 +163,35 @@ impl DaemonService {
                     .find(|task| task.task_id == params.id)
                     .ok_or_else(not_found)?;
                 to_value(task)
+            }
+            method::DAEMON_TASK_ACTIVITY => {
+                let query = parse_params::<TaskActivityQuery>(params)?;
+                let page = self
+                    .db
+                    .query_task_activity(&fluxdown_engine::task_activity::TaskActivityQuery {
+                        task_id: query.task_id,
+                        before_id: query.before_id,
+                        after_id: query.after_id,
+                        limit: query.limit,
+                    })
+                    .await
+                    .map_err(|error| match error {
+                        fluxdown_engine::db::DbError::InvalidActivityQuery(message) => {
+                            invalid_argument("params", message)
+                        }
+                        other => internal_error(other.to_string()),
+                    })?;
+                to_value(fluxdown_protocol::TaskActivityPage {
+                    entries: page
+                        .entries
+                        .into_iter()
+                        .map(fluxdown_engine_protocol::task_activity_to_dto)
+                        .collect(),
+                    has_more: page.has_more,
+                    oldest_id: page.oldest_id,
+                    newest_id: page.newest_id,
+                    truncated: page.truncated,
+                })
             }
             method::DAEMON_TASK_CREATE => self.create_task(params).await,
             method::DAEMON_TASK_PAUSE => {

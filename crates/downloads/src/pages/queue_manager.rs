@@ -162,6 +162,12 @@ impl QueueManagerView {
                 self.absorb_queues(queues.clone());
                 cx.notify();
             }
+            ServiceEvent::Agent(AgentEvent::DaemonSnapshotReplaced(snapshot))
+            | ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::SnapshotReplaced(snapshot))) => {
+                self.absorb_queues(snapshot.queues.clone());
+                self.stale = false;
+                cx.notify();
+            }
             ServiceEvent::Agent(AgentEvent::DaemonConnectionChanged(connected)) => {
                 self.stale = !connected;
                 cx.notify();
@@ -177,12 +183,16 @@ impl QueueManagerView {
 
     fn absorb_queues(&mut self, mut queues: Vec<QueueDto>) {
         queues.sort_by_key(|queue| queue.position);
-        // 已选队列被远端删除：回退到「新建」表单，避免对着已消失的 id 保存。
-        if let Some(form) = &self.form
+        // 运行态来自 daemon，不是本地草稿：切换后以事件为准，确保按钮可以反向操作。
+        // 已选队列被远端删除则清除表单，避免向失效 id 保存。
+        if let Some(form) = &mut self.form
             && let Some(id) = &form.queue_id
-            && !queues.iter().any(|queue| &queue.queue_id == id)
         {
-            self.form = None;
+            if let Some(queue) = queues.iter().find(|queue| &queue.queue_id == id) {
+                form.is_running = queue.is_running;
+            } else {
+                self.form = None;
+            }
         }
         self.queues = queues;
     }

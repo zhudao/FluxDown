@@ -20,7 +20,10 @@ pub(crate) struct DownloadStrings {
     pub(crate) col_source: SharedString,
     pub(crate) col_speed: SharedString,
     pub(crate) col_status: SharedString,
+    pub(crate) active_transfers: SharedString,
+    pub(crate) connected_peers: SharedString,
     pub(crate) delete: SharedString,
+    pub(crate) delete_task: SharedString,
     pub(crate) delete_task_and_file: SharedString,
     delete_confirm_with_file: SharedString,
     batch_delete_confirm_with_file: SharedString,
@@ -119,6 +122,8 @@ impl DownloadStrings {
             col_size: shared(translator.text(keys::COL_SIZE)),
             col_source: shared(translator.text("colSource")),
             col_speed: shared(translator.text(keys::COL_SPEED)),
+            active_transfers: shared(translator.text("taskActiveTransfers")),
+            connected_peers: shared(translator.text("taskConnectedPeers")),
             confirm: shared(translator.text("confirm")),
             empty_title: shared(translator.text("emptyTitle")),
             empty_subtitle: shared(translator.text("emptySubtitle")),
@@ -132,6 +137,7 @@ impl DownloadStrings {
             col_status: shared(translator.text(keys::COL_STATUS)),
             later_queue: shared(translator.text(keys::LATER_QUEUE)),
             delete: shared(translator.text(keys::DELETE)),
+            delete_task: shared(translator.text("deleteTask")),
             delete_task_and_file: shared(translator.text("deleteTaskAndFile")),
             delete_confirm_with_file: shared(translator.text("deleteConfirmDescWithFile")),
             batch_delete_confirm_with_file: shared(
@@ -176,7 +182,7 @@ impl DownloadStrings {
             redownload_task: shared(translator.text("redownloadTask")),
             copy_url: shared(translator.text("copyUrl")),
             move_to_queue: shared(translator.text("moveToQueueAction")),
-            open_in_window: shared(translator.text("openTaskInWindowAction")),
+            open_in_window: shared(translator.text("detail")),
             group_pause_all: shared(translator.text("groupPauseAll")),
             group_resume_all: shared(translator.text("groupResumeAll")),
             group_retry_failed: shared(translator.text("groupRetryFailed")),
@@ -304,6 +310,16 @@ impl DownloadStrings {
         } else {
             SharedString::from(created.format("%Y-%m-%d").to_string())
         }
+    }
+
+    /// 任务详情中的完整本地时间（Unix 秒）；列表仍使用简短创建时间。
+    pub(crate) fn format_detail_datetime(timestamp_secs: i64) -> SharedString {
+        use chrono::{Local, TimeZone};
+        Local
+            .timestamp_opt(timestamp_secs, 0)
+            .single()
+            .map(|at| SharedString::from(at.format("%Y-%m-%d %H:%M:%S").to_string()))
+            .unwrap_or_else(|| SharedString::from("—"))
     }
 }
 
@@ -485,4 +501,35 @@ impl NewDownloadStrings {
 
 fn shared(value: &str) -> SharedString {
     SharedString::from(value.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Local, TimeZone};
+
+    use super::DownloadStrings;
+
+    #[test]
+    fn detail_datetime_keeps_seconds_across_midnight_and_rejects_out_of_range() {
+        let before = Local
+            .with_ymd_and_hms(2026, 3, 18, 23, 59, 59)
+            .single()
+            .expect("valid local time");
+        let after = Local
+            .with_ymd_and_hms(2026, 3, 19, 0, 0, 0)
+            .single()
+            .expect("valid local time");
+        assert_eq!(
+            DownloadStrings::format_detail_datetime(before.timestamp()).as_ref(),
+            "2026-03-18 23:59:59"
+        );
+        assert_eq!(
+            DownloadStrings::format_detail_datetime(after.timestamp()).as_ref(),
+            "2026-03-19 00:00:00"
+        );
+        assert_eq!(
+            DownloadStrings::format_detail_datetime(i64::MAX).as_ref(),
+            "—"
+        );
+    }
 }

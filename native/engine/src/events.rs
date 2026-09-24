@@ -10,6 +10,7 @@ use crate::model::{
     GroupInfo, ManifestItemInfo, QueueInfo, QueuePosition, SegmentDetail, TaskInfo,
 };
 use crate::rss::model::{RssItemInfo, RssSourceInfo};
+use crate::transfer_activity::TaskRuntime;
 
 /// 引擎运行期间产生的、宿主需要感知的事件。
 ///
@@ -18,6 +19,11 @@ use crate::rss::model::{RssItemInfo, RssSourceInfo};
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
+    /// Latest observation of active body transfers and file ranges.
+    TaskRuntimeChanged(TaskRuntime),
+
+    /// 仅在任务活动已成功写入持久日志之后广播。
+    TaskActivityAdded(crate::task_activity::TaskActivity),
     /// 任务进度更新,下载过程中周期性发送。对应 `hub::signals::TaskProgress`。
     TaskProgress {
         task_id: String,

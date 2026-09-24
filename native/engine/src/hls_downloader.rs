@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -34,10 +35,25 @@ use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT, dedup_filename,
     extract_from_url, sanitize_filename,
 };
+use crate::events::EventSink;
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
 use crate::output;
 use crate::selection::SelectionOutcome;
+use crate::transfer_activity::{TaskRuntime, TransferTracker};
+
+fn hls_runtime(task_id: &str, tracker: &TransferTracker, limit: u32) -> TaskRuntime {
+    TaskRuntime {
+        task_id: task_id.to_owned(),
+        sampled_at_ms: chrono::Utc::now().timestamp_millis(),
+        sample_sequence: crate::transfer_activity::next_sample_sequence(),
+        active_transfers: Some(tracker.active()),
+        connected_peers: None,
+        parallelism_limit: Some(limit),
+        total_bytes: 0,
+        segments: Vec::new(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Same-origin check for cookie safety
@@ -1154,6 +1170,35 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // 复用 `download_segment_with_retry`(与媒体段完全相同的重试/退避/
     // Range 请求路径),`seg_idx` 传 `usize::MAX` 仅用于失败时的日志诊断,
     // 不代表真实段序号。
+    let tracker = TransferTracker::new();
+    // Segments can stay in the body for longer than a completed writer chunk.
+    // Sample independently, including while no byte geometry is available.
+    let reported_bytes = Arc::new(AtomicI64::new(downloaded_bytes));
+    let sample_tracker = tracker.clone();
+    let sample_bytes = Arc::clone(&reported_bytes);
+    let sample_tx = p.progress_tx.clone();
+    let sample_task = p.task_id.clone();
+    let sample_limit = concurrency as u32;
+    let sampler = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(200));
+        loop {
+            ticker.tick().await;
+            if sample_tx
+                .send(ProgressUpdate {
+                    task_id: sample_task.clone(),
+                    downloaded_bytes: sample_bytes.load(Ordering::Relaxed),
+                    total_bytes: 0,
+                    status: 1,
+                    runtime: Some(hls_runtime(&sample_task, &sample_tracker, sample_limit)),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
     let mut map_bytes: HashMap<MapKey, Vec<u8>> = HashMap::new();
     if is_fmp4 {
         let mut seen: std::collections::HashSet<MapKey> = std::collections::HashSet::new();
@@ -1163,7 +1208,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             if !seen.insert(map_key.clone()) {
                 continue;
             }
-            let init_data = download_segment_with_retry(
+            let init_data = match download_segment_with_retry(
                 &p.client,
                 &m.uri,
                 m.byte_range,
@@ -1173,8 +1218,18 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                 &p.task_id,
                 usize::MAX,
                 &p.extra_headers,
+                &tracker,
+                &p.db,
+                p.sink.as_ref(),
             )
-            .await?;
+            .await
+            {
+                Ok(data) => data,
+                Err(e) => {
+                    sampler.abort();
+                    return Err(e);
+                }
+            };
             log_info!(
                 "[hls-download] task {} fetched init segment {} ({} bytes)",
                 p.task_id,
@@ -1219,6 +1274,9 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         let task_id = p.task_id.clone();
         let extra_headers = p.extra_headers.clone();
         let key_cache = key_cache.clone();
+        let tracker = tracker.clone();
+        let db = p.db.clone();
+        let sink = p.sink.clone();
         let sem = semaphore.clone();
         let tx = result_tx.clone();
 
@@ -1247,6 +1305,9 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                 key_info.as_ref(),
                 &key_cache,
                 media_sequence,
+                &tracker,
+                &db,
+                sink.as_ref(),
             )
             .await;
             // Always emit a result for this index so the in-order writer never
@@ -1421,6 +1482,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                 last_written_map = current_map_key;
             }
             downloaded_bytes += written_len;
+            reported_bytes.store(downloaded_bytes, Ordering::Relaxed);
             next_to_write += 1;
 
             // Save resume checkpoint for HLS resume support.
@@ -1448,6 +1510,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                         error_message: String::new(),
                         file_name: String::new(),
                         segment_details: None,
+                        runtime: Some(hls_runtime(&p.task_id, &tracker, concurrency as u32)),
                         ..Default::default()
                     })
                     .await;
@@ -1488,6 +1551,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     for handle in producers {
         let _ = handle.await;
     }
+    sampler.abort();
 
     if let Some(err) = fatal_error {
         // Persist whatever fully-written prefix we have so a later resume can
@@ -1788,6 +1852,9 @@ async fn download_and_decrypt_segment(
     key_info: Option<&(String, Option<String>)>,
     key_cache: &KeyCache,
     media_sequence: u64,
+    tracker: &TransferTracker,
+    db: &crate::db::Db,
+    sink: &dyn EventSink,
 ) -> Result<Vec<u8>, DownloadError> {
     let seg_data = download_segment_with_retry(
         client,
@@ -1799,6 +1866,9 @@ async fn download_and_decrypt_segment(
         task_id,
         seg_idx,
         extra_headers,
+        tracker,
+        db,
+        sink,
     )
     .await?;
 
@@ -1844,21 +1914,22 @@ async fn download_segment_with_retry(
     task_id: &str,
     seg_idx: usize,
     extra_headers: &std::collections::HashMap<String, String>,
+    tracker: &TransferTracker,
+    db: &crate::db::Db,
+    sink: &dyn EventSink,
 ) -> Result<Vec<u8>, DownloadError> {
+    let transport = SegmentTransport {
+        client,
+        cookies,
+        playlist_url,
+        extra_headers,
+        cancel_token,
+        tracker,
+    };
     let mut attempts = 0u32;
 
     loop {
-        match download_segment_once(
-            client,
-            url,
-            byte_range,
-            cookies,
-            playlist_url,
-            extra_headers,
-            cancel_token,
-        )
-        .await
-        {
+        match download_segment_once(&transport, url, byte_range, seg_idx).await {
             Ok(data) => return Ok(data),
             Err(DownloadError::Cancelled) => return Err(DownloadError::Cancelled),
             Err(e) => {
@@ -1877,6 +1948,20 @@ async fn download_segment_with_retry(
                     MAX_RETRIES,
                     e
                 );
+                if let Err(journal_error) = crate::task_activity::record(
+                    db,
+                    sink,
+                    task_id,
+                    "retry",
+                    format!(
+                        "HLS 段 {seg_idx} 第 {attempts}/{MAX_RETRIES} 次尝试失败，即将重试：{e}"
+                    ),
+                    None,
+                )
+                .await
+                {
+                    crate::log_error!("[task-activity] failed to persist retry: {}", journal_error);
+                }
                 let delay = RETRY_BASE_DELAY * 2u32.saturating_pow(attempts - 1);
                 tokio::select! {
                     _ = cancel_token.cancelled() => return Err(DownloadError::Cancelled),
@@ -1887,22 +1972,28 @@ async fn download_segment_with_retry(
     }
 }
 
+struct SegmentTransport<'a> {
+    client: &'a Client,
+    cookies: &'a str,
+    playlist_url: &'a str,
+    extra_headers: &'a std::collections::HashMap<String, String>,
+    cancel_token: &'a tokio_util::sync::CancellationToken,
+    tracker: &'a TransferTracker,
+}
+
 async fn download_segment_once(
-    client: &Client,
+    transport: &SegmentTransport<'_>,
     url: &str,
     byte_range: Option<(u64, u64)>,
-    cookies: &str,
-    playlist_url: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
-    cancel_token: &tokio_util::sync::CancellationToken,
+    seg_idx: usize,
 ) -> Result<Vec<u8>, DownloadError> {
-    let safe_cookies = cookies_for_url(playlist_url, url, cookies);
-    let mut req = client.get(url);
+    let safe_cookies = cookies_for_url(transport.playlist_url, url, transport.cookies);
+    let mut req = transport.client.get(url);
     if !safe_cookies.is_empty() {
         req = req.header("Cookie", safe_cookies);
     }
     // 应用浏览器扩展捕获的额外请求头
-    req = crate::downloader::apply_extra_headers(req, extra_headers);
+    req = crate::downloader::apply_extra_headers(req, transport.extra_headers);
 
     // EXT-X-BYTERANGE:同一 uri 的多段是底层大文件的不同子区间,必须发
     // `Range: bytes=offset-(offset+length-1)` 头只取本段区间。否则每段都拉整
@@ -1927,7 +2018,7 @@ async fn download_segment_once(
     }
 
     let resp = tokio::select! {
-        _ = cancel_token.cancelled() => return Err(DownloadError::Cancelled),
+        _ = transport.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
         r = req.send() => r?.error_for_status()?,
     };
 
@@ -1980,9 +2071,12 @@ async fn download_segment_once(
 
     let mut buf = Vec::new();
     loop {
-        let chunk = tokio::select! {
-            _ = cancel_token.cancelled() => return Err(DownloadError::Cancelled),
-            c = stream.next() => c,
+        let chunk = {
+            let _transfer = transport.tracker.start(seg_idx as i32);
+            tokio::select! {
+                _ = transport.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
+                c = stream.next() => c,
+            }
         };
         let Some(chunk_result) = chunk else {
             break;
@@ -2032,6 +2126,57 @@ mod tests {
     use cbc::cipher::{BlockEncryptMut, KeyIvInit};
 
     type Aes128CbcEnc = cbc::Encryptor<Aes128>;
+
+    #[tokio::test]
+    async fn body_activity_excludes_response_setup_and_ends_at_eof()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await?;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
+                .await?;
+            let _ = release_rx.await;
+            socket.write_all(b"hello").await?;
+            Ok::<(), std::io::Error>(())
+        });
+        let tracker = super::TransferTracker::new();
+        let client = reqwest::Client::builder().no_proxy().build()?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let url = format!("http://{address}/segment.ts");
+        let download = tokio::spawn({
+            let tracker = tracker.clone();
+            async move {
+                let headers = std::collections::HashMap::new();
+                let transport = super::SegmentTransport {
+                    client: &client,
+                    cookies: "",
+                    playlist_url: &url,
+                    extra_headers: &headers,
+                    cancel_token: &cancel,
+                    tracker: &tracker,
+                };
+                super::download_segment_once(&transport, &url, None, 2).await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while tracker.active() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        assert!(tracker.is_active(2));
+        assert!(release_tx.send(()).is_ok());
+        assert_eq!(download.await??, b"hello");
+        server.await??;
+        assert_eq!(tracker.active(), 0);
+        Ok(())
+    }
 
     /// PKCS7-encrypt `plaintext` with the given key/iv, returning ciphertext.
     /// 返回 `None` 时由调用方断言失败,避免在测试中使用 `unwrap`/`expect`。

@@ -16,6 +16,7 @@ use crate::events::EventSink;
 use crate::logger::{log_info, log_warn};
 use crate::output;
 use crate::speed_limiter::SpeedLimiter;
+use crate::transfer_activity::{TaskRuntime, TaskSegment, TransferTracker};
 
 // ---------------------------------------------------------------------------
 // Error
@@ -174,6 +175,8 @@ pub struct FileInfo {
 #[derive(Default)]
 pub struct ProgressUpdate {
     pub task_id: String,
+    /// Observed active reads and byte-range geometry; absent when not sampled.
+    pub runtime: Option<crate::transfer_activity::TaskRuntime>,
     pub downloaded_bytes: i64,
     pub total_bytes: i64,
     pub status: i32,
@@ -207,6 +210,8 @@ pub struct ProgressUpdate {
 #[derive(Clone)]
 pub struct SegmentProgressInfo {
     pub index: i32,
+    /// None denotes geometry without a transport-level activity observation.
+    pub active: Option<bool>,
     pub start_byte: i64,
     pub end_byte: i64,
     pub downloaded_bytes: i64,
@@ -3300,6 +3305,18 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                     status
                 );
                 actual_use_segments = false;
+                if let Err(e) = crate::task_activity::record(
+                    &p.db,
+                    p.sink.as_ref(),
+                    &p.task_id,
+                    "fallback",
+                    format!("HTTP 分段回退单流：{status}"),
+                    Some(1),
+                )
+                .await
+                {
+                    tracing::error!(task_id = %p.task_id, error = %e, "failed to persist HTTP fallback");
+                }
                 // 清空多段残留：删 DB segment 行 + 删预分配临时文件。对两种触发都正确：
                 //   • 真·无 Range：预分配文件全零、无有效数据；
                 //   • 版本变化：已完成段是【旧版本】字节，整体作废，必须删以重下新版本。
@@ -3313,6 +3330,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
                     false, // server doesn't support Range — never attempt it
                     client,
                     &p.db,
+                    p.sink.as_ref(),
                     &p.progress_tx,
                     &p.cancel_token,
                     &p.speed_limiter,
@@ -3365,6 +3383,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             effective_supports_range,
             client,
             &p.db,
+            p.sink.as_ref(),
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
@@ -3856,6 +3875,45 @@ struct SingleDownloadResult {
     resumed_range_start: Option<u64>,
 }
 
+fn single_runtime(task_id: &str, downloaded: i64, total: i64, active: bool) -> TaskRuntime {
+    TaskRuntime {
+        task_id: task_id.to_owned(),
+        sampled_at_ms: chrono::Utc::now().timestamp_millis(),
+        sample_sequence: crate::transfer_activity::next_sample_sequence(),
+        active_transfers: Some(u32::from(active)),
+        connected_peers: None,
+        parallelism_limit: Some(1),
+        total_bytes: total,
+        segments: if total > 0 {
+            vec![TaskSegment {
+                index: 0,
+                start_byte: 0,
+                end_byte: total - 1,
+                downloaded_bytes: downloaded,
+                active: Some(active),
+            }]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn single_segment_progress(
+    downloaded: i64,
+    total: i64,
+    active: bool,
+) -> Option<Vec<SegmentProgressInfo>> {
+    (total > 0).then(|| {
+        vec![SegmentProgressInfo {
+            index: 0,
+            start_byte: 0,
+            end_byte: total - 1,
+            downloaded_bytes: downloaded,
+            active: Some(active),
+        }]
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn download_single(
     task_id: &str,
@@ -3865,6 +3923,7 @@ async fn download_single(
     supports_range: bool,
     client: &Client,
     db: &Db,
+    sink: &dyn EventSink,
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
@@ -3910,6 +3969,18 @@ async fn download_single(
             return Err(DownloadError::Other(format!(
                 "resumed Range returned no data before expected total: {current_len}/{expected_len}"
             )));
+        }
+        if let Err(e) = crate::task_activity::record(
+            db,
+            sink,
+            task_id,
+            "retry",
+            format!("HTTP 单流续传短响应：{current_len}/{expected_len}，从偏移 {current_len} 重试"),
+            Some(1),
+        )
+        .await
+        {
+            tracing::error!(task_id, error = %e, "failed to persist HTTP single-stream retry");
         }
     }
 }
@@ -4225,6 +4296,18 @@ async fn download_single_once(
     // Treat size as unknown so progress reports don't show wrong percentages
     // and the final integrity check is skipped.
     let total_bytes = if encoding.is_some() { 0 } else { total_bytes };
+    let reading = TransferTracker::new().start(0);
+    // Do not park a validated response behind a full UI progress channel before
+    // its first body read. The periodic sample or final frame will follow.
+    let _ = progress_tx.try_send(ProgressUpdate {
+        task_id: task_id.to_owned(),
+        downloaded_bytes: downloaded,
+        total_bytes,
+        status: 1,
+        segment_details: single_segment_progress(downloaded, total_bytes, true),
+        runtime: Some(single_runtime(task_id, downloaded, total_bytes, true)),
+        ..Default::default()
+    });
 
     let mut last_report = std::time::Instant::now();
     let mut last_db_save = std::time::Instant::now();
@@ -4278,12 +4361,8 @@ async fn download_single_once(
                                     status: 1,
                                     error_message: String::new(),
                                     file_name: String::new(),
-                                    segment_details: Some(vec![SegmentProgressInfo {
-                                        index: 0,
-                                        start_byte: 0,
-                                        end_byte: if total_bytes > 0 { total_bytes - 1 } else { 0 },
-                                        downloaded_bytes: downloaded,
-                                    }]),
+                                    segment_details: single_segment_progress(downloaded, total_bytes, true),
+                                    runtime: Some(single_runtime(task_id, downloaded, total_bytes, true)),
                                     ..Default::default()
                                 })
                                 .await;
@@ -4307,6 +4386,18 @@ async fn download_single_once(
         }
     }
 
+    drop(reading);
+    let _ = progress_tx
+        .send(ProgressUpdate {
+            task_id: task_id.to_owned(),
+            downloaded_bytes: downloaded,
+            total_bytes,
+            status: 1,
+            runtime: Some(single_runtime(task_id, downloaded, total_bytes, false)),
+            segment_details: single_segment_progress(downloaded, total_bytes, false),
+            ..Default::default()
+        })
+        .await;
     file.flush().await?;
     let _ = db.update_task_progress(task_id, downloaded).await;
     Ok(SingleDownloadResult {

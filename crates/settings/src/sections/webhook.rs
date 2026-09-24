@@ -1,9 +1,11 @@
 //! Webhook：端点列表（daemon `webhook.endpoints` JSON）与投递记录。
 
 use fluxdown_protocol::method;
-use fluxdown_ui_components::{ButtonVariant, button};
+use fluxdown_ui_components::{Button, ButtonVariant, button as themed_button};
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, Context, IntoElement as _, ParentElement, SharedString, Styled, div};
+use gpui::{
+    App, Context, ElementId, IntoElement as _, ParentElement, SharedString, Styled, div, px,
+};
 use gpui_component::{Disableable as _, h_flex, v_flex};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -12,6 +14,20 @@ use std::collections::BTreeMap;
 use super::{SectionContext, webhook_dialog};
 use crate::store::SettingsStore;
 use crate::ui::{SettingsRow, SettingsSection};
+
+pub(super) fn button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    cx: &App,
+) -> Button {
+    themed_button(id, label, variant, cx)
+        .h(CONTROL_HEIGHT)
+        .px(px(10.))
+        .text_size(px(12.))
+        .rounded(px(6.))
+        .flex_shrink_0()
+}
 
 pub(crate) const ENDPOINTS_KEY: &str = "webhook.endpoints";
 
@@ -83,6 +99,7 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
     let delete = ctx.t("webhookRowDelete");
     let disabled_label = ctx.t("webhookHealthDisabled");
     SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
+        let disabled = disabled || !store.read(cx).daemon_connected();
         let tokens = active_theme(cx).tokens();
         let endpoints = read_endpoints(store.read(cx));
         let deliveries = store.read(cx).webhook_deliveries().to_vec();
@@ -193,7 +210,6 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                             ButtonVariant::Secondary,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled)
                         .on_click(move |_, window, cx| {
                             webhook_dialog::open(
@@ -212,7 +228,6 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                             ButtonVariant::Secondary,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || store.read(cx).is_busy("webhookTest"))
                         .on_click({
                             let translator = translator.clone();
@@ -283,7 +298,6 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                             ButtonVariant::Destructive,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled)
                         .on_click(move |_, _, cx| {
                             let id = delete_id.clone();
@@ -316,7 +330,6 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
             .child(
                 h_flex().w_full().justify_end().child(
                     button("webhook-add", add.clone(), ButtonVariant::Primary, cx)
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled)
                         .on_click(move |_, window, cx| {
                             webhook_dialog::open(
@@ -341,11 +354,24 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
     let clear = ctx.t("webhookLogClear");
     let simulate = ctx.t("webhookLogSimulate");
     let row = SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
+        let disabled = disabled || !store.read(cx).daemon_connected();
         let tokens = active_theme(cx).tokens();
         let deliveries = store.read(cx).webhook_deliveries().to_vec();
         let clear_store = store.clone();
         let simulate_store = store.clone();
         let mut column = v_flex().w_full().gap(tokens.spacing.xs);
+        if let Some(text) = store
+            .read(cx)
+            .transient("webhook_simulate_result")
+            .and_then(serde_json::Value::as_str)
+        {
+            column = column.child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors.muted_foreground)
+                    .child(SharedString::from(text.to_owned())),
+            );
+        }
         if deliveries.is_empty() {
             column = column.child(
                 div()
@@ -415,22 +441,68 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
                     .child(
                         button(
                             "webhook-simulate",
-                            simulate.clone(),
+                            if store.read(cx).is_busy("webhookSimulate") {
+                                SharedString::from(translator.text("webhookLogPending").to_owned())
+                            } else {
+                                simulate.clone()
+                            },
                             ButtonVariant::Secondary,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || simulate_store.read(cx).is_busy("webhookSimulate"))
-                        .on_click(move |_, _, cx| {
-                            simulate_store.update(cx, |store, cx| {
-                                store.call_simple(
-                                    "webhookSimulate",
-                                    method::DAEMON_WEBHOOK_SIMULATE,
-                                    json!({}),
-                                    None,
-                                    cx,
-                                );
-                            });
+                        .on_click({
+                            let translator = translator.clone();
+                            move |_, _, cx| {
+                                let translator = translator.clone();
+                                simulate_store.update(cx, |store, cx| {
+                                    if store.is_busy("webhookSimulate") {
+                                        return;
+                                    }
+                                    store.set_transient(
+                                        "webhook_simulate_result",
+                                        json!(translator.text("webhookLogPending")),
+                                        cx,
+                                    );
+                                    store.call_with(
+                                        "webhookSimulate",
+                                        method::DAEMON_WEBHOOK_SIMULATE,
+                                        json!({}),
+                                        cx,
+                                        move |store, result, cx| {
+                                            let text = match result {
+                                                Ok(value) => match serde_json::from_value::<
+                                                    fluxdown_protocol::WebhookSimulateResponse,
+                                                >(
+                                                    value
+                                                ) {
+                                                    Ok(response) if response.dispatched == 0 => {
+                                                        translator
+                                                            .text("webhookSimulateNoTarget")
+                                                            .to_owned()
+                                                    }
+                                                    Ok(response) => translator.text_with(
+                                                        "webhookSimulateDispatched",
+                                                        &[("n", &response.dispatched.to_string())],
+                                                    ),
+                                                    Err(error) => translator.text_with(
+                                                        "webhookTestFail",
+                                                        &[("error", &error.to_string())],
+                                                    ),
+                                                },
+                                                Err(error) => translator.text_with(
+                                                    "webhookTestFail",
+                                                    &[("error", &format!("{:?}", error.code))],
+                                                ),
+                                            };
+                                            store.set_transient(
+                                                "webhook_simulate_result",
+                                                json!(text),
+                                                cx,
+                                            );
+                                        },
+                                    );
+                                });
+                            }
                         }),
                     )
                     .child(
@@ -440,7 +512,6 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
                             ButtonVariant::Secondary,
                             cx,
                         )
-                        .h(CONTROL_HEIGHT)
                         .disabled(disabled || deliveries.is_empty())
                         .on_click(move |_, _, cx| {
                             clear_store.update(cx, |store, cx| {

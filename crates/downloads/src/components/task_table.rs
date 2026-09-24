@@ -6,7 +6,7 @@ use std::{
 use fluxdown_ui_components::toolbar_action_button;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Div, FocusHandle, FontWeight,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Div, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement, Render,
     SharedString, Stateful, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, relative,
@@ -16,7 +16,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     h_flex,
-    menu::{PopupMenu, PopupMenuItem},
+    menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
     popover::Popover,
     spinner::Spinner,
     table::{Column, ColumnSort, DataTable, TableDelegate, TableState},
@@ -980,6 +980,23 @@ impl DownloadTableDelegate {
         keys
     }
 
+    /// 工具栏按钮可用性：只统计仍存在于 store 的选中任务（已删除任务不算）。
+    pub(crate) fn selection_summary(&self) -> SelectionSummary {
+        let mut summary = SelectionSummary::default();
+        for key in self
+            .selected_tasks
+            .iter()
+            .filter(|key| self.store.get(key).is_some())
+        {
+            summary.any = true;
+            if key.is_local() {
+                summary.any_local = true;
+                break;
+            }
+        }
+        summary
+    }
+
     pub(crate) fn toggle_group_collapsed(&mut self, key: &str) {
         self.prefs.toggle_group_collapsed(key);
         self.view_dirty = true;
@@ -1102,36 +1119,122 @@ impl DownloadTableDelegate {
             .into_any_element()
     }
 
+    fn render_speed_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
+        if task.state != TaskState::Downloading {
+            return self.text_cell("", cx);
+        }
+        let tokens = active_theme(cx).tokens();
+        let compact = self.prefs.density == crate::model::view_prefs::ViewDensity::Compact;
+        let speed = task
+            .speed_bytes_per_second
+            .map(|speed| format!("{}/s", format_bytes(speed)))
+            .unwrap_or_default();
+        let active = task.active_transfers();
+        let peers = task
+            .runtime
+            .as_ref()
+            .filter(|_| task.runtime_connected && task.protocol == crate::model::TaskProtocol::Bt)
+            .and_then(|runtime| runtime.connected_peers);
+        let detail = match (active, peers) {
+            (Some(active), Some(peers)) => Some(format!(
+                "{active} {} · {peers} {}",
+                self.strings.active_transfers, self.strings.connected_peers
+            )),
+            (Some(active), None) => Some(format!("{active} {}", self.strings.active_transfers)),
+            (None, Some(peers)) => Some(format!("{peers} {}", self.strings.connected_peers)),
+            (None, None) => None,
+        };
+        let badge = peers
+            .map(|peers| format!("BT {peers}"))
+            .or_else(|| active.map(|active| active.to_string()));
+        let tooltip = match &detail {
+            Some(detail) if !speed.is_empty() => format!("{speed}\n{detail}"),
+            Some(detail) => detail.clone(),
+            None => speed.clone(),
+        };
+        v_flex()
+            .id(SharedString::from(format!(
+                "download-speed-{}",
+                task.key.task_id()
+            )))
+            .size_full()
+            .min_w_0()
+            .justify_center()
+            .text_color(tokens.colors.muted_foreground)
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap(tokens.spacing.xs)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(tokens.typography.xs.size)
+                            .line_height(px(14.))
+                            .child(speed),
+                    )
+                    .when_some(badge.filter(|_| compact), |this, badge| {
+                        this.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(9.))
+                                .line_height(px(12.))
+                                .px(tokens.spacing.xxs)
+                                .rounded(tokens.radius.sm)
+                                .bg(tokens.colors.muted)
+                                .child(badge),
+                        )
+                    }),
+            )
+            .when_some(detail.filter(|_| !compact), |this, detail| {
+                // 舒适模式最多两行（14 + 12px），BT 节点不能再挤出第三行。
+                this.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(9.))
+                        .line_height(px(12.))
+                        .child(detail),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_progress_cell(&self, task: &DownloadTaskView, cx: &App) -> AnyElement {
         let tokens = active_theme(cx).tokens();
         let (_, status_color, _, _, _) = self.task_visuals(task, cx);
+        let column_width = self
+            .columns
+            .iter()
+            .find(|column| column.kind == DownloadColumnKind::Progress)
+            .map_or(110., |column| column.width);
+        // 所有密度下进度列只占一行；实时并发统一放在速度列。
+        let bar_width = (column_width - 80.).max(0.);
         h_flex()
             .size_full()
+            .min_w_0()
             .items_center()
             .gap(tokens.spacing.xs)
-            .child(
-                div()
-                    .relative()
-                    .h(px(5.))
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .rounded_full()
-                    .bg(tokens.colors.muted)
-                    .child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .w(relative(task.progress))
-                            .bg(status_color),
-                    ),
-            )
+            .child(div().flex_1().min_w_0().overflow_hidden().child(
+                crate::components::segment_progress::render_segment_progress(
+                    task.runtime.as_deref(),
+                    task.progress,
+                    bar_width,
+                    5.,
+                    status_color,
+                    tokens.colors.muted,
+                ),
+            ))
             .child(
                 div()
                     .flex_none()
-                    .w(px(44.))
+                    .w(px(60.))
                     .text_right()
                     .text_size(tokens.typography.xs.size)
+                    .line_height(relative(1.))
                     .text_color(tokens.colors.muted_foreground)
                     .child(task.progress_label.clone()),
             )
@@ -1343,7 +1446,7 @@ impl DownloadTableDelegate {
             MenuEntry::MoveToQueue => self.append_move_to_queue(menu),
             MenuEntry::Separator => menu.separator(),
             MenuEntry::Delete => menu.menu_with_icon(
-                self.strings.delete.clone(),
+                self.strings.delete_task.clone(),
                 IconName::Delete,
                 Box::new(crate::actions::DeleteSelected),
             ),
@@ -1695,20 +1798,13 @@ impl TableDelegate for DownloadTableDelegate {
                     .child(status)
                     .into_any_element()
             }
-            DownloadColumnKind::Speed => {
-                let speed = task
-                    .speed_bytes_per_second
-                    .filter(|speed| *speed > 0)
-                    .map(|speed| format!("{}/s", format_bytes(speed)))
-                    .unwrap_or_else(|| "—".to_owned());
-                self.text_cell(speed, cx)
-            }
+            DownloadColumnKind::Speed => self.render_speed_cell(task, cx),
             DownloadColumnKind::Eta => {
                 let eta = task
                     .eta_seconds
-                    .filter(|seconds| *seconds <= 86_400)
+                    .filter(|seconds| task.state == TaskState::Downloading && *seconds <= 86_400)
                     .map_or_else(
-                        || SharedString::from("—"),
+                        || SharedString::from(""),
                         |seconds| self.strings.format_eta(seconds),
                     );
                 self.text_cell(eta, cx)
@@ -1800,6 +1896,14 @@ pub(crate) enum ToolbarCommand {
     Reveal,
 }
 
+/// 选中集合对工具栏的投影：`any` 控制删除，`any_local` 控制打开文件 / 文件夹
+/// （远程任务没有本机文件）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SelectionSummary {
+    pub(crate) any: bool,
+    pub(crate) any_local: bool,
+}
+
 impl DownloadView {
     #[allow(
         clippy::too_many_arguments,
@@ -1812,6 +1916,7 @@ impl DownloadView {
         label: SharedString,
         icon: IconName,
         destructive: bool,
+        disabled: bool,
         action: ToolbarCommand,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -1826,12 +1931,76 @@ impl DownloadView {
                     label,
                     Icon::new(icon).size(px(15.)),
                     destructive,
+                    disabled,
                     cx,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.execute_toolbar(action, cx);
                 })),
             )
+    }
+
+    /// 删除入口：下拉区分「删除任务」与「删除任务和文件」（后者二次确认）。
+    fn toolbar_delete_menu(&self, enabled: bool, cx: &mut Context<Self>) -> AnyElement {
+        if !enabled {
+            return self
+                .toolbar_icon_action(
+                    "download-delete-tooltip",
+                    "download-delete",
+                    self.strings.delete.clone(),
+                    IconName::Delete,
+                    true,
+                    true,
+                    ToolbarCommand::Delete,
+                    cx,
+                )
+                .into_any_element();
+        }
+        let tokens = active_theme(cx).tokens().clone();
+        let delete_task = self.strings.delete_task.clone();
+        let delete_with_files = self.strings.delete_task_and_file.clone();
+        let view = cx.weak_entity();
+        div()
+            .size(px(30.))
+            .child(
+                Button::new("download-delete")
+                    .ghost()
+                    .size(px(30.))
+                    .rounded(tokens.radius.md)
+                    .tooltip(self.strings.delete.clone())
+                    .child(
+                        Icon::new(IconName::Delete)
+                            .size(px(15.))
+                            .text_color(tokens.colors.destructive),
+                    )
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                        menu.item(
+                            PopupMenuItem::new(delete_task.clone())
+                                .icon(IconName::Delete)
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, _, cx| {
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.execute_toolbar(ToolbarCommand::Delete, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new(delete_with_files.clone())
+                                .icon(IconName::Delete)
+                                .on_click({
+                                    let view = view.clone();
+                                    move |_, window, cx| {
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.delete_selected_with_files(window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                    }),
+            )
+            .into_any_element()
     }
 
     /// 选中集合 → 命令列表（远程任务走 `agent.remote.command`）。
@@ -2037,6 +2206,8 @@ impl DownloadView {
 
     pub(crate) fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
+        let selection = self.table_state.read(cx).delegate().selection_summary();
+        self.toolbar_selection.set(selection);
         let separator = || {
             div()
                 .h(px(24.))
@@ -2066,29 +2237,11 @@ impl DownloadView {
             )
             .child(separator())
             .child(self.toolbar_icon_action(
-                "download-resume-tooltip",
-                "download-resume",
-                self.strings.resume.clone(),
-                IconName::Play,
-                false,
-                ToolbarCommand::Resume,
-                cx,
-            ))
-            .child(self.toolbar_icon_action(
-                "download-pause-tooltip",
-                "download-pause",
-                self.strings.pause.clone(),
-                IconName::Pause,
-                false,
-                ToolbarCommand::Pause,
-                cx,
-            ))
-            .child(separator())
-            .child(self.toolbar_icon_action(
                 "download-stop-all-tooltip",
                 "download-stop-all",
                 self.strings.stop_all.clone(),
                 IconName::CircleX,
+                false,
                 false,
                 ToolbarCommand::PauseAll,
                 cx,
@@ -2099,25 +2252,19 @@ impl DownloadView {
                 self.strings.resume_all.clone(),
                 IconName::Play,
                 false,
+                false,
                 ToolbarCommand::ResumeAll,
                 cx,
             ))
             .child(separator())
-            .child(self.toolbar_icon_action(
-                "download-delete-tooltip",
-                "download-delete",
-                self.strings.delete.clone(),
-                IconName::Delete,
-                true,
-                ToolbarCommand::Delete,
-                cx,
-            ))
+            .child(self.toolbar_delete_menu(selection.any, cx))
             .child(self.toolbar_icon_action(
                 "download-open-tooltip",
                 "download-open",
                 self.strings.open_file.clone(),
                 IconName::File,
                 false,
+                !selection.any_local,
                 ToolbarCommand::Open,
                 cx,
             ))
@@ -2127,6 +2274,7 @@ impl DownloadView {
                 self.strings.open_folder.clone(),
                 IconName::FolderOpen,
                 false,
+                !selection.any_local,
                 ToolbarCommand::Reveal,
                 cx,
             ))
@@ -2186,7 +2334,7 @@ mod tests {
     use fluxdown_ui_i18n::{I18nCatalog, I18nError};
     use gpui::Modifiers;
 
-    use super::{DownloadColumnKind, DownloadTableDelegate, VisibleRow};
+    use super::{DownloadColumnKind, DownloadTableDelegate, SelectionSummary, VisibleRow};
     use crate::{
         model::{
             DownloadTaskView, RowKey, TaskStore,
@@ -2246,6 +2394,26 @@ mod tests {
         assert_eq!(
             delegate.selected_tasks,
             HashSet::from([RowKey::Local("t2".into())])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selection_summary_ignores_tasks_missing_from_store() -> Result<(), I18nError> {
+        let mut delegate = delegate(&[2])?;
+        assert_eq!(delegate.selection_summary(), SelectionSummary::default());
+
+        // 任务已被删除但选中集合仍残留其 key：工具栏不应因此可点。
+        delegate.selected_tasks.insert(RowKey::Local("gone".into()));
+        assert_eq!(delegate.selection_summary(), SelectionSummary::default());
+
+        delegate.selected_tasks.insert(RowKey::Local("t0".into()));
+        assert_eq!(
+            delegate.selection_summary(),
+            SelectionSummary {
+                any: true,
+                any_local: true,
+            }
         );
         Ok(())
     }

@@ -30,6 +30,7 @@ use crate::proxy_config::{ProxyConfig, ProxyMode};
 use crate::segment_coordinator::is_single_conn_domain;
 use crate::selection::HostSelection;
 use crate::speed_limiter::SpeedLimiter;
+use crate::transfer_activity::TaskRuntime;
 
 /// 文件已存在时的处理策略（config `file_exists_behavior`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -973,6 +974,8 @@ struct TaskSpeedState {
     /// carries segment_details, regardless of rate-limiting.  This ensures
     /// the next send always has the latest segment data available.
     cached_segments: Option<Vec<SegmentProgressInfo>>,
+    /// Latest observed transfer sample, retained until a terminal frame clears activity.
+    cached_runtime: Option<TaskRuntime>,
     /// Last status sent to Dart.  Used to detect status transitions so that
     /// they are always forwarded immediately (not rate-limited).
     last_sent_status: i32,
@@ -3775,12 +3778,13 @@ impl DownloadManager {
                 self.retry_scheduled.remove(task_id);
                 self.auto_failover_pending.remove(task_id);
                 self.auto_failover_attempts.remove(task_id);
-                if let Err(e) = self.db.delete_task(task_id).await {
-                    log_info!(
+                match self.db.delete_task(task_id).await {
+                    Ok(sources) => self.broadcast_deleted_rss_sources(sources).await,
+                    Err(e) => log_info!(
                         "[manager] duplicate cleanup {}: DB delete error: {}",
                         task_id,
                         e
-                    );
+                    ),
                 }
                 self.sink.emit(EngineEvent::DuplicateTorrentDetected {
                     task_id: task_id.to_string(),
@@ -4256,8 +4260,9 @@ impl DownloadManager {
                         "[manager] startup: removing orphan duplicate-torrent placeholder {}",
                         tid
                     );
-                    if let Err(e) = self.db.delete_task(tid).await {
-                        log_info!("[manager] startup duplicate cleanup {}: {}", tid, e);
+                    match self.db.delete_task(tid).await {
+                        Ok(sources) => self.broadcast_deleted_rss_sources(sources).await,
+                        Err(e) => log_info!("[manager] startup duplicate cleanup {}: {}", tid, e),
                     }
                 }
                 tasks.retain(|t| !orphans.contains(&t.task_id));
@@ -5635,6 +5640,7 @@ impl DownloadManager {
                 skip_file_selection: bt_skip_selection,
                 custom_name,
                 selector: self.selector.clone(),
+                sink: self.sink.clone(),
                 // 任务级/队列级上传限速只能在 add 时烘焙（librqbit 无
                 // per-torrent 热更 API）；行刚插入时任务级通常为 0，恢复/
                 // 续种路径会带上用户后来设置的值。
@@ -6140,6 +6146,25 @@ impl DownloadManager {
     /// 与 resume_task 的区别仅在于跳过 auto_retry_counts.remove，
     /// 使累积计数得以持久到下次失败，从而正确触发重试上限与递增退避。
     pub async fn resume_task_auto(&mut self, task_id: &str) {
+        if self.is_task_in_error(task_id).await {
+            let attempt = self.auto_retry_counts.get(task_id).copied();
+            let message = match attempt {
+                Some(attempt) => format!("自动重试下载（第 {attempt} 次）"),
+                None => "备用链路重试下载".to_owned(),
+            };
+            if let Err(e) = crate::task_activity::record(
+                &self.db,
+                self.sink.as_ref(),
+                task_id,
+                "retry",
+                message,
+                Some(4),
+            )
+            .await
+            {
+                tracing::error!(task_id, error = %e, "failed to persist task auto retry");
+            }
+        }
         self.resume_task_inner(task_id).await;
     }
 
@@ -6868,6 +6893,7 @@ impl DownloadManager {
                 skip_file_selection,
                 custom_name,
                 selector: self.selector.clone(),
+                sink: self.sink.clone(),
                 upload_limit_bps,
             };
 
@@ -7230,12 +7256,22 @@ impl DownloadManager {
         self.maybe_release_bt_session().await;
     }
 
+    /// 删任务事务提交后，只广播实际修改过回链的源和一次 badge 快照。
+    async fn broadcast_deleted_rss_sources(&mut self, sources: Vec<String>) {
+        if sources.is_empty() {
+            return;
+        }
+        for source_id in sources {
+            self.rss.broadcast_items(&source_id, Vec::new()).await;
+        }
+        self.rss.broadcast_sources().await;
+    }
+
     /// Delete task record and optionally its files on disk.
     ///
     /// If the task is actively downloading, the cancellation token is triggered
-    /// first and we **await** the spawned task's `JoinHandle` so that all
-    /// network connections and file handles are fully released before we
-    /// attempt to remove files.  A 5-second timeout prevents indefinite hangs.
+    /// first and we **await** the spawned task's JoinHandle so that all
+    /// network connections and file handles are released before deletion.
     pub async fn delete_task(&mut self, task_id: &str, delete_files: bool) {
         self.auto_retry_counts.remove(task_id);
         self.auto_failover_pending.remove(task_id);
@@ -7456,8 +7492,9 @@ impl DownloadManager {
             delete_task_artifact_files(&self.db, task_id, &t.save_dir).await;
         }
 
-        if let Err(e) = self.db.delete_task(task_id).await {
-            log_info!("[manager] delete_task {}: DB delete error: {}", task_id, e);
+        match self.db.delete_task(task_id).await {
+            Ok(sources) => self.broadcast_deleted_rss_sources(sources).await,
+            Err(e) => log_info!("[manager] delete_task {}: DB delete error: {}", task_id, e),
         }
 
         // 竞争修复：若 handle 等待超时（spawned task 可能仍在运行），它可能在首次
@@ -7837,8 +7874,9 @@ impl DownloadManager {
         }
 
         // 6. Single-transaction batch DB delete.
-        if let Err(e) = self.db.delete_tasks_batch(task_ids).await {
-            log_info!("[manager] delete_tasks_batch DB error: {}", e);
+        match self.db.delete_tasks_batch(task_ids).await {
+            Ok(sources) => self.broadcast_deleted_rss_sources(sources).await,
+            Err(e) => log_info!("[manager] delete_tasks_batch DB error: {}", e),
         }
 
         // 组 GC 钩子：批量删除后清理无成员的孤儿组行（D8 生命周期）。
@@ -8520,14 +8558,37 @@ impl DownloadManager {
             );
             return;
         }
-        if let Err(e) = self.db.delete_queue(&queue_id).await {
-            log_info!("[manager] delete_queue error: {}", e);
-            return;
+        let moved_ids = match self.db.delete_queue(&queue_id).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                log_info!("[manager] delete_queue error: {}", e);
+                return;
+            }
+        };
+        // DB 已把任务迁到主队列；调度缓存和事件流必须在同一操作内跟进。
+        for entry in self.active_tasks.values_mut() {
+            if entry.queue_id == queue_id {
+                entry.queue_id = MAIN_QUEUE_ID.to_owned();
+            }
         }
-        // Sync in-memory cache.
+        for entry in &mut self.pending_queue {
+            if entry.queue_id == queue_id {
+                entry.queue_id = MAIN_QUEUE_ID.to_owned();
+            }
+        }
         self.queues.remove(&queue_id);
         self.queue_limiters.remove(&queue_id);
         self.schedule_fired.retain(|(qid, _), _| qid != &queue_id);
+        for task_id in moved_ids {
+            self.sink.emit(EngineEvent::TaskQueueChanged {
+                task_id,
+                queue_id: MAIN_QUEUE_ID.to_owned(),
+            });
+        }
+        // 位置事件更新待排任务的 queuePosition；全量任务快照是 queue_order
+        // 已归零的权威来源，TaskQueueChanged 本身只包含归属 ID。
+        self.broadcast_queue_positions();
+        self.send_tasks_snapshot().await;
         log_info!("[manager] deleted queue: {}", queue_id);
         self.send_all_queues().await;
     }
@@ -9583,6 +9644,7 @@ pub async fn progress_reporter(
                 latest_bytes: update.downloaded_bytes,
                 file_name: String::new(),
                 cached_segments: None,
+                cached_runtime: None,
                 last_sent_status: -1, // never sent yet
                 last_raw_status: update.status,
                 awaiting_first_growth: update.status == 1,
@@ -9610,6 +9672,9 @@ pub async fn progress_reporter(
         // Always cache the latest segment snapshot, regardless of rate-limiting.
         if update.segment_details.is_some() {
             state.cached_segments = update.segment_details.clone();
+        }
+        if let Some(runtime) = &update.runtime {
+            state.cached_runtime = Some(runtime.clone());
         }
 
         // -----------------------------------------------------------------
@@ -9810,6 +9875,23 @@ pub async fn progress_reporter(
                 seeding_message: update.seeding_message.clone(),
                 seeding_time_secs: update.seeding_time_secs,
             });
+            if let Some(mut runtime) = state.cached_runtime.clone() {
+                if is_terminal {
+                    runtime.sampled_at_ms = chrono::Utc::now().timestamp_millis();
+                    runtime.sample_sequence = crate::transfer_activity::next_sample_sequence();
+                    if update.total_bytes > 0 {
+                        runtime.total_bytes = update.total_bytes;
+                    }
+                    runtime.active_transfers = runtime.active_transfers.map(|_| 0);
+                    for segment in &mut runtime.segments {
+                        segment.active = segment.active.map(|_| false);
+                        if update.status == 3 {
+                            segment.downloaded_bytes = segment.end_byte - segment.start_byte + 1;
+                        }
+                    }
+                }
+                sink.emit(EngineEvent::TaskRuntimeChanged(runtime));
+            }
 
             // Send segment-level progress for IDM-style visualization.
             // Use the cached snapshot (updated on every incoming update)
@@ -11061,6 +11143,223 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn deleting_tasks_broadcasts_only_affected_rss_sources_after_commit() {
+        use crate::rss::model::{RssItemInfo, RssItemStatus, RssSourceInfo};
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let save_dir = unique_dedup_dir("rss-deletion-events");
+        let save_dir = save_dir.to_str().expect("temporary path is UTF-8");
+        for (source_id, task_id) in [("first", "t1"), ("second", "t2"), ("unaffected", "other")] {
+            db.insert_rss_source(&RssSourceInfo {
+                source_id: source_id.into(),
+                ..Default::default()
+            })
+            .await
+            .expect("insert source");
+            db.insert_rss_items(&[RssItemInfo {
+                source_id: source_id.into(),
+                guid: "episode".into(),
+                status: RssItemStatus::Downloaded,
+                task_id: task_id.into(),
+                ..Default::default()
+            }])
+            .await
+            .expect("insert item");
+        }
+        for task_id in ["t1", "t2"] {
+            db.insert_task(
+                task_id,
+                "https://feed.test/file",
+                "file",
+                save_dir,
+                3,
+                0,
+                "",
+                "",
+                "",
+                0,
+            )
+            .await
+            .expect("insert task");
+        }
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = DownloadManager::new(
+            db.clone(),
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: save_dir.into(),
+                app_data_dir: String::new(),
+                data_dir: std::env::temp_dir(),
+                bt_config: BtConfig::default(),
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            sink.clone(),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        mgr.delete_task("t1", false).await;
+        let first = sink.events();
+        let items: Vec<_> = first
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::RssItemsChanged {
+                    source_id,
+                    items,
+                    notify_titles,
+                } => {
+                    assert!(notify_titles.is_empty());
+                    assert_eq!(items[0].status, RssItemStatus::Ignored);
+                    assert!(items[0].task_id.is_empty());
+                    Some(source_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, ["first"]);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::RssSourcesChanged(_)))
+                .count(),
+            1
+        );
+
+        mgr.delete_tasks_batch(&["t2".into()], false).await;
+        let events = sink.events();
+        let second = &events[first.len()..];
+        let items: Vec<_> = second
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::RssItemsChanged {
+                    source_id, items, ..
+                } => {
+                    assert_eq!(items[0].status, RssItemStatus::Ignored);
+                    Some(source_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items, ["second"]);
+        assert_eq!(
+            second
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::RssSourcesChanged(_)))
+                .count(),
+            1
+        );
+    }
+
+    /// 删除队列时 DB 重归属任务，事件流必须把受影响的任务定向迁回主队列。
+    #[tokio::test]
+    async fn delete_queue_emits_task_migrations_before_queue_list() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.seed_builtin_queues().await.expect("seed");
+        db.insert_queue("work", "Work", 0, 0, 0, "", 2, 0, "")
+            .await
+            .expect("insert queue");
+        for id in ["a", "b"] {
+            db.insert_task(
+                id,
+                "http://example.com/file",
+                "file",
+                "/tmp",
+                0,
+                0,
+                "",
+                "work",
+                "",
+                0,
+            )
+            .await
+            .expect("insert task");
+        }
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = DownloadManager::new(
+            db.clone(),
+            DownloadManagerConfig {
+                max_concurrent: 1,
+                speed_limit_bps: 0,
+                upload_limit_bps: 0,
+                default_save_dir: "/tmp".to_owned(),
+                app_data_dir: String::new(),
+                data_dir: std::env::temp_dir(),
+                bt_config: BtConfig::default(),
+                proxy_config: ProxyConfig::default(),
+                user_agent: String::new(),
+            },
+            sink.clone(),
+            Arc::new(crate::NoopSelection),
+        )
+        .expect("construct manager");
+
+        mgr.delete_queue("work".to_owned()).await;
+        let events = sink.events();
+        let mut moved: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskQueueChanged { task_id, queue_id }
+                    if queue_id == MAIN_QUEUE_ID =>
+                {
+                    Some(task_id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        moved.sort_unstable();
+        assert_eq!(moved, ["a", "b"]);
+        let migration_end = events
+            .iter()
+            .rposition(|event| matches!(event, EngineEvent::TaskQueueChanged { .. }))
+            .expect("migration event");
+        let positions_index = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::QueuePositionsChanged(_)))
+            .expect("position event");
+        let snapshot_index = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::TasksSnapshot(_)))
+            .expect("task snapshot");
+        let queues_index = events
+            .iter()
+            .position(|event| matches!(event, EngineEvent::QueuesChanged(_)))
+            .expect("queue list");
+        assert!(
+            migration_end < positions_index
+                && positions_index < snapshot_index
+                && snapshot_index < queues_index
+        );
+        let EngineEvent::TasksSnapshot(tasks) = &events[snapshot_index] else {
+            panic!("task snapshot missing")
+        };
+        for id in ["a", "b"] {
+            let task = tasks
+                .iter()
+                .find(|task| task.task_id == id)
+                .expect("migrated task");
+            assert_eq!(task.queue_id, MAIN_QUEUE_ID);
+            assert_eq!(task.queue_order, 0, "snapshot must carry DB-reset order");
+        }
+        for id in ["a", "b"] {
+            assert_eq!(
+                db.load_task_by_id(id)
+                    .await
+                    .expect("load")
+                    .expect("task")
+                    .queue_id,
+                MAIN_QUEUE_ID,
+            );
+        }
+    }
+
     /// 建任务事件契约：`create_task` 在 `TaskProgress` 之后立即定向广播
     /// `TaskQueueChanged`。`TaskProgress` 不携带 queue_id，客户端以「归属
     /// 待定」哨兵入列并被队列筛选视图隐藏；归属事件必须先于任何耗时操作
@@ -12146,6 +12445,74 @@ mod tests {
             progress_events.last(),
             Some(&(3, 0)),
             "terminal update must zero upload_speed_bps regardless of the raw value"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_reporter_terminal_clears_only_observed_activity_and_keeps_ranges() {
+        let (tx, rx) = mpsc::channel(8);
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let handle = tokio::spawn(progress_reporter(rx, db, sink.clone()));
+        let segment = crate::transfer_activity::TaskSegment {
+            index: 0,
+            start_byte: 0,
+            end_byte: 99,
+            downloaded_bytes: 20,
+            active: Some(true),
+        };
+        tx.send(ProgressUpdate {
+            task_id: "range".to_owned(),
+            status: 1,
+            downloaded_bytes: 20,
+            total_bytes: 100,
+            runtime: Some(TaskRuntime {
+                task_id: "range".to_owned(),
+                sampled_at_ms: 1,
+                sample_sequence: crate::transfer_activity::next_sample_sequence(),
+                active_transfers: Some(1),
+                connected_peers: None,
+                parallelism_limit: Some(8),
+                total_bytes: 100,
+                segments: vec![segment],
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("send live sample");
+        tx.send(ProgressUpdate {
+            task_id: "range".to_owned(),
+            status: 2,
+            downloaded_bytes: 20,
+            total_bytes: 100,
+            ..Default::default()
+        })
+        .await
+        .expect("send pause");
+        drop(tx);
+        handle.await.expect("reporter finished");
+        let samples: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter_map(|e| match e {
+                EngineEvent::TaskRuntimeChanged(runtime) => Some(runtime),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].active_transfers, Some(1));
+        assert_eq!(samples[1].active_transfers, Some(0));
+        assert!(samples[1].sample_sequence > samples[0].sample_sequence);
+        assert_eq!(samples[1].segments[0].active, Some(false));
+        assert_eq!(samples[1].segments[0].downloaded_bytes, 20);
+        assert_eq!(
+            (
+                samples[1].segments[0].start_byte,
+                samples[1].segments[0].end_byte
+            ),
+            (0, 99)
         );
     }
 

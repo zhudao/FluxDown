@@ -6,6 +6,7 @@ pub const SYSTEM_SNAPSHOT: &str = "system.snapshot";
 
 pub const DAEMON_TASK_LIST: &str = "daemon.task.list";
 pub const DAEMON_TASK_GET: &str = "daemon.task.get";
+pub const DAEMON_TASK_ACTIVITY: &str = "daemon.task.activity";
 pub const DAEMON_TASK_CREATE: &str = "daemon.task.create";
 pub const DAEMON_TASK_PAUSE: &str = "daemon.task.pause";
 pub const DAEMON_TASK_RESUME: &str = "daemon.task.resume";
@@ -188,6 +189,7 @@ pub const ALL_METHODS: &[&str] = &[
     SYSTEM_SNAPSHOT,
     DAEMON_TASK_LIST,
     DAEMON_TASK_GET,
+    DAEMON_TASK_ACTIVITY,
     DAEMON_TASK_CREATE,
     DAEMON_TASK_PAUSE,
     DAEMON_TASK_RESUME,

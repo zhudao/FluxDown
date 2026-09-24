@@ -51,11 +51,14 @@ pub mod site_auth;
 pub mod speed_limiter;
 /// 通用订阅 provider 接口（RSS 与插件订阅共用）。
 pub mod subscription;
+pub mod task_activity;
 /// `thunder://` 链接解析（迅雷专有 base64 封装：`AA<真实地址>ZZ`）。
 pub mod thunder;
 pub mod tracker_subscription;
+pub mod transfer_activity;
 /// 用户主目录下的系统标准目录（下载目录：Windows 已知文件夹 / XDG user-dirs）。
 pub mod user_dirs;
+
 /// 任务事件 Webhook 推送（免费自托管，BYOE）。
 pub mod webhook;
 
@@ -171,6 +174,9 @@ pub struct Engine {
     pub db: Db,
     /// 任务生命周期管理器。
     pub manager: DownloadManager,
+    /// 与 manager 共用的源端活动代理；宿主的 progress_reporter 也必须用它。
+    pub activity_sink: Arc<dyn EventSink>,
+    activity_journal: Arc<task_activity::JournalSink>,
     /// 需要宿主介入决策的选择接口(HLS 画质/BT 文件选择),与传入
     /// [`Engine::new`] 的实例相同 —— 供宿主收到"投递答案"信号时直接调用
     /// `engine.selector.provide_*(...)`,不必另行持有一份引用。
@@ -254,6 +260,8 @@ impl Engine {
         // send_all_groups 由宿主主动调用触发，此处不广播）。
         let _ = db.gc_empty_groups().await;
         // 插件系统构造所需值需在 config 被 move 进 DownloadManagerConfig 前克隆。
+        let activity_journal = task_activity::JournalSink::start(db.clone(), sink);
+        let sink: Arc<dyn EventSink> = activity_journal.clone();
         #[cfg(feature = "plugins")]
         let plugin_ctx = (
             config.proxy_config.clone(),
@@ -275,7 +283,7 @@ impl Engine {
                 proxy_config: config.proxy_config,
                 user_agent: config.user_agent,
             },
-            sink,
+            sink.clone(),
             selector.clone(),
         )?;
         // 组装并注入插件管理器（feature 关时整块不编译，下载主链路零变化）。
@@ -330,7 +338,17 @@ impl Engine {
             manager,
             selector,
             data_dir,
+            activity_sink: sink,
+            activity_journal,
         })
+    }
+    /// 等待事件队列中的活动全部持久化；停机前调用以免内存尾部丢失。
+    pub async fn flush_task_activity(&self) -> Result<(), String> {
+        self.activity_journal.flush().await
+    }
+    /// 报告器与 actor 排空后仍可执行最终刷盘。
+    pub fn activity_journal(&self) -> Arc<task_activity::JournalSink> {
+        self.activity_journal.clone()
     }
 
     /// 测试代理连通性,返回延迟(毫秒)。

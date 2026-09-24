@@ -254,7 +254,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(download_manager::progress_reporter(
             rx,
             engine.db.clone(),
-            sink.clone(),
+            engine.activity_sink.clone(),
         ));
     }
     let done_rx = engine

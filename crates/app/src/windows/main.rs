@@ -5,6 +5,7 @@ use std::{rc::Rc, sync::Arc};
 use fluxdown_ui_downloads::{DOWNLOAD_ICON_PATH, DownloadHostActions, DownloadView};
 use fluxdown_ui_i18n::keys;
 use fluxdown_ui_rss::{RSS_ICON_PATH, RssView};
+use fluxdown_ui_settings::WebhookView;
 use fluxdown_ui_shell::{RouteId, ShellAction, ShellRoute, ShellView, main_window_options};
 use fluxdown_ui_theme::{active_theme, toggle_theme};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
@@ -51,6 +52,8 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
             cx.new(|cx| DownloadView::new(translator.clone(), downloads_port, window, cx));
         let rss_port = Arc::new(AgentRssPort::new(client.clone()));
         let rss = cx.new(|cx| RssView::new(translator.clone(), rss_port, window, cx));
+        let webhooks =
+            cx.new(|cx| WebhookView::new(translator.clone(), settings_store.clone(), cx));
 
         let routes = vec![
             ShellRoute::new(
@@ -68,6 +71,15 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "sidebarRss",
                 Icon::empty().path(RSS_ICON_PATH),
                 rss.clone().into(),
+            )
+            .optional(true),
+            ShellRoute::new(
+                RouteId::new("webhooks"),
+                "activity-webhooks",
+                "activity-webhooks-tooltip",
+                "webhookNavTitle",
+                Icon::new(IconName::Bell),
+                webhooks.into(),
             )
             .optional(true),
         ];

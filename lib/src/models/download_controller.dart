@@ -2259,7 +2259,9 @@ class DownloadController extends ChangeNotifier {
   /// 队列，能不动就不动）保证任务在当前组合下可见；组成员任务展开所属
   /// 组与目录；最后选中并挂起定位请求——TaskList 消费请求执行滚动定位
   /// （「显示已完成」是视图层开关，由 TaskList 侧补齐）。
-  void revealTask(String taskId) {
+  /// 返回是否找到了任务：RSS 的已下载快照可能比删除信号晚到，不能因此
+  /// 退出 RSS 列表并打开不存在的任务详情。
+  bool revealTask(String taskId) {
     DownloadTask? task;
     for (final t in _tasks) {
       if (t.id == taskId) {
@@ -2267,7 +2269,7 @@ class DownloadController extends ChangeNotifier {
         break;
       }
     }
-    if (task == null) return;
+    if (task == null) return false;
 
     bool hidden() => !filteredTasks.any((t) => t.id == taskId);
     if (hidden()) setStatusTab(StatusTab.all);
@@ -2281,6 +2283,7 @@ class DownloadController extends ChangeNotifier {
     selectTask(taskId);
     _pendingRevealTaskId = taskId;
     _safeNotifyListeners();
+    return true;
   }
 
   /// 按聚合态二选一（design-proto-spec §8 组右键菜单 / §13 Space 键）：

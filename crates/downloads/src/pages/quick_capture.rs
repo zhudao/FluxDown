@@ -123,15 +123,7 @@ impl QuickCaptureView {
 
     /// `SessionConsumer::replace_snapshot`：折叠成纯数据，不接触 `Entity<InputState>`。
     pub fn replace_snapshot(&mut self, snapshot: &AgentSnapshot, cx: &mut Context<Self>) {
-        self.queues = snapshot
-            .daemon
-            .queues
-            .iter()
-            .map(|queue| NewDownloadQueue {
-                id: queue.queue_id.clone(),
-                name: queue.name.clone(),
-            })
-            .collect();
+        self.absorb_queues(&snapshot.daemon.queues);
         if !self.save_dir_initialized {
             let configured = snapshot
                 .daemon
@@ -154,17 +146,26 @@ impl QuickCaptureView {
             }
             ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::QueuesChanged(queues)))
             | ServiceEvent::Daemon(DaemonEvent::QueuesChanged(queues)) => {
-                self.queues = queues
-                    .iter()
-                    .map(|queue| NewDownloadQueue {
-                        id: queue.queue_id.clone(),
-                        name: queue.name.clone(),
-                    })
-                    .collect();
+                self.absorb_queues(queues);
+                cx.notify();
+            }
+            ServiceEvent::Agent(AgentEvent::DaemonSnapshotReplaced(snapshot))
+            | ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::SnapshotReplaced(snapshot))) => {
+                self.absorb_queues(&snapshot.queues);
                 cx.notify();
             }
             _ => {}
         }
+    }
+
+    fn absorb_queues(&mut self, queues: &[fluxdown_protocol::QueueDto]) {
+        self.queues = queues
+            .iter()
+            .map(|queue| NewDownloadQueue {
+                id: queue.queue_id.clone(),
+                name: queue.name.clone(),
+            })
+            .collect();
     }
 
     /// `SessionConsumer::mark_stale`：断线时保留当前列表，仅刷新只读态。

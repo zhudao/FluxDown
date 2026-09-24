@@ -15,7 +15,9 @@ use crate::{
         RevealSelected, SelectAllTasks, ToggleBoostSelected, ToggleDetailPanel,
         TogglePauseSelected,
     },
-    components::task_table::{DownloadTableDelegate, TableFilter, ToolbarCommand},
+    components::task_table::{
+        DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+    },
     controller::{
         DownloadsCommand, DownloadsController, DownloadsPort, LAST_SAVE_DIR_PREF,
         REMEMBER_LAST_SAVE_DIR_PREF,
@@ -116,6 +118,8 @@ pub struct DownloadView {
     pub(crate) detail: Option<Entity<TaskDetailView>>,
     /// 详情面板 / 主内容拆分的独立 resizable 状态。
     pub(crate) detail_resizable_state: Entity<ResizableState>,
+    /// 上次渲染时的工具栏选中投影；表格选中变化时与之比较，变了才重绘本页。
+    pub(crate) toolbar_selection: Cell<SelectionSummary>,
 }
 
 impl DownloadView {
@@ -159,6 +163,16 @@ impl DownloadView {
         .detach();
         cx.subscribe_in(&table_state, window, Self::handle_table_event)
             .detach();
+        // 选中变化只通知表格实体；工具栏按钮可用性依赖它，按投影差异重绘本页，
+        // 避免表格滚动 / 悬停等高频 notify 带着整页重绘。
+        cx.observe(&table_state, |this, table_state, cx| {
+            let selection = table_state.read(cx).delegate().selection_summary();
+            if this.toolbar_selection.get() != selection {
+                this.toolbar_selection.set(selection);
+                cx.notify();
+            }
+        })
+        .detach();
 
         Self {
             controller,
@@ -188,6 +202,7 @@ impl DownloadView {
             prefs_loaded: false,
             detail: None,
             detail_resizable_state: cx.new(|_| ResizableState::default()),
+            toolbar_selection: Cell::new(SelectionSummary::default()),
         }
     }
 
@@ -343,7 +358,11 @@ impl DownloadView {
         cx: &mut Context<Self>,
     ) {
         self.controller.replace_snapshot(snapshot);
-        self.last_error = None;
+        if let Some(detail) = self.detail.clone() {
+            detail.update(cx, |detail, cx| detail.replace_snapshot(snapshot, cx));
+        }
+        self.reconcile_queue_selection();
+        self.last_error = (!snapshot.daemon_connected).then(|| self.strings.disconnected.clone());
         self.load_view_prefs(cx);
         self.sync_delegate_context(cx);
         self.refresh_tasks(cx);
@@ -352,6 +371,9 @@ impl DownloadView {
 
     pub fn apply_event(&mut self, event: &fluxdown_protocol::ServiceEvent, cx: &mut Context<Self>) {
         let table_changed = self.controller.apply_event(event);
+        if let Some(detail) = self.detail.clone() {
+            detail.update(cx, |detail, cx| detail.apply_event(event, cx));
+        }
         if let fluxdown_protocol::ServiceEvent::Agent(
             fluxdown_protocol::AgentEvent::PreferencesChanged(_),
         ) = event
@@ -359,6 +381,17 @@ impl DownloadView {
             self.load_view_prefs(cx);
         }
         if table_changed {
+            if matches!(
+                event,
+                fluxdown_protocol::ServiceEvent::Agent(
+                    fluxdown_protocol::AgentEvent::Daemon(
+                        fluxdown_protocol::DaemonEvent::QueuesChanged(_)
+                            | fluxdown_protocol::DaemonEvent::SnapshotReplaced(_)
+                    ) | fluxdown_protocol::AgentEvent::DaemonSnapshotReplaced(_)
+                )
+            ) {
+                self.reconcile_queue_selection();
+            }
             self.sync_delegate_context(cx);
             self.refresh_tasks(cx);
             self.sync_detail_panel(cx);
@@ -367,9 +400,25 @@ impl DownloadView {
         }
     }
 
+    /// 队列删除/daemon 快照更替后，不能继续筛选已不存在的队列。
+    fn reconcile_queue_selection(&mut self) {
+        if let SidebarSelection::Queue(queue_id) = &self.selected_item
+            && !self
+                .controller
+                .queues()
+                .iter()
+                .any(|queue| &queue.queue_id == queue_id)
+        {
+            self.selected_item = SidebarSelection::Download(DownloadFilter::ALL);
+        }
+    }
+
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
         self.last_error = Some(self.strings.disconnected.clone());
         self.controller.mark_stale();
+        if let Some(detail) = self.detail.clone() {
+            detail.update(cx, |detail, cx| detail.mark_stale(cx));
+        }
         cx.notify();
     }
 
@@ -440,12 +489,19 @@ impl DownloadView {
 
     /// 停靠详情面板：把当前任务的最新 DTO 推给面板刷新（事件 / 快照后调用）。
     fn sync_detail_panel(&mut self, cx: &mut Context<Self>) {
+        if self.controller.is_stale() {
+            return;
+        }
         let Some(detail) = self.detail.clone() else {
             return;
         };
         let task_id = detail.read(cx).task_id().to_owned();
         let dto = self.controller.task_dto(&task_id).cloned();
-        detail.update(cx, |detail, cx| detail.sync(dto, cx));
+        let runtime = self.controller.task_runtime(&task_id).cloned();
+        detail.update(cx, |detail, cx| {
+            detail.sync(dto, cx);
+            detail.sync_runtime(runtime, cx);
+        });
     }
 
     pub(crate) fn refresh_tasks(&mut self, cx: &mut Context<Self>) {
@@ -566,6 +622,9 @@ impl DownloadView {
                         cx,
                     )
                 });
+                if self.controller.is_stale() {
+                    detail.update(cx, |detail, cx| detail.mark_stale(cx));
+                }
                 self.detail = Some(detail);
             }
         }
@@ -1054,6 +1113,15 @@ impl DownloadView {
     fn on_delete_selected_with_files(
         &mut self,
         _: &DeleteSelectedWithFiles,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete_selected_with_files(window, cx);
+    }
+
+    /// 对当前选中集合发起「删除任务和文件」（带二次确认）；空选择为 no-op。
+    pub(crate) fn delete_selected_with_files(
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {

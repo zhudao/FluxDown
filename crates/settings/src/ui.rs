@@ -649,7 +649,7 @@ impl SettingsSection {
                 .sum::<f32>()
     }
 
-    fn render(
+    pub(crate) fn render(
         &self,
         key: &str,
         index: usize,

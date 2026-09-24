@@ -5,6 +5,9 @@
 !Cargo.lock
 !native
 !crates
+!scripts
+scripts/*
+!scripts/desktop-dev
 !web
 !docker
 web/node_modules

@@ -34,6 +34,12 @@ impl DownloadsPort for AgentDownloadsPort {
         let client = self.client.clone();
         Box::pin(async move {
             let (method, params) = match command {
+                DownloadsCommand::TaskActivity(query) => {
+                    let page = client
+                        .call(method::DAEMON_TASK_ACTIVITY, Some(query))
+                        .await?;
+                    return Ok(DownloadsResult::TaskActivity(page));
+                }
                 DownloadsCommand::Create(params) => {
                     (method::DAEMON_TASK_CREATE, serialize(params)?)
                 }

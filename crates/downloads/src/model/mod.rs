@@ -5,7 +5,10 @@ pub(crate) mod store;
 pub(crate) mod view_prefs;
 
 pub(crate) use categories::CategoryIndex;
+use std::rc::Rc;
 pub(crate) use store::{RowId, TaskStore};
+
+use fluxdown_protocol::TaskRuntimeDto;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum DownloadStatusFilter {
@@ -269,6 +272,8 @@ pub(crate) struct DownloadTaskView {
     pub(crate) size_bytes: u64,
     pub(crate) downloaded_bytes: u64,
     pub(crate) speed_bytes_per_second: Option<u64>,
+    pub(crate) runtime: Option<Rc<TaskRuntimeDto>>,
+    pub(crate) runtime_connected: bool,
     pub(crate) eta_seconds: Option<u64>,
     pub(crate) created_at_secs: i64,
     pub(crate) completed_at_secs: i64,
@@ -391,6 +396,8 @@ impl DownloadTaskView {
             size_bytes,
             downloaded_bytes: downloaded,
             speed_bytes_per_second,
+            runtime: None,
+            runtime_connected: false,
             eta_seconds,
             created_at_secs,
             completed_at_secs: 0,
@@ -440,6 +447,18 @@ impl DownloadTaskView {
             .rsplit_once('.')
             .map(|(_, extension)| extension.to_ascii_lowercase())
             .filter(|extension| !extension.is_empty() && !extension.contains('/'))
+    }
+
+    pub(crate) fn active_transfers(&self) -> Option<u32> {
+        if !self.runtime_connected || self.source != TaskSource::Local {
+            None
+        } else if self.state != TaskState::Downloading {
+            Some(0)
+        } else {
+            self.runtime
+                .as_ref()
+                .and_then(|runtime| runtime.active_transfers)
+        }
     }
 }
 

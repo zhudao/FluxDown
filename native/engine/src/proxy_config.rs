@@ -1633,6 +1633,7 @@ pub async fn test_proxy_connection(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::{
         ProxyConfig, ProxyMode, ProxyType, base64_encode, is_proxy_tls_handshake_failure,

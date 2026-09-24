@@ -376,6 +376,41 @@ class S {
   String get detailTabGeneral => _r('detailTabGeneral');
   String get detailTabQueue => _r('detailTabQueue');
   String get detailTabLog => _r('detailTabLog');
+  String get taskActiveTransfers => _r('taskActiveTransfers');
+  String get taskConnectedPeers => _r('taskConnectedPeers');
+  String get detailActiveTransfers => _r('detailActiveTransfers');
+  String get detailConnectedPeers => _r('detailConnectedPeers');
+  String get detailActivityLoading => _r('detailActivityLoading');
+  String get detailActivityLoadMore => _r('detailActivityLoadMore');
+  String get detailActivityRetry => _r('detailActivityRetry');
+  String get detailActivityQueryFailed => _r('detailActivityQueryFailed');
+  String get detailActivityTruncated => _r('detailActivityTruncated');
+  String detailActivityRetainedRange(String oldest, String newest) =>
+      _r('detailActivityRetainedRange', {'oldest': oldest, 'newest': newest});
+  String get detailActivityKindCreated => _r('detailActivityKindCreated');
+  String get detailActivityKindStarted => _r('detailActivityKindStarted');
+  String get detailActivityKindPaused => _r('detailActivityKindPaused');
+  String get detailActivityKindResumed => _r('detailActivityKindResumed');
+  String get detailActivityKindCompleted => _r('detailActivityKindCompleted');
+  String get detailActivityKindFailed => _r('detailActivityKindFailed');
+  String get detailActivityKindDeleted => _r('detailActivityKindDeleted');
+  String get detailActivityKindRetry => _r('detailActivityKindRetry');
+  String get detailActivityKindRetrying => _r('detailActivityKindRetrying');
+  String get detailActivityKindStatusChanged =>
+      _r('detailActivityKindStatusChanged');
+  String get detailActivityKindStatus => _r('detailActivityKindStatus');
+  String get detailActivityKindError => _r('detailActivityKindError');
+  String get detailActivityKindSplit => _r('detailActivityKindSplit');
+  String get detailActivityKindCdnPool => _r('detailActivityKindCdnPool');
+  String get detailActivityKindCdnKick => _r('detailActivityKindCdnKick');
+  String get detailActivityKindCdnBreaker => _r('detailActivityKindCdnBreaker');
+  String get detailActivityKindCdnFallback =>
+      _r('detailActivityKindCdnFallback');
+  String get detailActivityKindCdnSummary => _r('detailActivityKindCdnSummary');
+  String get detailActivityKindJournalOverflow =>
+      _r('detailActivityKindJournalOverflow');
+  String get detailActivityJournalGap => _r('detailActivityJournalGap');
+  String get detailActivityKindUnknown => _r('detailActivityKindUnknown');
   String get detailTabAdvanced => _r('detailTabAdvanced');
   String get detailBoostActive => _r('detailBoostActive');
   String get infoProtocolSource => _r('infoProtocolSource');
@@ -2139,6 +2174,25 @@ class S {
   String get showSidebarRssDesc => _r('showSidebarRssDesc');
   String get rssSidebarEmptyHint => _r('rssSidebarEmptyHint');
   String get rssAddSource => _r('rssAddSource');
+  String get rssPageDescription => _r('rssPageDescription');
+  String get rssSubscriptions => _r('rssSubscriptions');
+  String rssUnreadCount(int n) => _r('rssUnreadCount', {'n': n});
+  String rssSelectedCount(int n) => _r('rssSelectedCount', {'n': n});
+  String get rssDownloadSelected => _r('rssDownloadSelected');
+  String get rssIgnoreSelected => _r('rssIgnoreSelected');
+  String get rssSelectVisible => _r('rssSelectVisible');
+  String get rssClearSelection => _r('rssClearSelection');
+  String get rssTaskMissing => _r('rssTaskMissing');
+  String get rssTaskCreated => _r('rssTaskCreated');
+  String rssItemsUpdated(int n) => _r('rssItemsUpdated', {'n': n});
+  String rssBatchResult(int done, int failed) =>
+      _r('rssBatchResult', {'done': done, 'failed': failed});
+  String get rssPublishedAt => _r('rssPublishedAt');
+  String get rssInvalidNumber => _r('rssInvalidNumber');
+  String get rssInvalidSizeRange => _r('rssInvalidSizeRange');
+  String get rssFeedRequired => _r('rssFeedRequired');
+  String get rssValidateBeforeSave => _r('rssValidateBeforeSave');
+  String get rssEditorAuthHint => _r('rssEditorAuthHint');
   String get rssManageTitle => _r('rssManageTitle');
   String get rssDeleteSource => _r('rssDeleteSource');
   String rssDeleteConfirmDesc(String name) =>
@@ -2248,6 +2302,7 @@ class S {
   String get settingsCatNotifyDesc => _r('settingsCatNotifyDesc');
   String get notifyGroupSystem => _r('notifyGroupSystem');
   String get notifyGroupWebhook => _r('notifyGroupWebhook');
+  String get webhookNavTitle => _r('webhookNavTitle');
   String get webhookAddEndpoint => _r('webhookAddEndpoint');
   String get webhookDeliveryLog => _r('webhookDeliveryLog');
   String get webhookEmptyTitle => _r('webhookEmptyTitle');
@@ -2318,6 +2373,7 @@ class S {
   String get webhookLogSimulateHint => _r('webhookLogSimulateHint');
   String get webhookLogPending => _r('webhookLogPending');
   String get webhookSimulateNoTarget => _r('webhookSimulateNoTarget');
+  String get webhookSimulateDispatched => _r('webhookSimulateDispatched');
   String get webhookLogClear => _r('webhookLogClear');
   String get webhookLogResponse => _r('webhookLogResponse');
   String get webhookLogHint4xx => _r('webhookLogHint4xx');
