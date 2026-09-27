@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex;
 
@@ -27,6 +28,8 @@ struct SupervisorState {
 pub struct DaemonSupervisor {
     state: Arc<Mutex<SupervisorState>>,
     bind_addr: SocketAddr,
+    /// 完全退出流程中置位：此后连接拒绝不再拉起 daemon。
+    stopped: AtomicBool,
 }
 
 impl DaemonSupervisor {
@@ -35,15 +38,27 @@ impl DaemonSupervisor {
         Self {
             state: Arc::new(Mutex::new(SupervisorState::default())),
             bind_addr,
+            stopped: AtomicBool::new(false),
         }
     }
 
+    /// 永久停止监管（不可恢复）：随后的 [`Self::ensure_running`] 均为空操作。
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+
     /// 启动同级 daemon；短时间内并发/重复调用只产生一个子进程。
-    pub async fn ensure_running(&self) -> Result<(), SupervisorError> {
+    ///
+    /// 返回本进程所监管、仍存活的 daemon 子进程代际（刚拉起或早先拉起）；已停止监管时为
+    /// `None`。代际让调用方区分「同一个子进程仍在初始化」与「子进程已退出又被重新拉起」。
+    pub async fn ensure_running(&self) -> Result<Option<u64>, SupervisorError> {
         let mut state = self.state.lock().await;
         state.reapers.retain(|task| !task.is_finished());
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(None);
+        }
         if state.running {
-            return Ok(());
+            return Ok(Some(state.generation));
         }
         let executable = daemon_executable()?;
         let mut command = std::process::Command::new(&executable);
@@ -52,7 +67,7 @@ impl DaemonSupervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        set_no_console_window(&mut command);
+        detach_background_process(&mut command);
         let mut child = tokio::process::Command::from(command)
             .spawn()
             .map_err(|error| SupervisorError::Spawn(format!("{error:#}")))?;
@@ -70,7 +85,7 @@ impl DaemonSupervisor {
                 state.running = false;
             }
         }));
-        Ok(())
+        Ok(Some(generation))
     }
 }
 
@@ -87,11 +102,19 @@ fn daemon_executable() -> Result<PathBuf, std::io::Error> {
     Ok(current.with_file_name(name))
 }
 
+/// 后台服务与拉起者解耦：Windows 不弹控制台窗；Unix 进入独立进程组，终端里对拉起者的
+/// Ctrl-C（SIGINT 发给前台进程组）不会连带终止常驻 daemon。
 #[cfg(windows)]
-fn set_no_console_window(command: &mut std::process::Command) {
+fn detach_background_process(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(0x0800_0000);
 }
 
-#[cfg(not(windows))]
-fn set_no_console_window(_command: &mut std::process::Command) {}
+#[cfg(unix)]
+fn detach_background_process(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(any(windows, unix)))]
+fn detach_background_process(_command: &mut std::process::Command) {}

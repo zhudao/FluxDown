@@ -13,15 +13,19 @@ use chrono::{Local, TimeZone as _};
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, TaskDto, TaskRuntimeDto,
 };
+use fluxdown_ui_components::{
+    ControlExt as _, FluxIcon, IconControlExt as _, form, form_field, form_row, segmented_tabs,
+    tabular_numbers,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, EventEmitter,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Size,
+    Disableable as _, Icon,
     button::{Button, ButtonVariants as _},
     chart::AreaChart,
     h_flex,
@@ -32,7 +36,10 @@ use gpui_component::{
 use activity::ActivityFeed;
 
 use crate::{
-    components::segment_progress::render_segment_progress,
+    components::{
+        segment_progress::render_segment_progress,
+        task_table::{PROGRESS_BAR_HEIGHT, progress_bar_color, progress_track_color, status_color},
+    },
     controller::{
         DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, SeedLimits,
     },
@@ -45,6 +52,12 @@ use crate::{
 const SPEED_HISTORY_CAPACITY: usize = 120;
 /// `SeedLimits` 各字段的「跟随全局」哨兵（与 `native/protocol` 一致）。
 const SEED_LIMIT_FOLLOW_GLOBAL: i64 = -2;
+/// 键值表标签列宽：详情、做种、高级与任务组概览共用，保证值列左缘对齐。
+const DETAIL_LABEL_WIDTH: f32 = 112.;
+/// 活动日志时间戳列宽（`YYYY-MM-DD HH:MM:SS.mmm` 等宽数字）。
+const ACTIVITY_TIME_WIDTH: f32 = 168.;
+/// 空状态图标边长。
+const EMPTY_ICON_SIZE: f32 = 32.;
 
 /// 面板承载方式：决定是否渲染顶部进度头。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -506,16 +519,31 @@ impl TaskDetailView {
         };
         let active = matches!(row.state, TaskState::Downloading | TaskState::Pending);
         drop(row);
-        let command = if active {
-            DownloadsCommand::Pause {
-                task_id: self.task_id.clone(),
-            }
-        } else {
-            DownloadsCommand::Resume {
-                task_id: self.task_id.clone(),
-            }
-        };
-        self.run_command(command, cx);
+        if active {
+            self.run_command(
+                DownloadsCommand::Pause {
+                    task_id: self.task_id.clone(),
+                },
+                cx,
+            );
+            return;
+        }
+        let task_id = self.task_id.clone();
+        let future = self.port.execute(DownloadsCommand::Resume {
+            task_id: task_id.clone(),
+        });
+        cx.spawn(async move |this, cx| {
+            let failed = future.await.is_err();
+            let _ = this.update(cx, |this, cx| {
+                if failed {
+                    this.last_error = Some(this.strings.action_failed.clone());
+                } else if let Some(hook) = this.host.on_user_started.clone() {
+                    hook(task_id, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn copy_link(&mut self, cx: &mut Context<Self>) {
@@ -570,80 +598,96 @@ impl TaskDetailView {
             (DetailTab::Log, "detailTabLog"),
             (DetailTab::Advanced, "detailTabAdvanced"),
         ];
+        let visible: Vec<(DetailTab, SharedString)> = candidates
+            .into_iter()
+            .filter(|(tab, _)| *tab != DetailTab::Seeding || is_bt)
+            .map(|(tab, key)| (tab, self.t(cx, key)))
+            .collect();
+        let selected = visible
+            .iter()
+            .position(|(tab, _)| *tab == self.tab)
+            .unwrap_or(0);
+        let tabs: Vec<DetailTab> = visible.iter().map(|(tab, _)| *tab).collect();
+        let this = cx.weak_entity();
         h_flex()
-            .gap(tokens.spacing.xs)
             .px(tokens.spacing.md)
-            .py(tokens.spacing.sm)
-            .border_b_1()
-            .border_color(tokens.colors.border)
-            .children(
-                candidates
-                    .into_iter()
-                    .enumerate()
-                    .filter(|(_, (tab, _))| *tab != DetailTab::Seeding || is_bt)
-                    .map(|(index, (tab, key))| {
-                        let active = self.tab == tab;
-                        let label = self.t(cx, key);
-                        Button::new(("detail-tab", index))
-                            .ghost()
-                            .compact()
-                            .small()
-                            .when(active, gpui_component::button::ButtonVariants::primary)
-                            .label(label)
-                            .on_click(cx.listener(move |this, _, _, cx| this.select_tab(tab, cx)))
-                    }),
-            )
+            .pt(tokens.spacing.md)
+            .child(segmented_tabs(
+                "detail-tabs",
+                visible.into_iter().map(|(_, label)| label),
+                selected,
+                move |index, _, cx| {
+                    if let Some(tab) = tabs.get(index).copied() {
+                        let _ = this.update(cx, |this, cx| this.select_tab(tab, cx));
+                    }
+                },
+                cx,
+            ))
     }
 
-    fn render_completed_head(
-        &self,
-        row: &DownloadTaskView,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let tokens = active_theme(cx).tokens().clone();
+    /// 独立窗口头部的任务名：窗口级标题字号。
+    fn render_head_title(name: SharedString, cx: &App) -> Div {
+        let title = active_theme(cx).extended().title;
+        div()
+            .min_w_0()
+            .truncate()
+            .text_size(title.size)
+            .line_height(title.line_height)
+            .font_weight(title.weight)
+            .child(name)
+    }
+
+    fn render_completed_head(&self, row: &DownloadTaskView, cx: &mut Context<Self>) -> AnyElement {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let size = if row.size_bytes > 0 {
             row.size.clone()
         } else {
             format_bytes(row.downloaded_bytes)
         };
+        // 完成态不着色：状态只用中性三级文字表达（与主表格一致）。
+        let meta = SharedString::from(format!(
+            "{} · {size}",
+            self.strings.state_label(TaskState::Completed)
+        ));
         v_flex()
             .gap(tokens.spacing.md)
             .p(tokens.spacing.md)
             .border_b_1()
-            .border_color(tokens.colors.border)
+            .border_color(extended.colors.hairline)
             .child(
                 h_flex()
-                    .items_center()
-                    .gap(tokens.spacing.md)
+                    .items_start()
+                    .gap(tokens.spacing.sm)
                     .child(
-                        Icon::new(IconName::Check)
-                            .size(px(28.))
-                            .text_color(cx.theme().success),
+                        div()
+                            .flex_none()
+                            .h(extended.title.line_height)
+                            .flex()
+                            .items_center()
+                            .child(
+                                Icon::new(FluxIcon::CircleCheck)
+                                    .size(extended.icon.lg)
+                                    .text_color(extended.colors.text_tertiary),
+                            ),
                     )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap(tokens.spacing.xs)
-                            .child(
-                                div()
-                                    .text_size(tokens.typography.sm.size)
-                                    .font_weight(tokens.typography.sm.weight)
-                                    .text_color(cx.theme().success)
-                                    .child(self.strings.state_label(TaskState::Completed)),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(tokens.typography.sm.size)
-                                    .child(SharedString::from(row.name.clone())),
-                            )
+                            .gap(tokens.spacing.xxs)
+                            .child(Self::render_head_title(
+                                SharedString::from(row.name.clone()),
+                                cx,
+                            ))
                             .child(
                                 div()
                                     .text_size(tokens.typography.xs.size)
-                                    .text_color(tokens.colors.muted_foreground)
-                                    .child(size),
+                                    .line_height(tokens.typography.xs.line_height)
+                                    .font_features(tabular_numbers())
+                                    .text_color(extended.colors.text_tertiary)
+                                    .child(meta),
                             ),
                     ),
             )
@@ -654,17 +698,17 @@ impl TaskDetailView {
                     .child(
                         Button::new("detail-open-file")
                             .primary()
-                            .small()
-                            .icon(IconName::File)
+                            .control(cx)
+                            .icon(FluxIcon::File)
                             .label(self.strings.open_file.clone())
                             .disabled(row.file_missing)
                             .on_click(cx.listener(|this, _, _, cx| this.open_file(cx))),
                     )
                     .child(
                         Button::new("detail-open-folder")
-                            .ghost()
-                            .small()
-                            .icon(IconName::FolderOpen)
+                            .outline()
+                            .control(cx)
+                            .icon(FluxIcon::FolderOpen)
                             .label(self.strings.open_folder.clone())
                             .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))),
                     ),
@@ -673,7 +717,9 @@ impl TaskDetailView {
     }
 
     fn render_progress_head(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return div().into_any_element();
         };
@@ -698,12 +744,7 @@ impl TaskDetailView {
             format_bytes(row.downloaded_bytes)
         });
         let active = matches!(row.state, TaskState::Downloading | TaskState::Pending);
-        let status_color = match row.state {
-            TaskState::Completed => cx.theme().success,
-            TaskState::Failed => cx.theme().danger,
-            TaskState::Paused => cx.theme().warning,
-            TaskState::Downloading | TaskState::Pending => tokens.colors.primary,
-        };
+        let bar_color = progress_bar_color(row.state, cx);
         let active_transfers = row.active_transfers().filter(|_| downloading).map(|count| {
             self.runtime
                 .as_ref()
@@ -718,66 +759,62 @@ impl TaskDetailView {
         drop(row);
 
         v_flex()
-            .gap(tokens.spacing.xs)
+            .gap(tokens.spacing.sm)
             .p(tokens.spacing.md)
             .border_b_1()
-            .border_color(tokens.colors.border)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(tokens.typography.sm.weight)
-                    .min_w_0()
-                    .truncate()
-                    .child(name),
-            )
+            .border_color(extended.colors.hairline)
+            .child(Self::render_head_title(name, cx))
             .child(render_segment_progress(
                 self.runtime.as_ref(),
                 progress,
                 (f32::from(window.viewport_size().width) - 2. * f32::from(tokens.spacing.md))
                     .max(0.),
-                6.,
-                status_color,
-                tokens.colors.muted,
+                PROGRESS_BAR_HEIGHT,
+                bar_color,
+                progress_track_color(cx),
             ))
             .child(
                 h_flex()
                     .justify_between()
                     .gap(tokens.spacing.sm)
                     .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
+                    .font_features(tabular_numbers())
                     .text_color(tokens.colors.muted_foreground)
                     .child(div().child(progress_label))
                     .child(div().flex_1().text_right().child(size_label))
-                    .when_some(speed, |this, speed| this.child(div().child(speed)))
+                    .when_some(speed, |this, speed| {
+                        this.child(div().text_color(tokens.colors.primary).child(speed))
+                    })
                     .when_some(eta, |this, eta| this.child(div().child(eta))),
             )
             .when_some(active_transfers, |this, count| {
-                this.child(Self::info_row(
-                    &tokens,
+                this.child(detail_row(
                     self.t(cx, "detailActiveTransfers"),
-                    count.into(),
+                    SharedString::from(count),
+                    cx,
                 ))
             })
             .when_some(connected_peers, |this, count| {
-                this.child(Self::info_row(
-                    &tokens,
+                this.child(detail_row(
                     self.t(cx, "detailConnectedPeers"),
-                    count.to_string().into(),
+                    SharedString::from(count.to_string()),
+                    cx,
                 ))
             })
             .child(
                 h_flex()
                     .items_center()
-                    .gap(tokens.spacing.sm)
-                    .pt(tokens.spacing.xs)
+                    .gap(tokens.spacing.xs)
                     .child(
                         Button::new("detail-toggle-pause")
-                            .small()
                             .ghost()
                             .icon(if active {
-                                IconName::Pause
+                                FluxIcon::Pause
                             } else {
-                                IconName::Play
+                                FluxIcon::Play
                             })
+                            .control_icon(cx)
                             .tooltip(if active {
                                 self.strings.pause.clone()
                             } else {
@@ -787,9 +824,9 @@ impl TaskDetailView {
                     )
                     .child(
                         Button::new("detail-open-folder")
-                            .small()
                             .ghost()
-                            .icon(IconName::FolderOpen)
+                            .icon(FluxIcon::FolderOpen)
+                            .control_icon(cx)
                             .tooltip(self.strings.open_folder.clone())
                             .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))),
                     ),
@@ -797,35 +834,10 @@ impl TaskDetailView {
             .into_any_element()
     }
 
-    fn info_row(
-        tokens: &fluxdown_ui_theme::SemanticThemeTokens,
-        label: SharedString,
-        value: SharedString,
-    ) -> impl IntoElement {
-        h_flex()
-            .justify_between()
-            .items_start()
-            .gap(tokens.spacing.md)
-            .py(tokens.spacing.xxs)
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(label),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .text_size(tokens.typography.xs.size)
-                    .text_right()
-                    .child(value),
-            )
-    }
-
-    fn render_general(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = active_theme(cx).tokens().clone();
+    fn render_general(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return div().into_any_element();
         };
@@ -851,15 +863,16 @@ impl TaskDetailView {
         let boosted = row.boosted;
 
         let mut list = v_flex()
-            .gap(tokens.spacing.xs)
             .child(
                 v_flex()
-                    .gap(px(2.))
+                    .gap(tokens.spacing.xxs)
+                    .pb(tokens.spacing.sm)
                     .when(self.mode == DetailMode::Docked, |this| {
                         this.child(
                             div()
-                                .text_sm()
-                                .font_weight(tokens.typography.sm.weight)
+                                .text_size(tokens.typography.sm.size)
+                                .line_height(tokens.typography.sm.line_height)
+                                .font_weight(FontWeight::MEDIUM)
                                 .min_w_0()
                                 .truncate()
                                 .child(SharedString::from(row.name.clone())),
@@ -868,6 +881,7 @@ impl TaskDetailView {
                     .child(
                         div()
                             .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
                             .text_color(tokens.colors.muted_foreground)
                             .child(format!("{} · {}", row.protocol.label(), row.source_site())),
                     )
@@ -875,7 +889,8 @@ impl TaskDetailView {
                         this.child(
                             div()
                                 .text_size(tokens.typography.xs.size)
-                                .text_color(cx.theme().warning)
+                                .line_height(tokens.typography.xs.line_height)
+                                .text_color(extended.colors.warning)
                                 .child(self.t(cx, "detailBoostActive")),
                         )
                     }),
@@ -883,143 +898,113 @@ impl TaskDetailView {
             .when(
                 self.mode == DetailMode::Docked || row.state != TaskState::Completed,
                 |this| {
-                    this.child(Self::info_row(
-                        &tokens,
+                    this.child(detail_row(
                         self.t(cx, "infoStatus"),
-                        self.strings.state_label(row.state),
+                        div()
+                            .text_color(status_color(row.state, cx))
+                            .child(self.strings.state_label(row.state)),
+                        cx,
                     ))
                     .when(row.size_bytes > 0, |this| {
-                        this.child(Self::info_row(
-                            &tokens,
+                        this.child(detail_row(
                             self.t(cx, "infoSize"),
-                            row.size.clone().into(),
+                            SharedString::from(row.size.clone()),
+                            cx,
                         ))
                     })
                 },
             )
             .when(row.state != TaskState::Completed, |this| {
-                this.child(Self::info_row(
-                    &tokens,
+                this.child(detail_row(
                     self.t(cx, "infoDownloaded"),
-                    format_bytes(row.downloaded_bytes).into(),
+                    SharedString::from(format_bytes(row.downloaded_bytes)),
+                    cx,
                 ))
             })
             .when(row.state == TaskState::Downloading, |this| {
                 this.when_some(row.speed_bytes_per_second, |this, speed| {
-                    this.child(Self::info_row(
-                        &tokens,
+                    this.child(detail_row(
                         self.t(cx, "infoSpeed"),
-                        format!("{}/s", format_bytes(speed)).into(),
+                        SharedString::from(format!("{}/s", format_bytes(speed))),
+                        cx,
                     ))
                 })
                 .when_some(row.eta_seconds, |this, seconds| {
-                    this.child(Self::info_row(
-                        &tokens,
+                    this.child(detail_row(
                         self.t(cx, "infoRemaining"),
                         self.strings.format_eta(seconds),
+                        cx,
                     ))
                 })
             })
             .when(row.created_at_secs > 0, |this| {
-                this.child(Self::info_row(
-                    &tokens,
+                this.child(detail_row(
                     self.t(cx, "infoStartedAt"),
-                    DownloadStrings::format_detail_datetime(row.created_at_secs),
+                    DownloadStrings::format_datetime(row.created_at_secs),
+                    cx,
                 ))
             })
             .when(row.completed_at_secs > 0, |this| {
-                this.child(Self::info_row(
-                    &tokens,
+                this.child(detail_row(
                     self.t(cx, "infoCompletedAt"),
-                    DownloadStrings::format_detail_datetime(row.completed_at_secs),
+                    DownloadStrings::format_datetime(row.completed_at_secs),
+                    cx,
                 ))
             })
             .child(
-                h_flex()
+                div()
                     .id("detail-reveal-row")
-                    .justify_between()
-                    .gap(tokens.spacing.md)
-                    .py(tokens.spacing.xxs)
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| this.reveal(cx)))
-                    .child(
+                    .child(detail_row(
+                        self.t(cx, "infoPath"),
                         div()
-                            .flex_none()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(self.t(cx, "infoPath")),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .text_size(tokens.typography.xs.size)
-                            .text_right()
-                            .text_color(tokens.colors.primary)
                             .truncate()
+                            .text_color(tokens.colors.primary)
                             .child(SharedString::from(row.save_dir.clone())),
-                    ),
+                        cx,
+                    )),
             )
-            .child(Self::info_row(
-                &tokens,
-                self.t(cx, "taskQueueLabel"),
-                queue_label,
-            ))
-            .child(Self::info_row(
-                &tokens,
-                self.t(cx, "taskChecksum"),
-                checksum,
-            ))
-            .child(Self::info_row(&tokens, self.t(cx, "taskProxy"), proxy));
+            .child(detail_row(self.t(cx, "taskQueueLabel"), queue_label, cx))
+            .child(detail_row(self.t(cx, "taskChecksum"), checksum, cx))
+            .child(detail_row(self.t(cx, "taskProxy"), proxy, cx));
 
         if ignore_tls {
-            list = list.child(Self::info_row(
-                &tokens,
+            list = list.child(detail_row(
                 self.t(cx, "taskIgnoreTlsErrors"),
                 SharedString::from("✓"),
+                cx,
             ));
         }
         if !row.error_message.is_empty() {
-            list = list.child(Self::info_row(
-                &tokens,
+            list = list.child(detail_row(
                 self.t(cx, "infoError"),
-                SharedString::from(row.error_message.clone()),
+                div()
+                    .text_color(tokens.colors.destructive)
+                    .child(SharedString::from(row.error_message.clone())),
+                cx,
             ));
         }
         drop(row);
         if !group_id.is_empty() {
-            list = list.child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .gap(tokens.spacing.md)
-                    .py(tokens.spacing.xxs)
-                    .child(
-                        div()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(self.t(cx, "groupMemberOfLabel")),
-                    )
-                    .child(
-                        Button::new("detail-open-group")
-                            .ghost()
-                            .compact()
-                            .small()
-                            .h(CONTROL_HEIGHT)
-                            .label(self.strings.open_group_in_window.clone())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_group(group_id.clone(), window, cx);
-                            })),
-                    ),
-            );
+            list = list.child(detail_row(
+                self.t(cx, "groupMemberOfLabel"),
+                Button::new("detail-open-group")
+                    .ghost()
+                    .control(cx)
+                    .label(self.strings.open_group_in_window.clone())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_group(group_id.clone(), window, cx);
+                    })),
+                cx,
+            ));
         }
         list.child(
-            h_flex().gap(tokens.spacing.sm).pt(tokens.spacing.sm).child(
+            h_flex().gap(tokens.spacing.sm).pt(tokens.spacing.md).child(
                 Button::new("detail-copy-link")
-                    .ghost()
-                    .small()
-                    .h(CONTROL_HEIGHT)
-                    .icon(IconName::Copy)
+                    .outline()
+                    .control(cx)
+                    .icon(FluxIcon::Copy)
                     .label(self.strings.copy_url.clone())
                     .on_click(cx.listener(|this, _, _, cx| this.copy_link(cx))),
             ),
@@ -1027,8 +1012,10 @@ impl TaskDetailView {
         .into_any_element()
     }
 
-    fn render_seeding(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = active_theme(cx).tokens().clone();
+    fn render_seeding(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return div().into_any_element();
         };
@@ -1056,23 +1043,18 @@ impl TaskDetailView {
         let has_chart = chart_points.len() > 1;
 
         v_flex()
-            .gap(tokens.spacing.xs)
-            .child(Self::info_row(
-                &tokens,
-                self.t(cx, "seedingStatus"),
-                status_label,
-            ))
-            .child(Self::info_row(
-                &tokens,
+            .child(detail_row(self.t(cx, "seedingStatus"), status_label, cx))
+            .child(detail_row(
                 self.t(cx, "uploadedTotal"),
                 SharedString::from(format_bytes(uploaded_bytes)),
+                cx,
             ))
-            .child(Self::info_row(
-                &tokens,
+            .child(detail_row(
                 self.t(cx, "seedRatio"),
                 SharedString::from(ratio),
+                cx,
             ))
-            .child(Self::info_row(&tokens, self.t(cx, "seedTime"), duration))
+            .child(detail_row(self.t(cx, "seedTime"), duration, cx))
             .when(has_chart, |this| {
                 this.child(
                     div().h(px(64.)).w_full().pt(tokens.spacing.sm).child(
@@ -1089,97 +1071,123 @@ impl TaskDetailView {
             .child(
                 div()
                     .h(px(1.))
-                    .my(tokens.spacing.sm)
-                    .bg(tokens.colors.border),
+                    .my(tokens.spacing.md)
+                    .bg(extended.colors.hairline),
             )
             .child(
                 div()
-                    .text_size(tokens.typography.xs.size)
-                    .font_weight(tokens.typography.sm.weight)
+                    .pb(tokens.spacing.md)
+                    .text_size(extended.caption.size)
+                    .line_height(extended.caption.line_height)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(extended.colors.text_tertiary)
                     .child(self.t(cx, "btSeedLimitsTitle")),
             )
-            .child(self.render_seed_field(cx, "btSeedRatioLimit", self.seed_ratio.clone()))
-            .child(self.render_seed_field(cx, "btSeedPostRatioLimit", self.seed_post_ratio.clone()))
-            .child(self.render_seed_field(cx, "btSeedTimeLimit", self.seed_time_limit.clone()))
-            .child(self.render_seed_field(
-                cx,
-                "btSeedInactiveTimeLimit",
-                self.seed_inactive_limit.clone(),
-            ))
-            .child(self.render_seed_field(cx, "btSeedUploadLimit", self.seed_upload_limit.clone()))
             .child(
-                Button::new("detail-save-seed-limits")
-                    .primary()
-                    .small()
-                    .h(CONTROL_HEIGHT)
-                    .label(self.strings.confirm.clone())
-                    .on_click(cx.listener(|this, _, _, cx| this.save_seed_limits(cx))),
+                form(cx)
+                    .child(form_row(
+                        [
+                            self.render_seed_field(cx, "btSeedRatioLimit", &self.seed_ratio, None),
+                            self.render_seed_field(
+                                cx,
+                                "btSeedPostRatioLimit",
+                                &self.seed_post_ratio,
+                                None,
+                            ),
+                        ],
+                        cx,
+                    ))
+                    .child(form_row(
+                        [
+                            self.render_seed_field(
+                                cx,
+                                "btSeedTimeLimit",
+                                &self.seed_time_limit,
+                                None,
+                            ),
+                            self.render_seed_field(
+                                cx,
+                                "btSeedInactiveTimeLimit",
+                                &self.seed_inactive_limit,
+                                None,
+                            ),
+                        ],
+                        cx,
+                    ))
+                    .child(self.render_seed_field(
+                        cx,
+                        "btSeedUploadLimit",
+                        &self.seed_upload_limit,
+                        Some("btSeedUploadLimitHint"),
+                    ))
+                    .child(
+                        h_flex().justify_end().child(
+                            Button::new("detail-save-seed-limits")
+                                .primary()
+                                .label(self.strings.confirm.clone())
+                                .control(cx)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_seed_limits(cx))),
+                        ),
+                    ),
             )
             .into_any_element()
     }
 
+    /// 做种限制字段：标签 → 数字输入（统一控件档 28 高）→ 可选说明。
     fn render_seed_field(
         &self,
         cx: &mut Context<Self>,
         label_key: &str,
-        state: Entity<InputState>,
-    ) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        h_flex()
-            .justify_between()
-            .items_center()
-            .gap(tokens.spacing.md)
-            .py(tokens.spacing.xxs)
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t(cx, label_key)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(120.))
-                    .child(NumberInput::new(&state).with_size(Size::Medium)),
-            )
+        state: &Entity<InputState>,
+        hint_key: Option<&str>,
+    ) -> AnyElement {
+        form_field(
+            self.t(cx, label_key),
+            NumberInput::new(state).control(cx).w_full(),
+            hint_key.map(|key| self.t(cx, key)),
+            cx,
+        )
+        .into_any_element()
     }
 
-    fn render_log(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = active_theme(cx).tokens().clone();
+    fn render_log(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let (oldest, newest, truncated) = self.activity.retained_range();
-        let mut content = v_flex().gap(tokens.spacing.xs).child(
+        let note = |text: SharedString, color: Hsla| {
             div()
                 .text_size(tokens.typography.xs.size)
-                .text_color(tokens.colors.muted_foreground)
-                .child(self.t(cx, "detailLogHint")),
-        );
+                .line_height(tokens.typography.xs.line_height)
+                .text_color(color)
+                .child(text)
+        };
+        let mut content = v_flex().gap(tokens.spacing.xs).child(note(
+            self.t(cx, "detailLogHint"),
+            tokens.colors.muted_foreground,
+        ));
         if truncated {
-            content = content.child(
-                div()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(cx.theme().warning)
-                    .child(self.t(cx, "detailActivityTruncated")),
-            );
+            content = content.child(note(
+                self.t(cx, "detailActivityTruncated"),
+                extended.colors.warning,
+            ));
         }
         if self.activity.has_journal_gap() {
-            content = content.child(
-                div()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(cx.theme().warning)
-                    .child(self.t(cx, "detailActivityJournalGap")),
-            );
+            content = content.child(note(
+                self.t(cx, "detailActivityJournalGap"),
+                extended.colors.warning,
+            ));
         }
         if let (Some(oldest), Some(newest)) = (oldest, newest) {
             content = content.child(
-                div()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(format!(
+                note(
+                    SharedString::from(format!(
                         "{}: #{oldest}–#{newest}",
                         self.t(cx, "detailActivityRetainedRange")
                     )),
+                    tokens.colors.muted_foreground,
+                )
+                .font_features(tabular_numbers()),
             );
         }
         if self.activity.failed() {
@@ -1187,35 +1195,30 @@ impl TaskDetailView {
                 h_flex()
                     .gap(tokens.spacing.sm)
                     .items_center()
-                    .child(
-                        div()
-                            .text_size(tokens.typography.xs.size)
-                            .text_color(cx.theme().danger)
-                            .child(self.t(cx, "detailActivityQueryFailed")),
-                    )
+                    .child(note(
+                        self.t(cx, "detailActivityQueryFailed"),
+                        tokens.colors.destructive,
+                    ))
                     .child(
                         Button::new("detail-activity-retry")
-                            .small()
+                            .outline()
+                            .control(cx)
                             .label(self.t(cx, "detailActivityRetry"))
                             .on_click(cx.listener(|this, _, _, cx| this.retry_activity(cx))),
                     ),
             );
         }
         if self.activity.is_loading() {
-            content = content.child(
-                div()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t(cx, "detailActivityLoading")),
-            );
+            content = content.child(note(
+                self.t(cx, "detailActivityLoading"),
+                tokens.colors.muted_foreground,
+            ));
         }
         if self.activity.loaded() && self.activity.entries().next().is_none() {
-            content = content.child(
-                div()
-                    .text_size(tokens.typography.xs.size)
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(self.t(cx, "detailLogEmpty")),
-            );
+            content = content.child(note(
+                self.t(cx, "detailLogEmpty"),
+                tokens.colors.muted_foreground,
+            ));
         }
         content = content.children(self.activity.entries().rev().map(|entry| {
             let kind_key = activity_kind_key(&entry.kind);
@@ -1243,39 +1246,43 @@ impl TaskDetailView {
             h_flex()
                 .gap(tokens.spacing.sm)
                 .items_start()
+                .text_size(tokens.typography.xs.size)
+                .line_height(tokens.typography.xs.line_height)
                 .child(
                     div()
                         .flex_none()
-                        .w(px(180.))
-                        .text_size(tokens.typography.xs.size)
-                        .text_color(tokens.colors.muted_foreground)
+                        .w(px(ACTIVITY_TIME_WIDTH))
+                        .font_features(tabular_numbers())
+                        .text_color(extended.colors.text_tertiary)
                         .child(format_activity_timestamp(entry.timestamp_ms)),
                 )
                 .child(
                     div()
                         .min_w_0()
                         .flex_1()
-                        .text_size(tokens.typography.xs.size)
-                        .when(entry.kind == "journal_overflow", |this| {
-                            this.text_color(cx.theme().warning)
+                        .text_color(if entry.kind == "journal_overflow" {
+                            extended.colors.warning
+                        } else {
+                            tokens.colors.foreground
                         })
                         .child(text),
                 )
         }));
         if self.activity.has_older() && !self.activity.is_loading() && !self.activity.failed() {
             content = content.child(
-                Button::new("detail-activity-load-older")
-                    .small()
-                    .ghost()
-                    .label(self.t(cx, "detailActivityLoadMore"))
-                    .on_click(cx.listener(|this, _, _, cx| this.load_older_activity(cx))),
+                div().pt(tokens.spacing.xs).child(
+                    Button::new("detail-activity-load-older")
+                        .ghost()
+                        .control(cx)
+                        .label(self.t(cx, "detailActivityLoadMore"))
+                        .on_click(cx.listener(|this, _, _, cx| this.load_older_activity(cx))),
+                ),
             );
         }
         content.into_any_element()
     }
 
-    fn render_advanced(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = active_theme(cx).tokens().clone();
+    fn render_advanced(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return div().into_any_element();
         };
@@ -1293,17 +1300,12 @@ impl TaskDetailView {
         let ignore_tls = dto.is_some_and(|dto| dto.ignore_tls_errors);
         drop(row);
         v_flex()
-            .gap(tokens.spacing.xs)
-            .child(Self::info_row(
-                &tokens,
-                self.t(cx, "infoSourcePage"),
-                referrer,
-            ))
-            .child(Self::info_row(&tokens, self.t(cx, "taskProxy"), proxy))
-            .child(Self::info_row(
-                &tokens,
+            .child(detail_row(self.t(cx, "infoSourcePage"), referrer, cx))
+            .child(detail_row(self.t(cx, "taskProxy"), proxy, cx))
+            .child(detail_row(
                 self.t(cx, "taskIgnoreTlsErrors"),
                 SharedString::from(if ignore_tls { "✓" } else { "—" }),
+                cx,
             ))
             .into_any_element()
     }
@@ -1311,19 +1313,34 @@ impl TaskDetailView {
 
 impl gpui::Render for TaskDetailView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let has_row = self
             .store
             .get(&RowKey::Local(self.task_id.clone()))
             .is_some();
         if !has_row {
+            // 空状态：32px 三级文字图标 + sm MEDIUM 说明，居中。
             return v_flex()
                 .size_full()
                 .items_center()
                 .justify_center()
-                .text_size(tokens.typography.sm.size)
-                .text_color(tokens.colors.muted_foreground)
-                .child(self.t(cx, "selectTaskHint"));
+                .gap(tokens.spacing.sm)
+                .bg(tokens.colors.surface)
+                .child(
+                    Icon::new(FluxIcon::FileText)
+                        .size(px(EMPTY_ICON_SIZE))
+                        .text_color(extended.colors.text_tertiary),
+                )
+                .child(
+                    div()
+                        .text_size(tokens.typography.sm.size)
+                        .line_height(tokens.typography.sm.line_height)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(tokens.colors.muted_foreground)
+                        .child(self.t(cx, "selectTaskHint")),
+                );
         }
         v_flex()
             .size_full()
@@ -1336,9 +1353,10 @@ impl gpui::Render for TaskDetailView {
                 this.child(
                     div()
                         .px(tokens.spacing.md)
-                        .py(tokens.spacing.xs)
+                        .pt(tokens.spacing.sm)
                         .text_size(tokens.typography.xs.size)
-                        .text_color(cx.theme().danger)
+                        .line_height(tokens.typography.xs.line_height)
+                        .text_color(tokens.colors.destructive)
                         .child(error),
                 )
             })
@@ -1358,6 +1376,38 @@ impl gpui::Render for TaskDetailView {
                     }),
             )
     }
+}
+
+/// 详情键值表的一行：左列标签（xs、三级文字，固定宽度），右列值（sm、正文色、等宽数字）。
+/// 标签沿用正文行高，使两列首行垂直居中对齐；值过长时在值列内换行而不挤压标签。
+/// 任务详情（常规 / 做种 / 高级）与任务组概览共用，保证所有详情窗口同一种键值排版。
+pub(crate) fn detail_row(label: SharedString, value: impl IntoElement, cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    h_flex()
+        .items_center()
+        .gap(tokens.spacing.md)
+        .min_h(CONTROL_HEIGHT)
+        .py(tokens.spacing.xxs)
+        .child(
+            div()
+                .flex_none()
+                .w(px(DETAIL_LABEL_WIDTH))
+                .text_size(tokens.typography.xs.size)
+                .line_height(tokens.typography.sm.line_height)
+                .text_color(theme.extended().colors.text_tertiary)
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_size(tokens.typography.sm.size)
+                .line_height(tokens.typography.sm.line_height)
+                .text_color(tokens.colors.foreground)
+                .font_features(tabular_numbers())
+                .child(value),
+        )
 }
 
 fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, capacity: usize) {

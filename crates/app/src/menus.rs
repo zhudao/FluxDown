@@ -221,21 +221,22 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&Window) + 'static) {
     });
 }
 
-/// 退出：有活跃任务时先在当前窗口提示「下载将继续由后台服务执行」。
+/// 退出（菜单 / ⌘Q）：完全退出，后台 agent 与 daemon 一起停止。有活跃任务时先在当前窗口
+/// 确认「下载将暂停」。只退出界面、保留后台，走关闭窗口（托盘驻留时）。
 pub fn request_quit(cx: &mut App) {
     if Desktop::active_task_count(cx) == 0 {
-        cx.quit();
+        crate::lifecycle::quit_everything(cx);
         return;
     }
     cx.defer(|cx| {
         let Some(window) = WindowRegistry::focused_window(cx)
             .or_else(|| WindowRegistry::handle(cx, &WindowKey::Main))
         else {
-            cx.quit();
+            crate::lifecycle::quit_everything(cx);
             return;
         };
         let _ = window.update(cx, |_, window, cx| {
-            confirm_active_tasks(window, cx, |_, cx| cx.quit());
+            confirm_active_tasks(window, cx, |_, cx| crate::lifecycle::quit_everything(cx));
         });
     });
 }
@@ -324,31 +325,63 @@ fn show_about(cx: &mut App) {
     let version_label = t(&translator, "currentVersion");
     let protocol_label = t(&translator, "protocolVersionLabel");
     let website_label = t(&translator, "menuWebsite");
+    let close_label = t(&translator, "close");
     let _ = window.update(cx, |_, window, cx| {
-        window.open_dialog(cx, move |dialog, _, _| {
-            use gpui::{ParentElement as _, Styled as _};
+        window.open_dialog(cx, move |dialog, _, cx| {
+            use gpui::{IntoElement as _, ParentElement as _, Styled as _};
             let version_label = version_label.clone();
             let protocol_label = protocol_label.clone();
             let website_label = website_label.clone();
             dialog
-                .title(title.clone())
-                .w(gpui::px(420.))
-                .content(move |content, _, _| {
-                    content.child(
-                        gpui_component::v_flex()
-                            .gap_2()
-                            .child(format!("{version_label}: v{}", env!("CARGO_PKG_VERSION")))
-                            .child(format!(
-                                "{protocol_label}: {}",
-                                fluxdown_protocol::PROTOCOL_VERSION
-                            ))
-                            .child(
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+                .w(gpui::px(520.))
+                .content(move |content, _, cx| {
+                    let tokens = fluxdown_ui_theme::active_theme(cx).tokens();
+                    let value = |text: String| {
+                        gpui::div()
+                            .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .font_features(fluxdown_ui_components::tabular_numbers())
+                            .child(text)
+                    };
+                    // 版本信息用分组卡片的「标签 — 值」行呈现，与设置页同一版式。
+                    content.child(fluxdown_ui_components::option_group(
+                        [
+                            fluxdown_ui_components::option_row(
+                                version_label.clone(),
+                                None,
+                                value(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                                cx,
+                            )
+                            .into_any_element(),
+                            fluxdown_ui_components::option_row(
+                                protocol_label.clone(),
+                                None,
+                                value(fluxdown_protocol::PROTOCOL_VERSION.to_string()),
+                                cx,
+                            )
+                            .into_any_element(),
+                            fluxdown_ui_components::option_row(
+                                website_label.clone(),
+                                None,
                                 gpui_component::link::Link::new("about-website")
                                     .href(WEBSITE_URL)
-                                    .child(website_label.clone()),
-                            ),
-                    )
+                                    .text_size(tokens.typography.sm.size)
+                                    .child(WEBSITE_URL),
+                                cx,
+                            )
+                            .into_any_element(),
+                        ],
+                        cx,
+                    ))
                 })
+                .footer(fluxdown_ui_components::dialog_footer(
+                    None,
+                    close_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Confirm,
+                    cx,
+                ))
         });
     });
 }

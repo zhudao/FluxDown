@@ -3,15 +3,17 @@
 
 use std::sync::Arc;
 
-use fluxdown_ui_components::{ButtonVariant, button};
+use fluxdown_ui_components::{ControlExt as _, field_error, field_hint, form, form_field};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, px,
+    App, AppContext as _, ClickEvent, Context, Entity, FontWeight, IntoElement, ParentElement,
+    Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Sizable as _, Size, StyledExt as _, WindowExt as _, h_flex,
+    Disableable as _, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     input::{Input, InputContentType, InputState},
     v_flex,
 };
@@ -40,11 +42,11 @@ pub(crate) fn open(
     let title = t(translator.read(cx), "accountRegisterDialogTitle");
     let view = cx.new(|cx| RegisterDialog::new(translator, port, window, cx));
     let email_input = view.read(cx).email_input.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let view = view.clone();
         dialog
-            .title(title.clone())
-            .w(px(400.))
+            .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+            .w(px(520.))
             .content(move |content, _, _| content.child(view.clone()))
     });
     email_input.update(cx, |input, cx| input.focus(window, cx));
@@ -178,37 +180,34 @@ impl RegisterDialog {
         } else {
             self.t("accountRegister", cx)
         };
+        // 底栏右对齐：取消(outline) 在左、主操作(primary) 在右，统一控件高度。
         h_flex()
             .w_full()
+            .pt(active_theme(cx).tokens().spacing.sm)
             .justify_end()
             .gap(active_theme(cx).tokens().spacing.sm)
             .child(
-                button(
-                    "account-register-cancel",
-                    self.t("cancel", cx),
-                    ButtonVariant::Secondary,
-                    cx,
-                )
-                .h(CONTROL_HEIGHT)
-                .disabled(self.busy)
-                .on_click(|_, window, cx| window.close_dialog(cx)),
+                Button::new("account-register-cancel")
+                    .outline()
+                    .label(self.t("cancel", cx))
+                    .control(cx)
+                    .disabled(self.busy)
+                    .on_click(|_, window, cx| window.close_dialog(cx)),
             )
             .child(
-                button(
-                    "account-register-submit",
-                    submit_label,
-                    ButtonVariant::Primary,
-                    cx,
-                )
-                .h(CONTROL_HEIGHT)
-                .disabled(self.busy)
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    if this.verification_required {
-                        this.submit_verify(window, cx);
-                    } else {
-                        this.submit_register(window, cx);
-                    }
-                })),
+                Button::new("account-register-submit")
+                    .primary()
+                    .label(submit_label)
+                    .control(cx)
+                    .loading(self.busy)
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        if this.verification_required {
+                            this.submit_verify(window, cx);
+                        } else {
+                            this.submit_register(window, cx);
+                        }
+                    })),
             )
     }
 }
@@ -216,69 +215,64 @@ impl RegisterDialog {
 impl Render for RegisterDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
-        let mut column = v_flex().w_full().gap(tokens.spacing.md);
-        if self.verification_required {
+        let body = if self.verification_required {
             let subtitle = t_with(
                 self.translator.read(cx),
                 "accountRegisterVerifySubtitle",
                 &[("email", &self.email(cx))],
             );
-            column = column
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .child(self.t("accountRegisterVerifyTitle", cx)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.colors.muted_foreground)
-                        .child(subtitle),
-                )
-                .child(
-                    Input::new(&self.code_input)
-                        .with_size(Size::Medium)
-                        .w_full(),
-                );
-        } else {
-            column = column
-                .child(
-                    Input::new(&self.email_input)
-                        .with_size(Size::Medium)
-                        .w_full(),
-                )
+            form(cx)
                 .child(
                     v_flex()
                         .gap(tokens.spacing.xxs)
                         .child(
-                            Input::new(&self.password_input)
-                                .with_size(Size::Medium)
-                                .w_full()
-                                .content_type(InputContentType::Password)
-                                .mask_toggle(),
-                        )
-                        .child(
                             div()
-                                .text_xs()
-                                .text_color(tokens.colors.muted_foreground)
-                                .child(self.t("accountPasswordHint", cx)),
-                        ),
+                                .text_size(tokens.typography.sm.size)
+                                .line_height(tokens.typography.sm.line_height)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(tokens.colors.foreground)
+                                .child(self.t("accountRegisterVerifyTitle", cx)),
+                        )
+                        .child(field_hint(subtitle, cx)),
                 )
-                .child(
-                    Input::new(&self.nickname_input)
-                        .with_size(Size::Medium)
-                        .w_full(),
-                );
-        }
-        if let Some(error) = self.error.clone() {
-            column = column.child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.destructive)
-                    .child(error),
-            );
-        }
-        column.child(self.render_footer(cx))
+                .child(form_field(
+                    self.t("accountFieldCode", cx),
+                    Input::new(&self.code_input).control(cx).w_full(),
+                    None,
+                    cx,
+                ))
+        } else {
+            form(cx)
+                .child(form_field(
+                    self.t("accountEmailPlaceholder", cx),
+                    Input::new(&self.email_input).control(cx).w_full(),
+                    None,
+                    cx,
+                ))
+                .child(form_field(
+                    self.t("accountPasswordPlaceholder", cx),
+                    Input::new(&self.password_input)
+                        .control(cx)
+                        .w_full()
+                        .content_type(InputContentType::Password)
+                        .mask_toggle(),
+                    Some(self.t("accountPasswordHint", cx)),
+                    cx,
+                ))
+                .child(form_field(
+                    self.t("accountFieldNickname", cx),
+                    Input::new(&self.nickname_input).control(cx).w_full(),
+                    None,
+                    cx,
+                ))
+        };
+        v_flex()
+            .w_full()
+            .gap(tokens.spacing.lg)
+            .child(body)
+            .when_some(self.error.clone(), |column, error| {
+                column.child(field_error(error, cx))
+            })
+            .child(self.render_footer(cx))
     }
 }

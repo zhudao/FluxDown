@@ -7,6 +7,7 @@ mod assets;
 mod controller;
 mod dialogs;
 mod pages;
+mod ui;
 mod view;
 
 use std::future::Future;

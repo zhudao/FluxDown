@@ -5,17 +5,17 @@
 
 use fluxdown_ui_theme::{
     AccentScheme, AppearancePreferences, BuiltinThemeId, COLOR_SCHEME_KEY, CUSTOM_COLOR_KEY,
-    DARK_THEME_KEY, LIGHT_THEME_KEY, THEME_MODE_KEY, ThemePreference, UI_SCALE_KEY,
+    DARK_THEME_KEY, ExtendedTokens, LIGHT_THEME_KEY, THEME_MODE_KEY, ThemePreference, UI_SCALE_KEY,
     UI_SCALE_PERCENTS, active_theme, argb_color, color_argb, foreground_for, set_appearance,
     set_theme_preference, set_ui_scale,
 };
 use gpui::{
     App, AppContext as _, Entity, Hsla, InteractiveElement as _, IntoElement as _, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    Pixels, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName,
+    Icon,
     color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState},
     h_flex,
     tooltip::Tooltip,
@@ -23,8 +23,9 @@ use gpui_component::{
 };
 
 use super::SectionContext;
-use crate::ui::{Control, SettingsPage, SettingsSection};
+use crate::ui::{Control, SettingsPage, SettingsSection, meta_text};
 use crate::{component_locale, store::SettingsStore};
+use fluxdown_ui_components::FluxIcon;
 
 pub(crate) const LOCALE_KEY: &str = "general.locale";
 
@@ -39,7 +40,7 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
         "appearance",
         ctx.t("settingsCatAppearance"),
         ctx.t("settingsCatAppearanceDesc"),
-        IconName::Palette,
+        FluxIcon::Palette,
     )
     .sections([
         SettingsSection::new().row(ctx.item("language", Some("languageDesc"), language_field(ctx))),
@@ -87,7 +88,7 @@ fn language_field(ctx: &SectionContext) -> Control {
                 store.set_pref_str(LOCALE_KEY, value.to_string(), cx)
             });
             let target = if value.as_ref() == "system" {
-                system_locale()
+                fluxdown_ui_i18n::system_locale()
             } else {
                 value.to_string()
             };
@@ -154,6 +155,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
             let mode = state.mode();
             let selected = state.appearance().builtin_theme(mode);
             let tokens = state.tokens().clone();
+            let extended = state.extended().clone();
             let group_label = if mode.is_dark() {
                 dark_label.clone()
             } else {
@@ -163,12 +165,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
             v_flex()
                 .w_full()
                 .gap(tokens.spacing.xs)
-                .child(
-                    div()
-                        .text_size(tokens.typography.xs.size)
-                        .text_color(tokens.colors.muted_foreground)
-                        .child(group_label),
-                )
+                .child(meta_text(cx).child(group_label))
                 .child(h_flex().gap(tokens.spacing.sm).flex_wrap().children(
                     BuiltinThemeId::presets_for(mode).map(|id| {
                         let label = labels
@@ -178,7 +175,15 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                                 || SharedString::from(id.wire_name()),
                                 |(_, label)| label.clone(),
                             );
-                        theme_card(id, label, id == selected, disabled, &tokens, store.clone())
+                        theme_card(
+                            id,
+                            label,
+                            id == selected,
+                            disabled,
+                            &tokens,
+                            &extended,
+                            store.clone(),
+                        )
                     }),
                 ))
                 .into_any_element()
@@ -192,9 +197,12 @@ fn theme_card(
     selected: bool,
     disabled: bool,
     tokens: &fluxdown_ui_theme::SemanticThemeTokens,
+    extended: &ExtendedTokens,
     store: Entity<SettingsStore>,
 ) -> impl gpui::IntoElement {
     let colors = tokens.colors;
+    let row_hover = extended.colors.row_hover;
+    let check_size = extended.icon.sm;
     let preview = id.colors();
     let bar = |width: gpui::DefiniteLength, color: Hsla| {
         div()
@@ -227,7 +235,7 @@ fn theme_card(
             v_flex()
                 .flex_1()
                 .h_full()
-                .p(px(4.))
+                .p(tokens.spacing.xs)
                 .justify_center()
                 .gap(px(THEME_PREVIEW_BAR_HEIGHT))
                 .child(bar(gpui::relative(1.), preview.foreground.opacity(0.4)))
@@ -256,7 +264,7 @@ fn theme_card(
         .when(!disabled, |this| {
             this.cursor_pointer()
                 .when(!selected, |this| {
-                    this.hover(move |style| style.bg(colors.muted))
+                    this.hover(move |style| style.bg(row_hover))
                 })
                 .on_click(move |_, _, cx| {
                     let mut appearance = *active_theme(cx).appearance();
@@ -281,12 +289,13 @@ fn theme_card(
                 .justify_between()
                 .items_center()
                 .text_size(tokens.typography.xs.size)
+                .line_height(tokens.typography.xs.line_height)
                 .text_color(colors.foreground)
                 .child(label)
                 .when(selected, |this| {
                     this.child(
-                        Icon::new(IconName::Check)
-                            .size(px(12.))
+                        Icon::new(FluxIcon::Check)
+                            .size(check_size)
                             .text_color(colors.primary),
                     )
                 }),
@@ -314,6 +323,7 @@ fn color_scheme_field(ctx: &SectionContext) -> Control {
             let state = active_theme(cx);
             let appearance = *state.appearance();
             let tokens = state.tokens().clone();
+            let icon_size = state.extended().icon.md;
 
             let dots = h_flex()
                 .gap(tokens.spacing.sm)
@@ -325,6 +335,7 @@ fn color_scheme_field(ctx: &SectionContext) -> Control {
                         appearance,
                         disabled,
                         &tokens,
+                        icon_size,
                         store.clone(),
                     )
                 }));
@@ -351,15 +362,16 @@ fn color_dot(
     appearance: AppearancePreferences,
     disabled: bool,
     tokens: &fluxdown_ui_theme::SemanticThemeTokens,
+    icon_size: Pixels,
     store: Entity<SettingsStore>,
 ) -> impl gpui::IntoElement {
     let colors = tokens.colors;
     let selected = appearance.color_scheme == scheme;
     let color = scheme.color(appearance.custom_color);
-    let icon = if selected {
-        Some(IconName::Check)
+    let icon: Option<Icon> = if selected {
+        Some(FluxIcon::Check.into())
     } else if scheme == AccentScheme::Custom {
-        Some(IconName::Palette)
+        Some(FluxIcon::Palette.into())
     } else {
         None
     };
@@ -396,11 +408,7 @@ fn color_dot(
                 })
         })
         .when_some(icon, |this, icon| {
-            this.child(
-                Icon::new(icon)
-                    .size(px(14.))
-                    .text_color(foreground_for(color)),
-            )
+            this.child(icon.size(icon_size).text_color(foreground_for(color)))
         })
 }
 
@@ -493,14 +501,4 @@ fn ui_scale_field(ctx: &SectionContext) -> Control {
             });
         },
     )
-}
-
-fn system_locale() -> String {
-    std::env::var("LC_ALL")
-        .or_else(|_| std::env::var("LC_MESSAGES"))
-        .or_else(|_| std::env::var("LANG"))
-        .ok()
-        .and_then(|value| value.split('.').next().map(str::to_owned))
-        .filter(|value| !value.is_empty() && value != "C" && value != "POSIX")
-        .unwrap_or_else(|| "en".to_owned())
 }

@@ -6,25 +6,21 @@
 use std::{rc::Rc, sync::Arc};
 
 use fluxdown_protocol::{AgentSnapshot, ServiceEvent};
+use fluxdown_ui_components::tabular_numbers;
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement, SharedString,
+    Styled, Window, div, prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    ActiveTheme as _, Sizable as _, Size, h_flex,
-    table::{DataTable, TableState},
-    v_flex,
-};
+use gpui_component::{table::TableState, v_flex};
 
 use crate::{
-    components::task_table::{DownloadTableDelegate, TableFilter},
+    components::task_table::{DownloadTableDelegate, TableFilter, render_download_table},
     controller::{DownloadsController, DownloadsPort, GroupSummary},
+    pages::task_detail::detail_row,
     strings::DownloadStrings,
 };
-
-const MEMBER_ROW_HEIGHT: f32 = 32.;
 
 pub struct GroupDetailView {
     group_id: String,
@@ -107,7 +103,9 @@ impl GroupDetailView {
         self.table_state.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.set_queue_names(queues);
-            if delegate.refresh_view() {
+            delegate.refresh_view();
+            // 行变化只需重绘；列配置未变时不重建 `col_groups`，保住用户拖拽的列宽。
+            if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
         });
@@ -128,7 +126,9 @@ impl GroupDetailView {
     }
 
     fn render_overview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let summary = self.summary();
         let status = if summary.total == 0 {
             self.t(cx, "groupDetailNoMembers")
@@ -140,37 +140,16 @@ impl GroupDetailView {
                 summary.progress * 100.0
             ))
         };
-        let row = |label: SharedString, value: SharedString| {
-            h_flex()
-                .justify_between()
-                .items_start()
-                .gap(tokens.spacing.md)
-                .py(tokens.spacing.xxs)
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(tokens.typography.xs.size)
-                        .text_color(tokens.colors.muted_foreground)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .text_size(tokens.typography.xs.size)
-                        .text_right()
-                        .child(value),
-                )
-        };
         v_flex()
-            .gap(tokens.spacing.xs)
+            .gap(tokens.spacing.sm)
             .p(tokens.spacing.md)
             .border_b_1()
-            .border_color(tokens.colors.border)
+            .border_color(extended.colors.hairline)
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(tokens.typography.sm.weight)
+                    .text_size(extended.title.size)
+                    .line_height(extended.title.line_height)
+                    .font_weight(extended.title.weight)
                     .min_w_0()
                     .truncate()
                     .child(SharedString::from(if summary.name.is_empty() {
@@ -179,47 +158,41 @@ impl GroupDetailView {
                         summary.name.clone()
                     })),
             )
-            .child(row(self.t(cx, "groupDetailSubtitle"), status))
-            .child(row(
-                self.t(cx, "groupDetailSource"),
-                SharedString::from(summary.origin_url.clone()),
-            ))
-            .child(row(
-                self.t(cx, "groupDetailSaveDir"),
-                SharedString::from(summary.save_dir.clone()),
-            ))
+            .child(
+                v_flex()
+                    .child(detail_row(
+                        self.t(cx, "groupDetailSubtitle"),
+                        div().font_features(tabular_numbers()).child(status),
+                        cx,
+                    ))
+                    .child(detail_row(
+                        self.t(cx, "groupDetailSource"),
+                        div()
+                            .truncate()
+                            .child(SharedString::from(summary.origin_url.clone())),
+                        cx,
+                    ))
+                    .child(detail_row(
+                        self.t(cx, "groupDetailSaveDir"),
+                        div()
+                            .truncate()
+                            .child(SharedString::from(summary.save_dir.clone())),
+                        cx,
+                    )),
+            )
     }
 
-    fn render_members(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        let table_state = self.table_state.clone();
-        div()
-            .id("group-detail-members-table")
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .overflow_hidden()
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .bottom_0()
-                    .left_0()
-                    .child(
-                        DataTable::new(&table_state)
-                            .with_size(Size::Size(px(MEMBER_ROW_HEIGHT)))
-                            .stripe(false)
-                            .bordered(false)
-                            .scrollbar_visible(true, true),
-                    ),
-            )
-            .into_any_element()
+    /// 成员表格与主窗口共用 [`render_download_table`]：同一套字号 / 数字 / 状态色规则。
+    fn render_members(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        render_download_table("group-detail-members-table", &self.table_state, cx)
     }
 }
 
 impl gpui::Render for GroupDetailView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         v_flex()
             .size_full()
             .min_h_0()
@@ -229,18 +202,22 @@ impl gpui::Render for GroupDetailView {
                 this.child(
                     div()
                         .px(tokens.spacing.md)
-                        .py(tokens.spacing.xs)
+                        .pt(tokens.spacing.sm)
                         .text_size(tokens.typography.xs.size)
-                        .text_color(cx.theme().danger)
+                        .line_height(tokens.typography.xs.line_height)
+                        .text_color(tokens.colors.destructive)
                         .child(error),
                 )
             })
             .child(
                 div()
                     .px(tokens.spacing.md)
-                    .py(tokens.spacing.sm)
-                    .text_size(tokens.typography.xs.size)
-                    .font_weight(tokens.typography.sm.weight)
+                    .pt(tokens.spacing.md)
+                    .pb(tokens.spacing.xs)
+                    .text_size(extended.caption.size)
+                    .line_height(extended.caption.line_height)
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(extended.colors.text_tertiary)
                     .child(self.t(cx, "groupDetailMembersTab")),
             )
             .child(self.render_members(cx))

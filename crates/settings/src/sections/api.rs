@@ -1,27 +1,30 @@
 //! API 服务：本机网关的功能开关、端口、访问令牌与 LAN 暴露。
 
 use fluxdown_protocol::GatewayPatchParams;
-use fluxdown_ui_components::{ButtonVariant, button, icon_button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_components::{
+    ButtonVariant, ControlExt as _, FluxIcon, button, icon_button, loading_icon_button,
+    tabular_numbers,
+};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClipboardItem, Entity, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, px,
+    StatefulInteractiveElement as _, Styled, Window, px,
 };
 use gpui_component::{
-    Icon, IconName, Sizable as _, Size, h_flex,
+    Icon, h_flex,
     input::{Input, InputEvent, InputState},
     tooltip::Tooltip,
 };
 
 use super::SectionContext;
-use crate::ui::{Control, SettingsPage, SettingsSection};
+use crate::ui::{Control, INPUT_WIDTH, SettingsPage, SettingsSection, body_text};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     SettingsPage::new(
         "api",
         ctx.t("settingsCatApiService"),
         ctx.t("settingsCatApiServiceDesc"),
-        IconName::Globe,
+        FluxIcon::Code,
     )
     .sections([service_section(ctx, cx), features_section(ctx)])
 }
@@ -39,7 +42,11 @@ fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
         .row(ctx.item(
             "apiServicePort",
             Some("apiServicePortDesc"),
-            Control::custom(move |_, _, _, _| div().child(port_text.clone())),
+            Control::custom(move |_, _, _, cx: &mut App| {
+                body_text(cx)
+                    .font_features(tabular_numbers())
+                    .child(port_text.clone())
+            }),
         ))
         .row(
             ctx.item(
@@ -51,7 +58,7 @@ fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
                     h_flex()
                         .gap(tokens.spacing.sm)
                         .items_center()
-                        .child(div().text_sm().child(address.clone()))
+                        .child(body_text(cx).child(address.clone()))
                         .child(
                             button(
                                 "api-copy-address",
@@ -59,7 +66,6 @@ fn service_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
                                 ButtonVariant::Secondary,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     address.to_string(),
@@ -169,20 +175,24 @@ fn token_field(ctx: &SectionContext) -> Control {
     let copied = ctx.t("apiServiceCopied");
     let placeholder = ctx.t("proxyNotConfigured");
     Control::custom(move |disabled, key, window: &mut Window, cx: &mut App| {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let icon_size = theme.extended().icon.md;
         let snapshot = store.read(cx);
         let token: SharedString = snapshot
             .transient("gateway_user_token")
             .and_then(serde_json::Value::as_str)
             .map(|token| SharedString::from(token.to_owned()))
             .unwrap_or_default();
-        let revealed = snapshot.transient("gateway_user_token").is_some();
+        let needs_reveal = snapshot.gateway_token_needs_reveal();
         let busy = snapshot.is_busy("gateway") || snapshot.is_busy("gatewayToken");
+        let regenerating = snapshot.is_busy_tagged("gateway", "regenerateToken");
+        let clearing = snapshot.is_busy_tagged("gateway", "clearToken");
         let just_copied = snapshot
             .transient("gateway_token_copied")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        if !revealed && !busy {
+        if needs_reveal && !busy {
             store.update(cx, |store, cx| store.reveal_gateway_token(cx));
         }
 
@@ -251,17 +261,15 @@ fn token_field(ctx: &SectionContext) -> Control {
             .gap(tokens.spacing.sm)
             .child(
                 Input::new(&input)
-                    .with_size(Size::Medium)
-                    .flex_1()
-                    .min_w(px(220.))
-                    .max_w(px(360.))
+                    .control(cx)
+                    .w(px(INPUT_WIDTH))
                     .disabled(disabled || busy),
             )
             .child(
                 icon_button(
                     "api-token-copy",
                     copy.clone(),
-                    Icon::new(IconName::Copy).size(px(13.)),
+                    Icon::new(FluxIcon::Copy).size(icon_size),
                     ButtonVariant::Secondary,
                     cx,
                 )
@@ -289,11 +297,12 @@ fn token_field(ctx: &SectionContext) -> Control {
                 }),
             )
             .child(
-                icon_button(
+                loading_icon_button(
                     "api-token-generate",
                     generate.clone(),
-                    Icon::new(IconName::Replace).size(px(13.)),
+                    Icon::new(FluxIcon::RotateCw).size(icon_size),
                     ButtonVariant::Secondary,
+                    regenerating,
                     cx,
                 )
                 .disabled(disabled || busy)
@@ -307,15 +316,19 @@ fn token_field(ctx: &SectionContext) -> Control {
                             },
                             cx,
                         );
+                        store.tag_busy("gateway", "regenerateToken");
                     });
                 }),
             )
             .child(
-                icon_button(
+                loading_icon_button(
                     "api-token-clear",
                     clear.clone(),
-                    Icon::new(IconName::Delete).size(px(13.)),
-                    ButtonVariant::Destructive,
+                    Icon::new(FluxIcon::Trash2)
+                        .size(icon_size)
+                        .text_color(tokens.colors.destructive),
+                    ButtonVariant::Secondary,
+                    clearing,
                     cx,
                 )
                 .disabled(disabled || busy || token.is_empty())
@@ -329,6 +342,7 @@ fn token_field(ctx: &SectionContext) -> Control {
                             },
                             cx,
                         );
+                        store.tag_busy("gateway", "clearToken");
                     });
                 }),
             )

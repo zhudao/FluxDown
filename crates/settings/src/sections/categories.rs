@@ -1,14 +1,20 @@
 //! 自定义分类：模型（与 `lib/src/models/custom_category.dart` 同 JSON 形状）与列表分区。
 
-use fluxdown_ui_components::{ButtonVariant, button};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, category_icon};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, Context, IntoElement as _, ParentElement, SharedString, Styled, div, px};
-use gpui_component::{Icon, h_flex, v_flex};
+use fluxdown_ui_theme::active_theme;
+use gpui::{
+    App, Context, InteractiveElement as _, IntoElement as _, ParentElement, SharedString,
+    StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
+};
+use gpui_component::{Icon, h_flex, tooltip::Tooltip, v_flex};
 
 use super::{SectionContext, category_dialog};
 use crate::store::SettingsStore;
-use crate::ui::{SettingsRow, SettingsSection};
+use crate::ui::{
+    SettingsRow, SettingsSection, body_text, meta_text, row_button, row_danger_button,
+    row_icon_button,
+};
 
 pub(crate) use fluxdown_protocol::CUSTOM_CATEGORIES_PREF_KEY as CATEGORIES_KEY;
 /// 分类模型：wire 形状归 protocol，设置页只读写偏好。
@@ -76,10 +82,12 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
     let regex_label = ctx.t("regexLabel");
     SettingsRow::custom(
         move |disabled: bool, _key: &SharedString, _window: &mut gpui::Window, cx: &mut App| {
-            let tokens = active_theme(cx).tokens();
+            let theme = active_theme(cx);
+            let tokens = theme.tokens();
+            let extended = theme.extended();
             let list = read_categories(store.read(cx));
             let count = list.len();
-            let mut column = v_flex().w_full().gap(tokens.spacing.xs);
+            let mut column = v_flex().w_full().gap(tokens.spacing.xxs);
             for (index, entry) in list.iter().enumerate() {
                 let name = display_name(&translator, entry);
                 let details = if entry.match_mode == "regex" {
@@ -104,19 +112,21 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                 let id_up = entry.id.clone();
                 let id_down = entry.id.clone();
                 let id_delete = entry.id.clone();
+                let up_tooltip = move_up.clone();
+                let down_tooltip = move_down.clone();
                 column = column.child(
                     h_flex()
+                        .id(SharedString::from(format!("category-row-{}", entry.id)))
                         .w_full()
                         .items_center()
                         .gap(tokens.spacing.sm)
                         .px(tokens.spacing.sm)
                         .py(tokens.spacing.xs)
                         .rounded(tokens.radius.md)
-                        .border_1()
-                        .border_color(tokens.colors.border)
+                        .hover(|style| style.bg(extended.colors.row_hover))
                         .child(
-                            Icon::new(category_dialog::icon_for(&entry.icon))
-                                .size(px(16.))
+                            Icon::new(category_icon(&entry.icon))
+                                .size(extended.icon.lg)
                                 .text_color(tokens.colors.muted_foreground),
                         )
                         .child(
@@ -128,14 +138,15 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                                     h_flex()
                                         .gap(tokens.spacing.sm)
                                         .items_center()
-                                        .child(div().text_sm().child(name))
+                                        .child(body_text(cx).child(name))
                                         .child(
                                             div()
                                                 .px(tokens.spacing.xs)
                                                 .rounded(tokens.radius.sm)
-                                                .bg(tokens.colors.accent)
-                                                .text_color(tokens.colors.accent_foreground)
-                                                .text_xs()
+                                                .bg(tokens.colors.muted)
+                                                .text_color(tokens.colors.muted_foreground)
+                                                .text_size(extended.caption.size)
+                                                .line_height(extended.caption.line_height)
                                                 .child(if entry.is_builtin {
                                                     builtin.clone()
                                                 } else {
@@ -143,23 +154,31 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                                                 }),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(tokens.colors.muted_foreground)
-                                        .child(SharedString::from(details)),
-                                )
-                                .when_some_dir(save_dir, tokens.colors.muted_foreground),
+                                .when(!details.is_empty(), |this| {
+                                    this.child(
+                                        meta_text(cx).truncate().child(SharedString::from(details)),
+                                    )
+                                })
+                                .when(!save_dir.is_empty(), |this| {
+                                    this.child(
+                                        meta_text(cx)
+                                            .truncate()
+                                            .text_color(extended.colors.text_tertiary)
+                                            .child(SharedString::from(save_dir)),
+                                    )
+                                }),
                         )
                         .child(
-                            button(
+                            row_icon_button(
                                 SharedString::from(format!("category-up-{}", entry.id)),
                                 move_up.clone(),
+                                Icon::new(FluxIcon::ArrowUp).size(extended.icon.md),
                                 ButtonVariant::Ghost,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(up_tooltip.clone()).build(window, cx)
+                            })
                             .disabled(disabled || index == 0)
                             .on_click(move |_, _, cx| {
                                 let id = id_up.clone();
@@ -167,13 +186,16 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                             }),
                         )
                         .child(
-                            button(
+                            row_icon_button(
                                 SharedString::from(format!("category-down-{}", entry.id)),
                                 move_down.clone(),
+                                Icon::new(FluxIcon::ArrowDown).size(extended.icon.md),
                                 ButtonVariant::Ghost,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(down_tooltip.clone()).build(window, cx)
+                            })
                             .disabled(disabled || index + 1 == count)
                             .on_click(move |_, _, cx| {
                                 let id = id_down.clone();
@@ -181,13 +203,12 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                             }),
                         )
                         .child(
-                            button(
+                            row_button(
                                 SharedString::from(format!("category-edit-{}", entry.id)),
                                 edit.clone(),
                                 ButtonVariant::Secondary,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
                             .disabled(disabled)
                             .on_click(move |_, window, cx| {
                                 category_dialog::open(
@@ -200,13 +221,11 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                             }),
                         )
                         .child(
-                            button(
+                            row_danger_button(
                                 SharedString::from(format!("category-delete-{}", entry.id)),
                                 delete.clone(),
-                                ButtonVariant::Destructive,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
                             .disabled(disabled || entry.is_builtin)
                             .on_click(move |_, _, cx| {
                                 let id = id_delete.clone();
@@ -229,22 +248,9 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                 .child(
                     h_flex()
                         .w_full()
+                        .pt(tokens.spacing.sm)
                         .justify_end()
                         .gap(tokens.spacing.sm)
-                        .child(
-                            button("category-add", add.clone(), ButtonVariant::Primary, cx)
-                                .h(CONTROL_HEIGHT)
-                                .disabled(disabled)
-                                .on_click(move |_, window, cx| {
-                                    category_dialog::open(
-                                        add_store.clone(),
-                                        add_translator.clone(),
-                                        None,
-                                        window,
-                                        cx,
-                                    );
-                                }),
-                        )
                         .child(
                             button(
                                 "category-auto-dirs",
@@ -252,7 +258,6 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                                 ButtonVariant::Secondary,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
                             .disabled(disabled)
                             .on_click(move |_, _, cx| {
                                 auto_store.update(cx, apply_auto_dirs);
@@ -265,39 +270,31 @@ fn list_item(ctx: &SectionContext) -> SettingsRow {
                                 ButtonVariant::Secondary,
                                 cx,
                             )
-                            .h(CONTROL_HEIGHT)
                             .disabled(disabled)
                             .on_click(move |_, _, cx| {
                                 reset_store.update(cx, |store, cx| {
                                     write_categories(store, CategoryEntry::builtin_defaults(), cx);
                                 });
                             }),
+                        )
+                        .child(
+                            button("category-add", add.clone(), ButtonVariant::Primary, cx)
+                                .disabled(disabled)
+                                .on_click(move |_, window, cx| {
+                                    category_dialog::open(
+                                        add_store.clone(),
+                                        add_translator.clone(),
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                }),
                         ),
                 )
                 .into_any_element()
         },
     )
     .keywords([ctx.t("customCategories"), ctx.t("customCategory")])
-}
-
-trait DirLine {
-    fn when_some_dir(self, dir: String, color: gpui::Hsla) -> Self;
-}
-
-impl DirLine for gpui::Div {
-    fn when_some_dir(self, dir: String, color: gpui::Hsla) -> Self {
-        if dir.is_empty() {
-            self
-        } else {
-            self.child(
-                div()
-                    .truncate()
-                    .text_xs()
-                    .text_color(color)
-                    .child(SharedString::from(dir)),
-            )
-        }
-    }
 }
 
 pub(crate) fn move_category(

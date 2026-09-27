@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use fluxdown_ui_components::{ButtonVariant, button, card};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, card};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::{CONTROL_HEIGHT, SemanticThemeTokens};
+use fluxdown_ui_theme::{SemanticThemeTokens, active_theme};
 use gpui::{
     Context, Entity, IntoElement, ParentElement, SharedString, Styled, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
-use gpui_component::{Icon, IconName, StyledExt as _, h_flex};
+use gpui_component::{Icon, h_flex};
 
 use crate::view::AccountView;
 use crate::{AccountPort, dialogs, t};
@@ -32,6 +32,11 @@ pub(crate) fn render(
     let register_translator = translator_entity.clone();
     let register_port = port;
 
+    let extended = active_theme(cx).extended().clone();
+    // 与空状态同一插图尺度：图标 = 2×lg（32），圆底 = 3.5×lg（56），随界面缩放。
+    let badge_icon = extended.icon.lg * 2.;
+    let badge = extended.icon.lg * 3.5;
+
     card(cx)
         .w_full()
         .p(tokens.spacing.xl)
@@ -40,30 +45,32 @@ pub(crate) fn render(
         .items_center()
         .child(
             div()
-                .size(px(64.))
+                .size(badge)
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(tokens.radius.full)
                 .bg(tokens.colors.accent)
                 .child(
-                    Icon::new(IconName::CircleUser)
-                        .size(px(30.))
+                    Icon::new(FluxIcon::CircleUser)
+                        .size(badge_icon)
                         .text_color(tokens.colors.accent_foreground),
                 ),
         )
         .child(
             div()
                 .mt(tokens.spacing.lg)
-                .text_size(px(16.))
-                .font_semibold()
+                .text_size(extended.title.size)
+                .line_height(extended.title.line_height)
+                .font_weight(extended.title.weight)
                 .text_color(tokens.colors.foreground)
                 .child(title),
         )
         .child(
             div()
                 .mt(tokens.spacing.xs)
-                .text_size(px(12.))
+                .text_size(tokens.typography.xs.size)
+                .line_height(tokens.typography.xs.line_height)
                 .text_color(tokens.colors.muted_foreground)
                 .text_center()
                 .child(subtitle),
@@ -79,7 +86,6 @@ pub(crate) fn render(
                         ButtonVariant::Primary,
                         cx,
                     )
-                    .h(CONTROL_HEIGHT)
                     .disabled(disabled)
                     .on_click(move |_, window, cx| {
                         dialogs::login::open(
@@ -97,7 +103,6 @@ pub(crate) fn render(
                         ButtonVariant::Secondary,
                         cx,
                     )
-                    .h(CONTROL_HEIGHT)
                     .disabled(disabled)
                     .on_click(move |_, window, cx| {
                         dialogs::register::open(
@@ -113,7 +118,7 @@ pub(crate) fn render(
             this.child(
                 div()
                     .mt(tokens.spacing.md)
-                    .text_size(px(11.5))
+                    .text_size(tokens.typography.xs.size)
                     .text_color(tokens.colors.destructive)
                     .child(error),
             )

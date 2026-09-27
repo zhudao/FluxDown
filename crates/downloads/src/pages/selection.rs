@@ -12,17 +12,19 @@ use fluxdown_protocol::{
     BtFileDto, HlsQualityOptionDto, ResolveVariantOptionDto, SelectionKind, SelectionOutcome,
     SelectionRequestDto, SelectionResolutionDto,
 };
+use fluxdown_ui_components::{
+    CheckState, ControlExt as _, check_mark, check_row, field_hint, tabular_numbers,
+};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
     ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    prelude::FluentBuilder as _,
 };
 use gpui_component::{
-    Disableable as _, Sizable as _, StyledExt as _, WindowExt as _,
+    Disableable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
     h_flex,
     notification::Notification,
     scroll::ScrollableElement as _,
@@ -175,7 +177,9 @@ impl SelectionView {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let title_style = theme.extended().title;
         let (title, description) = match &self.state {
             SelectionState::Hls { .. } => (
                 self.strings.hls_title.clone(),
@@ -201,10 +205,17 @@ impl SelectionView {
         v_flex()
             .gap(tokens.spacing.xs)
             .p(tokens.spacing.md)
-            .child(div().font_semibold().child(title))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(title_style.size)
+                    .line_height(title_style.line_height)
+                    .font_weight(title_style.weight)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
                     .text_color(tokens.colors.muted_foreground)
                     .child(if self.task_name.is_empty() {
                         description
@@ -230,9 +241,12 @@ impl SelectionView {
         selected: i32,
         cx: &mut Context<Self>,
     ) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let hover = theme.extended().colors.row_hover;
         v_flex()
-            .gap(tokens.spacing.xs)
+            .gap(tokens.spacing.xxs)
+            .px(tokens.spacing.md)
             .children(options.iter().map(|option| {
                 let checked = option.index == selected;
                 let index = option.index;
@@ -245,17 +259,28 @@ impl SelectionView {
                 h_flex()
                     .id(("hls-option", index as usize))
                     .cursor_pointer()
+                    .items_center()
                     .gap(tokens.spacing.sm)
-                    .p(tokens.spacing.sm)
+                    .px(tokens.spacing.sm)
+                    .py(tokens.spacing.xs)
                     .rounded(tokens.radius.md)
-                    .when(checked, |row| row.bg(tokens.colors.muted))
+                    .text_size(tokens.typography.sm.size)
+                    .line_height(tokens.typography.sm.line_height)
+                    .font_features(tabular_numbers())
+                    .map(|row| {
+                        if checked {
+                            row.bg(tokens.colors.accent)
+                        } else {
+                            row.hover(move |style| style.bg(hover))
+                        }
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if let SelectionState::Hls { selected, .. } = &mut this.state {
                             *selected = index;
                         }
                         cx.notify();
                     }))
-                    .child(Checkbox::new(("hls-option-check", index as usize)).checked(checked))
+                    .child(check_mark(check_state(checked), cx))
                     .child(div().flex_1().child(label))
             }))
     }
@@ -266,9 +291,12 @@ impl SelectionView {
         selected: i32,
         cx: &mut Context<Self>,
     ) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let hover = theme.extended().colors.row_hover;
         v_flex()
-            .gap(tokens.spacing.xs)
+            .gap(tokens.spacing.xxs)
+            .px(tokens.spacing.md)
             .children(options.iter().map(|option| {
                 let checked = option.index == selected;
                 let index = option.index;
@@ -280,25 +308,40 @@ impl SelectionView {
                 h_flex()
                     .id(("variant-option", index as usize))
                     .cursor_pointer()
+                    .items_center()
                     .gap(tokens.spacing.sm)
-                    .p(tokens.spacing.sm)
+                    .px(tokens.spacing.sm)
+                    .py(tokens.spacing.xs)
                     .rounded(tokens.radius.md)
-                    .when(checked, |row| row.bg(tokens.colors.muted))
+                    .map(|row| {
+                        if checked {
+                            row.bg(tokens.colors.accent)
+                        } else {
+                            row.hover(move |style| style.bg(hover))
+                        }
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if let SelectionState::Variant { selected, .. } = &mut this.state {
                             *selected = index;
                         }
                         cx.notify();
                     }))
-                    .child(Checkbox::new(("variant-option-check", index as usize)).checked(checked))
+                    .child(check_mark(check_state(checked), cx))
                     .child(
                         v_flex()
                             .flex_1()
-                            .gap(tokens.spacing.xs / 2.)
-                            .child(label)
+                            .gap(tokens.spacing.xxs)
                             .child(
                                 div()
-                                    .text_sm()
+                                    .text_size(tokens.typography.sm.size)
+                                    .line_height(tokens.typography.sm.line_height)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(tokens.typography.xs.size)
+                                    .line_height(tokens.typography.xs.line_height)
+                                    .font_features(tabular_numbers())
                                     .text_color(tokens.colors.muted_foreground)
                                     .child(meta),
                             ),
@@ -319,12 +362,12 @@ impl SelectionView {
             .map(|file| file.size)
             .sum();
         let toolbar = h_flex()
-            .gap(tokens.spacing.xs)
+            .items_center()
+            .gap(tokens.spacing.sm)
             .child(
                 Button::new("bt-select-all")
                     .outline()
-                    .small()
-                    .h(CONTROL_HEIGHT)
+                    .control(cx)
                     .label(self.strings.select_all.clone())
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let SelectionState::Bt { files, selected } = &mut this.state {
@@ -336,8 +379,7 @@ impl SelectionView {
             .child(
                 Button::new("bt-deselect-all")
                     .outline()
-                    .small()
-                    .h(CONTROL_HEIGHT)
+                    .control(cx)
                     .label(self.strings.deselect_all.clone())
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         if let SelectionState::Bt { selected, .. } = &mut this.state {
@@ -349,7 +391,10 @@ impl SelectionView {
             .child(
                 div()
                     .flex_1()
-                    .text_sm()
+                    .text_right()
+                    .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
+                    .font_features(tabular_numbers())
                     .text_color(tokens.colors.muted_foreground)
                     .child(SharedString::from(format!(
                         "{} · {}",
@@ -362,7 +407,6 @@ impl SelectionView {
         let list = v_flex()
             .flex_1()
             .min_h_0()
-            .gap(px(2.))
             .children(files.iter().map(|file| {
                 let checked = selected.contains(&file.index);
                 let index = file.index;
@@ -373,48 +417,61 @@ impl SelectionView {
                     .next()
                     .unwrap_or(&file.path)
                     .to_owned();
-                h_flex()
-                    .id(("bt-file", index as usize))
-                    .cursor_pointer()
-                    .gap(tokens.spacing.sm)
-                    .pl(px(depth * 16.))
-                    .py(px(2.))
-                    .rounded(tokens.radius.sm)
-                    .when(checked, |row| row.bg(tokens.colors.muted))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if let SelectionState::Bt { selected, .. } = &mut this.state
-                            && !selected.remove(&index)
-                        {
-                            selected.insert(index);
-                        }
-                        cx.notify();
-                    }))
-                    .child(Checkbox::new(("bt-file-check", index as usize)).checked(checked))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(SharedString::from(name)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(SharedString::from(format_bytes(file.size.max(0) as u64))),
-                    )
+                let this = cx.weak_entity();
+                check_row(
+                    ("bt-file", index as usize),
+                    checked,
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(tokens.spacing.sm)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(name)),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(tokens.typography.xs.size)
+                                .font_features(tabular_numbers())
+                                .text_color(tokens.colors.muted_foreground)
+                                .child(SharedString::from(format_bytes(file.size.max(0) as u64))),
+                        ),
+                    move |check, _, cx| {
+                        let _ = this.update(cx, |this, cx| {
+                            if let SelectionState::Bt { selected, .. } = &mut this.state {
+                                if check {
+                                    selected.insert(index);
+                                } else {
+                                    selected.remove(&index);
+                                }
+                            }
+                            cx.notify();
+                        });
+                    },
+                    cx,
+                )
+                .pl(tokens.spacing.xs + tokens.spacing.lg * depth)
+                .pr(tokens.spacing.sm)
+                .when(checked, |row| row.bg(tokens.colors.accent))
             }))
             .overflow_y_scrollbar();
         v_flex()
             .size_full()
             .gap(tokens.spacing.sm)
-            .p(tokens.spacing.md)
+            .px(tokens.spacing.md)
+            .pb(tokens.spacing.md)
             .child(toolbar)
             .child(div().flex_1().min_h_0().child(list))
     }
 
     fn render_footer(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let remaining = self.remaining_seconds();
         let countdown = SharedString::from(
             self.strings
@@ -439,13 +496,12 @@ impl SelectionView {
         h_flex()
             .justify_between()
             .items_center()
-            .p(tokens.spacing.md)
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(countdown),
-            )
+            .px(tokens.spacing.md)
+            .py(tokens.spacing.sm)
+            .bg(extended.colors.chrome)
+            .border_t_1()
+            .border_color(extended.colors.hairline)
+            .child(field_hint(countdown, cx).font_features(tabular_numbers()))
             .child(
                 h_flex()
                     .gap(tokens.spacing.sm)
@@ -453,8 +509,7 @@ impl SelectionView {
                         row.child(
                             Button::new("selection-cancel")
                                 .outline()
-                                .small()
-                                .h(CONTROL_HEIGHT)
+                                .control(cx)
                                 .label(self.strings.cancel.clone())
                                 .disabled(self.submitting)
                                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -465,8 +520,7 @@ impl SelectionView {
                     .child(
                         Button::new("selection-confirm")
                             .primary()
-                            .small()
-                            .h(CONTROL_HEIGHT)
+                            .control(cx)
                             .label(confirm_label)
                             .disabled(self.submitting)
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -482,10 +536,18 @@ impl Render for SelectionView {
         let tokens = active_theme(cx).tokens().clone();
         v_flex()
             .size_full()
+            .bg(tokens.colors.surface)
             .child(self.render_header(cx))
             .child(div().flex_1().min_h_0().child(self.render_body(cx)))
-            .child(div().h(px(1.)).w_full().bg(tokens.colors.border))
             .child(self.render_footer(cx))
+    }
+}
+
+fn check_state(checked: bool) -> CheckState {
+    if checked {
+        CheckState::Checked
+    } else {
+        CheckState::Unchecked
     }
 }
 

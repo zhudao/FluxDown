@@ -6,6 +6,17 @@ use gpui::{
     AnyElement, Hsla, IntoElement as _, ParentElement as _, Styled as _, div, px, relative,
 };
 
+/// 「正在写入但尚无已完成字节」的像素用主色的这一透明度绘制：与已完成部分同色系
+/// 但明显更浅，表达「活跃连接所在位置」而不冒充已下载进度。
+const ACTIVE_SEGMENT_ALPHA: f32 = 0.4;
+/// 相邻分段只有在投影宽度至少这么多像素时才留 1px 细缝；更窄时细缝会吞掉
+/// 分段本身，改为按覆盖率叠加。
+const MIN_SEGMENT_WIDTH_FOR_GAP: f64 = 5.;
+/// 像素覆盖率达到 `1 - FULL_COVERAGE_EPSILON` 即视为已完成（吸收浮点累加误差）。
+const FULL_COVERAGE_EPSILON: f32 = 1e-5;
+/// 进度条最大像素宽度：防御异常列宽导致逐像素节点数失控。
+const MAX_BAR_WIDTH: f32 = 4096.;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Pixel {
     completed: f32,
@@ -45,9 +56,9 @@ fn pixels(runtime: &TaskRuntimeDto, width: usize) -> Vec<Pixel> {
                 pixel.active = true;
             }
         }
-        // 只有边界能在至少 5 像素宽的相邻段间看清时才留 1px 细缝；
+        // 只有边界能在足够宽的相邻段间看清时才留 1px 细缝；
         // 像素密度高时按覆盖率叠加，不因缝隙吞掉整个小分段。
-        if right - left >= 5. && end < total {
+        if right - left >= MIN_SEGMENT_WIDTH_FOR_GAP && end < total {
             let boundary = right.floor() as usize;
             if boundary < width {
                 result[boundary].gap = true;
@@ -70,7 +81,7 @@ pub(crate) fn render_segment_progress(
     color: Hsla,
     muted: Hsla,
 ) -> AnyElement {
-    let width = width.max(0.).floor().min(4096.) as usize;
+    let width = width.max(0.).floor().min(MAX_BAR_WIDTH) as usize;
     let mut track = div()
         .relative()
         .flex_none()
@@ -83,7 +94,7 @@ pub(crate) fn render_segment_progress(
         runtime.filter(|runtime| runtime.total_bytes > 0 && !runtime.segments.is_empty())
     {
         let mut active_color = color;
-        active_color.a *= 0.4;
+        active_color.a *= ACTIVE_SEGMENT_ALPHA;
         let columns = pixels(runtime, width);
         let mut x = 0;
         while x < columns.len() {
@@ -92,9 +103,12 @@ pub(crate) fn render_segment_progress(
                 x += 1;
                 continue;
             }
-            if pixel.completed >= 1. - 1e-5 {
+            if pixel.completed >= 1. - FULL_COVERAGE_EPSILON {
                 let left = x;
-                while x < columns.len() && !columns[x].gap && columns[x].completed >= 1. - 1e-5 {
+                while x < columns.len()
+                    && !columns[x].gap
+                    && columns[x].completed >= 1. - FULL_COVERAGE_EPSILON
+                {
                     x += 1;
                 }
                 track = track.child(

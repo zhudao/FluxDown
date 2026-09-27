@@ -1,0 +1,390 @@
+//! 全应用共用的控件规格：按钮 / 输入框统一高度与字号、分段标签、复选行。
+//!
+//! 规则（所有窗口与页面一致）：
+//! - 唯一一档控件高度 [`CONTROL_HEIGHT`]（28）、13px 正文字号：页面工具栏、对话框、表单页、
+//!   设置行、列表行内、独立窗口里的按钮 / 输入框 / 下拉 / 数字输入全部同高同内边距
+//!   → [`ControlExt::control`] / [`IconControlExt::control_icon`]；chrome 纯图标按钮优先 `toolbar_action_button`。
+//! - 变体只用 gpui-component 的 `primary()` / `ghost()` / `outline()` / `danger()`，
+//!   再调用上面的尺寸方法。不要用 `.small()` / `.xsmall()` / 自定义高度。
+//! - 下拉选择 = outline 按钮 + `dropdown_caret(true)` + `.control(cx)`，与输入框等高。
+//! - 标签页（对话框内、页面内）一律 [`segmented_tabs`]，不自造按钮组。
+//! - 复选框一律 [`check_mark`] / [`check_row`]，不用 gpui-component `Checkbox`。
+//! - gpui 的 `hover` 每个元素只能设置一次：本 crate 返回的按钮 / 行已设置悬停，调用方不得再 `.hover()`。
+
+use std::rc::Rc;
+
+use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use gpui::{
+    AnyElement, App, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
+};
+use gpui_component::{
+    Sizable as _, Size,
+    button::{Button, ButtonVariants as _},
+    dialog::{DialogAction, DialogClose, DialogFooter},
+    input::{Input, NumberInput},
+};
+
+use crate::{CheckState, check_mark, tabular_numbers};
+
+/// 统一控件尺寸（带文字按钮与输入框）。
+pub trait ControlExt: Sized {
+    /// 28px 高、13px 字。
+    fn control(self, cx: &App) -> Self;
+}
+
+/// 纯图标按钮尺寸。
+pub trait IconControlExt: Sized {
+    /// 28×28（与同行输入框等高）。
+    fn control_icon(self, cx: &App) -> Self;
+}
+
+// gpui-component 的按钮文字字号由 `Size` 决定并写在内部 label 上（根节点的
+// `text_size` 覆盖不到）：`Medium` 取 `text_base` = 1rem = `typography.sm`(13)，
+// 再用实例样式把高度与内边距收回到目标档位。
+impl ControlExt for Button {
+    fn control(self, cx: &App) -> Self {
+        let tokens = active_theme(cx).tokens();
+        self.with_size(Size::Medium)
+            .h(CONTROL_HEIGHT)
+            .px(tokens.spacing.sm + tokens.spacing.xxs)
+            .text_size(tokens.typography.sm.size)
+    }
+}
+
+// 图标与带文字按钮的前置图标同为 `Medium`（16px）。
+impl IconControlExt for Button {
+    fn control_icon(self, _cx: &App) -> Self {
+        Styled::size(self.with_size(Size::Medium), CONTROL_HEIGHT)
+    }
+}
+
+// 输入框用 `Medium` 取得宽松的横向内边距（`Small` 只有约 6px，显得局促），
+// 字号 / 高度由实例样式覆盖（gpui-component 在根节点 `refine_style`，覆盖有效）。
+// 高度必须走 `Styled::h`：`Input` 自带的同名 `h()` 只作用于多行输入，单行会被
+// 静默忽略而退回 `Size::Medium` 的 2rem（26px），比同行按钮 / 下拉矮一截。
+impl ControlExt for Input {
+    fn control(self, cx: &App) -> Self {
+        let tokens = active_theme(cx).tokens();
+        Styled::h(self.with_size(Size::Medium), CONTROL_HEIGHT).text_size(tokens.typography.sm.size)
+    }
+}
+
+// NumberInput 的中间输入框字号跟随 `Size`（`Medium` 只有 text_sm ≈ 11px），外部
+// `text_size` 覆盖不到；取 `Large`（text_base = 13）再把外框高度收回到目标档位，
+// 内部输入框与加减按钮都是 `h_full`，随外框高度走。
+impl ControlExt for NumberInput {
+    fn control(self, _cx: &App) -> Self {
+        self.with_size(Size::Large).h(CONTROL_HEIGHT)
+    }
+}
+
+type TabSelect = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// 分段标签（macOS segmented control 风格）：浅灰轨道内，选中项白底 + 细阴影 +
+/// 正文色中等字重，未选中为二级文字色。高 28（轨道），项高 24。
+pub fn segmented_tabs(
+    id: impl Into<ElementId>,
+    labels: impl IntoIterator<Item = SharedString>,
+    selected: usize,
+    on_select: impl Fn(usize, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> Div {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let colors = tokens.colors;
+    let extended = theme.extended().colors;
+    let on_select: TabSelect = Rc::new(on_select);
+    let id: ElementId = id.into();
+    let inner = CONTROL_HEIGHT - px(4.);
+
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(CONTROL_HEIGHT)
+        .p(px(2.))
+        .gap(px(2.))
+        .rounded(tokens.radius.md + px(1.))
+        .bg(extended.nav_hover)
+        .children(labels.into_iter().enumerate().map(|(index, label)| {
+            let active = index == selected;
+            let on_select = Rc::clone(&on_select);
+            div()
+                .id(ElementId::NamedInteger(
+                    SharedString::from(format!("{id}-tab")),
+                    index as u64,
+                ))
+                .h(inner)
+                .px(tokens.spacing.md)
+                .flex()
+                .items_center()
+                .rounded(tokens.radius.md)
+                .text_size(tokens.typography.sm.size)
+                .cursor_pointer()
+                .map(|this| {
+                    if active {
+                        this.bg(colors.surface)
+                            .text_color(colors.foreground)
+                            .font_weight(FontWeight::MEDIUM)
+                            .shadow(tokens.shadow.sm.clone())
+                    } else {
+                        this.text_color(colors.muted_foreground)
+                            .hover(move |style| style.text_color(colors.foreground))
+                    }
+                })
+                .on_click(move |_, window, cx| on_select(index, window, cx))
+                .child(label)
+        }))
+}
+
+/// 可点击的复选行：[`check_mark`] + 文字（可选尾部计数/说明）。整行可点。
+pub fn check_row(
+    id: impl Into<ElementId>,
+    checked: bool,
+    label: impl IntoElement,
+    on_toggle: impl Fn(bool, &mut Window, &mut App) + 'static,
+    cx: &App,
+) -> gpui::Stateful<Div> {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let hover = theme.extended().colors.row_hover;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(tokens.spacing.sm)
+        .min_h(CONTROL_HEIGHT)
+        .px(tokens.spacing.xs)
+        .rounded(tokens.radius.md)
+        .cursor_pointer()
+        .text_size(tokens.typography.sm.size)
+        .text_color(tokens.colors.foreground)
+        .hover(move |style| style.bg(hover))
+        .on_click(move |_, window, cx| on_toggle(!checked, window, cx))
+        .child(check_mark(
+            if checked {
+                CheckState::Checked
+            } else {
+                CheckState::Unchecked
+            },
+            cx,
+        ))
+        .child(label)
+}
+
+/// 小号计数 / 数字徽标文字样式（caption + 等宽数字 + 三级文字色）。
+pub fn caption_number(text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let caption = theme.extended().caption;
+    div()
+        .text_size(caption.size)
+        .line_height(caption.line_height)
+        .font_features(tabular_numbers())
+        .text_color(theme.extended().colors.text_tertiary)
+        .child(text.into())
+}
+
+/// 对话框主操作的语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogIntent {
+    /// 普通确认（primary）。
+    Confirm,
+    /// 破坏性确认（danger）。
+    Destructive,
+}
+
+/// 统一的对话框底栏：右对齐，「取消」(outline) 在左、主操作在右，均为 28 高控件。
+///
+/// 取代 `DialogButtonProps`（其默认按钮是 32 高、不经过 [`ControlExt`]）。取消经
+/// `DialogClose` 关闭对话框并触发 `on_cancel`，主操作经 `DialogAction` 分发
+/// `Confirm`，与默认底栏同一路径，`on_ok` 语义不变。`cancel` 为 `None` 时只显示主操作。
+pub fn dialog_footer(
+    cancel: Option<SharedString>,
+    ok: impl Into<SharedString>,
+    intent: DialogIntent,
+    cx: &App,
+) -> DialogFooter {
+    let spacing = active_theme(cx).tokens().spacing;
+    let ok = Button::new("dialog-ok").label(ok.into());
+    let ok = match intent {
+        DialogIntent::Confirm => ok.primary(),
+        DialogIntent::Destructive => ok.danger(),
+    }
+    .control(cx);
+    DialogFooter::new()
+        .gap(spacing.sm)
+        .when_some(cancel, |footer, cancel| {
+            footer.child(
+                DialogClose::new().child(
+                    Button::new("dialog-cancel")
+                        .outline()
+                        .label(cancel)
+                        .control(cx),
+                ),
+            )
+        })
+        .child(DialogAction::new().child(ok))
+}
+
+/// 对话框 / 确认框标题：`extended.title`（15/20 半粗）+ 正文色，底部 `spacing.xs`
+/// （与 gpui-component 对话框内置 8px 间距合成规范的 12px）。所有窗口共用。
+pub fn dialog_title(text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let title = theme.extended().title;
+    div()
+        .pb(theme.tokens().spacing.xs)
+        .text_size(title.size)
+        .line_height(title.line_height)
+        .font_weight(title.weight)
+        .text_color(theme.tokens().colors.foreground)
+        .child(text.into())
+}
+
+// ── 表单原语 ─────────────────────────────────────────────────────────────
+// 所有对话框与表单页（新建订阅、Webhook、分类、新建下载、队列、登录注册、插件设置…）
+// 统一用下面几块拼装，保证字段间距、标签、说明、开关分组在各窗口一模一样。
+
+/// 表单字段之间的纵向间距（字段组 → 字段组）。
+pub fn form_gap(cx: &App) -> Pixels {
+    active_theme(cx).tokens().spacing.lg
+}
+
+/// 表单整体：纵向排列字段，间距 [`form_gap`]。
+pub fn form(cx: &App) -> Div {
+    div().flex().flex_col().w_full().gap(form_gap(cx))
+}
+
+/// 字段标签：12px 中等字重、正文色（比说明文字更醒目，比输入内容更轻）。
+pub fn field_label(text: impl Into<SharedString>, cx: &App) -> Div {
+    let tokens = active_theme(cx).tokens();
+    div()
+        .text_size(tokens.typography.xs.size)
+        .line_height(tokens.typography.xs.line_height)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(tokens.colors.foreground)
+        .child(text.into())
+}
+
+/// 字段说明：12px 三级文字色。
+pub fn field_hint(text: impl Into<SharedString>, cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let xs = theme.tokens().typography.xs;
+    div()
+        .text_size(xs.size)
+        .line_height(xs.line_height)
+        .text_color(theme.extended().colors.text_tertiary)
+        .child(text.into())
+}
+
+/// 字段错误：12px 危险色。
+pub fn field_error(text: impl Into<SharedString>, cx: &App) -> Div {
+    let xs = active_theme(cx).tokens().typography.xs;
+    div()
+        .text_size(xs.size)
+        .line_height(xs.line_height)
+        .text_color(active_theme(cx).tokens().colors.destructive)
+        .child(text.into())
+}
+
+/// 标准字段：标签 → 控件（输入框 / 下拉 / 输入框 + 同行按钮）→ 可选说明。
+/// 标签与控件间距 6px，控件与说明间距 6px。
+pub fn form_field(
+    label: impl Into<SharedString>,
+    control: impl IntoElement,
+    hint: Option<SharedString>,
+    cx: &App,
+) -> Div {
+    let spacing = active_theme(cx).tokens().spacing;
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .gap(spacing.xs + spacing.xxs)
+        .child(field_label(label, cx))
+        .child(control)
+        .when_some(hint, |this, hint| this.child(field_hint(hint, cx)))
+}
+
+/// 同一行并排的多个字段（如「刷新间隔 | 队列」、「最小 | 最大」），等分宽度。
+pub fn form_row(fields: impl IntoIterator<Item = AnyElement>, cx: &App) -> Div {
+    let spacing = active_theme(cx).tokens().spacing;
+    div().flex().w_full().gap(spacing.md).children(
+        fields
+            .into_iter()
+            .map(|field| div().flex_1().min_w_0().child(field)),
+    )
+}
+
+/// 输入框 + 同行操作按钮（如「浏览」「验证」）：输入框吃满剩余宽度。
+/// 两者都应经统一控件档（[`ControlExt::control`]）以保证等高。
+pub fn input_with_action(input: impl IntoElement, action: impl IntoElement, cx: &App) -> Div {
+    let spacing = active_theme(cx).tokens().spacing;
+    div()
+        .flex()
+        .items_center()
+        .w_full()
+        .gap(spacing.sm)
+        .child(div().flex_1().min_w_0().child(input))
+        .child(div().flex_none().child(action))
+}
+
+/// 开关行：左侧标题（13px 正文色）+ 说明（12px 二级文字色），右侧开关控件。
+/// 放进 [`option_group`] 里使用，行高随内容、上下内边距 10px。
+pub fn option_row(
+    title: impl Into<SharedString>,
+    description: Option<SharedString>,
+    control: impl IntoElement,
+    cx: &App,
+) -> Div {
+    let tokens = active_theme(cx).tokens();
+    div()
+        .flex()
+        .items_center()
+        .w_full()
+        .gap(tokens.spacing.lg)
+        .px(tokens.spacing.md)
+        .py(tokens.spacing.sm + tokens.spacing.xxs)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(tokens.spacing.xxs)
+                .child(
+                    div()
+                        .text_size(tokens.typography.sm.size)
+                        .line_height(tokens.typography.sm.line_height)
+                        .text_color(tokens.colors.foreground)
+                        .child(title.into()),
+                )
+                .when_some(description, |this, description| {
+                    this.child(
+                        div()
+                            .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .child(description),
+                    )
+                }),
+        )
+        .child(div().flex_none().child(control))
+}
+
+/// 开关 / 选项分组：一张 [`crate::card`]，行与行之间 hairline 分隔（macOS 分组表单风格）。
+pub fn option_group(rows: impl IntoIterator<Item = AnyElement>, cx: &App) -> Div {
+    let hairline = active_theme(cx).extended().colors.hairline;
+    let mut group = crate::card(cx).flex().flex_col().w_full().overflow_hidden();
+    for (index, row) in rows.into_iter().enumerate() {
+        group = group.child(
+            div()
+                .w_full()
+                .when(index > 0, |this| this.border_t_1().border_color(hairline))
+                .child(row),
+        );
+    }
+    group
+}

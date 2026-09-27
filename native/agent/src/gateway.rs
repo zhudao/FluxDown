@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
@@ -12,8 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, RpcErrorData, RpcErrorObject, RpcNotification, RpcRequest, RpcResponse,
-    ServiceHello, ServiceRole, validate_first_request,
+    ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, RpcErrorData, RpcErrorObject, RpcNotification,
+    RpcRequest, RpcResponse, ServiceHello, ServiceRole, validate_first_request,
 };
 use futures_util::StreamExt;
 use reqwest::Method;
@@ -27,13 +26,23 @@ use crate::cloud::{CloudApi, CloudAuthService, CloudError};
 use crate::daemon_client::DaemonClient;
 use crate::diagnostics::{DiagnosticsError, DiagnosticsService};
 use crate::event_hub::AgentEventHub;
+use crate::lifecycle::Lifecycle;
 use crate::platform::PlatformError;
+use crate::power::PowerService;
 use crate::remote::{RemoteError, RemoteTaskService};
+use crate::shell::ShellState;
 use crate::sync::SyncService;
 use crate::update::{UpdateError, UpdateService};
 
 /// daemon `/blobs/*` 请求体上限（与 `fluxdown_daemon::http::REQUEST_BODY_LIMIT` 一致）。
 const BLOB_UPLOAD_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// 网关依赖的本机外壳服务：UI 在线计数 / 驻留、完成后关机、进程生命周期。
+pub struct GatewayShell {
+    pub shell: Arc<ShellState>,
+    pub power: Arc<PowerService>,
+    pub lifecycle: Arc<Lifecycle>,
+}
 
 pub struct GatewayService {
     daemon: Arc<DaemonClient>,
@@ -51,9 +60,7 @@ pub struct GatewayService {
     api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
     api_token: fluxdown_api::auth::TokenCell,
     hello: ServiceHello,
-    /// 已连接并声明 `client.selections` 能力的 UI 客户端数量；与 `CaptureService` 共享
-    /// 同一个 `Arc`，用于决定无 UI 时是否需要为捕获拉起桌面程序。
-    selection_clients: Arc<AtomicUsize>,
+    local: GatewayShell,
 }
 
 impl GatewayService {
@@ -77,7 +84,7 @@ impl GatewayService {
         store: Arc<crate::state::StateStore>,
         api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
         api_token: fluxdown_api::auth::TokenCell,
-        selection_clients: Arc<AtomicUsize>,
+        local: GatewayShell,
     ) -> Self {
         Self {
             daemon,
@@ -107,7 +114,7 @@ impl GatewayService {
                     method::CAPABILITY_AGENT_DEVICE_LINK.to_owned(),
                 ],
             ),
-            selection_clients,
+            local,
         }
     }
 
@@ -121,11 +128,41 @@ impl GatewayService {
         }
     }
 
+    /// agent 内部组件（托盘、剪贴板监听）复用与 UI 相同的 RPC 分发入口。
+    pub async fn dispatch_local(
+        &self,
+        method_name: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        self.dispatch(RpcRequest::new(
+            fluxdown_protocol::RequestId::String("agent-local".to_owned()),
+            method_name,
+            Some(params),
+        ))
+        .await
+    }
+
     async fn dispatch(&self, request: RpcRequest) -> Result<serde_json::Value, RpcErrorData> {
         match request.method.as_str() {
             method::SYSTEM_PING => Ok(serde_json::json!({ "ok": true })),
             method::SYSTEM_SNAPSHOT => serde_json::to_value(self.events.snapshot())
                 .map_err(|_| RpcErrorData::new(ApplicationErrorCode::Internal, false)),
+            method::SYSTEM_SHUTDOWN => {
+                self.local.lifecycle.request_quit();
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            method::AGENT_POWER_ARM => {
+                let params = parse_params::<fluxdown_protocol::PowerArmParams>(request.params)?;
+                let armed = self
+                    .local
+                    .power
+                    .arm(std::time::Duration::from_secs(params.delay_secs));
+                Ok(serde_json::json!({ "armed": armed }))
+            }
+            method::AGENT_POWER_DISARM => {
+                self.local.power.disarm();
+                Ok(serde_json::json!({ "ok": true }))
+            }
             method::AGENT_SESSION_GET => {
                 let snapshot = self.events.snapshot();
                 let session = match snapshot.body {
@@ -423,6 +460,8 @@ impl GatewayService {
     ) -> Result<serde_json::Value, RpcErrorData> {
         let patch = parse_params::<fluxdown_protocol::GatewayPatchParams>(Some(params))?;
         let mut state = self.state.lock().await;
+        let api_was_enabled = state.gateway.api_enabled;
+        let mcp_was_enabled = state.gateway.mcp_enabled;
         if let Some(value) = patch.takeover_enabled {
             state.gateway.takeover_enabled = value;
         }
@@ -441,12 +480,20 @@ impl GatewayService {
         if let Some(value) = patch.lan_enabled {
             state.gateway.lan_enabled = value;
         }
+        let token_set_explicitly = patch.user_token.is_some();
         if patch.regenerate_user_token {
             state.gateway_user_token = generate_user_token();
             state.gateway.user_token_configured = true;
         } else if let Some(token) = patch.user_token {
             state.gateway_user_token = token;
             state.gateway.user_token_configured = !state.gateway_user_token.trim().is_empty();
+        }
+        ensure_forced_auth_token(&mut state, api_was_enabled, mcp_was_enabled);
+        // 本次显式清空 token 且没有同时开启强制鉴权开关（否则上一步已补 token）：
+        // 管理 API / MCP 空 token 会拒绝全部请求，随清空一并关闭，保持「开关开 ⇒ 有 token」。
+        if token_set_explicitly && state.gateway_user_token.trim().is_empty() {
+            state.gateway.api_enabled = false;
+            state.gateway.mcp_enabled = false;
         }
         let gateway = state.gateway.clone();
         let user_token = state.gateway_user_token.clone();
@@ -629,11 +676,18 @@ impl GatewayService {
         let request =
             serde_json::from_value::<fluxdown_protocol::DownloadRequest>(request_value)
                 .map_err(|_| RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false))?;
+        // 本机调用方：`silent=true`（系统打开链接 / 拖入）直接建任务；否则（剪贴板监听）
+        // 恒请用户确认。外部接管走 HTTP / NMH，由 `CaptureOrigin::External` 按免打扰偏好分流。
         let silent = params
             .get("silent")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        capture_value(self.capture.submit(request, silent).await)
+        let origin = if silent {
+            crate::capture::CaptureOrigin::Direct
+        } else {
+            crate::capture::CaptureOrigin::Prompt
+        };
+        capture_value(self.capture.submit(request, origin).await)
     }
 
     async fn capture_resolve(
@@ -644,7 +698,7 @@ impl GatewayService {
             .map_err(|_| RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false))?;
         capture_value(
             self.capture
-                .resolve(&params.transaction_id, params.accepted, params.overrides)
+                .resolve(&params.transaction_id, params.accepted, params.request)
                 .await,
         )
     }
@@ -804,34 +858,12 @@ impl GatewayService {
         )
     }
 
-    async fn add_selection_client(&self) {
-        if self.selection_clients.fetch_add(1, Ordering::AcqRel) == 0 {
-            let _ = self
-                .daemon
-                .call::<serde_json::Value, serde_json::Value>(
-                    method::DAEMON_SELECTION_SUBSCRIBE,
-                    Some(serde_json::json!({})),
-                )
-                .await;
-        }
+    async fn ui_connected(&self) {
+        self.local.shell.ui_connected().await;
     }
 
-    async fn remove_selection_client(&self) {
-        let previous = self
-            .selection_clients
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                Some(count.saturating_sub(1))
-            })
-            .unwrap_or(0);
-        if previous == 1 {
-            let _ = self
-                .daemon
-                .call::<serde_json::Value, serde_json::Value>(
-                    method::DAEMON_SELECTION_UNSUBSCRIBE,
-                    Some(serde_json::json!({})),
-                )
-                .await;
-        }
+    async fn ui_disconnected(&self) {
+        self.local.shell.ui_disconnected().await;
     }
 }
 
@@ -1022,6 +1054,22 @@ fn generate_user_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
+/// 管理 API / MCP 端点强制鉴权（空 token → 403）：任一开关由关转开且当前用户 token
+/// 为空时生成随机 token，避免开启即全部请求被拒。已有 token 一律保留；
+/// 显式清空 token 时的开关联动关闭由 `gateway_patch` 处理。
+pub(crate) fn ensure_forced_auth_token(
+    state: &mut crate::state::AgentState,
+    api_was_enabled: bool,
+    mcp_was_enabled: bool,
+) {
+    let turned_on = (state.gateway.api_enabled && !api_was_enabled)
+        || (state.gateway.mcp_enabled && !mcp_was_enabled);
+    if turned_on && state.gateway_user_token.trim().is_empty() {
+        state.gateway_user_token = generate_user_token();
+        state.gateway.user_token_configured = true;
+    }
+}
+
 fn remote_value<T: serde::Serialize>(
     result: Result<T, RemoteError>,
 ) -> Result<serde_json::Value, RpcErrorData> {
@@ -1177,14 +1225,20 @@ async fn run_socket(
     cancel: CancellationToken,
 ) {
     let mut ready = false;
-    let mut selection_client = false;
+    let mut ui_client = false;
     let mut events = None;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                // 完全退出时客户端必须停止重连 / 重拉；仅 agent 退出（SIGTERM）时允许重拉。
+                let reason = if service.local.lifecycle.quit_requested() {
+                    CLOSE_REASON_SERVICE_QUIT
+                } else {
+                    "agent-shutdown"
+                };
                 let _ = socket.send(Message::Close(Some(CloseFrame {
                     code: 1001,
-                    reason: "agent-shutdown".into(),
+                    reason: reason.into(),
                 }))).await;
                 break;
             }
@@ -1198,13 +1252,20 @@ async fn run_socket(
                         continue;
                     }
                 };
+                if !ready && request.method == method::SYSTEM_SHUTDOWN && request.validate().is_ok() {
+                    // 握手前也受理：协议版本不兼容的新桌面程序靠它替换旧 agent。
+                    let response = RpcResponse::success(request.id, serde_json::json!({ "ok": true }));
+                    let _ = send_response(&mut socket, response).await;
+                    service.local.lifecycle.request_quit();
+                    continue;
+                }
                 if !ready {
                     let id = request.id.clone();
                     match validate_first_request(&request, ServiceRole::Agent) {
                         Ok(hello) => {
                             ready = true;
-                            selection_client = hello.capabilities.iter().any(|capability| capability == method::CAPABILITY_CLIENT_SELECTIONS);
-                            if selection_client { service.add_selection_client().await; }
+                            ui_client = hello.capabilities.iter().any(|capability| capability == method::CAPABILITY_CLIENT_SELECTIONS);
+                            if ui_client { service.ui_connected().await; }
                             let (receiver, _) = service.events.subscribe_and_snapshot();
                             events = Some(receiver);
                             let result = match serde_json::to_value(&service.hello) {
@@ -1239,8 +1300,8 @@ async fn run_socket(
             }
         }
     }
-    if selection_client {
-        service.remove_selection_client().await;
+    if ui_client {
+        service.ui_disconnected().await;
     }
 }
 
@@ -1296,7 +1357,6 @@ fn temporary_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -1304,7 +1364,7 @@ mod tests {
         AgentSnapshot, ApplicationErrorCode, RequestId, RpcRequest, RpcResponse,
     };
 
-    use super::{GatewayService, authorized, load_or_create_bearer};
+    use super::{GatewayService, GatewayShell, authorized, load_or_create_bearer};
     #[tokio::test]
     async fn service_bearer_is_exact_stable_and_private() {
         let dir = std::env::temp_dir().join(format!(
@@ -1346,6 +1406,7 @@ mod tests {
         service: GatewayService,
         state: Arc<tokio::sync::Mutex<crate::state::AgentState>>,
         store: Arc<crate::state::StateStore>,
+        api_token: fluxdown_api::auth::TokenCell,
         dir: std::path::PathBuf,
     }
 
@@ -1389,12 +1450,30 @@ mod tests {
                 state.clone(),
                 store.clone(),
             ));
-            let selection_clients = Arc::new(AtomicUsize::new(0));
+            let shell = crate::shell::ShellState::new(
+                crate::shell::TrayAvailability::Unavailable(
+                    fluxdown_protocol::TrayUnavailableReason::NotBuilt,
+                ),
+                daemon.clone(),
+                events.clone(),
+            );
             let capture = Arc::new(crate::capture::CaptureService::new(
                 daemon.clone(),
                 events.clone(),
-                selection_clients.clone(),
+                shell.clone(),
             ));
+            let local = GatewayShell {
+                shell,
+                power: Arc::new(crate::power::PowerService::new(events.clone())),
+                lifecycle: Arc::new(crate::lifecycle::Lifecycle::new(
+                    tokio_util::sync::CancellationToken::new(),
+                    daemon.clone(),
+                    Arc::new(crate::supervisor::DaemonSupervisor::new(
+                        "127.0.0.1:9".parse().expect("test daemon address"),
+                    )),
+                    dir.clone(),
+                )),
+            };
             let daemon_config = crate::daemon_client::DaemonClientConfig {
                 rpc_url: "ws://127.0.0.1:9/rpc".to_owned(),
                 bearer: String::new(),
@@ -1405,6 +1484,7 @@ mod tests {
             let api_switches = Arc::new(fluxdown_api::server::ApiRuntimeSwitches::new(
                 false, false, false, false, false,
             ));
+            let api_token = fluxdown_api::auth::TokenCell::new("");
             let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
                 daemon.clone(),
                 daemon_config,
@@ -1412,6 +1492,7 @@ mod tests {
                 state.clone(),
                 store.clone(),
                 api_switches.clone(),
+                api_token.clone(),
             ));
             let update = Arc::new(
                 crate::update::UpdateService::new(env!("CARGO_PKG_VERSION"))
@@ -1431,13 +1512,14 @@ mod tests {
                 state.clone(),
                 store.clone(),
                 api_switches,
-                fluxdown_api::auth::TokenCell::new(""),
-                selection_clients,
+                api_token.clone(),
+                local,
             );
             Self {
                 service,
                 state,
                 store,
+                api_token,
                 dir,
             }
         }
@@ -1457,12 +1539,27 @@ mod tests {
                 service,
                 state,
                 store,
+                api_token: _,
                 dir,
             } = self;
             drop(service);
             drop(state);
             drop(store);
             let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+
+        async fn patch_gateway(&self, params: serde_json::Value) -> serde_json::Value {
+            let response = self
+                .call(fluxdown_protocol::method::AGENT_GATEWAY_PATCH, params)
+                .await;
+            let RpcResponse::Success(success) = response else {
+                panic!("gateway patch failed: {response:?}");
+            };
+            success.result
+        }
+
+        async fn user_token(&self) -> String {
+            self.state.lock().await.gateway_user_token.clone()
         }
     }
 
@@ -1517,6 +1614,91 @@ mod tests {
             serde_json::json!(false)
         );
         assert_eq!(success.result["lanEnabled"], serde_json::json!(false));
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn enabling_forced_auth_switch_fills_only_a_missing_token() {
+        let harness = TestGateway::new("gateway_forced_auth").await;
+
+        let result = harness
+            .patch_gateway(serde_json::json!({ "apiEnabled": true }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(true));
+        assert!(result.get("userToken").is_none());
+        let generated = harness.user_token().await;
+        assert_eq!(generated.len(), 64);
+        assert!(generated.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(&*harness.api_token.get(), generated);
+        let persisted = harness.store.load().await.expect("reload state");
+        assert_eq!(persisted.gateway_user_token, generated);
+
+        // 已有 token：开启另一个强制鉴权开关不得覆盖。
+        harness
+            .patch_gateway(serde_json::json!({ "mcpEnabled": true }))
+            .await;
+        assert_eq!(harness.user_token().await, generated);
+
+        // 开关已开时显式清空 token：管理 API 与 MCP 随之关闭，不回填 token。
+        let result = harness
+            .patch_gateway(serde_json::json!({ "userToken": "" }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
+        assert_eq!(result["apiEnabled"], serde_json::json!(false));
+        assert_eq!(result["mcpEnabled"], serde_json::json!(false));
+        assert!(harness.user_token().await.is_empty());
+        assert!(harness.api_token.is_empty());
+        let persisted = harness.store.load().await.expect("reload state");
+        assert!(!persisted.gateway.api_enabled);
+        assert!(!persisted.gateway.mcp_enabled);
+
+        // 管理 API 由关转开且 token 为空 → 重新生成。
+        harness
+            .patch_gateway(serde_json::json!({ "apiEnabled": true }))
+            .await;
+        let regenerated = harness.user_token().await;
+        assert_eq!(regenerated.len(), 64);
+        assert_ne!(regenerated, generated);
+
+        // 同一请求里显式给出的 token 优先。
+        harness
+            .patch_gateway(serde_json::json!({ "apiEnabled": false, "mcpEnabled": false }))
+            .await;
+        harness
+            .patch_gateway(serde_json::json!({ "apiEnabled": true, "userToken": "custom-token" }))
+            .await;
+        assert_eq!(harness.user_token().await, "custom-token");
+        assert_eq!(&*harness.api_token.get(), "custom-token");
+
+        // 非强制鉴权开关不生成 token。
+        harness
+            .patch_gateway(serde_json::json!({ "apiEnabled": false, "userToken": "" }))
+            .await;
+        let result = harness
+            .patch_gateway(serde_json::json!({ "takeoverEnabled": true, "jsonrpcEnabled": true }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
+        assert!(harness.user_token().await.is_empty());
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn diagnostics_enable_service_fills_missing_token() {
+        let harness = TestGateway::new("diagnostics_enable_service").await;
+        let response = harness
+            .call(
+                fluxdown_protocol::method::AGENT_DIAGNOSTICS_REPAIR,
+                serde_json::json!({ "action": crate::diagnostics::ACTION_ENABLE_SERVICE }),
+            )
+            .await;
+        assert!(matches!(response, RpcResponse::Success(_)), "{response:?}");
+        let state = harness.state.lock().await.clone();
+        assert!(state.gateway.api_enabled);
+        assert!(state.gateway.user_token_configured);
+        assert_eq!(state.gateway_user_token.len(), 64);
+        assert_eq!(&*harness.api_token.get(), state.gateway_user_token);
+        let persisted = harness.store.load().await.expect("reload state");
+        assert_eq!(persisted.gateway_user_token, state.gateway_user_token);
         harness.finish().await;
     }
 

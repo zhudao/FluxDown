@@ -10,8 +10,8 @@ use fluxdown_protocol::{
     AgentEvent, AgentPreferencesDto, AgentSnapshot, ApplicationErrorCode, ComponentStatusDto,
     ConnPolicySummaryDto, DaemonConfigPatch, DaemonConfigSnapshot, DaemonEvent,
     DiagnosticsReportDto, GatewayPatchParams, GatewayStatusDto, PlatformIntegrationDto, PluginDto,
-    QueueDto, RpcErrorData, ServiceEvent, SettingOwner, SiteAuthEntryDto, SyncStatusDto,
-    SystemProxyDto, UpdateCheckResultDto, WebhookDeliveryDto, method, setting_spec,
+    QueueDto, RpcErrorData, ServiceEvent, SettingOwner, ShellStatusDto, SiteAuthEntryDto,
+    SyncStatusDto, SystemProxyDto, UpdateCheckResultDto, WebhookDeliveryDto, method, setting_spec,
     setting_value_kind, value_to_daemon_config,
 };
 use gpui::{Context, SharedString};
@@ -68,6 +68,7 @@ pub struct SettingsStore {
     port: Arc<dyn SettingsPort>,
     daemon: DaemonConfigSnapshot,
     gateway: GatewayStatusDto,
+    shell: ShellStatusDto,
     preferences: AgentPreferencesDto,
     sync: SyncStatusDto,
     queues: Vec<QueueDto>,
@@ -97,11 +98,16 @@ pub struct SettingsStore {
     system_proxy: Option<SystemProxyDto>,
     update_check: Option<UpdateCheckResultDto>,
     busy: BTreeSet<&'static str>,
+    /// 同一 `action` 下具体是哪个按钮发起的（如某条修复 / 某个站点）；随 `action` 完成清除。
+    busy_tags: BTreeMap<&'static str, SharedString>,
     last_error: Option<SettingsError>,
     /// 最近一次动作的成功提示（i18n 键）。
     last_notice: Option<&'static str>,
     /// 页面级临时值（测试结果等），不持久化、不发送。
     transient: BTreeMap<&'static str, Value>,
+    /// 网关状态变化 / 快照重建后置位：`transient("gateway_user_token")` 可能已过期，
+    /// 下次展示时重新读取；发起读取时清除。
+    gateway_token_stale: bool,
 }
 
 impl SettingsStore {
@@ -111,6 +117,7 @@ impl SettingsStore {
             port,
             daemon: DaemonConfigSnapshot::default(),
             gateway: GatewayStatusDto::default(),
+            shell: ShellStatusDto::default(),
             preferences: AgentPreferencesDto::default(),
             sync: SyncStatusDto::default(),
             queues: Vec::new(),
@@ -134,9 +141,11 @@ impl SettingsStore {
             system_proxy: None,
             update_check: None,
             busy: BTreeSet::new(),
+            busy_tags: BTreeMap::new(),
             last_error: None,
             last_notice: None,
             transient: BTreeMap::new(),
+            gateway_token_stale: true,
         }
     }
 
@@ -145,6 +154,8 @@ impl SettingsStore {
     pub fn replace_snapshot(&mut self, snapshot: &AgentSnapshot, cx: &mut Context<Self>) {
         self.daemon.clone_from(&snapshot.daemon.config);
         self.gateway.clone_from(&snapshot.gateway);
+        self.gateway_token_stale = true;
+        self.shell.clone_from(&snapshot.shell);
         self.preferences.clone_from(&snapshot.preferences);
         self.sync.clone_from(&snapshot.sync);
         self.queues.clone_from(&snapshot.daemon.queues);
@@ -181,7 +192,11 @@ impl SettingsStore {
             AgentEvent::Daemon(DaemonEvent::WebhooksChanged(deliveries)) => {
                 self.webhook_deliveries.clone_from(deliveries)
             }
-            AgentEvent::GatewayChanged(gateway) => self.gateway.clone_from(gateway),
+            AgentEvent::GatewayChanged(gateway) => {
+                self.gateway.clone_from(gateway);
+                self.gateway_token_stale = true;
+            }
+            AgentEvent::ShellChanged(shell) => self.shell.clone_from(shell),
             AgentEvent::PreferencesChanged(preferences) => {
                 self.preferences.clone_from(preferences);
                 self.overlay_local_edits();
@@ -245,6 +260,11 @@ impl SettingsStore {
     pub fn gateway(&self) -> &GatewayStatusDto {
         &self.gateway
     }
+    /// agent 托盘可用性与关闭 UI 后的驻留策略。
+    #[must_use]
+    pub fn shell(&self) -> &ShellStatusDto {
+        &self.shell
+    }
     #[must_use]
     pub fn sync_status(&self) -> &SyncStatusDto {
         &self.sync
@@ -297,6 +317,11 @@ impl SettingsStore {
     pub fn transient(&self, key: &str) -> Option<&Value> {
         self.transient.get(key)
     }
+    /// 用户 token 尚未读取，或网关状态变化后可能已过期。
+    #[must_use]
+    pub fn gateway_token_needs_reveal(&self) -> bool {
+        self.gateway_token_stale || !self.transient.contains_key("gateway_user_token")
+    }
     pub fn set_transient(&mut self, key: &'static str, value: Value, cx: &mut Context<Self>) {
         self.transient.insert(key, value);
         cx.notify();
@@ -304,6 +329,22 @@ impl SettingsStore {
     #[must_use]
     pub fn is_busy(&self, action: &str) -> bool {
         self.busy.contains(action)
+    }
+    /// `action` 进行中且由 `tag` 标记的按钮发起。
+    #[must_use]
+    pub fn is_busy_tagged(&self, action: &str, tag: &str) -> bool {
+        self.busy.contains(action) && self.busy_tags.get(action).is_some_and(|t| t == tag)
+    }
+    /// `action` 进行中且未打标签（区分同一 action 下其他按钮发起的调用）。
+    #[must_use]
+    pub fn is_busy_untagged(&self, action: &str) -> bool {
+        self.busy.contains(action) && !self.busy_tags.contains_key(action)
+    }
+    /// 给刚发起的 `action` 打上发起者标签，供对应按钮显示 loading；`action` 未在进行中则忽略。
+    pub fn tag_busy(&mut self, action: &'static str, tag: impl Into<SharedString>) {
+        if self.busy.contains(action) {
+            self.busy_tags.insert(action, tag.into());
+        }
     }
     #[must_use]
     pub fn last_error(&self) -> Option<&SettingsError> {
@@ -508,6 +549,7 @@ impl SettingsStore {
 
     /// 用户 token 只在本机 UI 按需读取，不进快照；结果放入 `transient("gateway_user_token")`。
     pub fn reveal_gateway_token(&mut self, cx: &mut Context<Self>) {
+        self.gateway_token_stale = false;
         self.call_with(
             "gatewayToken",
             method::AGENT_GATEWAY_REVEAL_TOKEN,
@@ -539,6 +581,7 @@ impl SettingsStore {
             return;
         }
         self.busy.insert(action);
+        self.busy_tags.remove(action);
         self.last_error = None;
         self.last_notice = None;
         cx.notify();
@@ -547,6 +590,7 @@ impl SettingsStore {
             let result = future.await;
             let _ = this.update(cx, |this, cx| {
                 this.busy.remove(action);
+                this.busy_tags.remove(action);
                 if let Err(error) = &result {
                     this.last_error = Some(SettingsError {
                         kind: SettingsErrorKind::from_rpc(error),

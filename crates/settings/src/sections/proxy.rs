@@ -1,14 +1,14 @@
 //! 代理：模式、手动服务器、连通性测试、站点凭据。
 
 use fluxdown_protocol::method;
-use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, ParentElement, SharedString, Styled, div, px};
-use gpui_component::{Icon, IconName, h_flex};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, loading_button};
+use fluxdown_ui_theme::active_theme;
+use gpui::{App, ParentElement, SharedString, Styled};
+use gpui_component::{Icon, h_flex};
 use serde_json::json;
 
 use super::{SectionContext, site_auth};
-use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection};
+use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, body_text, meta_text};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     let mode = ctx.store.read(cx).daemon_str("proxy_mode");
@@ -31,7 +31,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         "proxy",
         ctx.t("settingsCatProxy"),
         ctx.t("settingsCatProxyDesc"),
-        IconName::Globe,
+        FluxIcon::Globe,
     )
     .sections(sections)
 }
@@ -195,8 +195,7 @@ fn proxy_port_control(ctx: &SectionContext) -> Control {
 fn readonly_control(value: SharedString) -> Control {
     Control::custom(move |_disabled, _key, _window, cx: &mut App| {
         let tokens = active_theme(cx).tokens();
-        div()
-            .text_sm()
+        body_text(cx)
             .text_color(tokens.colors.muted_foreground)
             .child(value.clone())
     })
@@ -204,23 +203,18 @@ fn readonly_control(value: SharedString) -> Control {
 
 /// info 图标 + 说明文字的整行（无标题/控件结构）。
 fn info_line(text: SharedString, cx: &mut App) -> gpui::Div {
-    let tokens = active_theme(cx).tokens();
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let extended = theme.extended();
     h_flex()
         .gap(tokens.spacing.sm)
-        .items_start()
+        .items_center()
         .child(
-            Icon::new(IconName::Info)
-                .size(px(13.))
-                .text_color(tokens.colors.muted_foreground),
+            Icon::new(FluxIcon::Info)
+                .size(extended.icon.md)
+                .text_color(extended.colors.text_tertiary),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_xs()
-                .text_color(tokens.colors.muted_foreground)
-                .child(text),
-        )
+        .child(meta_text(cx).flex_1().min_w_0().child(text))
 }
 
 #[derive(Clone, Copy)]
@@ -246,20 +240,15 @@ fn test_control(ctx: &SectionContext, source: ProxyTestSource) -> Control {
         h_flex()
             .gap(tokens.spacing.sm)
             .items_center()
+            .child(meta_text(cx).child(SharedString::from(result.unwrap_or_default())))
             .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(SharedString::from(result.unwrap_or_default())),
-            )
-            .child(
-                button(
+                loading_button(
                     "proxy-test",
                     if busy { testing.clone() } else { label.clone() },
                     ButtonVariant::Secondary,
+                    busy,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(busy)
                 .on_click({
                     let translator = translator.clone();

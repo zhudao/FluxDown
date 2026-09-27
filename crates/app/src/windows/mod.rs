@@ -1,7 +1,8 @@
-//! 窗口注册表与进程驻留态。
+//! 窗口注册表与界面进程退出判定。
 //!
-//! 所有顶层窗口按 [`WindowKey`] 去重；最后一个用户窗口关闭且非 Resident（托盘未安装）
-//! 时退出进程。gpui 不会在最后一个窗口关闭时自动退出，这里是唯一的退出判定点。
+//! 所有顶层窗口按 [`WindowKey`] 去重；最后一个用户窗口关闭时界面进程退出（后台是否驻留由
+//! agent 决定，见 `crate::lifecycle`）。gpui 不会在最后一个窗口关闭时自动退出，这里是唯一的
+//! 「关窗即退出」判定点。
 
 use std::{
     cell::{Cell, RefCell},
@@ -23,8 +24,8 @@ use crate::{agent_client::AgentClient, app::Desktop};
 pub mod group_detail;
 pub mod main;
 pub mod new_download;
+pub mod progress;
 pub mod queue_manager;
-pub mod quick_capture;
 pub mod selection;
 pub mod settings;
 pub mod task_detail;
@@ -36,10 +37,11 @@ pub enum WindowKey {
     Settings,
     NewDownload,
     QueueManager,
-    QuickCapture,
     Selection(String),
     TaskDetail(String),
     GroupDetail(String),
+    /// 独立下载进度 / 完成窗口（每任务一个）。
+    Progress(String),
 }
 
 impl WindowKey {
@@ -56,7 +58,6 @@ impl WindowKey {
 pub struct WindowRegistry {
     open: HashMap<WindowKey, AnyWindowHandle>,
     ids: HashMap<WindowId, WindowKey>,
-    resident: bool,
     /// 正在显示「下载仍在进行」确认框的窗口：重复 ⌘W / ⌘Q 不叠第二个对话框。
     confirming: HashSet<WindowId>,
     /// 防抖中尚未落盘的窗口边界（退出时强制写一次）。
@@ -71,23 +72,16 @@ impl WindowRegistry {
     /// 安装全局注册表：窗口关闭清理 + 退出判定 + 退出时落盘边界。
     pub fn init(cx: &mut App, client: Arc<AgentClient>) {
         let closed_sub = cx.on_window_closed(|cx, window_id| {
-            let (should_quit, hide_dock) = {
+            let last_closed = {
                 let registry = cx.global_mut::<Self>();
-                let key = registry.ids.remove(&window_id);
-                if let Some(key) = &key {
-                    registry.open.remove(key);
+                if let Some(key) = registry.ids.remove(&window_id) {
+                    registry.open.remove(&key);
                 }
                 registry.confirming.remove(&window_id);
-                (
-                    registry.should_quit(),
-                    registry.resident && key == Some(WindowKey::Main),
-                )
+                registry.open.is_empty()
             };
-            if should_quit {
-                cx.quit();
-            } else if hide_dock {
-                // 托盘驻留：主窗口关闭即从 Dock 隐藏，只从托盘唤回。
-                crate::app_icon::set_dock_visible(false);
+            if last_closed {
+                crate::lifecycle::quit_ui(cx);
             }
         });
         let pending_bounds = Rc::new(RefCell::new(HashMap::new()));
@@ -104,16 +98,11 @@ impl WindowRegistry {
         cx.set_global(Self {
             open: HashMap::new(),
             ids: HashMap::new(),
-            resident: false,
             confirming: HashSet::new(),
             pending_bounds,
             _closed_sub: closed_sub,
             _quit_sub: quit_sub,
         });
-    }
-
-    fn should_quit(&self) -> bool {
-        self.open.is_empty() && !self.resident
     }
 
     /// 打开或聚焦窗口。已开 → `activate_window` 并返回 `None`。
@@ -185,7 +174,7 @@ impl WindowRegistry {
     }
 
     /// 当前获得焦点的窗口。macOS 的 `cx.active_window()` 只认 `NSWindow`，`Floating` /
-    /// `PopUp` 是 `NSPanel`（选择框、快速捕获）会返回 `None`，此时按 gpui 记录的 key 态扫描。
+    /// `PopUp` 是 `NSPanel`（选择框）会返回 `None`，此时按 gpui 记录的 key 态扫描。
     /// 只能在 defer 之后调用：正在 update 栈内的窗口不在 `cx.windows` 里，扫描会漏掉它。
     #[must_use]
     pub fn focused_window(cx: &mut App) -> Option<AnyWindowHandle> {
@@ -217,27 +206,20 @@ impl WindowRegistry {
         });
     }
 
-    /// 托盘已安装 → 无窗口也不退出。变为 `false` 且无窗口 → 退出。
-    pub fn set_resident(cx: &mut App, resident: bool) {
-        let should_quit = {
-            let registry = cx.global_mut::<Self>();
-            registry.resident = resident;
-            registry.should_quit()
-        };
-        if should_quit {
-            cx.quit();
-        }
-    }
-
-    #[must_use]
-    pub fn is_resident(cx: &App) -> bool {
-        cx.global::<Self>().resident
-    }
-
     /// 用户窗口数量。
     #[must_use]
     pub fn open_count(cx: &App) -> usize {
         cx.global::<Self>().open.len()
+    }
+
+    /// 满足条件的已开窗口数量。
+    #[must_use]
+    pub fn count(cx: &App, predicate: impl Fn(&WindowKey) -> bool) -> usize {
+        cx.global::<Self>()
+            .open
+            .keys()
+            .filter(|key| predicate(key))
+            .count()
     }
 
     /// 在根视图上挂窗口边界观察，500ms 防抖后写入设备本地偏好。
@@ -304,6 +286,22 @@ impl WindowRegistry {
     }
 }
 
+/// 把窗口连同应用一起置前（界面常是后台应用：外部捕获、静默下载发生时浏览器在前台）：
+///
+/// - macOS：`activate_window` 只在本应用内排序（`makeKeyAndOrderFront`），必须同时
+///   `cx.activate(true)` 激活应用本身（`activateIgnoringOtherApps`），否则窗口压在浏览器下面。
+/// - Windows：`cx.activate` 为空操作；gpui 的 `activate_window` 以 `SetForegroundWindow` +
+///   模拟一次按键输入绕过前台锁，后台进程也能置前。
+/// - Linux：X11 发 `_NET_ACTIVE_WINDOW`、Wayland 申请 xdg-activation token，窗口管理器的
+///   防抢焦点策略可能拒绝；再请求注意（X11 置 urgency，任务栏 / 工作区高亮），被拒时
+///   用户仍能看到有待确认的下载。
+pub fn bring_to_front(window: &mut Window, cx: &mut App) {
+    cx.activate(true);
+    window.activate_window();
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    window.request_attention();
+}
+
 /// 「下载仍在进行」确认框：用户确认后执行 `on_ok`（关窗 / 退出）。同一窗口已在提示中
 /// （重复 ⌘W / ⌘Q、再点关闭按钮）则不再叠第二个对话框。
 pub fn confirm_active_tasks(
@@ -321,16 +319,17 @@ pub fn confirm_active_tasks(
     let ok = translator.text("menuQuit").to_owned();
     let cancel = translator.text("cancel").to_owned();
     let on_ok = Rc::new(on_ok);
-    window.open_alert_dialog(cx, move |dialog, _, _| {
+    window.open_alert_dialog(cx, move |dialog, _, cx| {
         let on_ok = Rc::clone(&on_ok);
         dialog
-            .title(title.clone())
+            .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
             .description(hint.clone())
-            .button_props(
-                gpui_component::dialog::DialogButtonProps::default()
-                    .ok_text(ok.clone())
-                    .cancel_text(cancel.clone()),
-            )
+            .footer(fluxdown_ui_components::dialog_footer(
+                Some(cancel.clone().into()),
+                ok.clone(),
+                fluxdown_ui_components::DialogIntent::Confirm,
+                cx,
+            ))
             .on_ok(move |_, window, cx| {
                 on_ok(window, cx);
                 true

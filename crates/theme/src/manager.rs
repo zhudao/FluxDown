@@ -1,17 +1,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use gpui::{App, Global, Window, linear_color_stop, linear_gradient};
+use gpui::{App, Global, Window};
 use gpui_component::{Theme as ComponentTheme, ThemeMode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AppearancePreferences, FluxThemeDefinition, SemanticThemeTokens, normalize_ui_scale_percent,
+    AppearancePreferences, ExtendedTokens, FluxThemeDefinition, SemanticThemeTokens,
+    ensure_primary_contrast, normalize_ui_scale_percent,
 };
-
-const TABLE_HOVER_TOP_OPACITY: f32 = 0.78;
-const TABLE_HOVER_BOTTOM_OPACITY: f32 = 0.48;
 
 /// 用户主题偏好；`System` 在每次安装时解析当前系统明暗模式。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +41,7 @@ pub struct FluxThemeState {
     appearance: AppearancePreferences,
     mode: ThemeMode,
     tokens: SemanticThemeTokens,
+    extended: ExtendedTokens,
 }
 
 impl Global for FluxThemeState {}
@@ -76,6 +75,11 @@ impl FluxThemeState {
     /// 当前完整 Base token（已按界面缩放）；应用自有组件应只从这里取值。
     pub fn tokens(&self) -> &SemanticThemeTokens {
         &self.tokens
+    }
+
+    /// FluxDown 扩展 token（状态色、三级文字、字号/图标阶梯；已按界面缩放）。
+    pub fn extended(&self) -> &ExtendedTokens {
+        &self.extended
     }
 }
 
@@ -185,17 +189,23 @@ fn install(
     let mode = appearance.theme_mode.resolve(cx);
     let mut tokens = definition.tokens(mode).clone();
     scale_tokens(&mut tokens, appearance.ui_scale());
+    ensure_primary_contrast(&mut tokens, mode);
+    let extended = ExtendedTokens::derive(&tokens, mode, appearance.ui_scale());
 
     ComponentTheme::change(mode, None, cx);
     {
         let component_theme = ComponentTheme::global_mut(cx);
         component_theme.apply_semantic_tokens(&tokens);
         component_theme.focus_ring = false;
+        // gpui-component 的对话框、输入框、Root 等取 `background`；FluxDown 的内容面统一是
+        // `surface`（chrome 区由各页显式着色），这里对齐，避免对话框发灰与白色内容区不一致。
+        component_theme.background = tokens.colors.surface;
+        component_theme.tokens.background = tokens.colors.surface.into();
         // gpui-component 的 `text_base` 取 `font_size`（默认映射到 md=16px），
         // 对桌面密度偏大；与 Flutter 桌面端 13px 正文基线对齐取 sm。
         component_theme.font_size = tokens.typography.sm.size;
-        component_theme.title_bar = tokens.colors.surface;
-        component_theme.title_bar_border = tokens.colors.border;
+        component_theme.title_bar = extended.colors.chrome;
+        component_theme.title_bar_border = extended.colors.hairline;
         // gpui-component 的 Sidebar / Settings 侧栏只读 sidebar_* 系列，legacy
         // `apply_semantic_tokens` 不会同步它们；不映射就会留在库默认的黑/白。
         component_theme.sidebar = tokens.colors.surface;
@@ -259,31 +269,36 @@ fn install(
         component_theme.tokens.button_danger_foreground = colors.destructive_foreground.into();
         component_theme.tokens.button_danger_hover = danger_hover.into();
         component_theme.tokens.button_danger_active = danger_active.into();
+        // 下载列表不画网格：行分隔线与表头竖线都取透明，只靠悬停 / 选中底色
+        // 区分行；表头与内容同底色。列宽拖拽柄在悬停表头时仍按 `border` 显示。
+        let no_line = tokens.colors.surface.opacity(0.);
         component_theme.table = tokens.colors.surface;
         component_theme.table_active = tokens.colors.accent;
         component_theme.table_active_border = tokens.colors.primary;
         component_theme.table_even = tokens.colors.surface;
-        component_theme.table_head = tokens.colors.muted;
-        component_theme.table_head_foreground = tokens.colors.muted_foreground;
-        component_theme.table_hover = tokens.colors.muted;
-        component_theme.table_row_border = tokens.colors.border;
+        component_theme.table_head = tokens.colors.surface;
+        component_theme.table_head_foreground = extended.colors.text_tertiary;
+        component_theme.table_hover = extended.colors.row_hover;
+        component_theme.table_row_border = no_line;
         component_theme.tokens.table = tokens.colors.surface.into();
         component_theme.tokens.table_active = tokens.colors.accent.into();
         component_theme.tokens.table_even = tokens.colors.surface.into();
-        component_theme.tokens.table_head = tokens.colors.muted.into();
-        component_theme.tokens.table_hover.background = linear_gradient(
-            180.,
-            linear_color_stop(tokens.colors.muted.opacity(TABLE_HOVER_TOP_OPACITY), 0.),
-            linear_color_stop(tokens.colors.muted.opacity(TABLE_HOVER_BOTTOM_OPACITY), 1.),
-        );
+        component_theme.tokens.table_head = tokens.colors.surface.into();
+        component_theme.tokens.table_hover.background = extended.colors.row_hover.into();
     }
     ComponentTheme::sync_base(cx);
-    gpui_base::Theme::global_mut(cx).tokens = tokens.clone();
+    {
+        let base_theme = gpui_base::Theme::global_mut(cx);
+        base_theme.tokens = tokens.clone();
+        // 面板分隔把手（侧栏|内容、详情面板）与其他结构线一致用 hairline。
+        base_theme.resizable.handle = extended.colors.hairline;
+    }
     cx.set_global(FluxThemeState {
         definition,
         appearance,
         mode,
         tokens,
+        extended,
     });
 
     for handle in cx.windows() {
@@ -338,6 +353,14 @@ fn scale_tokens(tokens: &mut SemanticThemeTokens, scale: f32) {
     }
 }
 
+/// 向对比方向偏移亮度：亮色变暗、暗色变亮（hover / active 派生）。
+fn shift_toward_contrast(color: gpui::Hsla, amount: f32) -> gpui::Hsla {
+    let delta = if color.l >= 0.5 { -amount } else { amount };
+    gpui::Hsla {
+        l: (color.l + delta).clamp(0., 1.),
+        ..color
+    }
+}
 #[cfg(test)]
 mod tests {
     use gpui::px;
@@ -352,7 +375,7 @@ mod tests {
         scale_tokens(&mut tokens, 1.5);
 
         assert_eq!(tokens.typography.md.size, px(24.));
-        assert_eq!(tokens.typography.sm.line_height, px(30.));
+        assert_eq!(tokens.typography.sm.line_height, px(27.));
         assert_eq!(tokens.spacing.md, px(18.));
         assert_eq!(tokens.radius.md, px(9.));
         assert_eq!(tokens.radius.full, definition.light.radius.full);
@@ -362,14 +385,5 @@ mod tests {
         let mut unchanged = definition.light.clone();
         scale_tokens(&mut unchanged, 1.);
         assert_eq!(unchanged, definition.light);
-    }
-}
-
-/// 向对比方向偏移亮度：亮色变暗、暗色变亮（hover / active 派生）。
-fn shift_toward_contrast(color: gpui::Hsla, amount: f32) -> gpui::Hsla {
-    let delta = if color.l >= 0.5 { -amount } else { amount };
-    gpui::Hsla {
-        l: (color.l + delta).clamp(0., 1.),
-        ..color
     }
 }

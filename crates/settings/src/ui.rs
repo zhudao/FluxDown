@@ -1,19 +1,24 @@
 //! 设置页的自有布局原语：分类页 → 子 Tab → 分组卡片 → 设置行。
 //!
-//! 与 Flutter 桌面端 `lib/src/pages/settings_page.dart` 同一视觉语言：
-//! 左侧分类导航、顶部「标题 + 描述 + 子 Tab」头部、白色内容区、
-//! 宽视口双列瀑布式分组卡片。控件全部由 gpui-component 公开原语渲染。
+//! 视觉规则与全客户端一致（见 `fluxdown_ui_components::kit`）：
+//! - 分组卡片 = surface + hairline 描边 + `radius.lg`，行间 hairline 分隔，不加阴影；
+//! - 组标题 caption MEDIUM + 三级文字色；行标题 `typography.sm`，说明 `typography.xs` 二级文字色；
+//! - 右侧控件一律统一档 [`fluxdown_ui_theme::CONTROL_HEIGHT`]（28）：按钮 / 输入走 `ControlExt::control`，下拉为
+//!   outline + caret，数字输入同高；横排行最小行高 [`ROW_MIN_HEIGHT`]；
+//!   宽度只用 [`INPUT_WIDTH`] / [`INPUT_WIDE_WIDTH`] / [`NUMBER_WIDTH`] / [`DROPDOWN_MIN_WIDTH`] 四档；开关保持 `Switch`。
+//! - 列表行内操作（上移 / 下移 / 测试 / 删除…）同高：[`row_button`] / [`row_icon_button`] 只额外禁止被长文本挤压。
 
 use std::rc::Rc;
 
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_components::{ButtonVariant, ControlExt as _, FluxIcon, card};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, ElementId, FontWeight, InteractiveElement as _,
+    Anchor, AnyElement, App, AppContext as _, Div, ElementId, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon, IconName, Sizable as _, Size,
+    Disableable as _, Icon,
     button::Button,
     input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -21,6 +26,181 @@ use gpui_component::{
     tooltip::Tooltip,
     v_flex,
 };
+
+/// 行内文本输入框宽度档位。
+pub(crate) const INPUT_WIDTH: f32 = 240.;
+/// 长文本输入框宽度档位（User-Agent 等整串值）。
+pub(crate) const INPUT_WIDE_WIDTH: f32 = 420.;
+/// 行内数字输入框宽度档位。
+pub(crate) const NUMBER_WIDTH: f32 = 132.;
+/// 行内下拉按钮的最小宽度档位（文案更长时自然撑开）。
+pub(crate) const DROPDOWN_MIN_WIDTH: f32 = 160.;
+/// 横排设置行的最小行高：28 高控件 + 上下各 10px。
+pub(crate) const ROW_MIN_HEIGHT: f32 = 48.;
+
+/// 正文文字（`typography.sm`，正文色）。
+pub(crate) fn body_text(cx: &App) -> Div {
+    let tokens = active_theme(cx).tokens();
+    div()
+        .text_size(tokens.typography.sm.size)
+        .line_height(tokens.typography.sm.line_height)
+        .text_color(tokens.colors.foreground)
+}
+
+/// 辅助说明 / 元信息文字（`typography.xs`，二级文字色）。
+pub(crate) fn meta_text(cx: &App) -> Div {
+    let tokens = active_theme(cx).tokens();
+    div()
+        .text_size(tokens.typography.xs.size)
+        .line_height(tokens.typography.xs.line_height)
+        .text_color(tokens.colors.muted_foreground)
+}
+
+/// 分区 / 组标题文字（caption MEDIUM，三级文字色）。
+pub(crate) fn caption_heading(cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let extended = theme.extended();
+    div()
+        .text_size(extended.caption.size)
+        .line_height(extended.caption.line_height)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(extended.colors.text_tertiary)
+}
+
+/// 页面内容区左右留白（设置页与 Webhook 独立页共用）。
+pub(crate) const CONTENT_PADDING_LEFT: f32 = 28.;
+pub(crate) const CONTENT_PADDING_RIGHT: f32 = 24.;
+
+/// 页面标题 + 一行描述（`extended.title` + xs 二级文字）。
+pub(crate) fn page_heading(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    cx: &App,
+) -> Div {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let title_style = theme.extended().title;
+    v_flex()
+        .w_full()
+        .gap(tokens.spacing.xxs)
+        .child(
+            div()
+                .text_size(title_style.size)
+                .line_height(title_style.line_height)
+                .font_weight(title_style.weight)
+                .text_color(tokens.colors.foreground)
+                .child(title.into()),
+        )
+        .child(meta_text(cx).truncate().child(description.into()))
+}
+
+/// 对话框底栏：右对齐，`spacing.sm` 间距；`leading` 放左端（次要破坏性操作）。
+pub(crate) fn dialog_footer(
+    leading: Option<AnyElement>,
+    actions: impl IntoIterator<Item = AnyElement>,
+    cx: &App,
+) -> Div {
+    let tokens = active_theme(cx).tokens();
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(tokens.spacing.sm)
+        .children(leading)
+        .child(div().flex_1())
+        .children(actions)
+}
+
+/// 次要破坏性操作按钮（danger-ghost）：透明底 + 破坏色文字，悬停中性灰。
+/// 对话框底栏左端的「删除」用它；列表行内用 [`row_danger_button`]。
+pub(crate) fn danger_ghost_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    cx: &App,
+) -> fluxdown_ui_components::Button {
+    let destructive = active_theme(cx).tokens().colors.destructive;
+    fluxdown_ui_components::button(id, label, ButtonVariant::Ghost, cx).text_color(destructive)
+}
+
+/// 列表行内的文字按钮：套件按钮且不被长文本挤压。
+/// 返回值已设置悬停，调用方不得再 `.hover()`。
+pub(crate) fn row_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    cx: &App,
+) -> fluxdown_ui_components::Button {
+    fluxdown_ui_components::button(id, label, variant, cx).flex_shrink_0()
+}
+
+/// 列表行内的「删除」：danger-ghost，不被长文本挤压。
+pub(crate) fn row_danger_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    cx: &App,
+) -> fluxdown_ui_components::Button {
+    danger_ghost_button(id, label, cx).flex_shrink_0()
+}
+
+/// [`row_button`] 的 loading 版本（异步动作进行中显示旋转图标且不可点击）。
+pub(crate) fn row_loading_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    loading: bool,
+    cx: &App,
+) -> fluxdown_ui_components::Button {
+    fluxdown_ui_components::loading_button(id, label, variant, loading, cx).flex_shrink_0()
+}
+
+/// [`row_danger_button`] 的 loading 版本。
+pub(crate) fn row_loading_danger_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    loading: bool,
+    cx: &App,
+) -> fluxdown_ui_components::Button {
+    let destructive = active_theme(cx).tokens().colors.destructive;
+    fluxdown_ui_components::loading_button(id, label, ButtonVariant::Ghost, loading, cx)
+        .text_color(destructive)
+        .flex_shrink_0()
+}
+
+/// 列表行内的纯图标按钮（上移 / 下移等）：套件图标按钮，不被长文本挤压。
+/// 返回值已设置悬停，调用方不得再 `.hover()`。
+pub(crate) fn row_icon_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    icon: impl IntoElement,
+    variant: ButtonVariant,
+    cx: &App,
+) -> fluxdown_ui_components::Button {
+    fluxdown_ui_components::icon_button(id, label, icon, variant, cx).flex_shrink_0()
+}
+
+/// 空状态：FluxIcon 32px 三级文字色 + 标题 sm MEDIUM + 说明 xs，居中。
+pub(crate) fn empty_state(
+    icon: impl Into<Icon>,
+    title: SharedString,
+    description: SharedString,
+    cx: &App,
+) -> Div {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let extended = theme.extended();
+    v_flex()
+        .w_full()
+        .items_center()
+        .gap(tokens.spacing.xs)
+        .py(tokens.spacing.lg)
+        .child(
+            Icon::new(icon)
+                .size(px(32.))
+                .text_color(extended.colors.text_tertiary),
+        )
+        .child(body_text(cx).font_weight(FontWeight::MEDIUM).child(title))
+        .child(meta_text(cx).text_center().child(description))
+}
 
 /// 触发双列排布的最小内容宽度（与 Flutter `_AdaptiveSections` 一致）。
 pub(crate) const TWO_COLUMN_MIN_WIDTH: f32 = 920.;
@@ -234,14 +414,19 @@ impl SettingsRow {
         window: &mut Window,
         cx: &mut App,
     ) -> gpui::Stateful<gpui::Div> {
-        let tokens = active_theme(cx).tokens().clone();
-        let colors = tokens.colors;
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let disabled = self.disabled;
         let mut row = div()
             .id(ElementId::from(key.clone()))
             .w_full()
-            .px(px(16.))
-            .py(if self.vertical { px(12.) } else { px(10.) })
+            .px(tokens.spacing.lg)
+            .py(if self.vertical {
+                tokens.spacing.md
+            } else {
+                tokens.spacing.sm
+            })
             .when(disabled, |this| this.opacity(0.5));
 
         if let Some(full) = self.full.clone() {
@@ -253,16 +438,14 @@ impl SettingsRow {
             .clone()
             .map(|control| render_control(&control, disabled, &key, self.vertical, window, cx));
         let label = v_flex()
-            .gap(px(2.))
+            .gap(tokens.spacing.xxs)
             .min_w_0()
             .child({
-                let mut title_row = div().flex().items_center().gap(px(4.)).child(
-                    div()
-                        .text_size(px(13.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(colors.foreground)
-                        .child(self.title.clone()),
-                );
+                let mut title_row = div()
+                    .flex()
+                    .items_center()
+                    .gap(tokens.spacing.xs)
+                    .child(body_text(cx).child(self.title.clone()));
                 if let Some(help) = self.help.clone() {
                     title_row = title_row.child(
                         div()
@@ -272,38 +455,33 @@ impl SettingsRow {
                             .cursor_pointer()
                             .tooltip(move |window, cx| Tooltip::new(help.clone()).build(window, cx))
                             .child(
-                                Icon::new(IconName::Info)
-                                    .size(px(13.))
-                                    .text_color(colors.muted_foreground),
+                                Icon::new(FluxIcon::Info)
+                                    .size(extended.icon.sm)
+                                    .text_color(extended.colors.text_tertiary),
                             ),
                     );
                 }
                 title_row
             })
             .when_some(self.description.clone(), |this, description| {
-                this.child(
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(colors.muted_foreground)
-                        .child(description),
-                )
+                this.child(meta_text(cx).child(description))
             });
 
         if self.vertical {
             row = row.child(
                 v_flex()
                     .w_full()
-                    .gap(px(10.))
+                    .gap(tokens.spacing.sm)
                     .child(label)
                     .children(control.map(|control| div().w_full().child(control))),
             );
         } else {
-            row = row.child(
+            row = row.flex().items_center().min_h(px(ROW_MIN_HEIGHT)).child(
                 div()
                     .w_full()
                     .flex()
                     .items_center()
-                    .gap(px(16.))
+                    .gap(tokens.spacing.lg)
                     // 标题列保底 160px；控件列可收缩，避免宽控件把描述挤成一列。
                     .child(div().flex_1().min_w(px(160.)).child(label))
                     .children(control.map(|control| div().min_w_0().child(control))),
@@ -349,6 +527,7 @@ fn render_control(
             disabled,
             vertical,
             set.clone(),
+            cx,
         ),
     }
 }
@@ -362,6 +541,7 @@ pub(crate) fn dropdown_button(
     disabled: bool,
     full_width: bool,
     set: Setter<SharedString>,
+    cx: &App,
 ) -> AnyElement {
     let label = options
         .iter()
@@ -370,14 +550,17 @@ pub(crate) fn dropdown_button(
     let options = options.to_vec();
     Button::new(ElementId::from(id.into()))
         .outline()
-        // small 取 text_sm 字号（Medium 会用 text_base，字号偏大），
-        // 高度另行拉到与 Input / NumberInput 一致的 28px。
-        .small()
-        .h(CONTROL_HEIGHT)
+        .control(cx)
         .label(label)
         .dropdown_caret(true)
         .disabled(disabled)
-        .when(full_width, |this| this.w_full())
+        .map(|this| {
+            if full_width {
+                this.w_full()
+            } else {
+                this.min_w(px(DROPDOWN_MIN_WIDTH))
+            }
+        })
         .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
             let current = current.clone();
             let set = set.clone();
@@ -439,13 +622,13 @@ fn render_input(
     });
     let state = slot.read(cx).state.clone();
     Input::new(&state)
-        .with_size(Size::Medium)
+        .control(cx)
         .disabled(disabled)
         .map(|this| {
             if vertical {
                 this.w_full()
             } else {
-                this.w(px(240.))
+                this.w(px(INPUT_WIDTH))
             }
         })
         .into_any_element()
@@ -549,13 +732,13 @@ fn render_number(
     });
     let state = slot.read(cx).state.clone();
     NumberInput::new(&state)
-        .with_size(Size::Medium)
+        .control(cx)
         .disabled(disabled)
         .map(|this| {
             if vertical {
                 this.w_full()
             } else {
-                this.w(px(132.))
+                this.w(px(NUMBER_WIDTH))
             }
         })
         .into_any_element()
@@ -656,24 +839,18 @@ impl SettingsSection {
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        let colors = tokens.colors;
-        let hairline = colors.border.opacity(0.6);
-        let mut card = v_flex()
-            .w_full()
-            .bg(colors.surface)
-            .border_1()
-            .border_color(colors.border.opacity(0.75))
-            .rounded(px(10.))
-            .overflow_hidden();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().colors;
+        let mut card = card(cx).flex().flex_col().w_full().overflow_hidden();
         for (row_index, row) in self.rows.iter().enumerate() {
             if row_index > 0 {
                 card = card.child(
                     div()
                         .w_full()
                         .h(px(1.))
-                        .pl(px(16.))
-                        .child(div().size_full().bg(hairline)),
+                        .pl(tokens.spacing.lg)
+                        .child(div().size_full().bg(extended.hairline)),
                 );
             }
             card = card.child(row.render(
@@ -685,22 +862,19 @@ impl SettingsSection {
 
         let heading = (self.title.is_some() || self.subtitle.is_some()).then(|| {
             v_flex()
-                .pl(px(4.))
-                .pb(px(6.))
-                .gap(px(2.))
-                .children(self.title.clone().map(|title| {
-                    div()
-                        .text_size(px(12.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.muted_foreground)
-                        .child(title)
-                }))
-                .children(self.subtitle.clone().map(|subtitle| {
-                    div()
-                        .text_size(px(11.))
-                        .text_color(colors.muted_foreground.opacity(0.85))
-                        .child(subtitle)
-                }))
+                .px(tokens.spacing.xs)
+                .pb(tokens.spacing.sm)
+                .gap(tokens.spacing.xxs)
+                .children(
+                    self.title
+                        .clone()
+                        .map(|title| caption_heading(cx).child(title)),
+                )
+                .children(
+                    self.subtitle
+                        .clone()
+                        .map(|subtitle| meta_text(cx).child(subtitle)),
+                )
         });
 
         v_flex().w_full().children(heading).child(card)
@@ -782,7 +956,8 @@ impl SettingsTab {
             section.title = None;
         }
 
-        let gap = px(16.);
+        let spacing = active_theme(cx).tokens().spacing;
+        let gap = spacing.lg;
         // 列数由宿主测得的内容宽度决定：不能用 container_query（它把高度钉死成
         // 父级高度，内容无法撑开，滚动容器就永远没有可滚区）。
         if sections.len() < 2 || width < TWO_COLUMN_MIN_WIDTH {
@@ -819,7 +994,7 @@ impl SettingsTab {
             .w_full()
             .flex()
             .items_start()
-            .gap(px(24.))
+            .gap(spacing.xl)
             .child(left)
             .child(right)
             .into_any_element()
@@ -831,7 +1006,7 @@ pub(crate) struct SettingsPage {
     pub(crate) key: &'static str,
     pub(crate) title: SharedString,
     pub(crate) description: SharedString,
-    pub(crate) icon: IconName,
+    icon: Icon,
     tabs: Vec<SettingsTab>,
 }
 
@@ -840,13 +1015,13 @@ impl SettingsPage {
         key: &'static str,
         title: impl Into<SharedString>,
         description: impl Into<SharedString>,
-        icon: IconName,
+        icon: impl Into<Icon>,
     ) -> Self {
         Self {
             key,
             title: title.into(),
             description: description.into(),
-            icon,
+            icon: icon.into(),
             tabs: Vec::new(),
         }
     }
@@ -864,7 +1039,7 @@ impl SettingsPage {
     }
 
     pub(crate) fn nav_icon(&self) -> Icon {
-        Icon::new(self.icon.clone())
+        self.icon.clone()
     }
 
     /// 按查询过滤；无命中返回 `None`（分类在搜索结果中隐藏）。

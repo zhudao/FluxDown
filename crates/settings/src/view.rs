@@ -5,15 +5,17 @@
 
 use std::collections::HashMap;
 
+use fluxdown_ui_components::{
+    ControlExt as _, FluxIcon, segmented_tabs, sidebar_navigation_button,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyView, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyView, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
+    Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    IconName, Sizable as _, Size,
+    Icon,
     input::{Input, InputState},
     scroll::ScrollableElement as _,
     v_flex,
@@ -24,12 +26,12 @@ use crate::sections::{
     proxy,
 };
 use crate::store::{SettingsErrorKind, SettingsStore};
-use crate::ui::SettingsPage;
+use crate::ui::{
+    CONTENT_PADDING_LEFT, CONTENT_PADDING_RIGHT, SettingsPage, meta_text, page_heading,
+};
 
-const SIDEBAR_WIDTH: f32 = 190.;
-/// 内容区左右留白（Flutter 内容区 40 / 36）。
-const CONTENT_PADDING_LEFT: f32 = 28.;
-const CONTENT_PADDING_RIGHT: f32 = 24.;
+/// 分类导航列宽（与下载侧栏默认宽一致）。
+const SIDEBAR_WIDTH: f32 = 200.;
 
 /// app 注入的外部内容槽：账户页与扩展页由对应 capability 提供。
 #[derive(Default)]
@@ -112,7 +114,7 @@ impl SettingsView {
                 "account",
                 "settingsCatAccount",
                 "settingsCatAccountDesc",
-                IconName::User,
+                FluxIcon::User,
                 self.slots.account.clone(),
             ),
             appearance::page(&ctx, cx),
@@ -127,7 +129,7 @@ impl SettingsView {
                 "extensions",
                 "settingsCatExtensions",
                 "settingsCatExtensionsDesc",
-                IconName::Settings2,
+                FluxIcon::Package,
                 self.slots.extensions.clone(),
             ),
             doctor::page(&ctx, cx),
@@ -136,74 +138,37 @@ impl SettingsView {
     }
 
     fn render_nav_item(&self, page: &SettingsPage, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        let colors = tokens.colors;
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let icon_size = theme.extended().icon.lg;
         let selected = self.selected == page.title || self.selected == page.key;
         let key = SharedString::from(page.key);
-        let foreground = if selected {
-            colors.accent_foreground
+        let icon_color = if selected {
+            tokens.colors.foreground
         } else {
-            colors.foreground
+            tokens.colors.muted_foreground
         };
 
-        div()
-            .id(gpui::ElementId::from(SharedString::from(format!(
-                "settings-nav-{}",
-                page.key
-            ))))
-            .w_full()
-            .mb(px(2.))
-            .px(px(10.))
-            .py(px(7.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .cursor_pointer()
-            .rounded(px(6.))
-            .when(selected, |this| this.bg(colors.accent))
-            .when(!selected, |this| {
-                this.hover(|style| style.bg(colors.muted.opacity(0.7)))
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.selected != key {
-                    this.selected = key.clone();
-                    cx.notify();
-                }
-            }))
-            .child(page.nav_icon().size(px(15.)).text_color(if selected {
-                colors.accent_foreground
-            } else {
-                colors.muted_foreground
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(13.))
-                    .font_weight(if selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(foreground)
-                    .child(page.title.clone()),
-            )
-            .when(selected, |this| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .w(px(3.))
-                        .h(px(14.))
-                        .rounded(px(2.))
-                        .bg(colors.accent_foreground),
-                )
-            })
+        sidebar_navigation_button(
+            SharedString::from(format!("settings-nav-{}", page.key)),
+            page.title.clone(),
+            page.nav_icon().size(icon_size).text_color(icon_color),
+            div(),
+            selected,
+            cx,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if this.selected != key {
+                this.selected = key.clone();
+                cx.notify();
+            }
+        }))
     }
 
     fn render_sidebar(&self, pages: &[SettingsPage], cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        let colors = tokens.colors;
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let items: Vec<_> = pages
             .iter()
             .map(|page| self.render_nav_item(page, cx).into_any_element())
@@ -214,24 +179,24 @@ impl SettingsView {
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .min_h_0()
-            .px(px(8.))
-            .py(px(12.))
-            .bg(colors.background)
+            .px(tokens.spacing.sm)
+            .py(tokens.spacing.md)
+            .gap(tokens.spacing.md)
+            .bg(extended.colors.chrome)
             .border_r_1()
-            .border_color(colors.border.opacity(0.8))
+            .border_color(extended.colors.hairline)
             .child(
-                div().w_full().pb(px(10.)).child(
-                    Input::new(&self.search).with_size(Size::Medium).prefix(
-                        gpui_component::Icon::new(IconName::Search)
-                            .size(px(13.))
-                            .text_color(colors.muted_foreground),
-                    ),
+                Input::new(&self.search).control(cx).prefix(
+                    Icon::new(FluxIcon::Search)
+                        .size(extended.icon.md)
+                        .text_color(extended.colors.text_tertiary),
                 ),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .min_h_0()
+                    .gap(tokens.spacing.xxs)
                     .children(items)
                     .overflow_y_scrollbar(),
             )
@@ -249,52 +214,38 @@ impl SettingsView {
         }
     }
 
-    fn render_tab_button(
+    fn render_tabs(
         &self,
-        page_key: &'static str,
-        id: &'static str,
-        label: SharedString,
-        selected: bool,
+        page: &SettingsPage,
+        tab_id: &str,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        let colors = tokens.colors;
-        let key = SharedString::from(page_key);
-
-        div()
-            .id(gpui::ElementId::from(SharedString::from(format!(
-                "settings-tab-{page_key}-{id}"
-            ))))
-            .mr(px(18.))
-            .pt(px(4.))
-            .pb(px(8.))
-            .px(px(2.))
-            .cursor_pointer()
-            .border_b_2()
-            .border_color(if selected {
-                colors.accent_foreground
-            } else {
-                colors.accent_foreground.opacity(0.)
-            })
-            .text_size(px(13.))
-            .font_weight(if selected {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            })
-            .text_color(if selected {
-                colors.foreground
-            } else {
-                colors.muted_foreground
-            })
-            .when(!selected, |this| {
-                this.hover(|style| style.text_color(colors.foreground))
-            })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.tab_by_page.insert(key.clone(), id);
-                cx.notify();
-            }))
-            .child(label)
+    ) -> Option<gpui::Div> {
+        let tabs = page.visible_tabs();
+        if tabs.is_empty() {
+            return None;
+        }
+        let ids: Vec<&'static str> = tabs.iter().map(|tab| tab.id).collect();
+        let selected = ids.iter().position(|id| *id == tab_id).unwrap_or(0);
+        let labels: Vec<SharedString> = tabs.iter().map(|tab| tab.label.clone()).collect();
+        let key = SharedString::from(page.key);
+        let view = cx.entity().downgrade();
+        Some(segmented_tabs(
+            SharedString::from(format!("settings-tabs-{}", page.key)),
+            labels,
+            selected,
+            move |index, _, cx| {
+                let Some(id) = ids.get(index).copied() else {
+                    return;
+                };
+                let key = key.clone();
+                // 视图已释放（窗口关闭中）时忽略点击。
+                let _ = view.update(cx, |this, cx| {
+                    this.tab_by_page.insert(key, id);
+                    cx.notify();
+                });
+            },
+            cx,
+        ))
     }
 
     fn render_content(
@@ -304,60 +255,33 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        let colors = tokens.colors;
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
         let tab_id = self.active_tab_id(page);
-        let tabs: Vec<_> = page
-            .visible_tabs()
-            .iter()
-            .map(|tab| {
-                self.render_tab_button(page.key, tab.id, tab.label.clone(), tab.id == tab_id, cx)
-                    .into_any_element()
-            })
-            .collect();
-        let has_tabs = !tabs.is_empty();
+        let tabs = self.render_tabs(page, tab_id, cx);
 
         v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(colors.surface)
+            .bg(tokens.colors.surface)
             .child(
                 v_flex()
                     .w_full()
                     .flex_none()
                     .px(px(CONTENT_PADDING_LEFT))
-                    .pt(px(16.))
+                    .pt(tokens.spacing.lg)
+                    .pb(tokens.spacing.md)
+                    .gap(tokens.spacing.md)
                     .border_b_1()
-                    .border_color(colors.border.opacity(0.5))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(10.))
-                            .pb(if has_tabs { px(8.) } else { px(12.) })
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(16.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(colors.foreground)
-                                    .child(page.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .text_color(colors.muted_foreground)
-                                    .child(page.description.clone()),
-                            ),
-                    )
-                    .when(has_tabs, |this| {
-                        this.child(div().w_full().flex().items_center().children(tabs))
-                    }),
+                    .border_color(extended.colors.hairline)
+                    .child(page_heading(
+                        page.title.clone(),
+                        page.description.clone(),
+                        cx,
+                    ))
+                    .children(tabs),
             )
             .child(
                 v_flex()
@@ -370,8 +294,8 @@ impl SettingsView {
                     .w_full()
                     .pl(px(CONTENT_PADDING_LEFT))
                     .pr(px(CONTENT_PADDING_RIGHT))
-                    .pt(px(20.))
-                    .pb(px(24.))
+                    .pt(tokens.spacing.lg + tokens.spacing.xs)
+                    .pb(tokens.spacing.xl)
                     .overflow_y_scrollbar()
                     .child(page.render_tab(tab_id, content_width, window, cx)),
             )
@@ -410,16 +334,11 @@ impl Render for SettingsView {
             .bg(tokens.colors.surface)
             .when_some(feedback, |this, (text, is_error)| {
                 this.child(
-                    div()
+                    meta_text(cx)
                         .w_full()
                         .px(px(CONTENT_PADDING_LEFT))
                         .py(tokens.spacing.sm)
-                        .text_size(px(12.))
-                        .text_color(if is_error {
-                            tokens.colors.destructive
-                        } else {
-                            tokens.colors.muted_foreground
-                        })
+                        .when(is_error, |this| this.text_color(tokens.colors.destructive))
                         .child(text),
                 )
             })

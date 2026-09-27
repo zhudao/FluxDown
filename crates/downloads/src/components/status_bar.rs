@@ -1,9 +1,9 @@
-//! P1.6 状态栏：速度 / 任务统计 / 视图描述 / 磁盘剩余 / 限速 / 完成后关机。
+//! 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 下行 / 上行限速、完成后关机、剩余空间。
 //!
 //! 限速走 `DownloadsCommand::PatchConfig`（键 `speed_limit_bytes` /
 //! `upload_limit_bytes`，单位字节/秒，见 `native/protocol/src/daemon_config.rs`）；
-//! 完成后关机走宿主注入的 `ShutdownPort`（状态机与真正执行由 app 侧
-//! `power::ShutdownScheduler` 拥有，本文件只发请求 + 每秒刷新倒计时显示）。
+//! 完成后关机走宿主注入的 `ShutdownPort`（状态机与真正执行归 agent，本文件只发请求 +
+//! 刷新倒计时显示）。
 
 use std::{collections::BTreeMap, rc::Rc, time::Duration};
 
@@ -11,28 +11,29 @@ use std::{collections::BTreeMap, rc::Rc, time::Duration};
 type NumberConfirm = Rc<dyn Fn(i64, &mut App)>;
 
 use fluxdown_protocol::ApplicationErrorCode;
+use fluxdown_ui_components::{
+    ControlExt as _, DialogIntent, FluxIcon, dialog_footer, dialog_title, field_hint, form,
+    form_field, tabular_numbers, toolbar_action_button,
+};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Anchor, App, AppContext as _, ClickEvent, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, App, AppContext as _, ClickEvent, Context, Div, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _,
+    Icon, Sizable as _, Size, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
-    status_bar::StatusBar,
-    v_flex,
+    tooltip::Tooltip,
 };
 
 use crate::{
+    components::task_table::ToolbarCommand,
     controller::DownloadsCommand,
-    model::{
-        TaskState, format_bytes,
-        shutdown::ShutdownRequest,
-        view_prefs::{ViewDensity, ViewGroupBy, ViewSortKey},
-    },
+    model::{format_bytes, shutdown::ShutdownRequest},
     pages::downloads::DownloadView,
 };
 
@@ -40,28 +41,48 @@ use crate::{
 const SPEED_PRESETS_MB: [i64; 4] = [1, 5, 10, 50];
 /// 完成后关机延迟预设（分钟）。
 const SHUTDOWN_PRESETS_MIN: [i64; 4] = [1, 5, 10, 30];
+/// 状态栏高度。
+const STATUS_BAR_HEIGHT: Pixels = px(28.);
+/// 状态栏内按钮高度（在 28px 栏内上下各留 3px）；chrome 区小按钮统一此高度。
+const STATUS_CONTROL_HEIGHT: Pixels = px(22.);
 
-fn group_by_key(group_by: ViewGroupBy) -> &'static str {
-    match group_by {
-        ViewGroupBy::None => "viewGroupNone",
-        ViewGroupBy::Status => "viewGroupStatus",
-        ViewGroupBy::Date => "viewGroupDate",
-        ViewGroupBy::Type => "viewGroupType",
-        ViewGroupBy::Queue => "viewGroupQueue",
-        ViewGroupBy::Site => "viewGroupSite",
-        ViewGroupBy::Group => "viewGroupGroup",
-    }
+/// 状态栏带文字的小按钮外壳：ghost、22 高、横向 `spacing.xs`。
+///
+/// gpui-component 按钮会按 `Size` 在内部 label 上覆盖字号与图标尺寸，所以内容一律经
+/// [`status_button_content`] 作为子元素传入，确保 caption 字号 + `icon.sm` 生效。
+fn status_button(id: &'static str, cx: &App) -> Button {
+    Button::new(id)
+        .ghost()
+        .with_size(Size::XSmall)
+        .h(STATUS_CONTROL_HEIGHT)
+        .px(active_theme(cx).tokens().spacing.xs)
 }
 
-fn sort_key_key(sort_key: ViewSortKey) -> &'static str {
-    match sort_key {
-        ViewSortKey::Smart => "viewSortSmart",
-        ViewSortKey::Created => "viewSortCreated",
-        ViewSortKey::Name => "viewSortName",
-        ViewSortKey::Size => "viewSortSize",
-        ViewSortKey::Progress => "viewSortProgress",
-        ViewSortKey::Speed => "viewSortSpeed",
-    }
+/// 状态栏按钮内容：可选图标 + 可选文字，caption 字号、等宽数字；`color` 为空时继承按钮前景色。
+fn status_button_content(
+    icon: Option<FluxIcon>,
+    text: Option<SharedString>,
+    color: Option<Hsla>,
+    cx: &App,
+) -> Div {
+    let theme = active_theme(cx);
+    let extended = theme.extended();
+    let icon_size = extended.icon.sm;
+    h_flex()
+        .items_center()
+        .gap(theme.tokens().spacing.xxs)
+        .text_size(extended.caption.size)
+        .line_height(extended.caption.line_height)
+        .font_features(tabular_numbers())
+        .when_some(color, |this, color| this.text_color(color))
+        .when_some(icon, |this, icon| {
+            this.child(
+                Icon::new(icon)
+                    .size(icon_size)
+                    .when_some(color, |icon, color| icon.text_color(color)),
+            )
+        })
+        .when_some(text, |this, text| this.child(text))
 }
 
 fn format_countdown(remaining: Duration) -> String {
@@ -121,62 +142,64 @@ fn apply_speed_limit(view: WeakEntity<DownloadView>, key: &'static str, value: i
     let _ = view.update(cx, |this, cx| this.execute_config_patch(key, value, cx));
 }
 
-/// 单个数字输入确认弹窗：自定义限速（KB/s）与自定义关机延迟（分钟）复用。
-struct NumberPromptDialog {
-    input: Entity<InputState>,
+/// 数字输入弹窗文案：自定义限速（KB/s）与自定义关机延迟（分钟）复用。
+#[derive(Clone)]
+struct NumberPrompt {
+    title: SharedString,
+    label: SharedString,
+    /// 输入框尾部单位（`KB/s` / `分钟`）。
+    unit: SharedString,
+    hint: Option<SharedString>,
+    cancel_label: SharedString,
     confirm_label: SharedString,
-    on_confirm: NumberConfirm,
 }
 
-impl Render for NumberPromptDialog {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .gap(tokens.spacing.sm)
-            .child(Input::new(&self.input).w_full())
-            .child(
-                h_flex().w_full().justify_end().child(
-                    Button::new("number-prompt-confirm")
-                        .primary()
-                        .label(self.confirm_label.clone())
-                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                            let value = this
-                                .input
-                                .read(cx)
-                                .value()
-                                .trim()
-                                .parse::<i64>()
-                                .unwrap_or(0)
-                                .max(0);
-                            (this.on_confirm)(value, cx);
-                            window.close_dialog(cx);
-                        })),
-                ),
-            )
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
+/// 单个数字输入确认弹窗：标题 → 表单字段（标签 + 带单位输入框 + 可选说明）→ 底栏。
 fn open_number_prompt(
     window: &mut Window,
     cx: &mut App,
-    title: SharedString,
-    placeholder: SharedString,
-    confirm_label: SharedString,
+    prompt: NumberPrompt,
     on_confirm: NumberConfirm,
 ) {
-    let view = cx.new(|cx| NumberPromptDialog {
-        input: cx.new(|cx| InputState::new(window, cx).placeholder(placeholder)),
-        confirm_label,
-        on_confirm,
-    });
-    let input = view.read(cx).input.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
-        let view = view.clone();
+    let input = cx.new(|cx| InputState::new(window, cx));
+    let dialog_input = input.clone();
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let content_input = dialog_input.clone();
+        let ok_input = dialog_input.clone();
+        let on_confirm = on_confirm.clone();
+        let prompt = prompt.clone();
         dialog
-            .title(title.clone())
-            .w(px(320.))
-            .content(move |content, _, _| content.child(view.clone()))
+            .title(dialog_title(prompt.title.clone(), cx))
+            .w(px(520.))
+            .content({
+                let prompt = prompt.clone();
+                move |content, _, cx| {
+                    let unit = field_hint(prompt.unit.clone(), cx).flex_none();
+                    content.child(form(cx).child(form_field(
+                        prompt.label.clone(),
+                        Input::new(&content_input).control(cx).suffix(unit).w_full(),
+                        prompt.hint.clone(),
+                        cx,
+                    )))
+                }
+            })
+            .footer(dialog_footer(
+                Some(prompt.cancel_label.clone()),
+                prompt.confirm_label.clone(),
+                DialogIntent::Confirm,
+                cx,
+            ))
+            .on_ok(move |_, _, cx| {
+                let value = ok_input
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .parse::<i64>()
+                    .unwrap_or(0)
+                    .max(0);
+                on_confirm(value, cx);
+                true
+            })
     });
     input.update(cx, |input, cx| input.focus(window, cx));
 }
@@ -214,27 +237,12 @@ impl DownloadView {
         .detach();
     }
 
-    fn cycle_status_bar_density(&mut self, cx: &mut Context<Self>) {
-        self.table_state.update(cx, |table, cx| {
-            let delegate = table.delegate_mut();
-            let next = match delegate.prefs().density {
-                ViewDensity::Comfortable => ViewDensity::Compact,
-                ViewDensity::Compact => ViewDensity::Comfortable,
-            };
-            delegate.prefs_mut().density = next;
-            delegate.refresh_view();
-            table.refresh(cx);
-        });
-        self.schedule_persist_prefs(cx);
-        cx.notify();
-    }
-
-    /// 下载 / 上传限速控件：图标 + 当前值的小按钮，点开自动收起的菜单（预设 + 自定义）。
+    /// 下载 / 上传限速控件：图标 + 当前值的幽灵按钮，点开自动收起的菜单（预设 + 自定义）。
     /// `config_key` 为 `speed_limit_bytes` 或 `upload_limit_bytes`（字节/秒）。
     fn render_speed_limit_control(
         &self,
         element_id: &'static str,
-        icon: IconName,
+        icon: FluxIcon,
         title_key: &'static str,
         config_key: &'static str,
         cx: &mut Context<Self>,
@@ -253,16 +261,28 @@ impl DownloadView {
         };
         let title = SharedString::from(translator.text(title_key).to_owned());
         let custom_label = SharedString::from(translator.text("speedLimitCustom").to_owned());
-        let unit_hint = SharedString::from(translator.text("statusSpeedLimitKbs").to_owned());
-        let confirm_label = SharedString::from(translator.text("confirm").to_owned());
+        let desc_key = if config_key == "upload_limit_bytes" {
+            "uploadLimitDesc"
+        } else {
+            "speedLimitDesc"
+        };
+        let prompt = NumberPrompt {
+            title: title.clone(),
+            label: custom_label.clone(),
+            unit: SharedString::from(translator.text("statusSpeedLimitKbs").to_owned()),
+            hint: Some(SharedString::from(translator.text(desc_key).to_owned())),
+            cancel_label: SharedString::from(translator.text("cancel").to_owned()),
+            confirm_label: SharedString::from(translator.text("confirm").to_owned()),
+        };
         let view = cx.weak_entity();
 
-        Button::new(element_id)
-            .ghost()
-            .xsmall()
-            .compact()
-            .icon(icon)
-            .label(trigger_label)
+        status_button(element_id, cx)
+            .child(status_button_content(
+                Some(icon),
+                Some(trigger_label),
+                None,
+                cx,
+            ))
             .tooltip(title.clone())
             .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, _, _| {
                 let mut menu = menu.item(
@@ -293,17 +313,13 @@ impl DownloadView {
                         .checked(!preset_hit)
                         .on_click({
                             let view = view.clone();
-                            let title = title.clone();
-                            let unit_hint = unit_hint.clone();
-                            let confirm_label = confirm_label.clone();
+                            let prompt = prompt.clone();
                             move |_, window, cx| {
                                 let view = view.clone();
                                 open_number_prompt(
                                     window,
                                     cx,
-                                    title.clone(),
-                                    unit_hint.clone(),
-                                    confirm_label.clone(),
+                                    prompt.clone(),
                                     Rc::new(move |kb, cx| {
                                         apply_speed_limit(
                                             view.clone(),
@@ -319,7 +335,8 @@ impl DownloadView {
             })
     }
 
-    /// 完成后关机控件：未启用时是弹出预设菜单的按钮；已启用 / 倒计时中显示状态 + 取消。
+    /// 完成后关机控件：未启用时只显示电源图标（悬浮提示 + 预设菜单）；
+    /// 已启用 / 倒计时中显示 warning 色倒计时文字，点击取消。
     fn render_shutdown_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let translator = self.translator.read(cx);
         let Some(shutdown) = self.host.shutdown.clone() else {
@@ -334,7 +351,7 @@ impl DownloadView {
         let can_arm = self.controller.runtime_stats().active_tasks > 0;
         let view = cx.weak_entity();
         let cancel_label = SharedString::from(translator.text("shutdownCancelButton").to_owned());
-        let warning = cx.theme().warning;
+        let warning = active_theme(cx).extended().colors.warning;
 
         let armed_text = if let Some(remaining) = status.countdown_remaining {
             Some(translator.text_with(
@@ -354,25 +371,31 @@ impl DownloadView {
             })
         };
         if let Some(text) = armed_text {
-            return Button::new("shutdown-cancel")
-                .ghost()
-                .xsmall()
-                .compact()
-                .icon(Icon::new(IconName::Moon).text_color(warning))
-                .label(SharedString::from(text))
+            return status_button("shutdown-cancel", cx)
                 .tooltip(cancel_label)
+                .child(status_button_content(
+                    Some(FluxIcon::Power),
+                    Some(SharedString::from(text)),
+                    Some(warning),
+                    cx,
+                ))
                 .on_click(move |_, _, cx| shutdown(ShutdownRequest::Disarm, cx))
                 .into_any_element();
         }
 
-        let trigger_label = SharedString::from(translator.text("shutdownTriggerLabel").to_owned());
         let title = SharedString::from(translator.text("shutdownTitle").to_owned());
         let need_active_hint =
             SharedString::from(translator.text("shutdownNeedActiveTask").to_owned());
         let immediate_label = SharedString::from(translator.text("shutdownImmediate").to_owned());
         let custom_label = SharedString::from(translator.text("speedLimitCustom").to_owned());
-        let minutes_unit = SharedString::from(translator.text("shutdownMinutesUnit").to_owned());
-        let confirm_label = SharedString::from(translator.text("confirm").to_owned());
+        let prompt = NumberPrompt {
+            title: title.clone(),
+            label: SharedString::from(translator.text("shutdownDelayLabel").to_owned()),
+            unit: SharedString::from(translator.text("shutdownMinutesUnit").to_owned()),
+            hint: None,
+            cancel_label: SharedString::from(translator.text("cancel").to_owned()),
+            confirm_label: SharedString::from(translator.text("confirm").to_owned()),
+        };
         let minute_presets: Vec<(i64, SharedString)> = SHUTDOWN_PRESETS_MIN
             .iter()
             .map(|&minutes| {
@@ -382,12 +405,9 @@ impl DownloadView {
             })
             .collect();
 
-        Button::new("shutdown-trigger")
-            .ghost()
-            .xsmall()
-            .compact()
-            .icon(IconName::Moon)
-            .label(trigger_label)
+        status_button("shutdown-trigger", cx)
+            .min_w(STATUS_CONTROL_HEIGHT)
+            .child(status_button_content(Some(FluxIcon::Power), None, None, cx))
             .tooltip(if can_arm {
                 title.clone()
             } else {
@@ -422,18 +442,14 @@ impl DownloadView {
                         .on_click({
                             let view = view.clone();
                             let shutdown = shutdown.clone();
-                            let title = title.clone();
-                            let minutes_unit = minutes_unit.clone();
-                            let confirm_label = confirm_label.clone();
+                            let prompt = prompt.clone();
                             move |_, window, cx| {
                                 let view = view.clone();
                                 let shutdown = shutdown.clone();
                                 open_number_prompt(
                                     window,
                                     cx,
-                                    title.clone(),
-                                    minutes_unit.clone(),
-                                    confirm_label.clone(),
+                                    prompt.clone(),
                                     Rc::new(move |minutes, cx| {
                                         shutdown(
                                             ShutdownRequest::ArmAfter(minutes_to_duration(
@@ -451,135 +467,133 @@ impl DownloadView {
             .into_any_element()
     }
 
-    /// 视图开关（分组 / 排序 / 密度）：图标 + 当前值的小按钮，点击循环。
-    fn render_view_toggle(
+    /// 状态栏里的小图标按钮（全部暂停 / 全部开始）。
+    fn render_status_action(
         &self,
         id: &'static str,
-        icon: IconName,
         label: SharedString,
-        tooltip: SharedString,
-        on_click: fn(&mut Self, &mut Context<Self>),
+        icon: FluxIcon,
+        command: ToolbarCommand,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        Button::new(id)
-            .ghost()
-            .xsmall()
-            .compact()
-            .icon(icon)
-            .label(label)
-            .tooltip(tooltip)
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| on_click(this, cx)))
+        let icon_size = active_theme(cx).extended().icon.sm;
+        let tooltip_label = label.clone();
+        div()
+            .id(SharedString::from(format!("{id}-tooltip")))
+            .flex_none()
+            .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
+            .child(
+                toolbar_action_button(id, label, Icon::new(icon).size(icon_size), false, false, cx)
+                    .size(STATUS_CONTROL_HEIGHT)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.execute_toolbar(command, cx);
+                    })),
+            )
     }
 
-    /// 状态栏：左=速度/任务统计，中=分组/排序/密度开关，右=关机/磁盘/限速。
-    pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let translator = self.translator.read(cx);
+    /// 状态栏：左 = 全局速度 + 全部暂停 / 全部开始；右 = 限速、完成后关机、剩余空间。
+    pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let stats = self.controller.runtime_stats();
         let download_speed = format!("{}/s", format_bytes(stats.total_download_bps.max(0) as u64));
         let upload_speed = format!("{}/s", format_bytes(stats.total_upload_bps.max(0) as u64));
         let disk_free = stats.disk_free_bytes.map(|bytes| {
-            translator.text_with("diskSpaceFreeLabel", &[("size", &format_bytes(bytes))])
+            self.translator
+                .read(cx)
+                .text_with("diskSpaceFreeLabel", &[("size", &format_bytes(bytes))])
         });
-        let active_tasks = stats.active_tasks;
 
-        let delegate = self.table_state.read(cx).delegate();
-        let paused = delegate.count_where(|task| task.state == TaskState::Paused);
-        let total = delegate.count_where(|_| true);
-        let summary = translator.text_with(
-            "statusSummary",
-            &[
-                ("active", &active_tasks.to_string()),
-                ("paused", &paused.to_string()),
-                ("total", &total.to_string()),
-            ],
+        let theme = active_theme(cx);
+        let spacing = theme.tokens().spacing;
+        let muted = theme.tokens().colors.muted_foreground;
+        let extended = theme.extended();
+        let chrome = extended.colors.chrome;
+        let hairline = extended.colors.hairline;
+        let caption_size = extended.caption.size;
+        let caption_line_height = extended.caption.line_height;
+        let icon_size = extended.icon.sm;
+
+        let pause_all = self.render_status_action(
+            "status-pause-all",
+            self.strings.pause_all.clone(),
+            FluxIcon::Pause,
+            ToolbarCommand::PauseAll,
+            cx,
         );
-        let prefs = delegate.prefs().clone();
-        let group_label =
-            SharedString::from(translator.text(group_by_key(prefs.group_by)).to_owned());
-        let group_tip = SharedString::from(translator.text("viewSectionGroupBy").to_owned());
-        let sort_label =
-            SharedString::from(translator.text(sort_key_key(prefs.sort_key)).to_owned());
-        let sort_tip = SharedString::from(translator.text("viewSectionSort").to_owned());
-        let density_key = match prefs.density {
-            ViewDensity::Comfortable => "viewDensityComfortable",
-            ViewDensity::Compact => "viewDensityCompact",
-        };
-        let density_label = SharedString::from(translator.text(density_key).to_owned());
-        let density_tip = SharedString::from(translator.text("viewSectionDensity").to_owned());
-
-        let tokens = active_theme(cx).tokens().clone();
-        let muted = tokens.colors.muted_foreground;
+        let resume_all = self.render_status_action(
+            "status-resume-all",
+            self.strings.resume_all.clone(),
+            FluxIcon::Play,
+            ToolbarCommand::ResumeAll,
+            cx,
+        );
         let download_limit = self.render_speed_limit_control(
             "status-download-limit",
-            IconName::ArrowDown,
+            FluxIcon::ArrowDown,
             "speedLimitTitle",
             "speed_limit_bytes",
             cx,
         );
         let upload_limit = self.render_speed_limit_control(
             "status-upload-limit",
-            IconName::ArrowUp,
+            FluxIcon::ArrowUp,
             "uploadLimit",
             "upload_limit_bytes",
             cx,
         );
         let shutdown_control = self.render_shutdown_control(cx);
-        let group_toggle = self.render_view_toggle(
-            "status-view-group",
-            IconName::LayoutDashboard,
-            group_label,
-            group_tip,
-            |this, cx| this.mutate_prefs(|prefs| prefs.cycle_group_by(), cx),
-            cx,
-        );
-        let sort_toggle = self.render_view_toggle(
-            "status-view-sort",
-            match prefs.sort_dir {
-                crate::model::view_prefs::SortDir::Asc => IconName::SortAscending,
-                crate::model::view_prefs::SortDir::Desc => IconName::SortDescending,
-            },
-            sort_label,
-            sort_tip,
-            |this, cx| this.mutate_prefs(|prefs| prefs.cycle_sort(), cx),
-            cx,
-        );
-        let density_toggle = self.render_view_toggle(
-            "status-view-density",
-            IconName::ALargeSmall,
-            density_label,
-            density_tip,
-            |this, cx| this.cycle_status_bar_density(cx),
-            cx,
-        );
-        let speed_cell = |icon: IconName, text: String| {
+        let icon_cell = move |icon: FluxIcon, text: String| {
             h_flex()
-                .gap_1()
+                .flex_none()
                 .items_center()
-                .px_2()
-                .child(Icon::new(icon).size(px(12.)).text_color(muted))
+                .gap(spacing.xxs)
+                .child(Icon::new(icon).size(icon_size).text_color(muted))
                 .child(text)
         };
 
-        StatusBar::new()
+        h_flex()
+            .w_full()
+            .h(STATUS_BAR_HEIGHT)
+            .flex_none()
+            .items_center()
+            .justify_between()
+            .gap(spacing.md)
+            .px(spacing.sm)
+            .bg(chrome)
             .border_t_1()
-            .border_color(tokens.colors.border)
-            .text_xs()
-            .left(speed_cell(IconName::ArrowDown, download_speed))
-            .left(speed_cell(IconName::ArrowUp, upload_speed))
-            .left(div().px_2().text_color(muted).child(summary))
-            .right(div().px_1().child(download_limit))
-            .right(div().px_1().child(upload_limit))
-            .when_some(disk_free, |this, disk_free| {
-                this.right(div().px_2().text_color(muted).child(disk_free))
-            })
-            .right(div().px_1().child(shutdown_control))
+            .border_color(hairline)
+            .text_size(caption_size)
+            .line_height(caption_line_height)
+            .font_features(tabular_numbers())
+            .text_color(muted)
             .child(
                 h_flex()
-                    .gap_1()
+                    .min_w_0()
                     .items_center()
-                    .child(group_toggle)
-                    .child(sort_toggle)
-                    .child(density_toggle),
+                    .gap(spacing.md)
+                    .child(icon_cell(FluxIcon::ArrowDown, download_speed))
+                    .child(icon_cell(FluxIcon::ArrowUp, upload_speed))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(spacing.xxs)
+                            .child(pause_all)
+                            .child(resume_all),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap(spacing.xs)
+                    .child(download_limit)
+                    .child(upload_limit)
+                    .child(shutdown_control)
+                    .children(
+                        // 与左侧按钮的内边距对齐，使限速 / 关机 / 磁盘三者视觉间距一致。
+                        disk_free.map(|disk_free| {
+                            icon_cell(FluxIcon::HardDrive, disk_free).px(spacing.xs)
+                        }),
+                    ),
             )
     }
 }

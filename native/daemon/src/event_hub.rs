@@ -70,8 +70,25 @@ impl DaemonEventHub {
     /// 先更新物化投影，再递增 sequence 并广播对应帧。
     pub fn publish(&self, event: DaemonEvent) -> EventFrame {
         let mut state = lock_or_recover(&self.state);
+        self.publish_locked(&mut state, event)
+    }
+
+    /// 发布事件；仅当它改变了运行时统计时，才在同一临界区内紧随发布
+    /// `RuntimeStatsChanged`。进度帧每个活动任务约每 0.5s 一次，这条路径
+    /// 不能为读取统计去克隆整份快照，也不该广播与上一帧相同的统计。
+    pub fn publish_with_runtime_stats(&self, event: DaemonEvent) {
+        let mut state = lock_or_recover(&self.state);
+        let before = state.snapshot.runtime_stats.clone();
+        self.publish_locked(&mut state, event);
+        if state.snapshot.runtime_stats != before {
+            let stats = state.snapshot.runtime_stats.clone();
+            self.publish_locked(&mut state, DaemonEvent::RuntimeStatsChanged(stats));
+        }
+    }
+
+    fn publish_locked(&self, state: &mut EventState, event: DaemonEvent) -> EventFrame {
         apply_daemon_event(&mut state.snapshot, &event);
-        apply_runtime_stats(&mut state, &event);
+        apply_runtime_stats(state, &event);
         state.sequence = state.sequence.saturating_add(1);
         let frame = EventFrame {
             epoch: state.epoch.clone(),
@@ -425,10 +442,10 @@ impl fluxdown_engine::events::EventSink for DaemonEngineEventSink {
             }
             message => DaemonEvent::Engine(message),
         };
-        self.0.publish(event);
-        if updates_runtime && let SnapshotBody::Daemon(snapshot) = self.0.snapshot().body {
-            self.0
-                .publish(DaemonEvent::RuntimeStatsChanged(snapshot.runtime_stats));
+        if updates_runtime {
+            self.0.publish_with_runtime_stats(event);
+        } else {
+            self.0.publish(event);
         }
     }
 }
@@ -445,7 +462,9 @@ mod tests {
         events::{EngineEvent, EventSink},
         model::QueueInfo,
     };
-    use fluxdown_protocol::{DaemonEvent, DaemonSnapshot, SnapshotBody, TaskDto, WsServerMsg};
+    use fluxdown_protocol::{
+        DaemonEvent, DaemonSnapshot, ServiceEvent, SnapshotBody, TaskDto, WsServerMsg,
+    };
 
     use super::{DaemonEngineEventSink, DaemonEventHub};
 
@@ -672,6 +691,61 @@ mod tests {
         assert_eq!(snapshot.runtime_stats.active_tasks, 0);
         assert_eq!(snapshot.runtime_stats.total_download_bps, 0);
         assert_eq!(snapshot.runtime_stats.total_upload_bps, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_stats_frame_follows_progress_only_when_stats_change() -> Result<(), serde_json::Error>
+    {
+        let task: TaskDto = serde_json::from_value(serde_json::json!({
+            "taskId":"task-live", "url":"https://example.com/live", "fileName":"live",
+            "saveDir":"/tmp", "status":1, "downloadedBytes":10, "totalBytes":100,
+            "errorMessage":"", "createdAt":"1", "proxyUrl":"", "queueId":"main", "checksum":""
+        }))?;
+        let hub = DaemonEventHub::new(
+            DaemonSnapshot {
+                tasks: vec![task],
+                ..DaemonSnapshot::default()
+            },
+            16,
+        );
+        let (mut subscriber, _) = hub.subscribe_and_snapshot();
+        let progress = |downloaded_bytes, speed| {
+            DaemonEvent::Engine(WsServerMsg::TaskProgress {
+                task_id: "task-live".to_owned(),
+                status: 1,
+                downloaded_bytes,
+                total_bytes: 100,
+                speed,
+                upload_speed: 0,
+                file_name: "live".to_owned(),
+                save_dir: "/tmp".to_owned(),
+                url: "https://example.com/live".to_owned(),
+                error_message: String::new(),
+                uploaded_bytes: 0,
+                seeding_status: 0,
+                seeding_message: String::new(),
+                seeding_time_secs: 0,
+            })
+        };
+        let mut drain = || {
+            std::iter::from_fn(|| subscriber.try_recv().ok())
+                .map(|frame| match frame.event {
+                    ServiceEvent::Daemon(DaemonEvent::RuntimeStatsChanged(stats)) => {
+                        Some(stats.total_download_bps)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        hub.publish_with_runtime_stats(progress(20, 100));
+        assert_eq!(drain(), [None, Some(100)]);
+        // 字节推进但聚合统计不变：只有进度帧。
+        hub.publish_with_runtime_stats(progress(30, 100));
+        assert_eq!(drain(), [None]);
+        hub.publish_with_runtime_stats(progress(40, 250));
+        assert_eq!(drain(), [None, Some(250)]);
         Ok(())
     }
     #[test]

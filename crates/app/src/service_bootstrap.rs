@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::net::TcpStream;
@@ -17,6 +18,10 @@ struct BootstrapState {
 
 pub struct ServiceBootstrap {
     state: Arc<Mutex<BootstrapState>>,
+    /// 完全退出或 agent 已声明退出后置位：此后连接拒绝不再拉起 agent。
+    stopped: AtomicBool,
+    /// 本进程曾拉起过 agent（即本次启动是 FluxDown 服务的冷启动）。
+    spawned: AtomicBool,
 }
 
 impl ServiceBootstrap {
@@ -24,7 +29,20 @@ impl ServiceBootstrap {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(BootstrapState::default())),
+            stopped: AtomicBool::new(false),
+            spawned: AtomicBool::new(false),
         }
+    }
+
+    /// 永久停止拉起 agent（不可恢复）。
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+
+    /// 本进程是否拉起过 agent：界面启动时据此区分「冷启动服务」与「打开已驻留的应用」。
+    #[must_use]
+    pub fn spawned_agent(&self) -> bool {
+        self.spawned.load(Ordering::Acquire)
     }
 
     /// 仅由 connection-refused/no-listener 路径调用。
@@ -34,7 +52,7 @@ impl ServiceBootstrap {
     pub async fn ensure_running(&self, rpc_url: &str) -> Result<(), BootstrapError> {
         let mut state = self.state.lock().await;
         state.reapers.retain(|task| !task.is_finished());
-        if state.running {
+        if state.running || self.stopped.load(Ordering::Acquire) {
             return Ok(());
         }
         if agent_is_listening(rpc_url).await? {
@@ -46,13 +64,14 @@ impl ServiceBootstrap {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        set_no_console_window(&mut command);
+        detach_background_process(&mut command);
         let mut child = tokio::process::Command::from(command)
             .spawn()
             .map_err(|error| BootstrapError::Spawn(format!("{error:#}")))?;
         state.generation = state.generation.saturating_add(1);
         let generation = state.generation;
         state.running = true;
+        self.spawned.store(true, Ordering::Release);
         let bootstrap_state = self.state.clone();
         state.reapers.push(tokio::spawn(async move {
             let _ = child.wait().await;
@@ -81,6 +100,17 @@ async fn agent_is_listening(rpc_url: &str) -> Result<bool, BootstrapError> {
         Err(_) => Err(BootstrapError::Probe(
             "agent listener probe timed out".to_owned(),
         )),
+    }
+}
+
+/// 等被替换的旧 agent 关闭监听（关停 daemon 后退出）；超时后交回重连循环自愈。
+pub async fn wait_until_stopped(rpc_url: &str, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if matches!(agent_is_listening(rpc_url).await, Ok(false)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -119,14 +149,22 @@ fn agent_executable() -> Result<PathBuf, std::io::Error> {
     }))
 }
 
+/// 后台服务与界面解耦：Windows 不弹控制台窗；Unix 进入独立进程组，终端里对桌面程序的
+/// Ctrl-C 不连带终止常驻 agent。
 #[cfg(windows)]
-fn set_no_console_window(command: &mut std::process::Command) {
+fn detach_background_process(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(0x0800_0000);
 }
 
-#[cfg(not(windows))]
-fn set_no_console_window(_command: &mut std::process::Command) {}
+#[cfg(unix)]
+fn detach_background_process(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+#[cfg(not(any(windows, unix)))]
+fn detach_background_process(_command: &mut std::process::Command) {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {

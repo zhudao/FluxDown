@@ -4,23 +4,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fluxdown_protocol::{PluginAuthResponse, RpcErrorData};
+use fluxdown_ui_components::{ControlExt as _, FluxIcon, field_error, form, form_field};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::CONTROL_HEIGHT;
+use fluxdown_ui_theme::active_theme;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, ClipboardItem, Context, Entity, Image, ImageFormat, IntoElement,
-    ParentElement, Render, Styled, Subscription, Window, div, img, px,
+    ParentElement, Render, SharedString, Styled, Subscription, Window, div, img, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IconName, Sizable as _, StyledExt as _, WindowExt as _,
+    Disableable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    dialog::DialogFooter,
+    h_flex,
     input::{Input, InputState},
     v_flex,
 };
 
 use crate::controller::plugin_auth_call;
-use crate::{ExtensionsPort, error_text};
+use crate::{ExtensionsPort, error_text, pages::Frame, ui};
 
 pub struct PluginAuthDialog {
     translator: Entity<Translator>,
@@ -341,9 +342,18 @@ impl PluginAuthDialog {
 
 impl Render for PluginAuthDialog {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = active_theme(cx);
         let translator = self.translator.read(cx);
+        let frame = Frame {
+            translator,
+            tokens: theme.tokens(),
+            extended: theme.extended(),
+            stale: false,
+        };
+        let tokens = frame.tokens;
         let begin = translator.text("pluginAuthBegin").to_owned();
+        let site_label = SharedString::from(translator.text("pluginAuthSiteLabel").to_owned());
+        let input_label = SharedString::from(translator.text("pluginAuthInputLabel").to_owned());
         let poll = translator.text("pluginAuthPoll").to_owned();
         let cancel = translator.text("cancel").to_owned();
         let logout_label = translator.text("pluginAuthLogout").to_owned();
@@ -358,38 +368,58 @@ impl Render for PluginAuthDialog {
             .as_deref()
             .is_some_and(|kind| kind.eq_ignore_ascii_case("qrcode"));
         let session_pending = self.status == "pending" && !self.session_id.is_empty();
-        let status_text = if is_logged_in {
-            translator.text("pluginAuthSuccess").to_owned()
+        // 状态色：已登录 success、进行中 primary；其余不显示状态行。
+        let status = if is_logged_in {
+            Some((
+                FluxIcon::CircleCheck,
+                frame.extended.colors.success,
+                translator.text("pluginAuthSuccess").to_owned(),
+            ))
         } else if session_pending {
-            translator.text("pluginAuthPending").to_owned()
+            Some((
+                FluxIcon::Clock,
+                tokens.colors.primary,
+                translator.text("pluginAuthPending").to_owned(),
+            ))
         } else {
-            String::new()
+            None
         };
         let challenge = self.challenge.clone();
         let challenge_type_label = self.challenge_type.clone().unwrap_or_default();
         v_flex()
             .w_full()
-            .gap_3()
+            .gap(tokens.spacing.lg)
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(translator.text("pluginAuthDescription").to_owned()),
+                form(cx)
+                    .child(ui::meta_text(
+                        translator.text("pluginAuthDescription").to_owned(),
+                        frame,
+                    ))
+                    .child(form_field(
+                        site_label,
+                        Input::new(&self.site)
+                            .control(cx)
+                            .w_full()
+                            .disabled(self.busy),
+                        None,
+                        cx,
+                    ))
+                    .child(form_field(
+                        input_label,
+                        Input::new(&self.input)
+                            .control(cx)
+                            .w_full()
+                            .disabled(self.busy),
+                        None,
+                        cx,
+                    )),
             )
-            .child(
-                Input::new(&self.site)
-                    .w_full()
-                    .with_size(gpui_component::Size::Medium)
-                    .disabled(self.busy),
-            )
-            .child(
-                Input::new(&self.input)
-                    .w_full()
-                    .with_size(gpui_component::Size::Medium)
-                    .disabled(self.busy),
-            )
-            .when(!status_text.is_empty(), |this| {
-                this.child(div().text_sm().font_semibold().child(status_text))
+            .when_some(status, |this, (icon, color, text)| {
+                this.child(
+                    ui::status_line(icon, color, text, frame)
+                        .text_size(tokens.typography.sm.size)
+                        .text_color(tokens.colors.foreground),
+                )
             })
             .when_some(challenge, |this, value| {
                 // 插件挑战不可信：`data:image/` 载荷尝试直接解码渲染成图片
@@ -399,16 +429,11 @@ impl Render for PluginAuthDialog {
                 let fallback_text = image.is_none().then(|| truncate_challenge_text(&value));
                 this.child(
                     v_flex()
-                        .gap_1()
-                        .p_2()
-                        .rounded(theme.radius)
-                        .bg(theme.secondary)
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(challenge_type_label),
-                        )
+                        .gap(tokens.spacing.xs)
+                        .p(tokens.spacing.sm)
+                        .rounded(tokens.radius.md)
+                        .bg(tokens.colors.muted)
+                        .child(ui::meta_text(challenge_type_label, frame))
                         .when_some(image, |this, image| {
                             this.child(
                                 div()
@@ -420,12 +445,14 @@ impl Render for PluginAuthDialog {
                         })
                         .when_some(fallback_text, |this, text| {
                             let copy_value = value.clone();
-                            this.child(div().text_xs().child(text)).child(
+                            this.child(
+                                ui::meta_text(text, frame).text_color(tokens.colors.foreground),
+                            )
+                            .child(
                                 Button::new("plugin-auth-copy-challenge")
                                     .outline()
-                                    .small()
-                                    .h(CONTROL_HEIGHT)
-                                    .icon(IconName::Copy)
+                                    .control(cx)
+                                    .icon(FluxIcon::Copy)
                                     .label(copy_label)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.copy_challenge(
@@ -440,13 +467,19 @@ impl Render for PluginAuthDialog {
                 )
             })
             .when_some(self.message.clone(), |this, message| {
-                this.child(div().text_xs().text_color(theme.danger).child(message))
+                this.child(field_error(message, cx))
             })
             .child(
-                DialogFooter::new()
+                // 底栏右对齐：取消(outline) 在左、主操作在右，统一控件高度。
+                h_flex()
+                    .w_full()
+                    .pt(tokens.spacing.sm)
+                    .justify_end()
+                    .gap(tokens.spacing.sm)
                     .child(
                         Button::new("plugin-auth-cancel")
                             .outline()
+                            .control(cx)
                             .label(cancel)
                             .disabled(self.busy)
                             .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx))),
@@ -457,7 +490,7 @@ impl Render for PluginAuthDialog {
                                 this.child(
                                     Button::new("plugin-auth-logout")
                                         .outline()
-                                        .h(CONTROL_HEIGHT)
+                                        .control(cx)
                                         .label(logout_label)
                                         .loading(self.busy)
                                         .disabled(self.busy)
@@ -471,7 +504,7 @@ impl Render for PluginAuthDialog {
                                 this.child(
                                     Button::new("plugin-auth-poll")
                                         .primary()
-                                        .h(CONTROL_HEIGHT)
+                                        .control(cx)
                                         .label(poll)
                                         .loading(self.busy)
                                         .disabled(self.busy)
@@ -486,7 +519,7 @@ impl Render for PluginAuthDialog {
                                 this.child(
                                     Button::new("plugin-auth-begin")
                                         .primary()
-                                        .h(CONTROL_HEIGHT)
+                                        .control(cx)
                                         .label(begin)
                                         .loading(self.busy)
                                         .disabled(self.busy)

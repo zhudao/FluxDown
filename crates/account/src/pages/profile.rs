@@ -7,18 +7,14 @@
 //! - Origin ID：强调色 12% 底 + 强调色等宽数字 + 复制图标；无 ID 灰色 `#—` 不可点。
 
 use fluxdown_protocol::{AgentSessionDto, CloudPlan};
-use fluxdown_ui_components::{ButtonVariant, button, card, icon_button};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, card, icon_button, tabular_numbers};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::SemanticThemeTokens;
+use fluxdown_ui_theme::{ExtendedTokens, SemanticThemeTokens, active_theme};
 use gpui::{
     ClickEvent, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, px,
-    white,
+    SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _, white,
 };
-use gpui_component::{
-    Icon, IconName, Sizable as _, StyledExt as _, h_flex, spinner::Spinner, tooltip::Tooltip,
-    v_flex,
-};
+use gpui_component::{Icon, Sizable as _, h_flex, spinner::Spinner, tooltip::Tooltip, v_flex};
 
 use crate::assets::{CLOUD_ICON_PATH, CROWN_ICON_PATH, REFRESH_ICON_PATH};
 use crate::view::AccountView;
@@ -71,10 +67,11 @@ pub(crate) fn render(
         session.user.nickname.clone()
     };
     let initial = avatar_initial(&display_name);
+    let extended = active_theme(cx).extended().clone();
     let plan_badge = session
         .current_plan
         .as_ref()
-        .and_then(|plan| plan_badge(tokens, plan, session.user.membership_ordinal));
+        .and_then(|plan| plan_badge(tokens, &extended, plan, session.user.membership_ordinal));
     let accent = tokens.colors.accent_foreground;
     let origin_id = session.user.origin_id;
     let logout_label = t(translator, "accountLogout");
@@ -87,8 +84,9 @@ pub(crate) fn render(
         .items_center()
         .gap(tokens.spacing.md)
         .child(
+            // 头像：3×lg（48）圆底；首字符用标题字号，无字符回退云图标（lg）。
             div()
-                .size(px(46.))
+                .size(extended.icon.lg * 3.)
                 .flex_none()
                 .flex()
                 .items_center()
@@ -98,15 +96,16 @@ pub(crate) fn render(
                 .map(|this| match &initial {
                     Some(initial) => this.child(
                         div()
-                            .text_size(px(19.))
-                            .font_semibold()
+                            .text_size(extended.title.size)
+                            .line_height(extended.title.line_height)
+                            .font_weight(extended.title.weight)
                             .text_color(accent)
                             .child(initial.clone()),
                     ),
                     None => this.child(
                         Icon::empty()
                             .path(CLOUD_ICON_PATH)
-                            .size(px(22.))
+                            .size(extended.icon.lg)
                             .text_color(accent),
                     ),
                 }),
@@ -116,15 +115,16 @@ pub(crate) fn render(
                 .flex_1()
                 .min_w_0()
                 .items_start()
-                .gap(px(6.))
+                .gap(tokens.spacing.xs)
                 .child(
                     h_flex()
                         .gap(tokens.spacing.sm)
                         .items_center()
                         .child(
                             div()
-                                .text_size(px(15.))
-                                .font_semibold()
+                                .text_size(extended.title.size)
+                                .line_height(extended.title.line_height)
+                                .font_weight(extended.title.weight)
                                 .truncate()
                                 .text_color(tokens.colors.foreground)
                                 .child(display_name),
@@ -133,6 +133,7 @@ pub(crate) fn render(
                 )
                 .child(origin_id_pill(
                     tokens,
+                    &extended,
                     origin_id,
                     origin_id_copied,
                     copied_label,
@@ -150,14 +151,14 @@ pub(crate) fn render(
                         refresh_label,
                         if refreshing {
                             Spinner::new()
-                                .with_size(px(14.))
+                                .with_size(extended.icon.md)
                                 .icon(Icon::empty().path(REFRESH_ICON_PATH))
                                 .color(tokens.colors.accent_foreground)
                                 .into_any_element()
                         } else {
                             Icon::empty()
                                 .path(REFRESH_ICON_PATH)
-                                .size(px(14.))
+                                .size(extended.icon.md)
                                 .text_color(tokens.colors.muted_foreground)
                                 .into_any_element()
                         },
@@ -176,9 +177,6 @@ pub(crate) fn render(
                 )
                 .child(
                     button("account-logout", logout_label, ButtonVariant::Secondary, cx)
-                        .h(px(28.))
-                        .px(tokens.spacing.sm)
-                        .text_size(px(12.5))
                         .disabled(disabled)
                         .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                             let future = view.controller.port().execute(AccountCommand::Auth {
@@ -200,7 +198,7 @@ pub(crate) fn render(
         .when_some(last_error, |this, error| {
             this.child(
                 div()
-                    .text_size(px(11.5))
+                    .text_size(tokens.typography.xs.size)
                     .text_color(tokens.colors.destructive)
                     .child(error),
             )
@@ -210,6 +208,7 @@ pub(crate) fn render(
 /// 套餐徽标：`badge` 为空则不渲染（免费/专业版等服务端未配置徽标的套餐）。
 fn plan_badge(
     tokens: &SemanticThemeTokens,
+    extended: &ExtendedTokens,
     plan: &CloudPlan,
     membership_ordinal: Option<i64>,
 ) -> Option<gpui::AnyElement> {
@@ -220,7 +219,7 @@ fn plan_badge(
         plan.badge_numbered.then_some(membership_ordinal).flatten(),
         plan.badge_number_digits,
     );
-    Some(plan_tag(text, color, &plan.badge_style))
+    Some(plan_tag(tokens, extended, text, color, &plan.badge_style))
 }
 
 /// Flutter `_withMembershipOrdinal`：`{badge} No.{ordinal 补零到 digits(1..=6)}`。
@@ -235,84 +234,75 @@ fn with_membership_ordinal(base: &str, ordinal: Option<i64>, digits: i64) -> Sha
 }
 
 /// Flutter `_PlanTag`：outline | solid | medal | ribbon | plain，全部纯色/描边，不用渐变。
-fn plan_tag(text: SharedString, color: Hsla, style: &str) -> gpui::AnyElement {
-    let crown = |size: f32, tint: Hsla| {
+/// 字号统一 caption（11/14），皇冠图标 `icon.sm`，内边距走 spacing token。
+fn plan_tag(
+    tokens: &SemanticThemeTokens,
+    extended: &ExtendedTokens,
+    text: SharedString,
+    color: Hsla,
+    style: &str,
+) -> gpui::AnyElement {
+    let spacing = tokens.spacing;
+    let caption = &extended.caption;
+    let icon_size = extended.icon.sm;
+    let crown = move |tint: Hsla| {
         Icon::empty()
             .path(CROWN_ICON_PATH)
-            .size(px(size))
+            .size(icon_size)
             .text_color(tint)
     };
+    let label = |weight: FontWeight, tint: Hsla| {
+        div()
+            .text_size(caption.size)
+            .line_height(caption.line_height)
+            .font_weight(weight)
+            .text_color(tint)
+            .child(text.clone())
+    };
+    let pill = || h_flex().items_center().flex_none().rounded_full();
     match style {
-        "outline" => h_flex()
-            .items_center()
-            .gap(px(3.))
-            .px(px(7.))
-            .py(px(1.5))
-            .rounded_full()
+        "outline" => pill()
+            .gap(spacing.xxs)
+            .px(spacing.sm)
             .border_1()
             .border_color(color)
             .bg(color.opacity(0.08))
-            .child(crown(9., color))
-            .child(
-                div()
-                    .text_size(px(9.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
-                    .child(text),
-            )
+            .child(crown(color))
+            .child(label(FontWeight::SEMIBOLD, color))
             .into_any_element(),
-        "solid" => div()
-            .px(px(7.))
-            .py(px(1.5))
-            .rounded_full()
+        "solid" => pill()
+            .px(spacing.sm)
             .bg(color)
-            .text_size(px(9.5))
-            .font_weight(FontWeight::BOLD)
-            .text_color(white())
-            .child(text)
+            .child(label(FontWeight::BOLD, white()))
             .into_any_element(),
-        "medal" => h_flex()
-            .items_center()
+        "medal" => pill()
             .overflow_hidden()
-            .rounded_full()
             .border_1()
             .border_color(color)
             .child(
                 div()
-                    .px(px(5.))
-                    .py(px(1.5))
+                    .flex()
+                    .items_center()
+                    .self_stretch()
+                    .px(spacing.xs)
                     .bg(color)
-                    .child(crown(9., white())),
+                    .child(crown(white())),
             )
             .child(
                 div()
-                    .px(px(6.))
-                    .py(px(1.5))
-                    .text_size(px(9.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
-                    .child(text),
+                    .px(spacing.xs)
+                    .child(label(FontWeight::SEMIBOLD, color)),
             )
             .into_any_element(),
-        "ribbon" => div()
-            .px(px(7.))
-            .py(px(1.5))
-            .rounded_full()
+        "ribbon" => pill()
+            .px(spacing.sm)
             .bg(color)
-            .text_size(px(9.5))
-            .font_weight(FontWeight::EXTRA_BOLD)
-            .text_color(white())
-            .child(text)
+            .child(label(FontWeight::EXTRA_BOLD, white()))
             .into_any_element(),
-        _ => div()
-            .px(px(6.))
-            .py(px(1.))
-            .rounded_full()
+        _ => pill()
+            .px(spacing.xs + spacing.xxs)
             .bg(color.opacity(TINT_ALPHA))
-            .text_size(px(9.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(color)
-            .child(text)
+            .child(label(FontWeight::SEMIBOLD, color))
             .into_any_element(),
     }
 }
@@ -333,6 +323,7 @@ fn parse_hex_color(value: &str) -> Option<Hsla> {
 
 fn origin_id_pill(
     tokens: &SemanticThemeTokens,
+    extended: &ExtendedTokens,
     origin_id: Option<i64>,
     copied: bool,
     copied_label: SharedString,
@@ -354,18 +345,24 @@ fn origin_id_pill(
     let pill = h_flex()
         .id("account-origin-id")
         .items_center()
-        .px(px(8.))
-        .py(px(3.))
-        .gap(px(3.))
+        .px(tokens.spacing.sm)
+        .py(tokens.spacing.xxs)
+        .gap(tokens.spacing.xs)
         .rounded_full()
         .bg(color.opacity(TINT_ALPHA))
-        .text_size(px(11.5))
-        .font_semibold()
+        .text_size(tokens.typography.xs.size)
+        .line_height(tokens.typography.xs.line_height)
+        .font_weight(FontWeight::MEDIUM)
+        .font_features(tabular_numbers())
         .text_color(color)
         .child(label);
     if let Some(origin_id) = origin_id {
         pill.cursor_pointer()
-            .child(Icon::new(IconName::Copy).size(px(10.)).text_color(color))
+            .child(
+                Icon::new(FluxIcon::Copy)
+                    .size(extended.icon.sm)
+                    .text_color(color),
+            )
             .on_click(cx.listener(move |view, _: &ClickEvent, _, cx| {
                 view.copy_origin_id(origin_id, cx);
             }))

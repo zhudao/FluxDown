@@ -32,6 +32,8 @@ Dart 与 Rust 两端写**同一目录同一文件**，统一格式 `HH:MM:SS.mmm
 
 `fluxdown-agent` 的 FluxCloud 地址解析（`native/agent/src/runtime.rs`）：运行期 env `FLUXCLOUD_BASE_URL` > 编译期同名 env（`option_env!`，正式包应在 `cargo build` 时注入，与 dart-define 同源）> `http://127.0.0.1:8720`。**仅调试构建**再叠加 agent 私有状态里的用户覆盖（`agent.cloud.endpointGet/Set`，GPUI 账户页「服务器地址」卡片；对齐 Flutter `CloudApiConfig` 的 `kDebugMode` 门控），正式构建忽略残留覆盖并拒绝 `endpointSet`。
 
+**GPUI 调试包**（`.github/workflows/gpui-debug-package.yml`，仅 `workflow_dispatch`，不发 Release）：输入 `ref` / `platform`（windows·linux·macos·all）/ `arch`（x64·arm64·all）/ `build_mode`，产出 `fluxdown-desktop` + `fluxdown-agent` + `fluxdownd` 同目录压缩包（Windows zip 带 MSVC CRT 与 `.pdb`，Unix tar.gz 保留可执行位）。始终走 `--release`：`gpui_windows` 在 `debug_assertions` 下运行期按构建机绝对路径读 `shaders.hlsl`，debug 包换机即失效；`fast` 模式只经 `CARGO_PROFILE_RELEASE_*` 关 LTO、保留行号符号。同理 macOS 主机无法交叉出 Windows release 包（着色器 `fxc` 预编译只在 Windows 主机的 build.rs 执行）。
+
 ---
 
 ## 设计文档实现状态（`docs/`）

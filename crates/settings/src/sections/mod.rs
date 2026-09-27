@@ -24,10 +24,10 @@ pub(crate) mod webhook_dialog;
 use fluxdown_protocol::{DaemonConfigKind, daemon_config_field};
 use fluxdown_ui_i18n::Translator;
 use gpui::{AnyView, App, Entity, ParentElement as _, SharedString};
-use gpui_component::IconName;
+use gpui_component::Icon;
 
 use crate::store::SettingsStore;
-use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, SettingsTab};
+use crate::ui::{Control, SettingsPage, SettingsRow, SettingsSection, SettingsTab, meta_text};
 
 /// 分区构建上下文：存储实体 + 当前语言的翻译快照 + 翻译实体 + app 注入的内容槽。
 pub(crate) struct SectionContext<'a> {
@@ -247,7 +247,7 @@ pub(crate) fn slot_page(
     key: &'static str,
     title_key: &str,
     desc_key: &str,
-    icon: IconName,
+    icon: impl Into<Icon>,
     view: Option<AnyView>,
 ) -> SettingsPage {
     let page = SettingsPage::new(key, ctx.t(title_key), ctx.t(desc_key), icon);
@@ -255,11 +255,9 @@ pub(crate) fn slot_page(
         Some(view) => page.tab(SettingsTab::new("", SharedString::default()).view(view)),
         None => {
             let description = ctx.t(desc_key);
-            page.sections([
-                SettingsSection::new().row(SettingsRow::custom(move |_, _, _, _| {
-                    gpui::div().child(description.clone())
-                })),
-            ])
+            page.sections([SettingsSection::new().row(SettingsRow::custom(
+                move |_, _, _, cx: &mut App| meta_text(cx).child(description.clone()),
+            ))])
         }
     }
 }

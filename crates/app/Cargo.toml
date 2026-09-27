@@ -32,12 +32,10 @@ thiserror = "2"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "sync", "process", "time", "net", "macros", "fs"] }
 tokio-tungstenite = "0.29"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+fluxdown_ui_components = { version = "0.1.0", path = "../components" }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource.workspace = true
-
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-tray-icon = "0.24.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

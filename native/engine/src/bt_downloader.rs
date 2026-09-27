@@ -247,6 +247,20 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// Upper bound for the BT runtime's blocking pool (tokio default: 512).
+///
+/// librqbit resolves every tracker hostname with `tokio::net::lookup_host`
+/// (one `spawn_blocking` getaddrinfo per tracker per torrent), so starting
+/// ~20 torrents × ~80 trackers fans out ~1700 concurrent lookups and grows the
+/// pool to the cap; the per-chunk `block_in_place` hand-offs then keep waking
+/// those idle threads round-robin so they never hit the keep-alive and stay
+/// alive for the whole session (observed: 520 `bt-runtime` threads).
+/// getaddrinfo is serialized by the system resolver anyway: the same burst
+/// finishes *faster* with 64 threads (0.37 s vs 0.49 s), and a loopback swarm
+/// keeps identical throughput down to a cap of 16. 64 leaves headroom for the
+/// long-running `spawn_blocking` work (completion moves, full re-verification).
+const BT_MAX_BLOCKING_THREADS: usize = 64;
+
 /// Well-known public trackers used to accelerate peer discovery for magnet
 /// links that ship without `tr=` parameters.
 ///
@@ -590,6 +604,7 @@ impl SharedBtSession {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(worker_threads)
+            .max_blocking_threads(BT_MAX_BLOCKING_THREADS)
             .thread_name("bt-runtime")
             .build()
             .map_err(|e| DownloadError::Other(format!("failed to build BT runtime: {e}")))?;

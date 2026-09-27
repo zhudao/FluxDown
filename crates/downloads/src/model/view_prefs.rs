@@ -18,11 +18,17 @@ pub(crate) enum ViewDensity {
 }
 
 impl ViewDensity {
+    /// 任务行高：紧凑单行 30；舒适双行 44（13/18 正文 + 12/16 元信息 + 上下留白）。
     pub(crate) fn row_height(self) -> f32 {
         match self {
-            Self::Comfortable => 38.,
-            Self::Compact => 28.,
+            Self::Comfortable => 44.,
+            Self::Compact => 30.,
         }
+    }
+
+    /// 是否渲染第二行元信息（名称列的类别 · 域名、状态列的详情）。
+    pub(crate) fn two_line(self) -> bool {
+        self == Self::Comfortable
     }
 
     pub(crate) fn next(self) -> Self {
@@ -140,6 +146,8 @@ pub(crate) struct ViewPrefs {
     pub(crate) sort_dir: SortDir,
     /// 空 = 使用默认列集。
     pub(crate) columns: Vec<ColumnPref>,
+    /// 文件名列拖过后的固定宽度；`None` = 吸收表格剩余宽度（默认）。
+    pub(crate) file_name_width: Option<f32>,
     pub(crate) detail_placement: DetailPlacement,
     pub(crate) detail_open: bool,
     pub(crate) detail_size: f32,
@@ -155,10 +163,11 @@ impl Default for ViewPrefs {
             sort_key: ViewSortKey::default(),
             sort_dir: SortDir::default(),
             columns: Vec::new(),
+            file_name_width: None,
             detail_placement: DetailPlacement::default(),
             detail_open: false,
             detail_size: 260.,
-            sidebar_width: 160.,
+            sidebar_width: 200.,
             collapsed_groups: Vec::new(),
         }
     }

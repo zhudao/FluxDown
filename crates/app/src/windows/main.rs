@@ -2,14 +2,15 @@
 
 use std::{rc::Rc, sync::Arc};
 
-use fluxdown_ui_downloads::{DOWNLOAD_ICON_PATH, DownloadHostActions, DownloadView};
+use fluxdown_ui_components::FluxIcon;
+use fluxdown_ui_downloads::{DownloadHostActions, DownloadView};
 use fluxdown_ui_i18n::keys;
-use fluxdown_ui_rss::{RSS_ICON_PATH, RssView};
+use fluxdown_ui_rss::RssView;
 use fluxdown_ui_settings::WebhookView;
 use fluxdown_ui_shell::{RouteId, ShellAction, ShellRoute, ShellView, main_window_options};
 use fluxdown_ui_theme::{active_theme, toggle_theme};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
-use gpui_component::{Icon, IconName, Root};
+use gpui_component::{Icon, Root};
 
 use crate::{
     app::Desktop,
@@ -29,8 +30,6 @@ pub fn reveal(cx: &mut App) {
 
 /// 打开或聚焦主窗口。返回新建窗口句柄（已开时 `None`）。
 pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
-    // 关窗驻留托盘时 Dock 图标已隐藏；主窗口出现前恢复，保证激活后菜单栏与 Dock 就位。
-    crate::app_icon::set_dock_visible(true);
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let session = desktop.session.clone();
@@ -54,22 +53,25 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
         let rss = cx.new(|cx| RssView::new(translator.clone(), rss_port, window, cx));
         let webhooks =
             cx.new(|cx| WebhookView::new(translator.clone(), settings_store.clone(), cx));
+        let downloads_title_bar = downloads.update(cx, |downloads, cx| downloads.new_title_bar(cx));
 
+        // RSS / Webhook 暂无顶栏插槽：统一顶栏保持空白拖拽区。
         let routes = vec![
             ShellRoute::new(
                 RouteId::new("downloads"),
                 "activity-downloads",
                 "activity-downloads-tooltip",
                 keys::MOBILE_NAV_DOWNLOADS,
-                Icon::empty().path(DOWNLOAD_ICON_PATH),
+                Icon::new(FluxIcon::Download),
                 downloads.clone().into(),
-            ),
+            )
+            .with_title_bar(downloads_title_bar),
             ShellRoute::new(
                 RouteId::new("rss"),
                 "activity-rss",
                 "activity-rss-tooltip",
                 "sidebarRss",
-                Icon::empty().path(RSS_ICON_PATH),
+                Icon::new(FluxIcon::Rss),
                 rss.clone().into(),
             )
             .optional(true),
@@ -78,7 +80,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "activity-webhooks",
                 "activity-webhooks-tooltip",
                 "webhookNavTitle",
-                Icon::new(IconName::Bell),
+                Icon::new(FluxIcon::Webhook),
                 webhooks.into(),
             )
             .optional(true),
@@ -90,9 +92,9 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "activityThemeToggle",
                 |cx| {
                     if active_theme(cx).mode().is_dark() {
-                        Icon::new(IconName::Sun)
+                        Icon::new(FluxIcon::Sun)
                     } else {
-                        Icon::new(IconName::Moon)
+                        Icon::new(FluxIcon::Moon)
                     }
                 },
                 toggle_theme,
@@ -102,7 +104,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 "activity-settings",
                 "activity-settings-tooltip",
                 keys::SETTINGS,
-                Icon::new(IconName::Settings),
+                Icon::new(FluxIcon::Settings),
                 move |_, cx| crate::windows::settings::open(cx),
             ),
         ];
@@ -150,6 +152,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 })),
                 shutdown_status,
                 shutdown: shutdown_port,
+                on_user_started: Some(Rc::new(crate::progress_windows::user_started)),
             });
         });
 
@@ -173,16 +176,18 @@ fn install_close_policy(window: &mut Window, cx: &mut App) {
     window.on_window_should_close(cx, should_close);
 }
 
-/// 主窗口是否可立即关闭：托盘驻留 → 关；无活跃任务或还有其他窗口 → 关；否则弹
-/// 「下载仍在进行」确认框并返回 `false`（确认后由对话框自己关窗）。
+/// 主窗口关闭：agent 托盘驻留 → 只关窗（最后一个窗口关闭后界面进程退出，下载与队列在后台
+/// 继续）；否则等同「退出」——有活跃任务时先确认，随后完全退出（后台随界面一起停止）。
+/// 尚未收到首个快照时驻留策略未知，按只关窗处理，绝不误停后台。
 pub fn should_close(window: &mut Window, cx: &mut App) -> bool {
-    let close_to_tray = Desktop::pref_bool(cx, "close_to_tray", true);
-    if close_to_tray && WindowRegistry::is_resident(cx) {
+    let desktop = Desktop::global(cx);
+    if desktop.shell.resident || desktop.session.read(cx).latest().is_none() {
         return true;
     }
-    if Desktop::active_task_count(cx) == 0 || WindowRegistry::open_count(cx) > 1 {
-        return true;
+    if Desktop::active_task_count(cx) == 0 {
+        crate::lifecycle::quit_everything(cx);
+    } else {
+        confirm_active_tasks(window, cx, |_, cx| crate::lifecycle::quit_everything(cx));
     }
-    confirm_active_tasks(window, cx, |window, _| window.remove_window());
     false
 }

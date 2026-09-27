@@ -52,6 +52,13 @@ impl AgentEventHub {
         (receiver, self.snapshot())
     }
 
+    /// 在临界区内只读访问当前投影。高频事件路径用它按需提取少量字段，
+    /// 避免每帧克隆整份 `AgentSnapshot`。闭包内不得再调用本 hub（非重入锁）。
+    pub fn inspect<R>(&self, read: impl FnOnce(&AgentSnapshot) -> R) -> R {
+        let state = lock_or_recover(&self.state);
+        read(&state.snapshot)
+    }
+
     /// daemon 增量先更新缓存，再发布 agent sequence。
     pub fn apply_daemon_event(&self, event: DaemonEvent) -> EventFrame {
         self.publish(AgentEvent::Daemon(event))

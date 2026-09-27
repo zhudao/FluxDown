@@ -4,23 +4,26 @@
 //! [`DownloadView`] 并作为路由内容注入 shell。
 
 pub mod actions;
-mod assets;
 mod components;
 mod controller;
 mod model;
 mod pages;
 mod strings;
 
-pub use assets::*;
+pub use components::title_bar::DownloadTitleBar;
 pub use controller::{
     DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, LAST_SAVE_DIR_PREF,
     PortFuture, QueueFields, REMEMBER_LAST_SAVE_DIR_PREF, SeedLimits,
+};
+pub use model::progress_window::{
+    COMPLETION_WINDOW_PREF, PROGRESS_WINDOW_PREF, ProgressWindowEffect, ProgressWindowPrefs,
+    ProgressWindowTracker,
 };
 pub use model::shutdown::*;
 pub use pages::downloads::*;
 pub use pages::group_detail::*;
 pub use pages::new_download::*;
+pub use pages::progress_window::*;
 pub use pages::queue_manager::*;
-pub use pages::quick_capture::*;
 pub use pages::selection::*;
 pub use pages::task_detail::*;

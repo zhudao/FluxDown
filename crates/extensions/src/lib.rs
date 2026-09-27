@@ -3,21 +3,19 @@
 mod components;
 mod controller;
 mod pages;
+mod ui;
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use fluxdown_protocol::{AgentSnapshot, ApplicationErrorCode, RpcErrorData, ServiceEvent};
+use fluxdown_ui_components::segmented_tabs;
 use fluxdown_ui_i18n::Translator;
+use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div,
+    Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    ActiveTheme as _, WindowExt as _,
-    notification::Notification,
-    tab::{Tab, TabBar},
-    v_flex,
-};
+use gpui_component::{WindowExt as _, h_flex, notification::Notification, v_flex};
 
 use controller::{COMPONENT_KINDS, component_slot};
 pub use controller::{ExtensionsController, ExtensionsSignal};
@@ -189,27 +187,40 @@ impl Render for ExtensionsView {
         };
         let translator = self.translator.read(cx);
         let labels = [
-            translator.text("settingsCatPlugins").to_owned(),
-            translator.text("settingsCatComponents").to_owned(),
+            SharedString::from(translator.text("settingsCatPlugins").to_owned()),
+            SharedString::from(translator.text("settingsCatComponents").to_owned()),
         ];
-        let danger = cx.theme().danger;
+        let tokens = active_theme(cx).tokens();
+        let (spacing, typography, destructive) = (
+            tokens.spacing,
+            tokens.typography.xs,
+            tokens.colors.destructive,
+        );
+        let view = cx.entity().downgrade();
         v_flex()
             .w_full()
-            .gap_4()
+            .gap(spacing.md)
             .when_some(self.last_error.clone(), |this, error| {
-                this.child(div().text_sm().text_color(danger).child(error))
+                this.child(
+                    div()
+                        .text_size(typography.size)
+                        .line_height(typography.line_height)
+                        .text_color(destructive)
+                        .child(error),
+                )
             })
-            .child(
-                TabBar::new("extensions-tabs")
-                    .underline()
-                    .selected_index(tab.index())
-                    .on_click(cx.listener(|this, index: &usize, _, cx| {
-                        if let Some(tab) = ExtensionsTab::ALL.get(*index) {
-                            this.show_tab(*tab, cx);
-                        }
-                    }))
-                    .children(labels.into_iter().map(|label| Tab::new().label(label))),
-            )
+            // 标签条左对齐、保持自然宽度（外层行吸收纵向容器的横向拉伸）。
+            .child(h_flex().w_full().child(segmented_tabs(
+                "extensions-tabs",
+                labels,
+                tab.index(),
+                move |index, _, cx| {
+                    if let Some(tab) = ExtensionsTab::ALL.get(index) {
+                        let _ = view.update(cx, |this, cx| this.show_tab(*tab, cx));
+                    }
+                },
+                cx,
+            )))
             .child(body)
     }
 }

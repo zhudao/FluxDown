@@ -1,10 +1,10 @@
 //! Webhook：端点列表（daemon `webhook.endpoints` JSON）与投递记录。
 
 use fluxdown_protocol::method;
-use fluxdown_ui_components::{Button, ButtonVariant, button as themed_button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, loading_button, tabular_numbers};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
-    App, Context, ElementId, IntoElement as _, ParentElement, SharedString, Styled, div, px,
+    App, Context, InteractiveElement as _, IntoElement as _, ParentElement, SharedString, Styled,
 };
 use gpui_component::{Disableable as _, h_flex, v_flex};
 use serde::{Deserialize, Serialize};
@@ -13,21 +13,10 @@ use std::collections::BTreeMap;
 
 use super::{SectionContext, webhook_dialog};
 use crate::store::SettingsStore;
-use crate::ui::{SettingsRow, SettingsSection};
-
-pub(super) fn button(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    variant: ButtonVariant,
-    cx: &App,
-) -> Button {
-    themed_button(id, label, variant, cx)
-        .h(CONTROL_HEIGHT)
-        .px(px(10.))
-        .text_size(px(12.))
-        .rounded(px(6.))
-        .flex_shrink_0()
-}
+use crate::ui::{
+    SettingsRow, SettingsSection, body_text, empty_state, meta_text, row_button, row_danger_button,
+    row_loading_button,
+};
 
 pub(crate) const ENDPOINTS_KEY: &str = "webhook.endpoints";
 
@@ -100,19 +89,19 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
     let disabled_label = ctx.t("webhookHealthDisabled");
     SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
         let disabled = disabled || !store.read(cx).daemon_connected();
-        let tokens = active_theme(cx).tokens();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let extended = theme.extended().colors;
         let endpoints = read_endpoints(store.read(cx));
         let deliveries = store.read(cx).webhook_deliveries().to_vec();
-        let mut column = v_flex().w_full().gap(tokens.spacing.xs);
+        let mut column = v_flex().w_full().gap(tokens.spacing.xxs);
         if endpoints.is_empty() {
-            column = column
-                .child(div().text_sm().child(empty_title.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.colors.muted_foreground)
-                        .child(empty_desc.clone()),
-                );
+            column = column.child(empty_state(
+                FluxIcon::Webhook,
+                empty_title.clone(),
+                empty_desc.clone(),
+                cx,
+            ));
         }
         for endpoint in &endpoints {
             let health = deliveries
@@ -145,14 +134,14 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
             let events = endpoint.events.join(", ");
             column = column.child(
                 h_flex()
+                    .id(SharedString::from(format!("webhook-row-{}", endpoint.id)))
                     .w_full()
                     .items_center()
                     .gap(tokens.spacing.sm)
                     .px(tokens.spacing.sm)
                     .py(tokens.spacing.xs)
                     .rounded(tokens.radius.md)
-                    .border_1()
-                    .border_color(tokens.colors.border)
+                    .hover(move |style| style.bg(extended.row_hover))
                     .child(
                         gpui_component::switch::Switch::new(SharedString::from(format!(
                             "webhook-enabled-{}",
@@ -177,34 +166,21 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                             .flex_1()
                             .min_w_0()
                             .gap(tokens.spacing.xxs)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .child(SharedString::from(endpoint.name.clone())),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(tokens.colors.muted_foreground)
-                                    .child(SharedString::from(format!(
-                                        "{} · {}",
-                                        endpoint.url, events
-                                    ))),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.colors.muted_foreground)
-                                    .child(if endpoint.enabled {
-                                        SharedString::from(health)
-                                    } else {
-                                        disabled_label.clone()
-                                    }),
-                            ),
+                            .child(body_text(cx).child(SharedString::from(endpoint.name.clone())))
+                            .child(meta_text(cx).truncate().child(SharedString::from(format!(
+                                "{} · {}",
+                                endpoint.url, events
+                            ))))
+                            .child(meta_text(cx).text_color(extended.text_tertiary).child(
+                                if endpoint.enabled {
+                                    SharedString::from(health)
+                                } else {
+                                    disabled_label.clone()
+                                },
+                            )),
                     )
                     .child(
-                        button(
+                        row_button(
                             SharedString::from(format!("webhook-edit-{}", endpoint.id)),
                             edit.clone(),
                             ButtonVariant::Secondary,
@@ -222,10 +198,11 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                         }),
                     )
                     .child(
-                        button(
+                        row_loading_button(
                             SharedString::from(format!("webhook-test-{}", endpoint.id)),
                             test.clone(),
                             ButtonVariant::Secondary,
+                            store.read(cx).is_busy_tagged("webhookTest", &endpoint.id),
                             cx,
                         )
                         .disabled(disabled || store.read(cx).is_busy("webhookTest"))
@@ -287,15 +264,15 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
                                             );
                                         },
                                     );
+                                    store.tag_busy("webhookTest", test_endpoint.id.clone());
                                 });
                             }
                         }),
                     )
                     .child(
-                        button(
+                        row_danger_button(
                             SharedString::from(format!("webhook-delete-{}", endpoint.id)),
                             delete.clone(),
-                            ButtonVariant::Destructive,
                             cx,
                         )
                         .disabled(disabled)
@@ -317,18 +294,13 @@ fn endpoints_item(ctx: &SectionContext) -> SettingsRow {
             .transient("webhook_test_result")
             .and_then(serde_json::Value::as_str)
         {
-            column = column.child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(SharedString::from(text.to_owned())),
-            );
+            column = column.child(meta_text(cx).child(SharedString::from(text.to_owned())));
         }
         let add_store = store.clone();
         let add_translator = translator.clone();
         column
             .child(
-                h_flex().w_full().justify_end().child(
+                h_flex().w_full().pt(tokens.spacing.sm).justify_end().child(
                     button("webhook-add", add.clone(), ButtonVariant::Primary, cx)
                         .disabled(disabled)
                         .on_click(move |_, window, cx| {
@@ -355,7 +327,9 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
     let simulate = ctx.t("webhookLogSimulate");
     let row = SettingsRow::custom(move |disabled, _key, _window, cx: &mut App| {
         let disabled = disabled || !store.read(cx).daemon_connected();
-        let tokens = active_theme(cx).tokens();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let hairline = theme.extended().colors.hairline;
         let deliveries = store.read(cx).webhook_deliveries().to_vec();
         let clear_store = store.clone();
         let simulate_store = store.clone();
@@ -365,20 +339,10 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
             .transient("webhook_simulate_result")
             .and_then(serde_json::Value::as_str)
         {
-            column = column.child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(SharedString::from(text.to_owned())),
-            );
+            column = column.child(meta_text(cx).child(SharedString::from(text.to_owned())));
         }
         if deliveries.is_empty() {
-            column = column.child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.colors.muted_foreground)
-                    .child(empty.clone()),
-            );
+            column = column.child(meta_text(cx).child(empty.clone()));
         }
         for delivery in deliveries.iter().rev().take(50) {
             let status = if delivery.success {
@@ -390,47 +354,42 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
             };
             let attempts =
                 translator.text_with("webhookAttempts", &[("n", &delivery.attempts.to_string())]);
-            column = column.child(
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .justify_between()
-                    .gap(tokens.spacing.md)
-                    .py(tokens.spacing.xxs)
-                    .border_b_1()
-                    .border_color(tokens.colors.border)
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap(tokens.spacing.xxs)
-                            .child(div().text_sm().child(SharedString::from(format!(
-                                "{} · {}",
-                                delivery.endpoint_name, delivery.event
-                            ))))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(tokens.colors.muted_foreground)
-                                    .child(SharedString::from(format!(
-                                        "{} · {}",
-                                        status, attempts
-                                    ))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if delivery.success {
-                                tokens.colors.muted_foreground
-                            } else {
-                                tokens.colors.destructive
-                            })
-                            .child(SharedString::from(super::subscription::format_unix(
-                                delivery.timestamp_ms / 1000,
-                            ))),
-                    ),
-            );
+            column =
+                column.child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .justify_between()
+                        .gap(tokens.spacing.md)
+                        .py(tokens.spacing.xs)
+                        .border_b_1()
+                        .border_color(hairline)
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .gap(tokens.spacing.xxs)
+                                .child(body_text(cx).child(SharedString::from(format!(
+                                    "{} · {}",
+                                    delivery.endpoint_name, delivery.event
+                                ))))
+                                .child(meta_text(cx).truncate().child(SharedString::from(
+                                    format!("{} · {}", status, attempts),
+                                ))),
+                        )
+                        .child(
+                            meta_text(cx)
+                                .flex_none()
+                                .font_features(tabular_numbers())
+                                .text_color(if delivery.success {
+                                    tokens.colors.muted_foreground
+                                } else {
+                                    tokens.colors.destructive
+                                })
+                                .child(SharedString::from(super::subscription::format_unix(
+                                    delivery.timestamp_ms / 1000,
+                                ))),
+                        ),
+                );
         }
         column
             .child(
@@ -439,7 +398,7 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
                     .justify_end()
                     .gap(tokens.spacing.sm)
                     .child(
-                        button(
+                        loading_button(
                             "webhook-simulate",
                             if store.read(cx).is_busy("webhookSimulate") {
                                 SharedString::from(translator.text("webhookLogPending").to_owned())
@@ -447,6 +406,7 @@ pub(crate) fn delivery_log_group(ctx: &SectionContext, _cx: &mut App) -> Setting
                                 simulate.clone()
                             },
                             ButtonVariant::Secondary,
+                            simulate_store.read(cx).is_busy("webhookSimulate"),
                             cx,
                         )
                         .disabled(disabled || simulate_store.read(cx).is_busy("webhookSimulate"))

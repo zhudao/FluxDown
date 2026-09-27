@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::{
     AgentPreferencesDto, AgentSessionDto, CloudDevice, GatewayStatusDto, PendingCaptureDto,
-    RemoteTaskDto, SyncStatusDto,
+    PowerStatusDto, RemoteTaskDto, ShellStatusDto, SyncStatusDto,
 };
 use crate::daemon::{
     ComponentStatusDto, DaemonConfigSnapshot, DaemonRuntimeStatsDto, GroupDto, LinkDeviceInfo,
@@ -52,6 +52,10 @@ pub struct AgentSnapshot {
     pub linked_devices: Vec<LinkDeviceInfo>,
     pub remote_tasks: Vec<RemoteTaskDto>,
     pub pending_captures: Vec<PendingCaptureDto>,
+    #[serde(default)]
+    pub shell: ShellStatusDto,
+    #[serde(default)]
+    pub power: PowerStatusDto,
 }
 
 /// `system.snapshot` 的服务角色对应主体。
@@ -129,6 +133,11 @@ pub enum AgentEvent {
     LinkedDevicesChanged(Vec<LinkDeviceInfo>),
     RemoteTasksChanged(Vec<RemoteTaskDto>),
     PendingCapturesChanged(Vec<PendingCaptureDto>),
+    ShellChanged(ShellStatusDto),
+    PowerChanged(PowerStatusDto),
+    /// 外部捕获未经确认直接建成的任务（免打扰下载 / 系统打开链接 / 拖入）。一次性通知，
+    /// 不进快照；官方 UI 据此为单任务弹出进度窗口。失败条目不在列表中。
+    CaptureTasksStarted(Vec<String>),
 }
 
 /// `service.event` notification 的事件主体。
@@ -171,6 +180,9 @@ pub fn apply_agent_event(snapshot: &mut AgentSnapshot, event: &AgentEvent) {
         AgentEvent::PendingCapturesChanged(captures) => {
             snapshot.pending_captures.clone_from(captures)
         }
+        AgentEvent::ShellChanged(shell) => snapshot.shell.clone_from(shell),
+        AgentEvent::PowerChanged(power) => snapshot.power = *power,
+        AgentEvent::CaptureTasksStarted(_) => {}
     }
 }
 

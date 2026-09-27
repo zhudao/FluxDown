@@ -1,26 +1,29 @@
 //! RSS 工作区：订阅列表、条目流和批量操作。
 
-use crate::{RSS_ICON_PATH, RssController, RssPort, editor};
+use crate::{RssController, RssPort, editor};
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, DaemonEvent, RssItemDto, RssSourceDto, ServiceEvent, WsServerMsg,
     method,
 };
+use fluxdown_ui_components::{
+    CheckState, ControlExt as _, FluxIcon, caption_number, check_mark, tabular_numbers,
+    toolbar_action_button,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, prelude::FluentBuilder as _, px, uniform_list,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, FocusableExt as _, Icon, IconName, Sizable as _, Size,
-    WindowExt as _,
-    button::{Button, ButtonVariant, ButtonVariants as _},
-    checkbox::Checkbox,
-    dialog::DialogButtonProps,
+    Disableable as _, Icon, WindowExt as _,
+    button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement as _,
+    tooltip::Tooltip,
     v_flex,
 };
 use std::{
@@ -29,10 +32,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// 订阅源列宽。
+const SOURCE_COLUMN_WIDTH: Pixels = px(240.);
+/// 条目行高（标题 + 元信息 + 可选过滤原因三行）。
+const ITEM_ROW_HEIGHT: Pixels = px(64.);
+/// 条目状态列宽。
+const STATUS_COLUMN_WIDTH: Pixels = px(120.);
+/// 条目搜索框宽度。
+const SEARCH_WIDTH: Pixels = px(200.);
+
 pub struct RssView {
     translator: Entity<Translator>,
     controller: RssController,
     search: Entity<InputState>,
+    /// 搜索框当前 placeholder；语言切换后在 render 中同步（InputState 只在构造时取一次）。
+    search_placeholder: SharedString,
     oldest_first: bool,
     last_error: Option<String>,
     feedback: Option<String>,
@@ -47,9 +61,10 @@ impl RssView {
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe(&translator, |_, _, cx| cx.notify()).detach();
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(translator.read(cx).text("rssSearchHint"))
-        });
+        let search_placeholder =
+            SharedString::from(translator.read(cx).text("rssSearchHint").to_owned());
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(search_placeholder.clone()));
         cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -60,6 +75,7 @@ impl RssView {
             translator,
             controller: RssController::new(port),
             search,
+            search_placeholder,
             oldest_first: false,
             last_error: None,
             feedback: None,
@@ -320,19 +336,18 @@ impl RssView {
             SharedString::from(self.with("rssDeleteConfirmDesc", &[("name", &name)], cx));
         let cancel = self.t("cancel", cx);
         let view = cx.weak_entity();
-        window.open_alert_dialog(cx, move |alert, _, _| {
+        window.open_alert_dialog(cx, move |alert, _, cx| {
             let view = view.clone();
             let source_id = source.source_id.clone();
             alert
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    DialogButtonProps::default()
-                        .ok_text(title.clone())
-                        .ok_variant(ButtonVariant::Danger)
-                        .cancel_text(cancel.clone())
-                        .show_cancel(true),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel.clone()),
+                    title.clone(),
+                    fluxdown_ui_components::DialogIntent::Destructive,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let _ = view.update(cx, |this, cx| {
                         if this.controller.stale || this.controller.delete_busy {
@@ -465,26 +480,36 @@ impl RssView {
         source: RssSourceDto,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let colors = active_theme(cx).tokens().colors;
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
+        let colors = tokens.colors;
         let selected = self.controller.selected_source.as_deref() == Some(&source.source_id);
         let unhealthy = !source.last_error.is_empty();
         let name = display_name(&source);
         let status = self.status_line(&source, cx);
         let id = source.source_id.clone();
         let count = source.unread_count;
-        let unread = self.with("rssUnreadCount", &[("n", &count.to_string())], cx);
-        let badge_id = format!("rss-unread-{id}");
+        let unread =
+            SharedString::from(self.with("rssUnreadCount", &[("n", &count.to_string())], cx));
+        let badge_id = SharedString::from(format!("rss-unread-{id}"));
+        let (background, hover) = if selected {
+            (extended.colors.nav_selected, extended.colors.nav_selected)
+        } else {
+            (
+                transparent(extended.colors.nav_hover),
+                extended.colors.nav_hover,
+            )
+        };
         div()
             .id(SharedString::from(format!("rss-source-{id}")))
             .w_full()
-            .px(px(10.))
-            .py(px(9.))
-            .rounded(px(6.))
+            .px(tokens.spacing.sm)
+            .py(tokens.spacing.xs + tokens.spacing.xxs)
+            .rounded(tokens.radius.md)
             .cursor_pointer()
-            .when(selected, |row| row.bg(colors.accent))
-            .when(!selected, |row| {
-                row.hover(move |style| style.bg(colors.muted.opacity(0.7)))
-            })
+            .bg(background)
+            .hover(move |style| style.bg(hover))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if this.controller.select_source(&id) {
                     this.fetch_items(cx);
@@ -494,10 +519,12 @@ impl RssView {
             .child(
                 h_flex()
                     .items_center()
-                    .gap_2()
-                    .child(Icon::empty().path(RSS_ICON_PATH).size(px(15.)).text_color(
+                    .gap(tokens.spacing.sm)
+                    .child(Icon::new(FluxIcon::Rss).size(extended.icon.lg).text_color(
                         if unhealthy {
-                            cx.theme().danger
+                            colors.destructive
+                        } else if selected {
+                            colors.foreground
                         } else {
                             colors.muted_foreground
                         },
@@ -506,19 +533,23 @@ impl RssView {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap_1()
                             .child(
                                 div()
                                     .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_size(tokens.typography.sm.size)
+                                    .line_height(tokens.typography.sm.line_height)
+                                    .text_color(if selected {
+                                        colors.foreground
+                                    } else {
+                                        colors.muted_foreground
+                                    })
+                                    .when(selected, |this| this.font_weight(FontWeight::MEDIUM))
                                     .child(name),
                             )
                             .child(
-                                div()
+                                meta_text(cx)
                                     .truncate()
-                                    .text_xs()
-                                    .text_color(colors.muted_foreground)
+                                    .when(unhealthy, |this| this.text_color(colors.destructive))
                                     .child(status),
                             ),
                     )
@@ -527,24 +558,20 @@ impl RssView {
                             div()
                                 .id(badge_id)
                                 .flex_none()
-                                .text_xs()
-                                .px(px(6.))
-                                .py(px(2.))
-                                .rounded(px(10.))
-                                .bg(colors.primary.opacity(0.12))
-                                .text_color(colors.primary)
                                 .tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(unread.clone())
-                                        .build(window, cx)
+                                    Tooltip::new(unread.clone()).build(window, cx)
                                 })
-                                .child(count.to_string()),
+                                .child(caption_number(count.to_string(), cx)),
                         )
                     }),
             )
     }
 
     fn render_item(&self, item: RssItemDto, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let colors = active_theme(cx).tokens().colors;
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
+        let colors = tokens.colors;
         let guid = item.guid.clone();
         let source_id = item.source_id.clone();
         let busy = self
@@ -553,7 +580,7 @@ impl RssView {
             .contains(&format!("{source_id}\0{guid}"));
         let selected = self.controller.selected.contains(&guid);
         let can_act = !self.controller.stale && !busy;
-        let title = item.title.clone();
+        let title = SharedString::from(item.title.clone());
         let status = self.t(self.controller.status_key(&item), cx);
         let reason_key = match item.reason.as_str() {
             "not_included" => Some("rssReasonNotIncluded"),
@@ -577,173 +604,269 @@ impl RssView {
         );
         let can_ignore = item.status == 0;
         let task_missing = item.status == 1 && self.controller.task_status(&item).is_none();
-        v_flex()
+        let group = SharedString::from(format!("rss-item-{source_id}-{guid}"));
+        let mut meta = Vec::new();
+        if !date.is_empty() {
+            meta.push(format!("{} · {date}", self.t("rssPublishedAt", cx)));
+        }
+        if !size.is_empty() {
+            meta.push(size);
+        }
+        h_flex()
+            .group(group.clone())
             .w_full()
-            .h(px(66.))
+            .h(ITEM_ROW_HEIGHT)
             .flex_none()
-            .justify_center()
-            .px(px(16.))
-            .gap_1()
-            .border_b_1()
-            .border_color(colors.border.opacity(0.7))
-            .hover(move |style| style.bg(colors.muted.opacity(0.4)))
+            .items_center()
+            .gap(tokens.spacing.md)
+            .px(tokens.spacing.lg)
+            .map(|row| {
+                if selected {
+                    row.bg(colors.accent)
+                } else {
+                    row.hover(move |style| style.bg(extended.colors.row_hover))
+                }
+            })
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        Checkbox::new(SharedString::from(format!("rss-select-{source_id}-{guid}")))
-                            .with_size(Size::XSmall)
-                            .checked(selected)
-                            .focus_ring(false)
-                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
-                                if *checked {
-                                    this.controller.selected.insert(guid.clone());
-                                } else {
-                                    this.controller.selected.remove(&guid);
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "rss-title-{}-{}",
-                                        item.source_id, item.guid
-                                    )))
-                                    .w_full()
-                                    .truncate()
-                                    .text_size(px(12.5))
-                                    .text_color(colors.foreground)
-                                    .tooltip(move |window, cx| {
-                                        gpui_component::tooltip::Tooltip::new(title.clone())
-                                            .build(window, cx)
-                                    })
-                                    .child(item.title),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_3()
-                                    .text_xs()
-                                    .text_color(colors.muted_foreground)
-                                    .when(!date.is_empty(), |row| {
-                                        row.child(format!(
-                                            "{} · {date}",
-                                            self.t("rssPublishedAt", cx)
-                                        ))
-                                    })
-                                    .when(!size.is_empty(), |row| row.child(size)),
-                            ),
-                    )
+                div()
+                    .id(SharedString::from(format!("rss-select-{source_id}-{guid}")))
+                    .flex_none()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if !this.controller.selected.remove(&guid) {
+                            this.controller.selected.insert(guid.clone());
+                        }
+                        cx.notify();
+                    }))
+                    .child(check_mark(
+                        if selected {
+                            CheckState::Checked
+                        } else {
+                            CheckState::Unchecked
+                        },
+                        cx,
+                    )),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(tokens.spacing.xxs)
                     .child(
                         div()
-                            .w(px(145.))
-                            .flex_none()
-                            .text_right()
-                            .text_xs()
-                            .text_color(if task_missing {
-                                cx.theme().danger
-                            } else {
-                                colors.muted_foreground
+                            .id(SharedString::from(format!(
+                                "rss-title-{}-{}",
+                                item.source_id, item.guid
+                            )))
+                            .w_full()
+                            .truncate()
+                            .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
+                            .text_color(colors.foreground)
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(title.clone()).build(window, cx)
                             })
-                            .child(status),
+                            .child(item.title.clone()),
                     )
-                    .child(
-                        h_flex()
-                            .w(px(177.))
-                            .flex_none()
-                            .justify_end()
-                            .gap_1()
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "rss-download-{}-{}",
-                                    item.source_id, item.guid
-                                )))
-                                .ghost()
-                                .xsmall()
-                                .label(label)
-                                .disabled(!can_act)
-                                .on_click(cx.listener({
-                                    let guid = item.guid.clone();
-                                    move |this, _, _, cx| {
-                                        this.act(vec![guid.clone()], "download", cx)
-                                    }
-                                })),
-                            )
-                            .when(can_ignore, |row| {
-                                row.child(
-                                    Button::new(SharedString::from(format!(
-                                        "rss-ignore-{}-{}",
-                                        item.source_id, item.guid
-                                    )))
-                                    .ghost()
-                                    .xsmall()
-                                    .label(self.t("rssActionIgnore", cx))
-                                    .disabled(!can_act)
-                                    .on_click(cx.listener({
-                                        let guid = item.guid.clone();
-                                        move |this, _, _, cx| {
-                                            this.act(vec![guid.clone()], "ignore", cx)
-                                        }
-                                    })),
-                                )
-                            }),
-                    ),
+                    .when(!meta.is_empty(), |column| {
+                        column.child(
+                            meta_text(cx)
+                                .truncate()
+                                .font_features(tabular_numbers())
+                                .child(meta.join(" · ")),
+                        )
+                    })
+                    .when_some(reason_key, |column, key| {
+                        column.child(meta_text(cx).truncate().child(self.t(key, cx)))
+                    }),
             )
-            .when_some(reason_key, |row, key| {
-                row.child(
-                    div()
-                        .pl(px(27.))
-                        .text_xs()
-                        .text_color(colors.muted_foreground)
-                        .child(self.t(key, cx)),
-                )
-            })
+            .child(
+                h_flex()
+                    .w(STATUS_COLUMN_WIDTH)
+                    .flex_none()
+                    .justify_end()
+                    .child(status_badge(
+                        status,
+                        task_missing.then_some(colors.destructive),
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .justify_end()
+                    .gap(tokens.spacing.xxs)
+                    // 行操作悬停时出现；选中或处理中时常显，保证状态可见。
+                    .when(!selected && !busy, |actions| {
+                        actions
+                            .opacity(0.)
+                            .group_hover(group, |style| style.opacity(1.))
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "rss-download-{}-{}",
+                            item.source_id, item.guid
+                        )))
+                        .ghost()
+                        .label(label)
+                        .control(cx)
+                        .disabled(!can_act)
+                        .on_click(cx.listener({
+                            let guid = item.guid.clone();
+                            move |this, _, _, cx| this.act(vec![guid.clone()], "download", cx)
+                        })),
+                    )
+                    .when(can_ignore, |row| {
+                        row.child(
+                            Button::new(SharedString::from(format!(
+                                "rss-ignore-{}-{}",
+                                item.source_id, item.guid
+                            )))
+                            .ghost()
+                            .label(self.t("rssActionIgnore", cx))
+                            .control(cx)
+                            .disabled(!can_act)
+                            .on_click(cx.listener({
+                                let guid = item.guid.clone();
+                                move |this, _, _, cx| this.act(vec![guid.clone()], "ignore", cx)
+                            })),
+                        )
+                    }),
+            )
     }
 
+    /// 空状态：32px 图标 + 标题 sm MEDIUM + 说明 xs 二级文字，居中。
     fn render_empty(
         &self,
-        title: &str,
-        description: &str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let colors = active_theme(cx).tokens().colors;
+        icon: FluxIcon,
+        icon_color: Option<Hsla>,
+        title: SharedString,
+        description: Option<SharedString>,
+        cx: &App,
+    ) -> Div {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
         v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .gap_3()
-            .px(px(40.))
+            .gap(tokens.spacing.sm)
+            .px(tokens.spacing.xl)
             .child(
-                Icon::empty()
-                    .path(RSS_ICON_PATH)
+                Icon::new(icon)
                     .size(px(32.))
-                    .text_color(colors.muted_foreground),
+                    .text_color(icon_color.unwrap_or(theme.extended().colors.text_tertiary)),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(tokens.typography.sm.size)
+                    .line_height(tokens.typography.sm.line_height)
                     .font_weight(FontWeight::MEDIUM)
-                    .child(self.t(title, cx)),
+                    .text_color(tokens.colors.foreground)
+                    .child(title),
             )
+            .when_some(description, |this, description| {
+                this.child(
+                    div()
+                        .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
+                        .text_center()
+                        .text_color(tokens.colors.muted_foreground)
+                        .child(description),
+                )
+            })
+    }
+
+    fn render_empty_keys(&self, title: &str, description: &str, cx: &App) -> Div {
+        self.render_empty(
+            FluxIcon::Rss,
+            None,
+            self.t(title, cx),
+            Some(self.t(description, cx)),
+            cx,
+        )
+    }
+
+    /// 面板头工具按钮（chrome 风格图标按钮 + 悬浮提示）。
+    fn tool_button(
+        id: &'static str,
+        label: SharedString,
+        icon: FluxIcon,
+        destructive: bool,
+        disabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let icon_size = active_theme(cx).extended().icon.md;
+        let tooltip = label.clone();
+        div()
+            .id(SharedString::from(format!("{id}-tooltip")))
+            .flex_none()
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .child(
-                div()
-                    .text_xs()
-                    .text_center()
-                    .text_color(colors.muted_foreground)
-                    .child(self.t(description, cx)),
+                toolbar_action_button(
+                    id,
+                    label,
+                    Icon::new(icon).size(icon_size),
+                    destructive,
+                    disabled,
+                    cx,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))),
             )
+            .into_any_element()
     }
 }
 
+/// 元信息文字：xs + 三级文字色。
+fn meta_text(cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let xs = theme.tokens().typography.xs;
+    div()
+        .text_size(xs.size)
+        .line_height(xs.line_height)
+        .text_color(theme.extended().colors.text_tertiary)
+}
+
+/// 中性小徽标（条目状态）；`tone` 仅用于需要提示的状态（如任务丢失）。
+fn status_badge(text: SharedString, tone: Option<Hsla>, cx: &App) -> Div {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let caption = theme.extended().caption;
+    div()
+        .flex_none()
+        .max_w_full()
+        .truncate()
+        .px(tokens.spacing.xs + tokens.spacing.xxs)
+        .py(px(1.))
+        .rounded(tokens.radius.sm)
+        .bg(tokens.colors.muted)
+        .text_size(caption.size)
+        .line_height(caption.line_height)
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(tone.unwrap_or(tokens.colors.muted_foreground))
+        .child(text)
+}
+
+fn transparent(color: Hsla) -> Hsla {
+    Hsla { a: 0., ..color }
+}
+
 impl Render for RssView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = active_theme(cx).tokens().colors;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 语言切换后同步搜索框 placeholder。
+        let placeholder = self.t("rssSearchHint", cx);
+        if placeholder != self.search_placeholder {
+            self.search_placeholder = placeholder.clone();
+            self.search.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx);
+            });
+        }
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
+        let colors = tokens.colors;
+        let xs = tokens.typography.xs;
         let stale = self.controller.stale;
         let source = self
             .controller
@@ -761,6 +884,11 @@ impl Render for RssView {
                     .selected
                     .contains(&self.controller.items[index].guid)
             });
+        let any_visible = visible.iter().any(|&index| {
+            self.controller
+                .selected
+                .contains(&self.controller.items[index].guid)
+        });
         let selected_count = self.controller.selected.len();
         let selected_guids: Vec<_> = self.controller.selected.iter().cloned().collect();
         let selected_for_ignore: Vec<_> = self
@@ -771,44 +899,45 @@ impl Render for RssView {
             .map(|item| item.guid.clone())
             .collect();
         let side = v_flex()
-            .w(px(234.))
+            .w(SOURCE_COLUMN_WIDTH)
             .flex_none()
             .h_full()
             .min_h_0()
+            .bg(extended.colors.chrome)
             .border_r_1()
-            .border_color(colors.border)
+            .border_color(extended.colors.hairline)
             .child(
                 h_flex()
                     .items_center()
                     .justify_between()
-                    .px(px(16.))
-                    .py(px(12.))
+                    .px(tokens.spacing.lg)
+                    .pt(tokens.spacing.md)
+                    .pb(tokens.spacing.sm)
                     .child(
                         div()
-                            .text_xs()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors.muted_foreground)
+                            .text_size(extended.caption.size)
+                            .line_height(extended.caption.line_height)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(extended.colors.text_tertiary)
                             .child(self.t("rssSubscriptions", cx)),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted_foreground)
-                            .child(self.controller.sources.len().to_string()),
-                    ),
+                    .child(caption_number(
+                        self.controller.sources.len().to_string(),
+                        cx,
+                    )),
             )
             .child(
                 v_flex()
                     .flex_1()
                     .min_h_0()
-                    .px(px(8.))
+                    .px(tokens.spacing.sm)
+                    .pb(tokens.spacing.sm)
+                    .gap(tokens.spacing.xxs)
                     .when(self.controller.sources.is_empty(), |list| {
                         list.child(
-                            div()
-                                .px(px(10.))
-                                .py(px(16.))
-                                .text_xs()
-                                .text_color(colors.muted_foreground)
+                            meta_text(cx)
+                                .px(tokens.spacing.sm)
+                                .py(tokens.spacing.lg)
                                 .child(self.t("rssSidebarEmptyHint", cx)),
                         )
                     })
@@ -821,28 +950,34 @@ impl Render for RssView {
                     )
                     .overflow_y_scrollbar(),
             );
-        let mut main = v_flex().flex_1().min_w_0().min_h_0().h_full();
+        let mut main = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .bg(colors.surface);
         if let Some(source) = source {
             let status = self.status_line(&source, cx);
-            let title = display_name(&source);
+            let title = SharedString::from(display_name(&source));
             let unhealthy = !source.last_error.is_empty();
             let source_for_manage = source.clone();
             let source_for_delete = source.clone();
+            let tooltip_title = title.clone();
             main = main.child(
                 v_flex()
                     .flex_none()
-                    .px(px(16.))
-                    .py(px(11.))
-                    .gap_2()
+                    .px(tokens.spacing.lg)
+                    .py(tokens.spacing.md)
+                    .gap(tokens.spacing.md)
                     .border_b_1()
-                    .border_color(colors.border)
+                    .border_color(extended.colors.hairline)
                     .child(
                         h_flex()
                             .items_center()
-                            .gap_2()
-                            .child(Icon::empty().path(RSS_ICON_PATH).size(px(17.)).text_color(
+                            .gap(tokens.spacing.sm)
+                            .child(Icon::new(FluxIcon::Rss).size(extended.icon.lg).text_color(
                                 if unhealthy {
-                                    cx.theme().danger
+                                    colors.destructive
                                 } else {
                                     colors.muted_foreground
                                 },
@@ -851,65 +986,62 @@ impl Render for RssView {
                                 v_flex()
                                     .flex_1()
                                     .min_w_0()
-                                    .gap_1()
                                     .child(
                                         div()
                                             .id("rss-selected-source-title")
                                             .truncate()
+                                            .text_size(tokens.typography.sm.size)
+                                            .line_height(tokens.typography.sm.line_height)
                                             .font_weight(FontWeight::SEMIBOLD)
-                                            .text_sm()
+                                            .text_color(colors.foreground)
                                             .tooltip(move |window, cx| {
-                                                gpui_component::tooltip::Tooltip::new(title.clone())
+                                                Tooltip::new(tooltip_title.clone())
                                                     .build(window, cx)
                                             })
-                                            .child(display_name(&source)),
+                                            .child(title),
                                     )
                                     .child(
-                                        div()
+                                        meta_text(cx)
                                             .truncate()
-                                            .text_xs()
-                                            .text_color(if unhealthy {
-                                                cx.theme().danger
-                                            } else {
-                                                colors.muted_foreground
+                                            .font_features(tabular_numbers())
+                                            .when(unhealthy, |this| {
+                                                this.text_color(colors.destructive)
                                             })
                                             .child(status),
                                     ),
                             )
-                            .child(
-                                Button::new("rss-manage")
-                                    .ghost()
-                                    .small()
-                                    .label(self.t("rssManageTitle", cx))
-                                    .disabled(stale)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_editor(
-                                            Some(source_for_manage.clone()),
-                                            window,
-                                            cx,
-                                        )
-                                    })),
-                            )
-                            .child(
-                                Button::new("rss-delete")
-                                    .ghost()
-                                    .small()
-                                    .label(self.t("rssDeleteSource", cx))
-                                    .disabled(stale || self.controller.delete_busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_delete(source_for_delete.clone(), window, cx)
-                                    })),
-                            ),
+                            .child(Self::tool_button(
+                                "rss-manage",
+                                self.t("rssManageTitle", cx),
+                                FluxIcon::Settings,
+                                false,
+                                stale,
+                                move |this, window, cx| {
+                                    this.open_editor(Some(source_for_manage.clone()), window, cx)
+                                },
+                                cx,
+                            ))
+                            .child(Self::tool_button(
+                                "rss-delete",
+                                self.t("rssDeleteSource", cx),
+                                FluxIcon::Trash2,
+                                true,
+                                stale || self.controller.delete_busy,
+                                move |this, window, cx| {
+                                    this.confirm_delete(source_for_delete.clone(), window, cx)
+                                },
+                                cx,
+                            )),
                     )
                     .child(
                         h_flex()
                             .flex_wrap()
                             .items_center()
-                            .gap_2()
+                            .gap(tokens.spacing.xs)
                             .child(
                                 Button::new("rss-sort")
-                                    .outline()
-                                    .small()
+                                    .ghost()
+                                    .icon(FluxIcon::ArrowUpDown)
                                     .label(self.t(
                                         if self.oldest_first {
                                             "rssSortOldest"
@@ -918,6 +1050,7 @@ impl Render for RssView {
                                         },
                                         cx,
                                     ))
+                                    .control(cx)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.oldest_first = !this.oldest_first;
                                         cx.notify();
@@ -926,15 +1059,16 @@ impl Render for RssView {
                             .child(
                                 Button::new("rss-read-all")
                                     .ghost()
-                                    .small()
+                                    .icon(FluxIcon::Check)
                                     .label(self.t("rssMarkAllRead", cx))
+                                    .control(cx)
                                     .disabled(stale || self.controller.read_busy)
                                     .on_click(cx.listener(|this, _, _, cx| this.read_all(cx))),
                             )
                             .child(
                                 Button::new("rss-refresh")
                                     .ghost()
-                                    .small()
+                                    .icon(FluxIcon::RotateCw)
                                     .label(self.t(
                                         if self.controller.refresh_busy {
                                             "rssRefreshing"
@@ -943,83 +1077,95 @@ impl Render for RssView {
                                         },
                                         cx,
                                     ))
+                                    .control(cx)
                                     .disabled(stale || self.controller.refresh_busy)
                                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                             )
-                            .child(div().flex_1().min_w(px(8.)))
+                            .child(div().flex_1().min_w(tokens.spacing.sm))
                             .child(
-                                div().w(px(185.)).child(
-                                    Input::new(&self.search).with_size(Size::Small).prefix(
-                                        Icon::new(IconName::Search)
-                                            .size(px(13.))
-                                            .text_color(colors.muted_foreground),
+                                div().w(SEARCH_WIDTH).child(
+                                    Input::new(&self.search).control(cx).prefix(
+                                        Icon::new(FluxIcon::Search)
+                                            .size(extended.icon.md)
+                                            .text_color(extended.colors.text_tertiary),
                                     ),
                                 ),
                             ),
                     ),
             );
             if !visible.is_empty() || selected_count > 0 {
+                let select_state = if all_visible {
+                    CheckState::Checked
+                } else if any_visible {
+                    CheckState::Indeterminate
+                } else {
+                    CheckState::Unchecked
+                };
                 main = main.child(
                     h_flex()
                         .flex_wrap()
                         .flex_none()
                         .items_center()
-                        .gap_2()
-                        .px(px(16.))
-                        .py(px(7.))
+                        .gap(tokens.spacing.sm)
+                        .px(tokens.spacing.lg)
+                        .py(tokens.spacing.xxs)
                         .border_b_1()
-                        .border_color(colors.border)
+                        .border_color(extended.colors.hairline)
                         .child(
-                            Checkbox::new("rss-select-visible")
-                                .with_size(Size::XSmall)
-                                .checked(all_visible)
-                                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            h_flex()
+                                .id("rss-select-visible")
+                                .h(CONTROL_HEIGHT)
+                                .items_center()
+                                .gap(tokens.spacing.md)
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     let query = this.search.read(cx).value().to_string();
                                     this.controller.select_visible(
                                         &query,
                                         this.oldest_first,
-                                        *checked,
+                                        !all_visible,
                                     );
                                     cx.notify();
-                                })),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(colors.muted_foreground)
-                                .child(self.t("rssSelectVisible", cx)),
+                                }))
+                                .child(check_mark(select_state, cx))
+                                .child(
+                                    div()
+                                        .text_size(xs.size)
+                                        .line_height(xs.line_height)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(extended.colors.text_tertiary)
+                                        .child(self.t("rssSelectVisible", cx)),
+                                ),
                         )
                         .when(selected_count > 0, |bar| {
-                            bar.child(div().text_xs().text_color(colors.muted_foreground).child(
-                                self.with(
-                                    "rssSelectedCount",
-                                    &[("n", &selected_count.to_string())],
-                                    cx,
-                                ),
-                            ))
+                            bar.child(
+                                div()
+                                    .text_size(xs.size)
+                                    .line_height(xs.line_height)
+                                    .font_features(tabular_numbers())
+                                    .text_color(colors.muted_foreground)
+                                    .child(self.with(
+                                        "rssSelectedCount",
+                                        &[("n", &selected_count.to_string())],
+                                        cx,
+                                    )),
+                            )
+                            .child(div().flex_1())
                             .child(
-                                Button::new("rss-download-selected")
-                                    .primary()
-                                    .xsmall()
-                                    .label(self.t("rssDownloadSelected", cx))
-                                    .disabled(
-                                        stale
-                                            || selected_guids.iter().all(|guid| {
-                                                self.controller.busy.contains(&format!(
-                                                    "{}\0{guid}",
-                                                    source.source_id
-                                                ))
-                                            }),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.act(selected_guids.clone(), "download", cx)
+                                Button::new("rss-clear-selection")
+                                    .ghost()
+                                    .label(self.t("rssClearSelection", cx))
+                                    .control(cx)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.controller.selected.clear();
+                                        cx.notify();
                                     })),
                             )
                             .child(
                                 Button::new("rss-ignore-selected")
                                     .outline()
-                                    .xsmall()
                                     .label(self.t("rssIgnoreSelected", cx))
+                                    .control(cx)
                                     .disabled(
                                         stale
                                             || selected_for_ignore.iter().all(|guid| {
@@ -1034,98 +1180,95 @@ impl Render for RssView {
                                     })),
                             )
                             .child(
-                                Button::new("rss-clear-selection")
-                                    .ghost()
-                                    .xsmall()
-                                    .label(self.t("rssClearSelection", cx))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.controller.selected.clear();
-                                        cx.notify();
+                                Button::new("rss-download-selected")
+                                    .primary()
+                                    .label(self.t("rssDownloadSelected", cx))
+                                    .control(cx)
+                                    .disabled(
+                                        stale
+                                            || selected_guids.iter().all(|guid| {
+                                                self.controller.busy.contains(&format!(
+                                                    "{}\0{guid}",
+                                                    source.source_id
+                                                ))
+                                            }),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.act(selected_guids.clone(), "download", cx)
                                     })),
                             )
                         }),
                 );
             }
             if self.controller.loading && visible.is_empty() {
-                main =
-                    main.child(self.render_empty("rssEmptyFetching", "rssEmptyFetchingHint", cx));
+                main = main.child(self.render_empty_keys(
+                    "rssEmptyFetching",
+                    "rssEmptyFetchingHint",
+                    cx,
+                ));
             } else if visible.is_empty() {
                 if !query.is_empty() && !self.controller.items.is_empty() {
-                    main = main.child(
-                        v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .text_sm()
-                            .text_color(colors.muted_foreground)
-                            .child(self.with("rssNoMatch", &[("query", &query)], cx)),
-                    );
+                    main = main.child(self.render_empty(
+                        FluxIcon::Search,
+                        None,
+                        SharedString::from(self.with("rssNoMatch", &[("query", &query)], cx)),
+                        None,
+                        cx,
+                    ));
                 } else if unhealthy || self.load_error {
                     let retry_fetch = self.load_error;
                     let source_for_manage = source.clone();
                     main = main.child(
-                        v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .px(px(40.))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(cx.theme().danger)
-                                    .child(self.t("rssEmptyError", cx)),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_center()
-                                    .text_color(colors.muted_foreground)
-                                    .child(self.t("rssEmptyErrorHint", cx)),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("rss-empty-retry")
-                                            .outline()
-                                            .small()
-                                            .label(self.t("rssEmptyRetry", cx))
-                                            .disabled(stale)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if retry_fetch {
-                                                    this.fetch_items(cx);
-                                                    cx.notify();
-                                                } else {
-                                                    this.refresh(cx);
-                                                }
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("rss-empty-manage")
-                                            .outline()
-                                            .small()
-                                            .label(self.t("rssCheckConfig", cx))
-                                            .disabled(stale)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.open_editor(
-                                                    Some(source_for_manage.clone()),
-                                                    window,
-                                                    cx,
-                                                )
-                                            })),
-                                    ),
-                            ),
+                        self.render_empty(
+                            FluxIcon::CircleAlert,
+                            Some(colors.destructive),
+                            self.t("rssEmptyError", cx),
+                            Some(self.t("rssEmptyErrorHint", cx)),
+                            cx,
+                        )
+                        .child(
+                            h_flex()
+                                .pt(tokens.spacing.xs)
+                                .gap(tokens.spacing.sm)
+                                .child(
+                                    Button::new("rss-empty-retry")
+                                        .outline()
+                                        .label(self.t("rssEmptyRetry", cx))
+                                        .control(cx)
+                                        .disabled(stale)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if retry_fetch {
+                                                this.fetch_items(cx);
+                                                cx.notify();
+                                            } else {
+                                                this.refresh(cx);
+                                            }
+                                        })),
+                                )
+                                .child(
+                                    Button::new("rss-empty-manage")
+                                        .outline()
+                                        .label(self.t("rssCheckConfig", cx))
+                                        .control(cx)
+                                        .disabled(stale)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.open_editor(
+                                                Some(source_for_manage.clone()),
+                                                window,
+                                                cx,
+                                            )
+                                        })),
+                                ),
+                        ),
                     );
                 } else if !source.seeded && source.enabled {
-                    main = main.child(self.render_empty(
+                    main = main.child(self.render_empty_keys(
                         "rssEmptyFetching",
                         "rssEmptyFetchingHint",
                         cx,
                     ));
                 } else {
-                    main = main.child(self.render_empty("rssEmptyTitle", "rssEmptyDesc", cx));
+                    main = main.child(self.render_empty_keys("rssEmptyTitle", "rssEmptyDesc", cx));
                 }
             } else {
                 let count = visible.len();
@@ -1150,32 +1293,37 @@ impl Render for RssView {
                 );
             }
         } else {
-            main = main.child(self.render_empty("rssAddSource", "rssSidebarEmptyHint", cx));
+            main = main.child(self.render_empty_keys("rssAddSource", "rssSidebarEmptyHint", cx));
         }
         v_flex()
             .size_full()
-            .bg(colors.background)
+            .bg(colors.surface)
             .child(
                 h_flex()
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .px(px(18.))
-                    .py(px(12.))
+                    .gap(tokens.spacing.md)
+                    .px(tokens.spacing.lg)
+                    .py(tokens.spacing.md)
                     .border_b_1()
-                    .border_color(colors.border)
+                    .border_color(extended.colors.hairline)
                     .child(
                         v_flex()
-                            .gap_1()
+                            .min_w_0()
+                            .gap(tokens.spacing.xxs)
                             .child(
                                 div()
-                                    .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(extended.title.size)
+                                    .line_height(extended.title.line_height)
+                                    .font_weight(extended.title.weight)
+                                    .text_color(colors.foreground)
                                     .child(self.t("rssSubscriptions", cx)),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(xs.size)
+                                    .line_height(xs.line_height)
                                     .text_color(colors.muted_foreground)
                                     .child(self.t("rssPageDescription", cx)),
                             ),
@@ -1183,10 +1331,9 @@ impl Render for RssView {
                     .child(
                         Button::new("rss-add-source")
                             .primary()
-                            .small()
-                            .h(CONTROL_HEIGHT)
-                            .icon(IconName::Plus)
+                            .icon(FluxIcon::Plus)
                             .label(self.t("rssAddSource", cx))
+                            .control(cx)
                             .disabled(stale)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_editor(None, window, cx)
@@ -1197,11 +1344,12 @@ impl Render for RssView {
                 page.child(
                     div()
                         .flex_none()
-                        .px(px(18.))
-                        .py(px(7.))
-                        .bg(cx.theme().danger.opacity(0.1))
-                        .text_xs()
-                        .text_color(cx.theme().danger)
+                        .px(tokens.spacing.lg)
+                        .py(tokens.spacing.xs + tokens.spacing.xxs)
+                        .bg(colors.destructive.opacity(0.08))
+                        .text_size(xs.size)
+                        .line_height(xs.line_height)
+                        .text_color(colors.destructive)
                         .child(error),
                 )
             })
@@ -1209,16 +1357,24 @@ impl Render for RssView {
                 page.child(
                     h_flex()
                         .flex_none()
-                        .px(px(18.))
-                        .py(px(7.))
-                        .gap_3()
-                        .bg(colors.primary.opacity(0.08))
-                        .child(div().flex_1().text_xs().child(feedback))
+                        .items_center()
+                        .px(tokens.spacing.lg)
+                        .py(tokens.spacing.xxs)
+                        .gap(tokens.spacing.md)
+                        .bg(colors.accent)
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(xs.size)
+                                .line_height(xs.line_height)
+                                .text_color(colors.foreground)
+                                .child(feedback),
+                        )
                         .child(
                             Button::new("rss-dismiss-feedback")
                                 .ghost()
-                                .xsmall()
                                 .label(self.t("close", cx))
+                                .control(cx)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.feedback = None;
                                     cx.notify();

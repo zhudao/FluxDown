@@ -1,9 +1,12 @@
 //! BitTorrent：基础（DHT/UPnP/端口）、Tracker（列表 + 订阅）、做种。
 
+use fluxdown_ui_components::FluxIcon;
 use gpui::{App, SharedString};
-use gpui_component::IconName;
 
-use super::{SectionContext, subscription};
+use super::{
+    SectionContext,
+    subscription::{self, ListFormat},
+};
 use crate::ui::{SettingsPage, SettingsSection, SettingsTab};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
@@ -11,7 +14,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         "bt",
         ctx.t("settingsCatBt"),
         ctx.t("settingsCatBtDesc"),
-        IconName::HardDrive,
+        FluxIcon::Magnet,
     )
     .tab(SettingsTab::new("basic", ctx.t("settingsTabGeneral")).section(basic_section(ctx)))
     .tab(SettingsTab::new("tracker", ctx.t("settingsTabTracker")).section(tracker_section(ctx, cx)))
@@ -46,6 +49,7 @@ fn basic_section(ctx: &SectionContext) -> SettingsSection {
 }
 
 fn tracker_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
+    let sub_enabled = ctx.store.read(cx).daemon_bool("bt_tracker_sub_enabled");
     SettingsSection::new()
         .title(ctx.t("settingsTabTracker"))
         .row(subscription::list_item(
@@ -54,19 +58,24 @@ fn tracker_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
             "btTrackerListDesc",
             "btTrackerPlaceholder",
             "bt_custom_trackers",
+            ListFormat::Lines,
         ))
         .row(ctx.item(
             "btTrackerSub",
             Some("btTrackerSubDesc"),
             ctx.daemon_switch("bt_tracker_sub_enabled"),
         ))
-        .row(subscription::list_item(
-            ctx,
-            "btTrackerSub",
-            "btTrackerSubDesc",
-            "btTrackerSubPlaceholder",
-            "bt_tracker_sub_urls",
-        ))
+        .row(
+            subscription::list_item(
+                ctx,
+                "btTrackerSubUrls",
+                "btTrackerSubUrlsDesc",
+                "btTrackerSubPlaceholder",
+                "bt_tracker_sub_urls",
+                ListFormat::Lines,
+            )
+            .disabled(!sub_enabled),
+        )
         .row(subscription::status_item(
             ctx,
             subscription::SubscriptionKind::BtTrackers,

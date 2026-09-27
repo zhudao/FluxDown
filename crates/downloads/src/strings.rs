@@ -1,6 +1,12 @@
 use fluxdown_ui_i18n::{Translator, keys};
 use gpui::SharedString;
 
+/// 「聚焦搜索」快捷键提示（与 app `menus.rs` 的 `secondary-f` 绑定一致），显示在顶栏搜索框右侧徽标里。
+#[cfg(target_os = "macos")]
+pub(crate) const SEARCH_SHORTCUT_HINT: &str = "⌘F";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const SEARCH_SHORTCUT_HINT: &str = "Ctrl+F";
+
 #[derive(Clone)]
 pub(crate) struct DownloadStrings {
     pub(crate) category_archive: SharedString,
@@ -38,10 +44,10 @@ pub(crate) struct DownloadStrings {
     eta_hours: SharedString,
     pub(crate) later_queue: SharedString,
     pub(crate) pause: SharedString,
+    pub(crate) pause_all: SharedString,
     pub(crate) resume: SharedString,
     pub(crate) resume_all: SharedString,
     pub(crate) main_queue: SharedString,
-    pub(crate) new_download: SharedString,
     pub(crate) open_file: SharedString,
     pub(crate) open_folder: SharedString,
     pub(crate) remote_tasks: SharedString,
@@ -53,7 +59,6 @@ pub(crate) struct DownloadStrings {
     pub(crate) status_incomplete: SharedString,
     pub(crate) status_paused: SharedString,
     pub(crate) status_pending: SharedString,
-    pub(crate) stop_all: SharedString,
     pub(crate) today: SharedString,
     pub(crate) yesterday: SharedString,
     pub(crate) this_week: SharedString,
@@ -61,9 +66,6 @@ pub(crate) struct DownloadStrings {
     pub(crate) older: SharedString,
     pub(crate) ungrouped: SharedString,
     pub(crate) site_bt: SharedString,
-    pub(crate) view_columns_at_least_one: SharedString,
-    pub(crate) view_columns_menu_title: SharedString,
-    pub(crate) view_columns_reset_action: SharedString,
     pub(crate) ignore_plugin_retry: SharedString,
     pub(crate) ignore_plugin_retry_title: SharedString,
     pub(crate) ignore_plugin_retry_msg: SharedString,
@@ -146,9 +148,9 @@ impl DownloadStrings {
             too_many_windows_hint: shared(translator.text("tooManyWindowsHint")),
             main_queue: shared(translator.text(keys::MAIN_QUEUE)),
             pause: shared(translator.text(keys::PAUSE)),
+            pause_all: shared(translator.text("pauseAll")),
             resume: shared(translator.text(keys::RESUME)),
             resume_all: shared(translator.text("resumeAll")),
-            new_download: shared(translator.text(keys::NEW_DOWNLOAD)),
             open_file: shared(translator.text("openFile")),
             open_folder: shared(translator.text("openFolder")),
             remote_tasks: shared(translator.text("remoteTasksGroup")),
@@ -160,7 +162,6 @@ impl DownloadStrings {
             status_incomplete: shared(translator.text("tabDownloading")),
             status_paused: shared(translator.text(keys::STATUS_PAUSED)),
             status_pending: shared(translator.text("statusPending")),
-            stop_all: shared(translator.text(keys::STOP_ALL)),
             today: shared(translator.text(keys::TODAY)),
             yesterday: shared(translator.text("yesterday")),
             this_week: shared(translator.text("thisWeek")),
@@ -168,9 +169,6 @@ impl DownloadStrings {
             older: shared(translator.text("older")),
             ungrouped: shared(translator.text("ungroupedTasks")),
             site_bt: shared(translator.text("viewSiteBt")),
-            view_columns_at_least_one: shared(translator.text(keys::VIEW_COLUMNS_AT_LEAST_ONE)),
-            view_columns_menu_title: shared(translator.text(keys::VIEW_COLUMNS_MENU_TITLE)),
-            view_columns_reset_action: shared(translator.text(keys::VIEW_COLUMNS_RESET_ACTION)),
             ignore_plugin_retry: shared(translator.text("taskIgnorePluginRetry")),
             ignore_plugin_retry_title: shared(translator.text("taskIgnorePluginRetryTitle")),
             ignore_plugin_retry_msg: shared(translator.text("taskIgnorePluginRetryMsg")),
@@ -299,21 +297,8 @@ impl DownloadStrings {
         }
     }
 
-    /// 创建时间：今天只显示 `HH:MM`，否则 `YYYY-MM-DD`。
-    pub(crate) fn format_created(&self, created_at_secs: i64) -> SharedString {
-        use chrono::{Local, TimeZone};
-        let Some(created) = Local.timestamp_opt(created_at_secs, 0).single() else {
-            return SharedString::from("—");
-        };
-        if created.date_naive() == Local::now().date_naive() {
-            SharedString::from(created.format("%H:%M").to_string())
-        } else {
-            SharedString::from(created.format("%Y-%m-%d").to_string())
-        }
-    }
-
-    /// 任务详情中的完整本地时间（Unix 秒）；列表仍使用简短创建时间。
-    pub(crate) fn format_detail_datetime(timestamp_secs: i64) -> SharedString {
+    /// 完整本地时间 `YYYY-MM-DD HH:MM:SS`（Unix 秒）：列表「创建时间」列与任务详情共用。
+    pub(crate) fn format_datetime(timestamp_secs: i64) -> SharedString {
         use chrono::{Local, TimeZone};
         Local
             .timestamp_opt(timestamp_secs, 0)
@@ -351,6 +336,8 @@ pub(crate) struct NewDownloadStrings {
     pub(crate) http_auth_user: SharedString,
     pub(crate) http_auth_password: SharedString,
     pub(crate) http_auth_save: SharedString,
+    pub(crate) capture_auth_hint: SharedString,
+    pub(crate) capture_context_hint: SharedString,
     pub(crate) proxy: SharedString,
     pub(crate) proxy_desc: SharedString,
     pub(crate) proxy_placeholder: SharedString,
@@ -419,6 +406,8 @@ impl NewDownloadStrings {
             http_auth_user: shared(translator.text("taskHttpAuthUser")),
             http_auth_password: shared(translator.text("taskHttpAuthPassword")),
             http_auth_save: shared(translator.text("taskHttpAuthSaveForSite")),
+            capture_auth_hint: shared(translator.text("newDownloadCaptureAuthHint")),
+            capture_context_hint: shared(translator.text("newDownloadCaptureContextHint")),
             proxy: shared(translator.text("taskProxy")),
             proxy_desc: shared(translator.text("taskProxyDesc")),
             proxy_placeholder: shared(translator.text("taskProxyPlaceholder")),
@@ -510,7 +499,7 @@ mod tests {
     use super::DownloadStrings;
 
     #[test]
-    fn detail_datetime_keeps_seconds_across_midnight_and_rejects_out_of_range() {
+    fn datetime_keeps_seconds_across_midnight_and_rejects_out_of_range() {
         let before = Local
             .with_ymd_and_hms(2026, 3, 18, 23, 59, 59)
             .single()
@@ -520,16 +509,13 @@ mod tests {
             .single()
             .expect("valid local time");
         assert_eq!(
-            DownloadStrings::format_detail_datetime(before.timestamp()).as_ref(),
+            DownloadStrings::format_datetime(before.timestamp()).as_ref(),
             "2026-03-18 23:59:59"
         );
         assert_eq!(
-            DownloadStrings::format_detail_datetime(after.timestamp()).as_ref(),
+            DownloadStrings::format_datetime(after.timestamp()).as_ref(),
             "2026-03-19 00:00:00"
         );
-        assert_eq!(
-            DownloadStrings::format_detail_datetime(i64::MAX).as_ref(),
-            "—"
-        );
+        assert_eq!(DownloadStrings::format_datetime(i64::MAX).as_ref(), "—");
     }
 }

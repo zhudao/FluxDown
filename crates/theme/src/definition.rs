@@ -1,6 +1,7 @@
-use gpui::{Hsla, Rgba, SharedString, rgb};
+use gpui::{FontWeight, Hsla, Rgba, SharedString, px, rgb};
 use gpui_base::{
-    ColorTokens, RadiusTokens, SemanticThemeTokens, ShadowTokens, SpacingTokens, TypographyTokens,
+    ColorTokens, RadiusTokens, SemanticThemeTokens, ShadowTokens, SpacingTokens, TextStyleToken,
+    TypographyTokens,
 };
 use gpui_component::ThemeMode;
 use serde::{Deserialize, Serialize};
@@ -95,8 +96,15 @@ impl Default for FluxThemeDefinition {
 }
 
 fn semantic_tokens(colors: ColorTokens) -> SemanticThemeTokens {
+    // 桌面正文基线 13/18（macOS 正文字号，Windows/Linux 桌面列表同样取 13），
+    // gpui-component 的 rem 也取 `sm`，因此整套 rem 工具类随之对齐。
     let typography = TypographyTokens {
         sans: "MiSans".into(),
+        sm: TextStyleToken {
+            size: px(13.),
+            line_height: px(18.),
+            weight: FontWeight::NORMAL,
+        },
         ..TypographyTokens::default()
     };
 
@@ -258,7 +266,7 @@ pub fn foreground_for(accent: Hsla) -> Hsla {
 }
 
 /// WCAG 相对亮度（Flutter `Color.computeLuminance`）。
-fn relative_luminance(value: Hsla) -> f32 {
+pub(crate) fn relative_luminance(value: Hsla) -> f32 {
     fn linear(channel: f32) -> f32 {
         if channel <= 0.039_28 {
             channel / 12.92

@@ -5,14 +5,19 @@ use std::sync::Arc;
 use fluxdown_protocol::{
     QueueDto, RpcErrorData, RssSourceDto, RssValidateRequest, RssValidateResponse, method,
 };
+use fluxdown_ui_components::{
+    ControlExt as _, FluxIcon, card, dialog_title, field_error, field_hint, form, form_field,
+    form_row, input_with_action, option_group, option_row, segmented_tabs,
+};
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Anchor, App, AppContext as _, ClickEvent, Context, Div, Entity, IntoElement, ParentElement,
-    PathPromptOptions, Render, SharedString, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, App, AppContext as _, ClickEvent, Context, Div, Entity, FontWeight,
+    IntoElement, ParentElement, PathPromptOptions, Render, SharedString, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Sizable as _, Size, WindowExt as _,
+    Disableable as _, Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -93,10 +98,10 @@ pub(super) fn open_editor(
     );
     let editor = cx.new(|cx| Editor::new(translator, port, source, queues, window, cx));
     let url = editor.read(cx).url.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let editor = editor.clone();
         dialog
-            .title(title.clone())
+            .title(dialog_title(title.clone(), cx))
             .w(px(640.))
             .margin_top(px(32.))
             .overlay_closable(false)
@@ -475,32 +480,20 @@ impl Editor {
         .detach();
     }
 
-    fn label(&self, key: &str, cx: &App) -> Div {
-        let tokens = active_theme(cx).tokens();
-        div()
-            .text_xs()
-            .font_weight(tokens.typography.sm.weight)
-            .text_color(tokens.colors.muted_foreground)
-            .child(self.t(key, cx))
-    }
-
     fn hint(&self, key: &str, cx: &App) -> Div {
-        let tokens = active_theme(cx).tokens();
-        div()
-            .text_xs()
-            .text_color(tokens.colors.muted_foreground)
-            .child(self.t(key, cx))
+        field_hint(self.t(key, cx), cx)
     }
 
     fn field(&self, key: &str, input: &Entity<InputState>, cx: &App) -> Div {
-        let tokens = active_theme(cx).tokens();
-        v_flex()
-            .w_full()
-            .gap(tokens.spacing.xs)
-            .child(self.label(key, cx))
-            .child(Input::new(input).with_size(Size::Medium).w_full())
+        form_field(
+            self.t(key, cx),
+            Input::new(input).control(cx).w_full(),
+            None,
+            cx,
+        )
     }
 
+    /// 开关行（放进 `option_group`）。
     fn toggle(
         &self,
         id: &'static str,
@@ -509,27 +502,22 @@ impl Editor {
         checked: bool,
         on_change: fn(&mut Self, bool),
         cx: &mut Context<Self>,
-    ) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        h_flex()
-            .items_center()
-            .gap(tokens.spacing.md)
-            .py(tokens.spacing.xs)
-            .child(
-                v_flex()
-                    .flex_1()
-                    .gap(tokens.spacing.xxs)
-                    .child(div().text_sm().child(self.t(key, cx)))
-                    .child(self.hint(description, cx)),
-            )
-            .child(Switch::new(id).checked(checked).on_click(cx.listener(
+    ) -> AnyElement {
+        option_row(
+            self.t(key, cx),
+            Some(self.t(description, cx)),
+            Switch::new(id).checked(checked).on_click(cx.listener(
                 move |this, checked: &bool, _, cx| {
                     on_change(this, *checked);
                     cx.notify();
                 },
-            )))
+            )),
+            cx,
+        )
+        .into_any_element()
     }
 
+    /// 下拉选择：与输入框同高、铺满字段宽度，右侧下拉箭头。
     fn menu(
         &self,
         id: &'static str,
@@ -537,14 +525,14 @@ impl Editor {
         choices: Vec<(String, SharedString)>,
         on_select: fn(&mut Self, String),
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let this = cx.weak_entity();
         Button::new(id)
             .outline()
-            .small()
-            .h(CONTROL_HEIGHT)
             .label(label)
             .dropdown_caret(true)
+            .control(cx)
+            .w_full()
             .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
                 choices.iter().fold(menu, |menu, (value, label)| {
                     let this = this.clone();
@@ -561,34 +549,31 @@ impl Editor {
     }
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        let mut tabs = h_flex().gap(tokens.spacing.xs);
-        for (tab, key, id) in [
-            (Tab::Basic, "rssTabBasic", "rss-editor-basic"),
-            (Tab::Filter, "rssTabFilter", "rss-editor-filter"),
-            (Tab::Advanced, "rssTabAdvanced", "rss-editor-advanced"),
-        ] {
-            let button = Button::new(id)
-                .small()
-                .h(CONTROL_HEIGHT)
-                .label(self.t(key, cx));
-            let button = if self.tab == tab {
-                button.primary()
-            } else {
-                button.ghost()
-            };
-            tabs = tabs.child(
-                button.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+        const TABS: [Tab; 3] = [Tab::Basic, Tab::Filter, Tab::Advanced];
+        let labels = ["rssTabBasic", "rssTabFilter", "rssTabAdvanced"].map(|key| self.t(key, cx));
+        let selected = TABS.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let this = cx.weak_entity();
+        segmented_tabs(
+            "rss-editor-tabs",
+            labels,
+            selected,
+            move |index, _, cx| {
+                let Some(tab) = TABS.get(index).copied() else {
+                    return;
+                };
+                let _ = this.update(cx, |this, cx| {
                     this.tab = tab;
                     cx.notify();
-                })),
-            );
-        }
-        tabs
+                });
+            },
+            cx,
+        )
     }
 
     fn render_basic(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let tertiary = theme.extended().colors.text_tertiary;
         let queue_label = self
             .queues
             .iter()
@@ -617,130 +602,175 @@ impl Editor {
             .chain((!INTERVALS.contains(&self.interval)).then_some(self.interval))
             .map(|minutes| (minutes.to_string(), self.interval_label(minutes, cx)))
             .collect();
-        let mut body =
-            v_flex()
-                .gap(tokens.spacing.md)
-                .child(self.field("rssUrlLabel", &self.url, cx));
-        if self.existing.is_none() {
-            body = body.child(self.hint("rssEditorAuthHint", cx));
-            if self.validating {
-                body = body.child(self.hint("rssWizardValidating", cx));
-            }
-            if let Some(feed) = &self.validated {
-                body = body.child(
-                    v_flex()
-                        .gap(tokens.spacing.xs)
-                        .rounded(tokens.radius.md)
-                        .border_1()
-                        .border_color(tokens.colors.border)
-                        .p(tokens.spacing.sm)
-                        .child(
-                            div()
-                                .text_sm()
-                                .child(SharedString::from(feed.title.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(tokens.colors.muted_foreground)
-                                .child(SharedString::from(
-                                    self.t("rssWizardFeedSummary", cx)
-                                        .replace("{n}", &feed.item_count.to_string()),
-                                )),
-                        ),
-                );
-            }
+
+        // 订阅链接 + 行内「验证」：验证是新建流程的第一步，和链接放在同一行，
+        // 不再挤在底栏左端。
+        let can_validate =
+            !self.validating && !self.saving && !Self::value(&self.url, cx).is_empty();
+        let url_hint = if self.existing.is_none() {
+            Some(self.t(
+                if self.validating {
+                    "rssWizardValidating"
+                } else {
+                    "rssEditorAuthHint"
+                },
+                cx,
+            ))
+        } else {
+            None
+        };
+        let url_field = form_field(
+            self.t("rssUrlLabel", cx),
+            input_with_action(
+                Input::new(&self.url).control(cx).w_full(),
+                Button::new("rss-editor-validate")
+                    .outline()
+                    .label(self.t("rssWizardValidate", cx))
+                    .control(cx)
+                    .loading(self.validating)
+                    .disabled(!can_validate)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.validate(cx))),
+                cx,
+            ),
+            url_hint,
+            cx,
+        );
+
+        let mut body = form(cx).child(url_field);
+        if let Some(feed) = self.validated.as_ref().filter(|_| self.existing.is_none()) {
+            body = body.child(
+                card(cx)
+                    .flex()
+                    .items_center()
+                    .gap(tokens.spacing.sm)
+                    .px(tokens.spacing.md)
+                    .py(tokens.spacing.sm)
+                    .child(
+                        Icon::new(FluxIcon::CircleCheck)
+                            .size(theme.extended().icon.lg)
+                            .text_color(theme.extended().colors.success),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .flex_1()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(tokens.typography.sm.size)
+                                    .line_height(tokens.typography.sm.line_height)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(tokens.colors.foreground)
+                                    .child(SharedString::from(feed.title.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(tokens.typography.xs.size)
+                                    .line_height(tokens.typography.xs.line_height)
+                                    .text_color(tertiary)
+                                    .child(SharedString::from(
+                                        self.t("rssWizardFeedSummary", cx)
+                                            .replace("{n}", &feed.item_count.to_string()),
+                                    )),
+                            ),
+                    ),
+            );
         }
-        if self.existing.is_some() || self.validated.is_some() {
-            body = body
-                .child(self.field("rssNameLabel", &self.name, cx))
-                .child(
-                    h_flex()
-                        .gap(tokens.spacing.md)
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .gap(tokens.spacing.xs)
-                                .child(self.label("rssIntervalLabel", cx))
-                                .child(self.menu(
-                                    "rss-editor-interval",
-                                    self.interval_label(self.interval, cx),
-                                    intervals,
-                                    |this, value| {
-                                        if let Ok(value) = value.parse() {
-                                            this.interval = value;
-                                        }
-                                    },
-                                    cx,
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .gap(tokens.spacing.xs)
-                                .child(self.label("rssQueueLabel", cx))
-                                .child(self.menu(
-                                    "rss-editor-queue",
-                                    queue_label,
-                                    choices,
-                                    |this, value| this.queue_id = value,
-                                    cx,
-                                )),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .gap(tokens.spacing.xs)
-                        .child(self.label("rssSaveDirLabel", cx))
-                        .child(
-                            h_flex()
-                                .gap(tokens.spacing.sm)
-                                .child(div().flex_1().min_w_0().child(
-                                    Input::new(&self.save_dir).with_size(Size::Medium).w_full(),
-                                ))
-                                .child(
-                                    Button::new("rss-editor-pick-dir")
-                                        .outline()
-                                        .small()
-                                        .h(CONTROL_HEIGHT)
-                                        .label(self.t("browse", cx))
-                                        .disabled(self.picking_dir)
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, window, cx| {
-                                                this.pick_dir(window, cx)
-                                            },
-                                        )),
-                                ),
-                        )
-                        .child(self.hint("rssSaveDirHint", cx)),
-                )
-                .child(self.toggle(
+        if self.existing.is_none() && self.validated.is_none() {
+            return body;
+        }
+
+        let interval_field = form_field(
+            self.t("rssIntervalLabel", cx),
+            self.menu(
+                "rss-editor-interval",
+                self.interval_label(self.interval, cx),
+                intervals,
+                |this, value| {
+                    if let Ok(value) = value.parse() {
+                        this.interval = value;
+                    }
+                },
+                cx,
+            ),
+            None,
+            cx,
+        );
+        let queue_field = form_field(
+            self.t("rssQueueLabel", cx),
+            self.menu(
+                "rss-editor-queue",
+                queue_label,
+                choices,
+                |this, value| this.queue_id = value,
+                cx,
+            ),
+            None,
+            cx,
+        );
+        let save_dir_field = form_field(
+            self.t("rssSaveDirLabel", cx),
+            input_with_action(
+                Input::new(&self.save_dir).control(cx).w_full(),
+                Button::new("rss-editor-pick-dir")
+                    .outline()
+                    .icon(FluxIcon::FolderOpen)
+                    .label(self.t("browse", cx))
+                    .control(cx)
+                    .disabled(self.picking_dir)
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.pick_dir(window, cx)),
+                    ),
+                cx,
+            ),
+            Some(self.t("rssSaveDirHint", cx)),
+            cx,
+        );
+        let options = option_group(
+            [
+                self.toggle(
                     "rss-editor-enabled",
                     "rssEnabledLabel",
                     "rssEnabledDesc",
                     self.enabled,
                     |this, v| this.enabled = v,
                     cx,
-                ))
-                .child(self.toggle(
+                ),
+                self.toggle(
                     "rss-editor-autodownload",
                     "rssAutoDownloadLabel",
                     "rssAutoDownloadDesc",
                     self.auto_download,
                     |this, v| this.auto_download = v,
                     cx,
-                ))
-                .child(self.hint("rssWizardSeedNote", cx))
-                .child(self.toggle(
+                ),
+                self.toggle(
                     "rss-editor-paused",
                     "rssStartPausedLabel",
                     "rssStartPausedDesc",
                     self.start_paused,
                     |this, v| this.start_paused = v,
                     cx,
-                ));
-        }
-        body
+                ),
+            ],
+            cx,
+        );
+
+        body.child(self.field("rssNameLabel", &self.name, cx))
+            .child(form_row(
+                [
+                    interval_field.into_any_element(),
+                    queue_field.into_any_element(),
+                ],
+                cx,
+            ))
+            .child(save_dir_field)
+            .child(
+                v_flex()
+                    .gap(tokens.spacing.xs + tokens.spacing.xxs)
+                    .child(options)
+                    .child(self.hint("rssWizardSeedNote", cx)),
+            )
     }
 
     fn interval_label(&self, minutes: i32, cx: &App) -> SharedString {
@@ -753,65 +783,73 @@ impl Editor {
     }
 
     fn render_filter(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .gap(tokens.spacing.md)
+        form(cx)
             .child(self.field("rssIncludeLabel", &self.include, cx))
             .child(self.field("rssExcludeLabel", &self.exclude, cx))
-            .child(
-                h_flex()
-                    .gap(tokens.spacing.md)
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(self.field("rssSizeMinLabel", &self.size_min, cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(self.field("rssSizeMaxLabel", &self.size_max, cx)),
-                    ),
-            )
-            .child(self.toggle(
-                "rss-editor-regex",
-                "rssUseRegexLabel",
-                "rssUseRegexDesc",
-                self.use_regex,
-                |this, v| this.use_regex = v,
+            .child(form_row(
+                [
+                    self.field("rssSizeMinLabel", &self.size_min, cx)
+                        .into_any_element(),
+                    self.field("rssSizeMaxLabel", &self.size_max, cx)
+                        .into_any_element(),
+                ],
                 cx,
             ))
-            .child(self.toggle(
-                "rss-editor-episode",
-                "rssSmartEpisodeLabel",
-                "rssSmartEpisodeDesc",
-                self.smart_episode,
-                |this, v| this.smart_episode = v,
+            .child(option_group(
+                [
+                    self.toggle(
+                        "rss-editor-regex",
+                        "rssUseRegexLabel",
+                        "rssUseRegexDesc",
+                        self.use_regex,
+                        |this, v| this.use_regex = v,
+                        cx,
+                    ),
+                    self.toggle(
+                        "rss-editor-episode",
+                        "rssSmartEpisodeLabel",
+                        "rssSmartEpisodeDesc",
+                        self.smart_episode,
+                        |this, v| this.smart_episode = v,
+                        cx,
+                    ),
+                ],
                 cx,
             ))
     }
 
     fn render_advanced(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        v_flex()
-            .gap(tokens.spacing.md)
+        form(cx)
             .child(self.field("rssCookiesLabel", &self.cookies, cx))
             .child(self.field("rssUserAgentLabel", &self.user_agent, cx))
-            .child(self.field("rssProxyLabel", &self.proxy, cx))
-            .child(self.field("rssMaxPerFetchLabel", &self.max_per_fetch, cx))
-            .child(self.toggle(
-                "rss-editor-referer",
-                "rssSendRefererLabel",
-                "rssSendRefererDesc",
-                self.send_referer,
-                |this, v| this.send_referer = v,
+            .child(form_row(
+                [
+                    self.field("rssProxyLabel", &self.proxy, cx)
+                        .into_any_element(),
+                    self.field("rssMaxPerFetchLabel", &self.max_per_fetch, cx)
+                        .into_any_element(),
+                ],
                 cx,
             ))
-            .child(self.toggle(
-                "rss-editor-notify",
-                "rssNotifyLabel",
-                "rssNotifyDesc",
-                self.notify_on_download,
-                |this, v| this.notify_on_download = v,
+            .child(option_group(
+                [
+                    self.toggle(
+                        "rss-editor-referer",
+                        "rssSendRefererLabel",
+                        "rssSendRefererDesc",
+                        self.send_referer,
+                        |this, v| this.send_referer = v,
+                        cx,
+                    ),
+                    self.toggle(
+                        "rss-editor-notify",
+                        "rssNotifyLabel",
+                        "rssNotifyDesc",
+                        self.notify_on_download,
+                        |this, v| this.notify_on_download = v,
+                        cx,
+                    ),
+                ],
                 cx,
             ))
     }
@@ -825,39 +863,27 @@ impl Render for Editor {
             Tab::Filter => self.render_filter(cx),
             Tab::Advanced => self.render_advanced(cx),
         };
-        let can_validate =
-            !self.validating && !self.saving && !Self::value(&self.url, cx).is_empty();
         let can_save = !self.saving
             && !self.validating
             && (self.existing.is_some() || self.validated.is_some());
+        // 底栏只放「取消 / 订阅」，右对齐；「验证」已移到订阅链接行内。
         let footer = h_flex()
             .w_full()
+            .pt(tokens.spacing.sm)
             .gap(tokens.spacing.sm)
             .items_center()
-            .child(
-                Button::new("rss-editor-validate")
-                    .outline()
-                    .small()
-                    .h(CONTROL_HEIGHT)
-                    .label(self.t("rssWizardValidate", cx))
-                    .disabled(!can_validate)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.validate(cx))),
-            )
-            .child(div().flex_1())
+            .justify_end()
             .child(
                 Button::new("rss-editor-cancel")
                     .outline()
-                    .small()
-                    .h(CONTROL_HEIGHT)
                     .label(self.t("cancel", cx))
+                    .control(cx)
                     .disabled(self.saving)
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             )
             .child(
                 Button::new("rss-editor-save")
                     .primary()
-                    .small()
-                    .h(CONTROL_HEIGHT)
                     .label(self.t(
                         if self.existing.is_some() {
                             "confirm"
@@ -866,29 +892,27 @@ impl Render for Editor {
                         },
                         cx,
                     ))
+                    .control(cx)
+                    .loading(self.saving)
                     .disabled(!can_save)
                     .on_click(
                         cx.listener(|this, _: &ClickEvent, window, cx| this.save(window, cx)),
                     ),
             );
+        // 内容区高度随内容伸缩，超出上限时纵向滚动；标签条左对齐、与内容间隔 spacing.lg。
         v_flex()
             .w_full()
-            .gap(tokens.spacing.md)
-            .child(self.render_tabs(cx))
+            .gap(tokens.spacing.lg)
+            .child(h_flex().child(self.render_tabs(cx)))
             .child(
                 div()
-                    .h(px(410.))
+                    .max_h(px(460.))
                     .w_full()
                     .overflow_y_scrollbar()
                     .child(body),
             )
             .when_some(self.error.clone(), |root, error| {
-                root.child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.colors.destructive)
-                        .child(SharedString::from(error)),
-                )
+                root.child(field_error(SharedString::from(error), cx))
             })
             .child(footer)
     }

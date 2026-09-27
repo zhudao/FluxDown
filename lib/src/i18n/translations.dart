@@ -162,6 +162,8 @@ class S {
   String get queueScheduleStopLabel => _r('queueScheduleStopLabel');
   String get queueScheduleTimeHint => _r('queueScheduleTimeHint');
   String get queueScheduleTimeInvalid => _r('queueScheduleTimeInvalid');
+  String get queueScheduleTimeUnset => _r('queueScheduleTimeUnset');
+  String get queueScheduleTimePickHint => _r('queueScheduleTimePickHint');
   String get queueScheduleDays => _r('queueScheduleDays');
   String get weekdaysShort => _r('weekdaysShort');
   String get queueTasksOrderHint => _r('queueTasksOrderHint');
@@ -877,7 +879,10 @@ class S {
   String get closeToTrayDesc => _r('closeToTrayDesc');
   String get startMinimizedToTray => _r('startMinimizedToTray');
   String get startMinimizedToTrayDesc => _r('startMinimizedToTrayDesc');
-  String get trayUnsupportedLinux => _r('trayUnsupportedLinux');
+  String get trayUnavailableNoHost => _r('trayUnavailableNoHost');
+  String get trayUnavailableNoDisplay => _r('trayUnavailableNoDisplay');
+  String get trayUnavailableInitFailed => _r('trayUnavailableInitFailed');
+  String get trayUnavailableNotBuilt => _r('trayUnavailableNotBuilt');
   String get floatingBall => _r('floatingBall');
   String get floatingBallDesc => _r('floatingBallDesc');
   String get floatingBallActiveOnly => _r('floatingBallActiveOnly');
@@ -900,6 +905,19 @@ class S {
   String get torrentAssocDialogDesc => _r('torrentAssocDialogDesc');
   String get notifyOnComplete => _r('notifyOnComplete');
   String get notifyOnCompleteDesc => _r('notifyOnCompleteDesc');
+  String get progressWindowGroup => _r('progressWindowGroup');
+  String get showProgressWindow => _r('showProgressWindow');
+  String get showProgressWindowDesc => _r('showProgressWindowDesc');
+  String get showCompletionWindow => _r('showCompletionWindow');
+  String get showCompletionWindowDesc => _r('showCompletionWindowDesc');
+  String get progressWindowTitle => _r('progressWindowTitle');
+  String get progressWindowStop => _r('progressWindowStop');
+  String progressWindowSegments(int n) =>
+      _r('progressWindowSegments', {'n': n});
+  String get progressWindowPartsShow => _r('progressWindowPartsShow');
+  String get progressWindowPartsHide => _r('progressWindowPartsHide');
+  String get progressWindowPartWaiting => _r('progressWindowPartWaiting');
+  String get progressWindowShowCompletion => _r('progressWindowShowCompletion');
   String get silentDownload => _r('silentDownload');
   String get silentDownloadDesc => _r('silentDownloadDesc');
   String get silentSkipSelection => _r('silentSkipSelection');
@@ -1411,6 +1429,8 @@ class S {
   String get btTrackerSubUpdateFailed => _r('btTrackerSubUpdateFailed');
   String get btTrackerSubPlaceholder => _r('btTrackerSubPlaceholder');
   String get btTrackerSubResetConfirm => _r('btTrackerSubResetConfirm');
+  String get btTrackerSubUrls => _r('btTrackerSubUrls');
+  String get btTrackerSubUrlsDesc => _r('btTrackerSubUrlsDesc');
   String get btPortInvalid => _r('btPortInvalid');
 
   // ─────────────────────────────────────────────
@@ -1496,6 +1516,8 @@ class S {
   String get ed2kServerSubUpdateFailed => _r('ed2kServerSubUpdateFailed');
   String get ed2kServerSubPlaceholder => _r('ed2kServerSubPlaceholder');
   String get ed2kServerSubResetConfirm => _r('ed2kServerSubResetConfirm');
+  String get ed2kServerSubUrls => _r('ed2kServerSubUrls');
+  String get ed2kServerSubUrlsDesc => _r('ed2kServerSubUrlsDesc');
 
   // ─────────────────────────────────────────────
   // File picker 错误
@@ -1748,20 +1770,18 @@ class S {
       _r('selectionAutoDefaultIn', {'seconds': seconds});
 
   // ─────────────────────────────────────────────
-  // GPUI 快速捕获窗口
+  // GPUI 新建下载窗口：外部捕获提示
   // ─────────────────────────────────────────────
-  String get quickCaptureTitle => _r('quickCaptureTitle');
-  String get quickCaptureDownload => _r('quickCaptureDownload');
-  String get quickCaptureIgnore => _r('quickCaptureIgnore');
-  String get quickCaptureDownloadAll => _r('quickCaptureDownloadAll');
-  String get quickCaptureIgnoreAll => _r('quickCaptureIgnoreAll');
-  String get quickCaptureMoreOptions => _r('quickCaptureMoreOptions');
+  String get newDownloadCaptureContextHint =>
+      _r('newDownloadCaptureContextHint');
+  String get newDownloadCaptureAuthHint => _r('newDownloadCaptureAuthHint');
 
   // ─────────────────────────────────────────────
   // TrayService
   // ─────────────────────────────────────────────
   String get trayShowWindow => _r('trayShowWindow');
   String get trayExit => _r('trayExit');
+  String get trayCancelShutdown => _r('trayCancelShutdown');
 
   // ─────────────────────────────────────────────
   // 应用菜单与桌面标题栏

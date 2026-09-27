@@ -15,33 +15,29 @@ use crate::{
         RevealSelected, SelectAllTasks, ToggleBoostSelected, ToggleDetailPanel,
         TogglePauseSelected,
     },
-    components::task_table::{
-        DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+    components::{
+        task_table::{DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand},
+        title_bar::DownloadTitleBar,
     },
-    controller::{
-        DownloadsCommand, DownloadsController, DownloadsPort, LAST_SAVE_DIR_PREF,
-        REMEMBER_LAST_SAVE_DIR_PREF,
-    },
+    controller::{DownloadsCommand, DownloadsController, DownloadsPort},
     model::{
         DownloadFilter, DownloadStatusFilter, RowKey, SidebarSection, SidebarSelection,
         StatusFolderMotion, TaskState,
-        new_download::manual_proxy_url,
         view_prefs::{DetailPlacement, VIEW_PREFS_KEY, ViewGroupBy, ViewPrefs},
     },
-    pages::new_download::{NewDownloadContext, NewDownloadQueue, NewDownloadSubmission},
+    pages::new_download::{NewDownloadContext, NewDownloadSubmission, build_new_download_context},
     pages::task_detail::TaskDetailView,
     strings::DownloadStrings,
 };
+use fluxdown_ui_components::{ControlExt as _, FluxIcon, TOOLBAR_BUTTON_SIZE};
 use fluxdown_ui_i18n::Translator;
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle,
+    App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement, PathPromptOptions, Render, SharedString,
     Styled, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Icon, IconName, ResizableState, Sizable as _, Size, WindowExt as _,
-    button::{Button, ButtonVariants as _},
-    h_flex, h_resizable,
+    Icon, ResizableState, WindowExt as _, h_flex, h_resizable,
     input::{Input, InputEvent, InputState},
     resizable_panel,
     table::{TableEvent, TableState},
@@ -65,6 +61,9 @@ pub type IdOpener = Rc<dyn Fn(String, &mut Window, &mut App)>;
 pub type PlainOpener = Rc<dyn Fn(&mut Window, &mut App)>;
 /// 分类编辑入口：`Some(id)` 编辑现有分类，`None` 新建。
 pub type CategoryEditorOpener = Rc<dyn Fn(Option<String>, &mut Window, &mut App)>;
+/// 用户在场亲手开始了一个任务（单任务继续 / 重新下载 / 新建单任务成功）；宿主据此弹
+/// 独立进度窗口。
+pub type UserStartHook = Rc<dyn Fn(String, &mut App)>;
 
 /// app 注入的跨窗口 / 跨能力入口；未注入的入口对应按钮无动作。
 #[derive(Clone, Default)]
@@ -79,6 +78,8 @@ pub struct DownloadHostActions {
     pub shutdown_status: Option<crate::model::shutdown::SharedShutdownStatus>,
     /// 状态栏发起关机请求的端口。
     pub shutdown: Option<crate::model::shutdown::ShutdownPort>,
+    /// 单任务交互式开始成功后回调（批量操作不回调）。
+    pub on_user_started: Option<UserStartHook>,
 }
 
 /// 下载能力的顶层页面。
@@ -105,7 +106,7 @@ pub struct DownloadView {
     /// 根元素 focus handle：右键菜单 action_context 分派目标，`escape`
     /// 清空搜索框后也交回给它。
     pub(crate) focus_handle: FocusHandle,
-    /// 工具栏搜索框状态。
+    /// 顶栏搜索框状态（输入框渲染在 [`DownloadTitleBar`] 插槽里）。
     pub(crate) search_input: Entity<InputState>,
     /// 已下发给搜索框的 placeholder（语言切换后需重下发）。
     search_placeholder: SharedString,
@@ -118,8 +119,8 @@ pub struct DownloadView {
     pub(crate) detail: Option<Entity<TaskDetailView>>,
     /// 详情面板 / 主内容拆分的独立 resizable 状态。
     pub(crate) detail_resizable_state: Entity<ResizableState>,
-    /// 上次渲染时的工具栏选中投影；表格选中变化时与之比较，变了才重绘本页。
-    pub(crate) toolbar_selection: Cell<SelectionSummary>,
+    /// 上次渲染时的选中投影；表格选中变化时与之比较，变了才重绘本页（浮动选择条）。
+    pub(crate) selection_summary: Cell<SelectionSummary>,
 }
 
 impl DownloadView {
@@ -163,12 +164,12 @@ impl DownloadView {
         .detach();
         cx.subscribe_in(&table_state, window, Self::handle_table_event)
             .detach();
-        // 选中变化只通知表格实体；工具栏按钮可用性依赖它，按投影差异重绘本页，
+        // 选中变化只通知表格实体；浮动选择条依赖它，按投影差异重绘本页，
         // 避免表格滚动 / 悬停等高频 notify 带着整页重绘。
         cx.observe(&table_state, |this, table_state, cx| {
             let selection = table_state.read(cx).delegate().selection_summary();
-            if this.toolbar_selection.get() != selection {
-                this.toolbar_selection.set(selection);
+            if this.selection_summary.get() != selection {
+                this.selection_summary.set(selection);
                 cx.notify();
             }
         })
@@ -202,7 +203,7 @@ impl DownloadView {
             prefs_loaded: false,
             detail: None,
             detail_resizable_state: cx.new(|_| ResizableState::default()),
-            toolbar_selection: Cell::new(SelectionSummary::default()),
+            selection_summary: Cell::new(SelectionSummary::default()),
         }
     }
 
@@ -211,67 +212,37 @@ impl DownloadView {
         self.host = host;
     }
 
-    /// 「新建下载」表单的环境快照：保存目录 / 默认队列 / 线程数初值与队列候选。
-    ///
-    /// 与 Dart 一致：偏好 `remember_last_save_dir` 开启且有记录时沿用上次目录，
-    /// 否则用全局默认；队列优先侧栏当前筛选，其次配置 `default_queue_id`，
-    /// 最后主队列；线程数优先队列 `default_segments`，其次全局配置。
+    /// 创建挂到 shell 统一顶栏的下载页插槽（搜索、视图选项、新建）。
+    pub fn new_title_bar(&self, cx: &mut Context<Self>) -> Entity<DownloadTitleBar> {
+        let view = cx.entity();
+        let translator = self.translator.clone();
+        let search_input = self.search_input.clone();
+        let table_state = self.table_state.clone();
+        cx.new(|cx| DownloadTitleBar::new(&view, translator, search_input, table_state, cx))
+    }
+
+    /// 「新建下载」表单的环境快照：保存目录 / 默认队列 / 线程数初值与队列候选；
+    /// 队列优先侧栏当前筛选（规则见 [`build_new_download_context`]）。
     #[must_use]
     pub fn new_download_context(&self) -> NewDownloadContext {
         let controller = &self.controller;
-        let remember = controller.preference_bool(REMEMBER_LAST_SAVE_DIR_PREF, false);
-        let last_save_dir = controller
-            .preference(LAST_SAVE_DIR_PREF)
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let save_dir = if remember && !last_save_dir.is_empty() {
-            last_save_dir
-        } else {
-            controller.effective_save_dir()
+        let selected_queue = match &self.selected_item {
+            SidebarSelection::Queue(queue_id) => Some(queue_id.as_str()),
+            _ => None,
         };
-        let queue_id = match &self.selected_item {
-            SidebarSelection::Queue(queue_id) => queue_id.as_str(),
-            _ => match controller.config_str("default_queue_id") {
-                "" => fluxdown_protocol::MAIN_QUEUE_ID,
-                configured => configured,
-            },
-        };
-        let queue_segments = controller
-            .queues()
-            .iter()
-            .find(|queue| queue.queue_id == queue_id)
-            .map_or(0, |queue| queue.default_segments);
-        let segments = if queue_segments > 0 {
-            queue_segments
-        } else {
-            controller
-                .config_str("default_segments")
-                .parse::<i32>()
-                .unwrap_or(0)
-        };
-        NewDownloadContext {
-            save_dir: save_dir.to_owned(),
-            queue_id: queue_id.to_owned(),
-            segments,
-            queues: controller
-                .queues()
-                .iter()
-                .map(|queue| NewDownloadQueue {
-                    id: queue.queue_id.clone(),
-                    name: queue.name.clone(),
-                })
-                .collect(),
-            manual_proxy_url: manual_proxy_url(controller.config()),
-            initial_urls: Vec::new(),
-            initial_file_name: String::new(),
-        }
+        build_new_download_context(
+            controller.config(),
+            &controller.runtime_stats().save_dir,
+            controller.preferences(),
+            controller.queues(),
+            selected_queue,
+        )
     }
 
     /// 打开「新建下载」窗口（可预填链接）。
     pub(crate) fn open_new_download_with(
         &self,
         initial_urls: Vec<String>,
-        initial_file_name: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -280,19 +251,17 @@ impl DownloadView {
         };
         let mut context = self.new_download_context();
         context.initial_urls = initial_urls;
-        context.initial_file_name = initial_file_name;
         opener(context, window, cx);
     }
 
     pub(crate) fn open_new_download(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_new_download_with(Vec::new(), String::new(), window, cx);
+        self.open_new_download_with(Vec::new(), window, cx);
     }
 
-    /// 按表单提交创建任务；对话框确认后由宿主调用。
+    /// 按表单提交创建任务 / 确认外部捕获；对话框确认后由宿主调用。
     ///
-    /// 链接逐条 `daemon.task.create`，任一失败即在页面横幅提示；同时把本次
-    /// 保存目录记入本机偏好（无条件记录，开关开启后立即生效）。种子文件交给
-    /// agent 读取上传。返回的 future 在全部完成后给出是否全部成功。
+    /// 命令逐条执行，任一失败即在页面横幅提示；同时把本次保存目录记入本机偏好（无条件
+    /// 记录，开关开启后立即生效）。返回的 future 在全部完成后给出是否全部成功。
     pub fn create_download(
         &mut self,
         submission: NewDownloadSubmission,
@@ -301,55 +270,45 @@ impl DownloadView {
         if self.controller.is_stale() {
             return gpui::Task::ready(false);
         }
-        let futures = match submission {
-            NewDownloadSubmission::Tasks(requests) => {
-                if let Some(save_dir) = requests.first().map(|request| request.save_dir.clone()) {
-                    // 记录目录是尽力而为：失败不影响任务创建，也不进横幅。
-                    let remember = self
-                        .controller
-                        .execute(DownloadsCommand::SetLocalPreference {
-                            key: LAST_SAVE_DIR_PREF,
-                            value: serde_json::Value::String(save_dir),
-                        });
-                    cx.background_spawn(async move {
-                        let _ = remember.await;
-                    })
-                    .detach();
-                }
-                requests
-                    .into_iter()
-                    .map(|request| {
-                        self.controller.execute(DownloadsCommand::Create(Box::new(
-                            fluxdown_protocol::DaemonCreateTaskParams {
-                                request,
-                                torrent_blob_id: None,
-                                unattended: false,
-                            },
-                        )))
-                    })
-                    .collect::<Vec<_>>()
-            }
-            NewDownloadSubmission::TorrentFiles(paths) => paths
-                .iter()
-                .map(|path| {
-                    self.controller
-                        .execute(DownloadsCommand::SubmitTorrentFile {
-                            path: path.display().to_string(),
-                        })
-                })
-                .collect(),
-        };
+        if let Some(remember) = submission.remember_save_dir_command() {
+            // 记录目录是尽力而为：失败不影响任务创建，也不进横幅。
+            let remember = self.controller.execute(remember);
+            cx.background_spawn(async move {
+                let _ = remember.await;
+            })
+            .detach();
+        }
+        let starts_immediately = submission.starts_immediately();
+        let futures = submission
+            .into_commands()
+            .into_iter()
+            .map(|command| self.controller.execute(command))
+            .collect::<Vec<_>>();
         cx.spawn(async move |this, cx| {
             let mut failed = false;
+            let mut created = Vec::new();
             for future in futures {
-                failed |= future.await.is_err();
+                match future.await {
+                    Ok(result) => created.extend(result.created_task_ids()),
+                    Err(_) => failed = true,
+                }
             }
             let _ = this.update(cx, |this, cx| {
                 this.last_error = failed.then(|| this.strings.action_failed.clone());
+                if starts_immediately {
+                    this.notify_user_started(&created, cx);
+                }
                 cx.notify();
             });
             !failed
         })
+    }
+
+    /// 只有恰好一个任务被交互式开始时通知宿主（批量不逐个弹窗）。
+    pub(crate) fn notify_user_started(&self, task_ids: &[String], cx: &mut App) {
+        if let ([task_id], Some(hook)) = (task_ids, self.host.on_user_started.as_ref()) {
+            hook(task_id.clone(), cx);
+        }
     }
 
     pub fn replace_snapshot(
@@ -374,11 +333,17 @@ impl DownloadView {
         if let Some(detail) = self.detail.clone() {
             detail.update(cx, |detail, cx| detail.apply_event(event, cx));
         }
-        if let fluxdown_protocol::ServiceEvent::Agent(
-            fluxdown_protocol::AgentEvent::PreferencesChanged(_),
-        ) = event
-        {
-            self.load_view_prefs(cx);
+        match event {
+            fluxdown_protocol::ServiceEvent::Agent(
+                fluxdown_protocol::AgentEvent::PreferencesChanged(_),
+            ) => self.load_view_prefs(cx),
+            // agent 先于 daemon 就绪时首个快照即为未连接；连接态以事件为准，横幅随之出现 / 消失。
+            fluxdown_protocol::ServiceEvent::Agent(
+                fluxdown_protocol::AgentEvent::DaemonConnectionChanged(connected),
+            ) => {
+                self.last_error = (!connected).then(|| self.strings.disconnected.clone());
+            }
+            _ => {}
         }
         if table_changed {
             if matches!(
@@ -509,7 +474,10 @@ impl DownloadView {
         self.table_state.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
             delegate.set_filter(filter);
-            if delegate.refresh_view() {
+            delegate.refresh_view();
+            // 行变化只需重绘（行数每帧从代理读取）；只有列配置变了才重建
+            // `col_groups`，否则进度节拍会覆盖拖拽中的列宽。
+            if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
         });
@@ -580,13 +548,16 @@ impl DownloadView {
                     self.open_detail_for(key, window, cx);
                 }
             }
-            TableEvent::ColumnWidthsChanged(_) | TableEvent::MoveColumn(..) => {
+            TableEvent::ColumnWidthsChanged(widths) => {
+                table_state.update(cx, |table, _| {
+                    table.delegate_mut().sync_column_widths(widths);
+                });
+                self.schedule_persist_prefs(cx);
+            }
+            TableEvent::MoveColumn(..) => {
                 self.schedule_persist_prefs(cx);
             }
             _ => {}
-        }
-        if table_state.update(cx, |table, _| table.delegate_mut().take_sort_changed()) {
-            self.schedule_persist_prefs(cx);
         }
     }
 
@@ -700,14 +671,6 @@ impl DownloadView {
         .detach();
     }
 
-    /// 供弹出层（列菜单等）触发偏好写回的句柄。
-    pub(crate) fn persist_prefs_handle(&self, cx: &Context<Self>) -> Rc<dyn Fn(&mut App)> {
-        let this = cx.weak_entity();
-        Rc::new(move |cx: &mut App| {
-            let _ = this.update(cx, |this, cx| this.schedule_persist_prefs(cx));
-        })
-    }
-
     pub(crate) fn mutate_prefs(
         &mut self,
         mutate: impl FnOnce(&mut ViewPrefs),
@@ -760,7 +723,7 @@ impl DownloadView {
     }
 
     /// 搜索框内 `escape`：清空查询并把焦点交回下载页根元素。
-    fn on_search_escape(
+    pub(crate) fn on_search_escape(
         &mut self,
         _: &gpui_component::input::Escape,
         window: &mut Window,
@@ -799,6 +762,7 @@ impl DownloadView {
             .map(|row| row.name.clone())
             .unwrap_or_default();
         let title = self.strings.rename_task_title.clone();
+        let field_label = self.strings.col_file_name.clone();
         let placeholder = self.strings.rename_task_placeholder.clone();
         let ok_label = self.strings.confirm.clone();
         let cancel_label = self.strings.cancel.clone();
@@ -809,21 +773,31 @@ impl DownloadView {
         });
         let dialog_input = input.clone();
         let this = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let content_input = dialog_input.clone();
             let ok_input = dialog_input.clone();
             let this = this.clone();
             let task_id = task_id.clone();
+            let field_label = field_label.clone();
             dialog
-                .title(title.clone())
-                .content(move |content, _, _| {
-                    content.child(Input::new(&content_input).with_size(Size::Medium).w_full())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
+                .w(px(520.))
+                .content(move |content, _, cx| {
+                    content.child(fluxdown_ui_components::form(cx).child(
+                        fluxdown_ui_components::form_field(
+                            field_label.clone(),
+                            Input::new(&content_input).control(cx).w_full(),
+                            None,
+                            cx,
+                        ),
+                    ))
                 })
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Confirm,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let file_name = ok_input.read(cx).value().trim().to_owned();
                     if file_name.is_empty() {
@@ -854,17 +828,18 @@ impl DownloadView {
         let ok_label = self.strings.ignore_plugin_retry.clone();
         let cancel_label = self.strings.cancel.clone();
         let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
             let task_id = task_id.clone();
             dialog
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Confirm,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let task_id = task_id.clone();
                     let _ = this.update(cx, |this, cx| {
@@ -975,18 +950,18 @@ impl DownloadView {
         let ok_label = self.strings.delete.clone();
         let cancel_label = self.strings.cancel.clone();
         let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
             let group_id = group_id.clone();
             dialog
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Destructive,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let group_id = group_id.clone();
                     let _ = this.update(cx, |this, cx| {
@@ -1045,7 +1020,7 @@ impl DownloadView {
             self.execute_commands(torrent_commands, cx);
         }
         if !urls.is_empty() {
-            self.open_new_download_with(urls, String::new(), window, cx);
+            self.open_new_download_with(urls, window, cx);
         }
         if unsupported {
             window.push_notification(self.strings.unsupported_drop_hint.clone(), cx);
@@ -1068,6 +1043,11 @@ impl DownloadView {
     }
 
     fn on_clear_selection(&mut self, _: &ClearSelection, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_table_selection(cx);
+    }
+
+    /// 清空表格选中（Esc 快捷键与浮动选择条「取消选择」共用）。
+    pub(crate) fn clear_table_selection(&mut self, cx: &mut Context<Self>) {
         self.table_state.update(cx, |table, cx| {
             table.delegate_mut().clear_selection();
             cx.notify();
@@ -1146,18 +1126,18 @@ impl DownloadView {
         let ok_label = self.strings.delete.clone();
         let cancel_label = self.strings.cancel.clone();
         let this = cx.weak_entity();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
+        window.open_alert_dialog(cx, move |dialog, _, cx| {
             let this = this.clone();
             let keys = keys.clone();
             dialog
-                .title(title.clone())
+                .title(fluxdown_ui_components::dialog_title(title.clone(), cx))
                 .description(description.clone())
-                .button_props(
-                    gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text(ok_label.clone())
-                        .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                        .cancel_text(cancel_label.clone()),
-                )
+                .footer(fluxdown_ui_components::dialog_footer(
+                    Some(cancel_label.clone()),
+                    ok_label.clone(),
+                    fluxdown_ui_components::DialogIntent::Destructive,
+                    cx,
+                ))
                 .on_ok(move |_, _, cx| {
                     let commands: Vec<DownloadsCommand> = keys
                         .iter()
@@ -1400,53 +1380,66 @@ impl DownloadView {
         self.execute_commands(commands, cx);
     }
 
-    /// 工具栏右侧插槽：搜索框（P1.5）。
-    pub(crate) fn render_toolbar_trailing(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let tokens = fluxdown_ui_theme::active_theme(cx).tokens();
-        vec![
-            div()
-                .id("download-search-box")
-                .w(px(220.))
-                .on_action(cx.listener(Self::on_search_escape))
-                .child(
-                    Input::new(&self.search_input)
-                        .with_size(Size::Medium)
-                        .cleanable(true)
-                        .prefix(
-                            Icon::new(IconName::Search)
-                                .size(px(13.))
-                                .text_color(tokens.colors.muted_foreground),
-                        ),
-                )
-                .into_any_element(),
-        ]
+    /// 错误 / 断连提示：紧凑的 destructive 文字条，可关闭。
+    fn render_error_strip(&self, error: SharedString, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = fluxdown_ui_theme::active_theme(cx);
+        let tokens = theme.tokens();
+        let spacing = tokens.spacing;
+        let text_size = tokens.typography.xs.size;
+        let line_height = tokens.typography.xs.line_height;
+        let destructive = tokens.colors.destructive;
+        let icon_size = theme.extended().icon.sm;
+        let close_label = SharedString::from(self.translator.read(cx).text("close").to_owned());
+        let dismiss = self.icon_action(
+            "download-error-dismiss",
+            close_label,
+            Icon::new(FluxIcon::X).size(icon_size),
+            false,
+            |this, _, cx| {
+                this.last_error = None;
+                cx.notify();
+            },
+            cx,
+        );
+        h_flex()
+            .w_full()
+            .flex_none()
+            .items_center()
+            .gap(spacing.sm)
+            .pl(spacing.md)
+            .pr(spacing.xs)
+            .text_size(text_size)
+            .line_height(line_height)
+            .text_color(destructive)
+            .child(div().flex_1().min_w_0().truncate().child(error))
+            .child(dismiss)
+            .into_any_element()
     }
 
-    pub(crate) fn render_main(
-        &self,
-        available_width: f32,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let tokens = fluxdown_ui_theme::active_theme(cx).tokens().clone();
+    pub(crate) fn render_main(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let surface = fluxdown_ui_theme::active_theme(cx).tokens().colors.surface;
         let prefs = self.table_state.read(cx).delegate().prefs().clone();
+        let error_strip = self
+            .last_error
+            .clone()
+            .map(|error| self.render_error_strip(error, cx));
+        let table = self.render_table(cx);
+        let selection_bar = self.render_selection_bar(cx);
         let content = v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .child(self.render_toolbar(cx))
-            .when_some(self.last_error.clone(), |this, error| {
-                this.child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .border_b_1()
-                        .border_color(tokens.colors.border)
-                        .text_sm()
-                        .child(error),
-                )
-            })
-            .child(self.render_table(available_width, cx));
+            .children(error_strip)
+            .child(
+                // 表格区域：浮动选择条相对它底部居中定位。
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(table)
+                    .children(selection_bar),
+            );
 
         let body: gpui::AnyElement = if prefs.detail_open {
             let panel = self.render_detail_panel(cx);
@@ -1488,26 +1481,70 @@ impl DownloadView {
             content.into_any_element()
         };
 
-        v_flex()
+        // 侧栏 | 内容的结构线由 resizable 把手绘制（主题已映射为 hairline），这里不再画边框。
+        div()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .bg(tokens.colors.surface)
-            .child(div().flex_1().min_h_0().min_w_0().child(body))
-            .child(self.render_status_bar(cx))
+            .bg(surface)
+            .child(body)
             .into_any_element()
     }
 
     fn render_detail_panel(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let tokens = fluxdown_ui_theme::active_theme(cx).tokens().clone();
+        let theme = fluxdown_ui_theme::active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let icon_size = theme.extended().icon.md;
+        let hairline = theme.extended().colors.hairline;
+        let tertiary = theme.extended().colors.text_tertiary;
         let placement = self
             .table_state
             .read(cx)
             .delegate()
             .prefs()
             .detail_placement;
-        let title = self.translator.read(cx).text("detail").to_owned();
-        let hint = self.translator.read(cx).text("selectTaskHint").to_owned();
+        let translator = self.translator.read(cx);
+        let title = translator.text("detail").to_owned();
+        let hint = translator.text("selectTaskHint").to_owned();
+        // 切换按钮指向「切换后」的位置。
+        let (placement_icon, placement_label) = if placement == DetailPlacement::Bottom {
+            (
+                FluxIcon::PanelRight,
+                translator.text("viewDetailRight").to_owned(),
+            )
+        } else {
+            (
+                FluxIcon::PanelBottom,
+                translator.text("viewDetailBottom").to_owned(),
+            )
+        };
+        let close_label = SharedString::from(translator.text("close").to_owned());
+        let pop_out_label = self.strings.open_in_window.clone();
+        let toggle_position = self.icon_action(
+            "detail-panel-toggle-position",
+            SharedString::from(placement_label),
+            Icon::new(placement_icon).size(icon_size),
+            false,
+            |this, _, cx| this.on_toggle_detail_placement(cx),
+            cx,
+        );
+        let pop_out = self.icon_action(
+            "detail-panel-pop-out",
+            pop_out_label,
+            Icon::new(FluxIcon::AppWindow).size(icon_size),
+            false,
+            |this, window, cx| this.on_pop_out_detail(window, cx),
+            cx,
+        );
+        let close = self.icon_action(
+            "detail-panel-close",
+            close_label,
+            Icon::new(FluxIcon::X).size(icon_size),
+            false,
+            |this, _, cx| this.on_close_detail_panel(cx),
+            cx,
+        );
+
         v_flex()
             .size_full()
             .min_h_0()
@@ -1515,58 +1552,27 @@ impl DownloadView {
             .bg(tokens.colors.surface)
             .child(
                 h_flex()
-                    .h(px(36.))
+                    // 面板头：28 的图标按钮上下各留 spacing.xxs。
+                    .h(TOOLBAR_BUTTON_SIZE + tokens.spacing.xs)
                     .flex_none()
                     .items_center()
                     .justify_between()
-                    .px(tokens.spacing.sm)
+                    .pl(tokens.spacing.md)
+                    .pr(tokens.spacing.xxs)
                     .border_b_1()
-                    .border_color(tokens.colors.border)
+                    .border_color(hairline)
                     .child(
                         div()
                             .text_size(tokens.typography.sm.size)
-                            .font_weight(tokens.typography.sm.weight)
+                            .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )
                     .child(
                         h_flex()
                             .gap(tokens.spacing.xxs)
-                            .child(
-                                Button::new("detail-panel-toggle-position")
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .icon(if placement == DetailPlacement::Bottom {
-                                        IconName::PanelRight
-                                    } else {
-                                        IconName::PanelBottom
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.on_toggle_detail_placement(cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("detail-panel-pop-out")
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .icon(IconName::ExternalLink)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.on_pop_out_detail(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("detail-panel-close")
-                                    .ghost()
-                                    .xsmall()
-                                    .compact()
-                                    .icon(IconName::Close)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| {
-                                            this.on_close_detail_panel(cx)
-                                        }),
-                                    ),
-                            ),
+                            .child(toggle_position)
+                            .child(pop_out)
+                            .child(close),
                     ),
             )
             .child(
@@ -1577,14 +1583,19 @@ impl DownloadView {
                     .when_some(self.detail.clone(), |this, detail| this.child(detail))
                     .when(self.detail.is_none(), |this| {
                         this.child(
-                            div()
+                            v_flex()
                                 .size_full()
-                                .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(tokens.colors.muted_foreground)
-                                .text_sm()
-                                .child(hint),
+                                .gap(tokens.spacing.sm)
+                                .child(Icon::new(FluxIcon::File).size(px(32.)).text_color(tertiary))
+                                .child(
+                                    div()
+                                        .text_size(tokens.typography.xs.size)
+                                        .line_height(tokens.typography.xs.line_height)
+                                        .text_color(tokens.colors.muted_foreground)
+                                        .child(hint),
+                                ),
                         )
                     }),
             )
@@ -1610,12 +1621,7 @@ impl Render for DownloadView {
             });
         }
         let sidebar_width = self.table_state.read(cx).delegate().prefs().sidebar_width;
-        let available_width = sizes.get(1).map_or_else(
-            || f32::from(window.viewport_size().width) - sidebar_width - 46.,
-            |size| f32::from(*size) - 8.,
-        );
-
-        div()
+        v_flex()
             .key_context(KEY_CONTEXT)
             .size_full()
             .min_w_0()
@@ -1652,26 +1658,29 @@ impl Render for DownloadView {
                 style.bg(tokens.colors.accent.opacity(0.2))
             })
             .child(
-                h_resizable("downloads-content")
-                    .with_state(&self.resizable_state)
-                    .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
-                        state.update(cx, |state, cx| state.reset_panel(1, cx));
-                        if let Some(width) = state.read(cx).sizes().first().copied() {
-                            let width = f32::from(width);
-                            if width > 0. {
-                                this.mutate_prefs(|prefs| prefs.sidebar_width = width, cx);
+                div().flex_1().min_h_0().min_w_0().child(
+                    h_resizable("downloads-content")
+                        .with_state(&self.resizable_state)
+                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
+                            state.update(cx, |state, cx| state.reset_panel(1, cx));
+                            if let Some(width) = state.read(cx).sizes().first().copied() {
+                                let width = f32::from(width);
+                                if width > 0. {
+                                    this.mutate_prefs(|prefs| prefs.sidebar_width = width, cx);
+                                }
                             }
-                        }
-                    }))
-                    .child(
-                        resizable_panel()
-                            .size(px(sidebar_width))
-                            .flex_none()
-                            .size_range(px(148.)..px(280.))
-                            .child(self.render_sidebar(window, cx)),
-                    )
-                    .child(resizable_panel().child(self.render_main(available_width, cx))),
+                        }))
+                        .child(
+                            resizable_panel()
+                                .size(px(sidebar_width))
+                                .flex_none()
+                                .size_range(px(176.)..px(300.))
+                                .child(self.render_sidebar(window, cx)),
+                        )
+                        .child(resizable_panel().child(self.render_main(cx))),
+                ),
             )
+            .child(self.render_status_bar(cx))
     }
 }
 

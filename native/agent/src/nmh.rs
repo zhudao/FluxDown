@@ -114,7 +114,11 @@ impl NmhService {
         match message.action.as_str() {
             "ping" => PipeResponse::ok(message.msg_id, "pong"),
             "download" => match serde_json::from_value::<DownloadRequest>(message.payload) {
-                Ok(request) => match self.capture.submit(request, false).await {
+                Ok(request) => match self
+                    .capture
+                    .submit(request, crate::capture::CaptureOrigin::External)
+                    .await
+                {
                     Ok(_) => PipeResponse::ok(message.msg_id, "download accepted"),
                     Err(error) => PipeResponse::error(message.msg_id, error.to_string()),
                 },
@@ -148,7 +152,11 @@ impl NmhService {
         };
         let count = batch.items.len();
         for request in batch.items {
-            if let Err(error) = self.capture.submit(request, false).await {
+            if let Err(error) = self
+                .capture
+                .submit(request, crate::capture::CaptureOrigin::External)
+                .await
+            {
                 return PipeResponse::error(msg_id, error.to_string());
             }
         }
@@ -1151,7 +1159,6 @@ pub mod registry {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
 
     use serde_json::json;
 
@@ -1164,10 +1171,17 @@ mod tests {
         let daemon = Arc::new(crate::daemon_client::DaemonClient::disconnected());
         let events =
             crate::event_hub::AgentEventHub::new(fluxdown_protocol::AgentSnapshot::default());
+        let shell = crate::shell::ShellState::new(
+            crate::shell::TrayAvailability::Unavailable(
+                fluxdown_protocol::TrayUnavailableReason::NotBuilt,
+            ),
+            daemon.clone(),
+            events.clone(),
+        );
         let capture = Arc::new(crate::capture::CaptureService::new(
             daemon.clone(),
             events,
-            Arc::new(AtomicUsize::new(0)),
+            shell,
         ));
         let service = NmhService::new(daemon, capture);
         let (client, server) = tokio::io::duplex(4096);

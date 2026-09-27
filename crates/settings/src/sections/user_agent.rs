@@ -2,19 +2,19 @@
 
 use std::rc::Rc;
 
+use fluxdown_ui_components::ControlExt as _;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, Entity, IntoElement as _, ParentElement, SharedString, Styled,
     Subscription, Window, px,
 };
 use gpui_component::{
-    Sizable as _, Size,
     input::{Input, InputEvent, InputState},
     v_flex,
 };
 
 use super::SectionContext;
-use crate::ui::{Control, dropdown_button};
+use crate::ui::{Control, INPUT_WIDE_WIDTH, dropdown_button};
 
 pub(crate) const UA_KEY: &str = "global_user_agent";
 
@@ -113,6 +113,7 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
                     }
                 });
             }),
+            cx,
         );
 
         let mut column = v_flex()
@@ -163,8 +164,8 @@ pub(crate) fn field(ctx: &SectionContext) -> Control {
             let input = slot.read(cx).input.clone();
             column = column.child(
                 Input::new(&input)
-                    .with_size(Size::Medium)
-                    .w(px(420.))
+                    .control(cx)
+                    .w(px(INPUT_WIDE_WIDTH))
                     .disabled(disabled),
             );
         }

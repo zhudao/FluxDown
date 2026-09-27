@@ -3,13 +3,14 @@
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Context, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, px,
+    Context, Entity, InteractiveElement as _, IntoElement, ParentElement, Render, SharedString,
+    Styled, Window, div, px,
 };
 use gpui_component::{scroll::ScrollableElement as _, v_flex};
 
 use crate::sections::{SectionContext, webhook};
 use crate::store::{SettingsErrorKind, SettingsStore};
+use crate::ui::{CONTENT_PADDING_LEFT, CONTENT_PADDING_RIGHT, meta_text, page_heading};
 
 /// 主窗口中的独立 Webhook 管理页面。
 pub struct WebhookView {
@@ -66,6 +67,7 @@ impl Render for WebhookView {
         ];
         let feedback = self.feedback(cx);
 
+        let hairline = active_theme(cx).extended().colors.hairline;
         v_flex()
             .size_full()
             .min_w_0()
@@ -73,31 +75,23 @@ impl Render for WebhookView {
             .bg(tokens.colors.surface)
             .text_color(tokens.colors.foreground)
             .child(
-                v_flex()
+                div()
                     .flex_none()
-                    .px(px(24.))
-                    .py(px(16.))
-                    .gap(px(4.))
+                    .px(px(CONTENT_PADDING_LEFT))
+                    .pt(tokens.spacing.lg)
+                    .pb(tokens.spacing.md)
                     .border_b_1()
-                    .border_color(tokens.colors.border)
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(ctx.t("webhookNavTitle")),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(tokens.colors.muted_foreground)
-                            .child(ctx.t("webhookEmptyDesc")),
-                    ),
+                    .border_color(hairline)
+                    .child(page_heading(
+                        ctx.t("webhookNavTitle"),
+                        ctx.t("webhookEmptyDesc"),
+                        cx,
+                    )),
             )
             .children(feedback.map(|text| {
-                div()
-                    .px(px(24.))
-                    .py(px(8.))
-                    .text_size(px(12.))
+                meta_text(cx)
+                    .px(px(CONTENT_PADDING_LEFT))
+                    .py(tokens.spacing.sm)
                     .text_color(tokens.colors.destructive)
                     .child(text)
             }))
@@ -107,8 +101,11 @@ impl Render for WebhookView {
                     .flex_1()
                     .min_h_0()
                     .w_full()
-                    .p(px(24.))
-                    .gap(px(20.))
+                    .pl(px(CONTENT_PADDING_LEFT))
+                    .pr(px(CONTENT_PADDING_RIGHT))
+                    .pt(tokens.spacing.lg + tokens.spacing.xs)
+                    .pb(tokens.spacing.xl)
+                    .gap(tokens.spacing.lg)
                     .overflow_y_scrollbar()
                     .children(sections.iter().enumerate().map(|(index, section)| {
                         section

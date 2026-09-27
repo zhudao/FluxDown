@@ -4,15 +4,13 @@ use fluxdown_ui_components::activity_button as activity_bar_button;
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Entity, Img, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, img, px,
+    AnyElement, AnyView, App, Context, Div, Entity, FontWeight, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, div, img, px,
 };
-use gpui_component::{
-    Icon, TITLE_BAR_HEIGHT, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex,
-};
+use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
-use crate::assets::APP_LOGO_PATH;
+use crate::{SHELL_TITLE_BAR_HEIGHT, assets::APP_LOGO_PATH};
 
 /// shell 路由的稳定标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +31,8 @@ pub struct ShellRoute {
     label_key: &'static str,
     icon: Icon,
     view: AnyView,
+    /// 路由活跃时渲染在统一顶栏中的插槽（靠右内容由插槽自己排布）。
+    title_bar: Option<AnyView>,
     /// 可选路由参与活动栏「是否整体渲染」的判定；固定路由（如下载）不参与。
     optional: bool,
     visible: bool,
@@ -55,6 +55,7 @@ impl ShellRoute {
             label_key,
             icon,
             view,
+            title_bar: None,
             optional: false,
             visible: true,
         }
@@ -63,6 +64,14 @@ impl ShellRoute {
     /// 标记该路由是否为「可选」：活动栏在没有任何可见可选项时整体收起。
     pub fn optional(mut self, optional: bool) -> Self {
         self.optional = optional;
+        self
+    }
+
+    /// 为该路由挂载统一顶栏插槽：路由活跃时 shell 在标题栏中渲染它。
+    ///
+    /// 插槽内可交互元素须自行拦截左键 `mouse_down` 冒泡，空白处保持窗口拖拽 / 双击。
+    pub fn with_title_bar(mut self, view: impl Into<AnyView>) -> Self {
+        self.title_bar = Some(view.into());
         self
     }
 }
@@ -130,6 +139,8 @@ impl ShellAction {
 pub struct AuxiliaryWindowView {
     _translator: Entity<Translator>,
     title: SharedString,
+    /// 宿主设置的动态标题（如任务文件名）；存在时优先于按语言刷新的默认标题。
+    title_override: Option<SharedString>,
     content: AnyView,
 }
 
@@ -150,22 +161,36 @@ impl AuxiliaryWindowView {
         Self {
             _translator: translator,
             title,
+            title_override: None,
             content,
         }
     }
 
+    /// 以动态文本覆盖标题（传 `None` 恢复按语言键显示的默认标题）。
+    pub fn set_title(&mut self, title: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.title_override != title {
+            self.title_override = title;
+            cx.notify();
+        }
+    }
+
+    /// 辅助窗口标题栏：与主窗口统一顶栏同为 chrome 底 + hairline 底线；标题 sm MEDIUM，
+    /// 三平台一致左对齐（macOS 紧随交通灯，Windows/Linux 自窗口左缘起）。
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens();
+        let theme = active_theme(cx);
+        let tokens = theme.tokens();
+        let extended = theme.extended().colors;
         let spacing = tokens.spacing;
         let typography = tokens.typography.clone();
         let title_bar = TitleBar::new();
         #[cfg(not(target_os = "macos"))]
         let title_bar = title_bar.pl(spacing.sm);
 
+        // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(TITLE_BAR_HEIGHT)
-            .bg(tokens.colors.surface)
-            .border_color(tokens.colors.border)
+            .h(SHELL_TITLE_BAR_HEIGHT)
+            .bg(extended.chrome)
+            .border_color(extended.hairline)
             .child(
                 h_flex()
                     .size_full()
@@ -176,9 +201,16 @@ impl AuxiliaryWindowView {
                     .child(
                         div()
                             .min_w_0()
+                            .truncate()
                             .text_size(typography.sm.size)
-                            .font_weight(typography.sm.weight)
-                            .child(self.title.clone()),
+                            .line_height(typography.sm.line_height)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tokens.colors.foreground)
+                            .child(
+                                self.title_override
+                                    .clone()
+                                    .unwrap_or_else(|| self.title.clone()),
+                            ),
                     ),
             )
     }
@@ -190,7 +222,7 @@ impl Render for AuxiliaryWindowView {
         v_flex()
             .size_full()
             .relative()
-            .bg(colors.background)
+            .bg(colors.surface)
             .text_color(colors.foreground)
             .child(self.render_title_bar(cx))
             .child(
@@ -198,6 +230,7 @@ impl Render for AuxiliaryWindowView {
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
+                    .bg(colors.surface)
                     .child(self.content.clone()),
             )
             .children(gpui_component::Root::render_sheet_layer(window, cx))
@@ -206,14 +239,14 @@ impl Render for AuxiliaryWindowView {
     }
 }
 
-/// 活动栏轨宽度：40px 按钮居中 + 左右各 4px 留白。
+/// 活动栏轨宽度：32px 按钮居中 + 左右各 8px 留白。
 const ACTIVITY_RAIL_WIDTH: gpui::Pixels = px(48.);
 /// 活动栏每个按钮位所占的行高（等于按钮自身高度，纵向间距由 `gap` 提供）。
-const ACTIVITY_TILE_HEIGHT: gpui::Pixels = px(40.);
+const ACTIVITY_TILE_HEIGHT: gpui::Pixels = px(32.);
 /// 活动栏按钮尺寸。
-const ACTIVITY_BUTTON_SIZE: gpui::Pixels = px(40.);
-/// 活动栏图标尺寸。
-const ACTIVITY_ICON_SIZE: gpui::Pixels = px(20.);
+const ACTIVITY_BUTTON_SIZE: gpui::Pixels = px(32.);
+/// 活动栏图标比 `extended.icon.lg` 大的余量（图标 = lg + 2，随 lg 缩放）。
+const ACTIVITY_ICON_EXTRA: gpui::Pixels = px(2.);
 /// GPUI 窗口外壳：只负责窗口 chrome、活动栏、路由与内容槽位。
 pub struct ShellView {
     translator: Entity<Translator>,
@@ -284,52 +317,70 @@ impl ShellView {
         cx.notify();
     }
 
+    /// 统一顶栏：macOS 交通灯 / Windows·Linux logo + 应用菜单，其后是当前活跃路由的插槽；
+    /// Windows·Linux 的窗口按钮由 `TitleBar` 自带。
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = active_theme(cx).tokens();
-        let colors = tokens.colors;
-        let spacing = tokens.spacing;
-        let logo = img(APP_LOGO_PATH).size(px(16.));
+        let theme = active_theme(cx);
+        let spacing = theme.tokens().spacing;
+        let extended = theme.extended().colors;
+        let is_macos = cfg!(target_os = "macos");
+        // macOS 走原生菜单且交通灯占据左侧，不渲染 logo 与应用内菜单。
+        let leading = (!is_macos).then(|| {
+            h_flex()
+                .h_full()
+                .flex_none()
+                .items_center()
+                .gap(spacing.sm)
+                .child(img(APP_LOGO_PATH).size(px(16.)))
+                .children(self.menu_bar.clone().map(|menu_bar| {
+                    h_flex()
+                        .h_full()
+                        .items_center()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(menu_bar)
+                }))
+        });
+        let slot = self.active_title_bar();
         let title_bar = TitleBar::new();
         #[cfg(not(target_os = "macos"))]
         let title_bar = title_bar.pl(spacing.sm);
-        #[cfg(target_os = "macos")]
-        let (leading_logo, trailing_logo): (Option<Img>, Option<Img>) = (None, Some(logo));
-        #[cfg(not(target_os = "macos"))]
-        let (leading_logo, trailing_logo): (Option<Img>, Option<Img>) = (Some(logo), None);
-        let menu_bar = if cfg!(target_os = "macos") {
-            None
-        } else {
-            self.menu_bar.clone()
-        };
 
+        // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(TITLE_BAR_HEIGHT)
-            .bg(colors.surface)
-            .border_color(colors.border)
+            .h(SHELL_TITLE_BAR_HEIGHT)
+            .bg(extended.chrome)
+            .border_color(extended.hairline)
             .child(
                 h_flex()
                     .size_full()
                     .min_w_0()
                     .items_center()
                     .gap(spacing.sm)
-                    .pl(spacing.xxs)
-                    .pr(spacing.md)
-                    .children(leading_logo)
-                    .children(menu_bar.map(|menu_bar| {
+                    .pr(if is_macos { spacing.md } else { spacing.sm })
+                    .children(leading)
+                    .child(
                         h_flex()
                             .h_full()
+                            .flex_1()
+                            .min_w_0()
                             .items_center()
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(menu_bar)
-                    }))
-                    .child(div().flex_1())
-                    .children(trailing_logo),
+                            .children(slot),
+                    ),
             )
+    }
+
+    /// 当前活跃路由挂载的顶栏插槽。
+    fn active_title_bar(&self) -> Option<AnyView> {
+        self.active_route
+            .and_then(|active| self.routes.iter().find(|route| route.id == active))
+            .and_then(|route| route.title_bar.clone())
     }
 
     fn route_button(&self, route: &ShellRoute, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.active_route == Some(route.id);
-        let colors = active_theme(cx).tokens().colors;
+        let theme = active_theme(cx);
+        let colors = theme.tokens().colors;
+        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
         let label = SharedString::from(self.translator.read(cx).text(route.label_key).to_owned());
         let tooltip_label = label.clone();
         let route_id = route.id;
@@ -346,15 +397,11 @@ impl ShellView {
                 activity_bar_button(
                     route.button_id,
                     label,
-                    route
-                        .icon
-                        .clone()
-                        .size(ACTIVITY_ICON_SIZE)
-                        .text_color(if selected {
-                            colors.accent_foreground
-                        } else {
-                            colors.muted_foreground
-                        }),
+                    route.icon.clone().size(icon_size).text_color(if selected {
+                        colors.foreground
+                    } else {
+                        colors.muted_foreground
+                    }),
                     selected,
                     ACTIVITY_BUTTON_SIZE,
                     cx,
@@ -384,6 +431,9 @@ impl ShellView {
         let tooltip_label = label.clone();
         let handler = Rc::clone(&action.handler);
         let icon = (action.icon)(cx);
+        let theme = active_theme(cx);
+        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
+        let icon_color = theme.tokens().colors.muted_foreground;
 
         div()
             .id(action.tooltip_id)
@@ -397,7 +447,7 @@ impl ShellView {
                 activity_bar_button(
                     action.button_id,
                     label,
-                    icon.size(ACTIVITY_ICON_SIZE),
+                    icon.size(icon_size).text_color(icon_color),
                     false,
                     ACTIVITY_BUTTON_SIZE,
                     cx,
@@ -432,18 +482,17 @@ impl ShellView {
         if !self.has_visible_optional_item() {
             return None;
         }
-        let tokens = active_theme(cx).tokens();
-        let colors = tokens.colors;
-        let spacing = tokens.spacing;
+        let theme = active_theme(cx);
+        let spacing = theme.tokens().spacing;
+        let chrome = theme.extended().colors.chrome;
+        // 与侧栏同为 chrome 底，二者之间不画分隔线。
         Some(
             v_flex()
                 .h_full()
                 .w(ACTIVITY_RAIL_WIDTH)
                 .flex_none()
                 .justify_between()
-                .bg(colors.surface)
-                .border_r_1()
-                .border_color(colors.border)
+                .bg(chrome)
                 .pt(spacing.sm)
                 .pb(spacing.sm)
                 .child(self.route_buttons(cx))

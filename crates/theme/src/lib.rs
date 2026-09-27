@@ -6,10 +6,12 @@
 
 mod appearance;
 mod definition;
+mod extended;
 mod manager;
 
 pub use appearance::*;
 pub use definition::*;
+pub use extended::*;
 pub use gpui_base::{
     ColorTokens, RadiusTokens, SemanticThemeTokens, ShadowTokens, SpacingTokens, TextStyleToken,
     TypographyTokens,
@@ -17,9 +19,9 @@ pub use gpui_base::{
 pub use gpui_component::ThemeMode;
 pub use manager::*;
 
-/// 表单控件（输入框 / 数字输入 / 下拉按钮 / 行内操作按钮）的统一高度。
+/// 控件高度：全应用唯一一档，页面工具栏、对话框、表单、设置行、列表行内与独立窗口里的
+/// 按钮 / 输入框 / 下拉 / 数字输入统一取此值。
 ///
-/// gpui-component 的 `Size::Small` 只有 21px、`Size::Medium` 是 28px 但按钮字号
-/// 会跳到 `text_base`；桌面端统一取 28px 高 + `text_sm` 字号，避免同一行里
-/// 输入框、下拉与按钮三种高度并存。
+/// gpui-component 的 `Size::Small` 只有 21px、`Size::Medium` 是 26px（2rem）；统一取 28px，
+/// 与活动栏、表头等 chrome 元素的节奏一致。
 pub const CONTROL_HEIGHT: gpui::Pixels = gpui::px(28.);

@@ -1,12 +1,12 @@
 //! 下载：保存位置、行为、连接与性能、自动重试、高级。
 
-use fluxdown_ui_components::{ButtonVariant, button};
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
-use gpui::{App, ParentElement, SharedString, Styled, div};
-use gpui_component::{IconName, h_flex};
+use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, loading_button, tabular_numbers};
+use fluxdown_ui_theme::active_theme;
+use gpui::{App, ParentElement, SharedString, Styled, px};
+use gpui_component::h_flex;
 
 use super::{SectionContext, user_agent};
-use crate::ui::{Control, SettingsPage, SettingsSection};
+use crate::ui::{Control, SettingsPage, SettingsSection, body_text, meta_text};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
     if ctx.store.read(cx).conn_policy().is_none() && !ctx.store.read(cx).is_busy("connPolicy") {
@@ -16,7 +16,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         "download",
         ctx.t("settingsCatDownload"),
         ctx.t("settingsCatDownloadDesc"),
-        IconName::HardDrive,
+        FluxIcon::Download,
     )
     .sections([
         save_location_section(ctx),
@@ -54,10 +54,9 @@ fn save_dir_control(ctx: &SectionContext) -> Control {
             .gap(tokens.spacing.sm)
             .items_center()
             .child(
-                div()
-                    .max_w_80()
+                body_text(cx)
+                    .max_w(px(320.))
                     .truncate()
-                    .text_sm()
                     .text_color(if current.is_empty() {
                         tokens.colors.muted_foreground
                     } else {
@@ -72,7 +71,6 @@ fn save_dir_control(ctx: &SectionContext) -> Control {
                     ButtonVariant::Secondary,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .on_click(move |_, _, cx| {
                     let store = pick_store.clone();
                     let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -114,7 +112,7 @@ fn behavior_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
         section = section.row(ctx.item(
             "silentSkipSelection",
             Some("silentSkipSelectionDesc"),
-            ctx.pref_switch("silent_skip_selection", false),
+            ctx.pref_switch("download.silent_skip_selection", false),
         ));
     }
     section
@@ -232,14 +230,14 @@ fn conn_policy_control(ctx: &SectionContext) -> Control {
             .conn_policy()
             .map_or(0, |summary| summary.domain_count);
         let busy = store.read(cx).is_busy("connPolicy");
+        let clearing = store.read(cx).is_busy_tagged("connPolicy", "clear");
         let clear_store = store.clone();
         h_flex()
             .gap(tokens.spacing.sm)
             .items_center()
             .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors.muted_foreground)
+                meta_text(cx)
+                    .font_features(tabular_numbers())
                     .child(if count == 0 {
                         empty.clone()
                     } else {
@@ -247,16 +245,19 @@ fn conn_policy_control(ctx: &SectionContext) -> Control {
                     }),
             )
             .child(
-                button(
+                loading_button(
                     "download-clear-conn-policy",
                     clear.clone(),
                     ButtonVariant::Secondary,
+                    clearing,
                     cx,
                 )
-                .h(CONTROL_HEIGHT)
                 .disabled(busy || count == 0)
                 .on_click(move |_, _, cx| {
-                    clear_store.update(cx, |store, cx| store.clear_conn_policy(cx));
+                    clear_store.update(cx, |store, cx| {
+                        store.clear_conn_policy(cx);
+                        store.tag_busy("connPolicy", "clear");
+                    });
                 }),
             )
     })
