@@ -4,6 +4,7 @@
 
 mod account_port;
 mod actions;
+mod activity;
 mod agent_client;
 mod app;
 mod app_icon;
@@ -19,6 +20,7 @@ mod progress_windows;
 mod service_bootstrap;
 mod session;
 mod settings_port;
+mod theme_library;
 mod windows;
 
 use std::process::ExitCode;

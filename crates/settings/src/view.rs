@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, segmented_tabs, sidebar_navigation_button,
+    ControlExt as _, FluxIcon, nav_icon_color, segmented_tabs, sidebar_navigation_button,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -33,11 +33,22 @@ use crate::ui::{
 /// 分类导航列宽（与下载侧栏默认宽一致）。
 const SIDEBAR_WIDTH: f32 = 200.;
 
-/// app 注入的外部内容槽：账户页与扩展页由对应 capability 提供。
+/// app 注入的外部内容：账户页与扩展页由对应 capability 提供；活动栏开关由 app 的
+/// 活动栏注册表派生。
 #[derive(Default)]
 pub struct SettingsContentSlots {
     pub account: Option<AnyView>,
     pub extensions: Option<AnyView>,
+    /// 「通用 → 活动栏」分区的开关行，按活动栏自上而下顺序。
+    pub activity_bar: Vec<ActivityBarToggle>,
+}
+
+/// 活动栏可选入口的可见性开关：一个布尔偏好（缺省视为显示）+ 标题 / 描述文案键。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivityBarToggle {
+    pub pref_key: &'static str,
+    pub title_key: &'static str,
+    pub desc_key: &'static str,
 }
 
 /// 设置能力的顶层页面。
@@ -108,7 +119,7 @@ impl SettingsView {
             translator_entity: &self.translator,
         };
         vec![
-            general::page(&ctx, cx),
+            general::page(&ctx, &self.slots.activity_bar, cx),
             sections::slot_page(
                 &ctx,
                 "account",
@@ -138,16 +149,10 @@ impl SettingsView {
     }
 
     fn render_nav_item(&self, page: &SettingsPage, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = active_theme(cx);
-        let tokens = theme.tokens();
-        let icon_size = theme.extended().icon.lg;
+        let icon_size = active_theme(cx).extended().icon.lg;
         let selected = self.selected == page.title || self.selected == page.key;
         let key = SharedString::from(page.key);
-        let icon_color = if selected {
-            tokens.colors.foreground
-        } else {
-            tokens.colors.muted_foreground
-        };
+        let icon_color = nav_icon_color(selected, cx);
 
         sidebar_navigation_button(
             SharedString::from(format!("settings-nav-{}", page.key)),

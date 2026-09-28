@@ -32,13 +32,28 @@ impl DownloadView {
         on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.icon_action_with_state(id, label, icon, destructive, false, on_click, cx)
+    }
+
+    /// [`Self::icon_action`] 的可禁用版本：`disabled` 时保留悬浮提示但不响应点击。
+    #[allow(clippy::too_many_arguments)]
+    fn icon_action_with_state(
+        &self,
+        id: &'static str,
+        label: SharedString,
+        icon: Icon,
+        destructive: bool,
+        disabled: bool,
+        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tooltip_label = label.clone();
         div()
             .id(SharedString::from(format!("{id}-tooltip")))
             .flex_none()
             .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
             .child(
-                toolbar_action_button(id, label, icon, destructive, false, cx)
+                toolbar_action_button(id, label, icon, destructive, disabled, cx)
                     .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx))),
             )
             .into_any_element()
@@ -48,7 +63,7 @@ impl DownloadView {
     fn selection_delete_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens();
-        let radius = tokens.radius.md;
+        let radius = theme.components().button_radius;
         let destructive = tokens.colors.destructive;
         let icon_size = theme.extended().icon.md;
         let delete_task = self.strings.delete_task.clone();
@@ -115,6 +130,7 @@ impl DownloadView {
         let text_size = tokens.typography.xs.size;
         let line_height = tokens.typography.xs.line_height;
         let hairline = theme.extended().colors.hairline;
+        let stroke = theme.extended().stroke.thin;
         let icon_size = theme.extended().icon.md;
         let count_label = SharedString::from(
             self.translator
@@ -128,7 +144,7 @@ impl DownloadView {
         let separator = move || {
             div()
                 .flex_none()
-                .w(px(1.))
+                .w(stroke)
                 .h(separator_height)
                 .mx(spacing.xs)
                 .bg(hairline)
@@ -156,11 +172,12 @@ impl DownloadView {
             ));
         }
         if selection.any_local {
-            actions.push(self.icon_action(
+            actions.push(self.icon_action_with_state(
                 "download-selection-open",
                 self.strings.open_file.clone(),
                 Icon::new(FluxIcon::ExternalLink).size(icon_size),
                 false,
+                !selection.all_openable,
                 |this, _, cx| this.execute_toolbar(ToolbarCommand::Open, cx),
                 cx,
             ));
@@ -200,7 +217,7 @@ impl DownloadView {
                         .gap(spacing.xxs)
                         .items_center()
                         .bg(surface)
-                        .border_1()
+                        .border(stroke)
                         .border_color(hairline)
                         .rounded(radius)
                         .shadow(shadow)

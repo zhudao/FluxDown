@@ -124,5 +124,7 @@ assets/screenshot/
 
 # Git worktrees
 .worktrees/
-website-v2/
 .tmp*
+
+# Promo video production workspace (local only)
+/promo-video/

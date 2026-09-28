@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use fluxdown_ui_components::activity_button as activity_bar_button;
+use fluxdown_ui_components::{activity_button as activity_bar_button, nav_icon_color};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -10,7 +10,7 @@ use gpui::{
 };
 use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
-use crate::{SHELL_TITLE_BAR_HEIGHT, assets::APP_LOGO_PATH};
+use crate::assets::APP_LOGO_PATH;
 
 /// shell 路由的稳定标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,7 +188,7 @@ impl AuxiliaryWindowView {
 
         // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(SHELL_TITLE_BAR_HEIGHT)
+            .h(theme.density().title_bar)
             .bg(extended.chrome)
             .border_color(extended.hairline)
             .child(
@@ -285,35 +285,28 @@ impl ShellView {
         }
     }
 
-    /// 设置路由的可见性（宿主偏好回流入口）；隐藏当前活跃路由时自动切到首条可见路由。
-    pub fn set_route_visible(&mut self, route: RouteId, visible: bool, cx: &mut Context<Self>) {
-        let Some(target) = self.routes.iter_mut().find(|r| r.id == route) else {
+    /// 按活动栏按钮 id 设置可选路由或动作的可见性（宿主偏好回流入口）；
+    /// 隐藏当前活跃路由时自动切到首条可见路由。
+    pub fn set_entry_visible(&mut self, button_id: &str, visible: bool, cx: &mut Context<Self>) {
+        if let Some(route) = self.routes.iter_mut().find(|r| r.button_id == button_id) {
+            if route.visible == visible {
+                return;
+            }
+            route.visible = visible;
+            let id = route.id;
+            if !visible && self.active_route == Some(id) {
+                self.active_route = self.routes.iter().find(|r| r.visible).map(|r| r.id);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(action) = self.actions.iter_mut().find(|a| a.button_id == button_id) else {
             return;
         };
-        if target.visible == visible {
+        if action.visible == visible {
             return;
         }
-        target.visible = visible;
-        if !visible && self.active_route == Some(route) {
-            self.active_route = self.routes.iter().find(|r| r.visible).map(|r| r.id);
-        }
-        cx.notify();
-    }
-
-    /// 设置活动栏动作的可见性（宿主偏好回流入口）。
-    pub fn set_action_visible(
-        &mut self,
-        button_id: &'static str,
-        visible: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(target) = self.actions.iter_mut().find(|a| a.button_id == button_id) else {
-            return;
-        };
-        if target.visible == visible {
-            return;
-        }
-        target.visible = visible;
+        action.visible = visible;
         cx.notify();
     }
 
@@ -347,7 +340,7 @@ impl ShellView {
 
         // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(SHELL_TITLE_BAR_HEIGHT)
+            .h(theme.density().title_bar)
             .bg(extended.chrome)
             .border_color(extended.hairline)
             .child(
@@ -378,9 +371,7 @@ impl ShellView {
 
     fn route_button(&self, route: &ShellRoute, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.active_route == Some(route.id);
-        let theme = active_theme(cx);
-        let colors = theme.tokens().colors;
-        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
+        let icon_size = active_theme(cx).extended().icon.lg + ACTIVITY_ICON_EXTRA;
         let label = SharedString::from(self.translator.read(cx).text(route.label_key).to_owned());
         let tooltip_label = label.clone();
         let route_id = route.id;
@@ -397,11 +388,11 @@ impl ShellView {
                 activity_bar_button(
                     route.button_id,
                     label,
-                    route.icon.clone().size(icon_size).text_color(if selected {
-                        colors.foreground
-                    } else {
-                        colors.muted_foreground
-                    }),
+                    route
+                        .icon
+                        .clone()
+                        .size(icon_size)
+                        .text_color(nav_icon_color(selected, cx)),
                     selected,
                     ACTIVITY_BUTTON_SIZE,
                     cx,

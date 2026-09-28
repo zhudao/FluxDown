@@ -15,7 +15,7 @@ use fluxdown_protocol::{
 use fluxdown_ui_downloads::DownloadView;
 use fluxdown_ui_i18n::{I18nCatalog, I18nError, Translator, system_locale};
 use fluxdown_ui_settings::{SettingsStore, component_locale};
-use fluxdown_ui_shell::{RouteId, ShellView};
+use fluxdown_ui_shell::ShellView;
 use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
 use gpui_component::menu::AppMenuBar;
 use tokio::sync::mpsc;
@@ -27,6 +27,7 @@ use crate::launch::{self, LaunchOptions};
 use crate::service_bootstrap::ServiceBootstrap;
 use crate::session::{AgentSession, SessionSignal, attach};
 use crate::settings_port::AgentSettingsPort;
+use crate::theme_library::FsThemeLibrary;
 use crate::windows::WindowRegistry;
 
 const MI_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Regular.ttf");
@@ -185,6 +186,12 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         gpui_component::init(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
+        // 导入主题须在首个偏好快照前注册，`custom:<id>` 偏好才能直接命中；
+        // 库内缺失的 id 由主题 crate 回退到该槽位的内置默认主题。
+        let theme_library = FsThemeLibrary::new(app_data_dir().join("themes"));
+        for failure in fluxdown_ui_settings::install_theme_library(Arc::new(theme_library), cx) {
+            eprintln!("failed to load imported theme: {failure}");
+        }
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
         let session = cx.new(|cx| AgentSession::new(agent_client.clone(), cx));
@@ -536,22 +543,13 @@ fn apply_preferences(cx: &mut App) {
     }
 }
 
-/// 偏好快照/事件 → 活动栏可选项可见性（RSS 路由、主题切换动作）。
+/// 偏好快照/事件 → 活动栏可选入口可见性（条目与偏好键见 `activity` 注册表）。
 fn apply_activity_bar_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
     let Some(shell) = Desktop::global(cx).main_shell.clone() else {
         return;
     };
-    let show_activity_rss = values
-        .get("ui.show_activity_rss")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
-    let show_activity_theme = values
-        .get("ui.show_activity_theme")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
     let _ = shell.update(cx, |shell, cx| {
-        shell.set_route_visible(RouteId::new("rss"), show_activity_rss, cx);
-        shell.set_action_visible("activity-theme", show_activity_theme, cx);
+        crate::activity::apply_visibility(shell, values, cx);
     });
 }
 
@@ -602,6 +600,18 @@ pub(crate) fn submit_captures_detached(
         let _ = done.send(());
     });
     finished
+}
+
+/// 桌面数据根目录：与 agent 同一规则（`FLUXDOWN_DATA_DIR` 优先，否则与 agent token 同一
+/// ProjectDirs 数据目录）。
+fn app_data_dir() -> std::path::PathBuf {
+    if let Some(path) = env::var_os("FLUXDOWN_DATA_DIR") {
+        return path.into();
+    }
+    directories::ProjectDirs::from("dev", "zerx", "FluxDown")
+        .map_or_else(std::path::PathBuf::new, |project| {
+            project.data_dir().to_owned()
+        })
 }
 
 fn agent_token_path() -> std::path::PathBuf {

@@ -8,12 +8,12 @@ mod kit;
 
 pub use icons::{ComponentAssets, FluxIcon, category_icon};
 pub use kit::{
-    ControlExt, DialogIntent, IconControlExt, caption_number, check_row, dialog_footer,
-    dialog_title, field_error, field_hint, field_label, form, form_field, form_gap, form_row,
-    input_with_action, option_group, option_row, segmented_tabs,
+    ControlExt, DIALOG_PRIMARY_KEY_CONTEXT, DialogIntent, IconControlExt, caption_number,
+    check_row, dialog_footer, dialog_title, field_error, field_hint, field_label, form, form_field,
+    form_gap, form_row, input_with_action, option_group, option_row, segmented_tabs,
 };
 
-use fluxdown_ui_theme::{CONTROL_HEIGHT, active_theme};
+use fluxdown_ui_theme::active_theme;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, Div, ElementId, FontFeatures, FontWeight, Hsla, InteractiveElement, IntoElement,
@@ -22,11 +22,6 @@ use gpui::{
 };
 pub use gpui_base::Button;
 use gpui_component::Sizable as _;
-
-/// 侧栏导航行高。
-pub const NAV_ROW_HEIGHT: Pixels = px(28.);
-/// 工具栏 / 顶栏图标按钮边长。
-pub const TOOLBAR_BUTTON_SIZE: Pixels = px(28.);
 
 /// 等宽数字（OpenType `tnum`）：速度、大小、百分比、计数等会刷新的数字统一使用，
 /// 避免 MiSans 比例数字（「1」比「0」窄约 36%）在刷新时左右跳动。
@@ -40,6 +35,8 @@ pub enum ButtonVariant {
     Primary,
     Secondary,
     Ghost,
+    /// 外链 / 跳转类文字操作：幽灵按钮外观 + `colors.accentText` 文字，悬停同样只做中性加深。
+    Link,
     Destructive,
 }
 
@@ -80,19 +77,20 @@ pub fn loading_button(
 
 /// 文字按钮的公共外观（不含内容），供 [`button`] / [`loading_button`] 共用。
 fn text_button_frame(id: impl Into<ElementId>, variant: ButtonVariant, cx: &App) -> Button {
-    let tokens = active_theme(cx).tokens();
-    let palette = ButtonPalette::for_variant(variant, tokens.colors);
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let palette = ButtonPalette::for_variant(variant, tokens.colors, theme.extended().colors);
 
     Button::new(id)
-        .h(CONTROL_HEIGHT)
+        .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
         .line_height(relative(1.))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(tokens.radius.md)
-        .border_1()
+        .rounded(theme.components().button_radius)
+        .border(theme.extended().stroke.thin)
         .border_color(palette.border)
         .bg(palette.background)
         .text_color(palette.foreground)
@@ -131,7 +129,8 @@ pub fn choice_chip(
     selected: bool,
     cx: &App,
 ) -> Button {
-    let tokens = active_theme(cx).tokens();
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
     let colors = tokens.colors;
     let label = label.into();
     let (background, foreground, border, hover) = if selected {
@@ -151,15 +150,15 @@ pub fn choice_chip(
     };
 
     Button::new(id)
-        .h(CONTROL_HEIGHT)
+        .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
         .line_height(relative(1.))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(tokens.radius.md)
-        .border_1()
+        .rounded(theme.components().button_radius)
+        .border(theme.extended().stroke.thin)
         .border_color(border)
         .bg(background)
         .text_color(foreground)
@@ -176,7 +175,7 @@ pub fn choice_chip(
         .child(label)
 }
 
-/// 创建仅图标的方形按钮（`CONTROL_HEIGHT` 尺寸，与同行输入框等高），用于设置行内联的紧凑操作
+/// 创建仅图标的方形按钮（`density.control` 尺寸，与同行输入框等高），用于设置行内联的紧凑操作
 /// （复制 / 生成 / 清空等）。`label` 仅用作无障碍标签，不渲染文字；
 /// 视觉悬浮提示由调用方通过 `Button::tooltip` 叠加。
 pub fn icon_button(
@@ -214,17 +213,18 @@ fn icon_button_frame(
     variant: ButtonVariant,
     cx: &App,
 ) -> Button {
-    let tokens = active_theme(cx).tokens();
-    let palette = ButtonPalette::for_variant(variant, tokens.colors);
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let palette = ButtonPalette::for_variant(variant, tokens.colors, theme.extended().colors);
 
     Button::new(id)
-        .size(CONTROL_HEIGHT)
+        .size(theme.density().control)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(tokens.radius.md)
-        .border_1()
+        .rounded(theme.components().button_radius)
+        .border(theme.extended().stroke.thin)
         .border_color(palette.border)
         .bg(palette.background)
         .text_color(palette.foreground)
@@ -241,20 +241,25 @@ pub fn primary_icon_button(
     icon: impl IntoElement,
     cx: &App,
 ) -> Button {
-    let tokens = active_theme(cx).tokens();
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
     let label = label.into();
-    let palette = ButtonPalette::for_variant(ButtonVariant::Primary, tokens.colors);
+    let palette = ButtonPalette::for_variant(
+        ButtonVariant::Primary,
+        tokens.colors,
+        theme.extended().colors,
+    );
 
     Button::new(id)
-        .h(CONTROL_HEIGHT)
+        .h(theme.density().control)
         .px(tokens.spacing.sm + tokens.spacing.xxs)
         .line_height(relative(1.))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(tokens.radius.md)
-        .border_1()
+        .rounded(theme.components().button_radius)
+        .border(theme.extended().stroke.thin)
         .border_color(palette.border)
         .bg(palette.background)
         .text_color(palette.foreground)
@@ -301,12 +306,12 @@ pub fn toolbar_action_button(
     };
 
     let button = Button::new(id)
-        .size(TOOLBAR_BUTTON_SIZE)
+        .size(theme.density().toolbar_button)
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(tokens.radius.md)
+        .rounded(theme.components().button_radius)
         .bg(transparent(extended.nav_hover))
         .text_color(foreground)
         .disabled(disabled)
@@ -345,8 +350,8 @@ pub fn navigation_button(
 
 /// 创建带图标与尾部信息的侧栏导航按钮。
 ///
-/// 选中态是中性底色 + 正文色 + 中等字重（强调色只留给主操作与进行中的下载），
-/// 未选中为二级文字色；图标颜色由调用方决定。
+/// 选中态是中性底色 + `navSelectedForeground` 文字 + 中等字重，未选中为二级文字色；
+/// 图标颜色由调用方决定，常规导航项用 [`nav_icon_color`]（选中时强调色落在图标上）。
 pub fn sidebar_navigation_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -362,7 +367,7 @@ pub fn sidebar_navigation_button(
     let (background, foreground, weight) = if selected {
         (
             extended.nav_selected,
-            tokens.colors.foreground,
+            extended.nav_selected_foreground,
             FontWeight::MEDIUM,
         )
     } else {
@@ -372,14 +377,14 @@ pub fn sidebar_navigation_button(
             FontWeight::NORMAL,
         )
     };
-    let hover_background = if selected {
-        extended.nav_selected
+    let (hover_background, hover_foreground) = if selected {
+        (extended.nav_selected, extended.nav_selected_foreground)
     } else {
-        extended.nav_hover
+        (extended.nav_hover, tokens.colors.foreground)
     };
 
     Button::new(id)
-        .h(NAV_ROW_HEIGHT)
+        .h(theme.density().nav_row)
         .w_full()
         .px(tokens.spacing.sm)
         .line_height(relative(1.))
@@ -388,16 +393,12 @@ pub fn sidebar_navigation_button(
         .justify_between()
         .gap(tokens.spacing.xs)
         .cursor_pointer()
-        .rounded(tokens.radius.md)
+        .rounded(theme.components().nav_item_radius)
         .bg(background)
         .text_color(foreground)
         .text_size(tokens.typography.sm.size)
         .font_weight(weight)
-        .hover(move |style| {
-            style
-                .bg(hover_background)
-                .text_color(tokens.colors.foreground)
-        })
+        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
         .active(move |style| style.bg(extended.nav_selected))
         .focus_visible(move |style| style.bg(hover_background))
         .selected(selected)
@@ -414,10 +415,21 @@ pub fn sidebar_navigation_button(
         .child(trailing)
 }
 
+/// 导航项（侧栏、设置分类、活动栏、订阅源列表）的图标色：选中取 `navSelectedIcon`
+/// （强调色，保证与选中底色 ≥ 3:1），未选中取二级文字色。
+pub fn nav_icon_color(selected: bool, cx: &App) -> Hsla {
+    let theme = active_theme(cx);
+    if selected {
+        theme.extended().colors.nav_selected_icon
+    } else {
+        theme.tokens().colors.muted_foreground
+    }
+}
+
 /// 创建活动栏按钮。
 ///
-/// 选中态为中性底色 + 正文色图标；未选中为二级文字色图标，悬停时出现浅底。
-/// 活动栏与侧栏同为 `chrome` 底色，不用强调色块抢内容区的注意力。
+/// 选中态为中性底色 + 强调色图标（图标色由调用方经 [`nav_icon_color`] 决定）；未选中为
+/// 二级文字色图标，悬停时出现浅底。活动栏与侧栏同为 `chrome` 底色，不铺强调色块。
 pub fn activity_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -431,14 +443,14 @@ pub fn activity_button(
     let colors = tokens.colors;
     let extended = theme.extended().colors;
     let (background, foreground) = if selected {
-        (extended.nav_selected, colors.foreground)
+        (extended.nav_selected, extended.nav_selected_icon)
     } else {
         (transparent(extended.nav_hover), colors.muted_foreground)
     };
-    let hover_background = if selected {
-        extended.nav_selected
+    let (hover_background, hover_foreground) = if selected {
+        (extended.nav_selected, extended.nav_selected_icon)
     } else {
-        extended.nav_hover
+        (extended.nav_hover, colors.foreground)
     };
 
     // 颜色直接落在基础样式上：`styles.selected` 的 text_color 不会传给 svg 图标。
@@ -448,10 +460,10 @@ pub fn activity_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .rounded(tokens.radius.md)
+        .rounded(theme.components().nav_item_radius)
         .bg(background)
         .text_color(foreground)
-        .hover(move |style| style.bg(hover_background).text_color(colors.foreground))
+        .hover(move |style| style.bg(hover_background).text_color(hover_foreground))
         .active(move |style| style.bg(extended.nav_selected))
         .focus_visible(move |style| style.bg(hover_background))
         .accessibility_label(label)
@@ -467,13 +479,11 @@ pub enum CheckState {
     Indeterminate,
 }
 
-/// 复选框边长。
-pub const CHECK_MARK_SIZE: Pixels = px(16.);
-
-/// 列表用复选框外观（纯视觉，点击由调用方挂在外层）：16px 圆角方块，
+/// 列表用复选框外观（纯视觉，点击由调用方挂在外层）：`density.checkMark` 见方的圆角方块，
 /// 未选中为细描边空框，选中 / 部分选中为强调色实心 + 粗线勾 / 横线。
 pub fn check_mark(state: CheckState, cx: &App) -> Div {
-    let tokens = active_theme(cx).tokens();
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
     let colors = tokens.colors;
     let glyph = match state {
         CheckState::Unchecked => None,
@@ -481,13 +491,13 @@ pub fn check_mark(state: CheckState, cx: &App) -> Div {
         CheckState::Indeterminate => Some(FluxIcon::CheckboxMinus),
     };
     let base = div()
-        .size(CHECK_MARK_SIZE)
+        .size(theme.density().check_mark)
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .rounded(tokens.radius.sm + px(1.))
-        .border_1();
+        .rounded(theme.components().checkbox_radius)
+        .border(theme.extended().stroke.thin);
     match glyph {
         None => base
             .border_color(colors.muted_foreground.opacity(0.55))
@@ -500,16 +510,16 @@ pub fn check_mark(state: CheckState, cx: &App) -> Div {
     }
 }
 
-/// 基础卡片：内容底色 + hairline 描边 + `radius.lg`，不加阴影（阴影只留给浮层）。
+/// 基础卡片：内容底色 + hairline 描边 + `components.card.radius`，不加阴影（阴影只留给浮层）。
 pub fn card(cx: &App) -> Div {
     let theme = active_theme(cx);
     let tokens = theme.tokens();
     div()
         .bg(tokens.colors.surface)
         .text_color(tokens.colors.surface_foreground)
-        .border_1()
+        .border(theme.extended().stroke.thin)
         .border_color(theme.extended().colors.hairline)
-        .rounded(tokens.radius.lg)
+        .rounded(theme.components().card_radius)
 }
 
 #[derive(Clone, Copy)]
@@ -522,7 +532,18 @@ struct ButtonPalette {
 }
 
 impl ButtonPalette {
-    fn for_variant(variant: ButtonVariant, colors: fluxdown_ui_theme::ColorTokens) -> Self {
+    fn for_variant(
+        variant: ButtonVariant,
+        colors: fluxdown_ui_theme::ColorTokens,
+        extended: fluxdown_ui_theme::ExtendedColors,
+    ) -> Self {
+        let ghost = Self {
+            background: transparent(colors.background),
+            foreground: colors.foreground,
+            border: transparent(colors.border),
+            hover: colors.muted,
+            active: shift_toward_contrast(colors.muted, 0.04),
+        };
         match variant {
             ButtonVariant::Primary => Self::filled(colors.primary, colors.primary_foreground),
             // 次要按钮：内容底色 + 描边（outline），悬停只做中性加深，不泛强调色。
@@ -533,12 +554,10 @@ impl ButtonPalette {
                 hover: colors.muted,
                 active: shift_toward_contrast(colors.muted, 0.04),
             },
-            ButtonVariant::Ghost => Self {
-                background: transparent(colors.background),
-                foreground: colors.foreground,
-                border: transparent(colors.border),
-                hover: colors.muted,
-                active: shift_toward_contrast(colors.muted, 0.04),
+            ButtonVariant::Ghost => ghost,
+            ButtonVariant::Link => Self {
+                foreground: extended.accent_text,
+                ..ghost
             },
             ButtonVariant::Destructive => {
                 Self::filled(colors.destructive, colors.destructive_foreground)
