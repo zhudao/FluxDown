@@ -1,6 +1,5 @@
 //! GPUI 对同级 `fluxdown-agent` 的单飞启动与异步回收。
 
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,24 +46,27 @@ impl ServiceBootstrap {
 
     /// 仅由 connection-refused/no-listener 路径调用。
     ///
-    /// 先探测目标端口。这样当另一桌面进程或直接启动的 agent 正在完成
-    /// 初始化（尚未写出 bearer）时，不会反复拉起会立即因独占锁退出的子进程。
-    pub async fn ensure_running(&self, rpc_url: &str) -> Result<(), BootstrapError> {
+    /// `probe_listener` 为 true（本机尚无 bearer）时先探测目标端口：另一桌面进程或直接启动的
+    /// agent 可能已监听、只是还没写出 bearer，此时拉起的子进程会立即因独占锁退出。连接已被
+    /// 拒绝时此刻确定无人监听，跳过探测直接拉起，省掉 Windows 上约 2s 的拒绝等待。
+    pub async fn ensure_running(
+        &self,
+        rpc_url: &str,
+        probe_listener: bool,
+    ) -> Result<(), BootstrapError> {
         let mut state = self.state.lock().await;
         state.reapers.retain(|task| !task.is_finished());
         if state.running || self.stopped.load(Ordering::Acquire) {
             return Ok(());
         }
-        if agent_is_listening(rpc_url).await? {
+        if probe_listener && agent_is_listening(rpc_url).await? {
             return Ok(());
         }
-        let executable = agent_executable()?;
-        let mut command = std::process::Command::new(executable);
+        let mut command = agent_command()?;
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        detach_background_process(&mut command);
         let mut child = tokio::process::Command::from(command)
             .spawn()
             .map_err(|error| BootstrapError::Spawn(format!("{error:#}")))?;
@@ -84,9 +86,14 @@ impl ServiceBootstrap {
     }
 }
 
+/// 探测 agent 监听端口的超时。Windows 连接回环上未监听的端口时，收到 RST 后内核还会重传
+/// SYN（约 0.5s + 1s），`connect` 要约 2s 才返回 `ConnectionRefused`；超时必须明显大于这段
+/// 时间，否则「无人监听」会被误判为探测失败而永远不拉起 agent。已监听时回环握手是亚毫秒级。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn agent_is_listening(rpc_url: &str) -> Result<bool, BootstrapError> {
     let target = agent_socket_target(rpc_url)?;
-    match tokio::time::timeout(Duration::from_millis(250), TcpStream::connect(target)).await {
+    match tokio::time::timeout(PROBE_TIMEOUT, TcpStream::connect(target)).await {
         Ok(Ok(_)) => Ok(true),
         Ok(Err(error))
             if matches!(
@@ -137,16 +144,54 @@ fn agent_socket_target(rpc_url: &str) -> Result<String, BootstrapError> {
         Ok(format!("{host}:{port}"))
     }
 }
-fn agent_executable() -> Result<PathBuf, std::io::Error> {
+/// macOS 打包布局中 agent 所在的辅助 bundle（相对外层 `Contents/`）；与
+/// `fluxdown_agent::platform` 的布局约定及 `scripts/package_gpui_macos.sh` 保持一致。
+#[cfg(target_os = "macos")]
+const MACOS_AGENT_HELPER_APP: &str = "Helpers/FluxDownAgent.app";
+#[cfg(target_os = "macos")]
+const MACOS_AGENT_HELPER_EXE: &str = "Contents/MacOS/fluxdown-agent";
+
+/// 拉起 agent 的命令。
+///
+/// macOS 打包布局下经 Launch Services（`open -g`）启动辅助 bundle：直接 spawn 的
+/// agent 会被系统记为桌面 App 的附属进程，桌面退出后 Dock 仍以
+/// `exited-with-subordinates` 保留其图标，直到托盘驻留的 agent 退出。`open` 在辅助
+/// App 已运行时不会再起第二个实例，`-g` 不抢前台。
+fn agent_command() -> Result<std::process::Command, std::io::Error> {
     if let Some(path) = std::env::var_os("FLUXDOWN_AGENT_BIN") {
-        return Ok(PathBuf::from(path));
+        let mut command = std::process::Command::new(path);
+        detach_background_process(&mut command);
+        return Ok(command);
     }
     let current = std::env::current_exe()?;
-    Ok(current.with_file_name(if cfg!(windows) {
+    #[cfg(target_os = "macos")]
+    if let Some(helper_app) = bundled_agent_app(&current) {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("-g").arg(helper_app);
+        return Ok(command);
+    }
+    let mut command = std::process::Command::new(current.with_file_name(if cfg!(windows) {
         "fluxdown-agent.exe"
     } else {
         "fluxdown-agent"
-    }))
+    }));
+    detach_background_process(&mut command);
+    Ok(command)
+}
+
+/// 桌面程序位于 `<App>.app/Contents/MacOS/` 且辅助 bundle 内存在 agent 时返回辅助
+/// bundle 路径；开发期平铺布局返回 `None`，回退同级查找。
+#[cfg(target_os = "macos")]
+fn bundled_agent_app(desktop_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_dir = desktop_exe.parent()?;
+    if !macos_dir.ends_with("Contents/MacOS") {
+        return None;
+    }
+    let helper_app = macos_dir.parent()?.join(MACOS_AGENT_HELPER_APP);
+    helper_app
+        .join(MACOS_AGENT_HELPER_EXE)
+        .is_file()
+        .then_some(helper_app)
 }
 
 /// 后台服务与界面解耦：Windows 不弹控制台窗；Unix 进入独立进程组，终端里对桌面程序的

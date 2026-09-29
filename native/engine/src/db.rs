@@ -977,7 +977,7 @@ impl Db {
         // `auto_proxy::route`（direct / direct:sampled / direct:pinned /
         // direct:failover / proxy:cached / proxy:sampled / proxy:failover）。
         // 空 = 非 Auto 模式或任务从未启动。每次任务启动时由 manager 重写，
-        // 运行中热切换由 coordinator 侧状态机更新。
+        // 运行中主导链路变化由 coordinator 侧多路径调度更新。
         self.add_column_if_missing("tasks", "auto_route", "TEXT NOT NULL DEFAULT ''")
             .await?;
         // 无人值守创建标记（外部接管/RSS 等自动化入口 + 「免打扰跳过二次选择」
@@ -2458,6 +2458,7 @@ impl Db {
             // 大小/并发推导），1..=8 手动。
             ("cdn_multi_enabled", "0"),
             ("cdn_max_nodes", "0"),
+            ("multi_nic_enabled", "0"),
             ("max_concurrent_tasks", "5"),
             ("speed_limit_bytes", "0"),
             // 全局 BT 上传限速（B/s）："0" = 不限。与 speed_limit_bytes
@@ -4134,7 +4135,7 @@ impl Db {
 
     /// 写入 `ProxyMode::Auto` 的任务级最终链路标签（wire 值见
     /// `auto_proxy::route`；空 = 非 Auto 模式）。任务启动时由 manager
-    /// 重写基线，运行中热切换/采样定论由 coordinator 状态机更新。
+    /// 重写基线，运行中主导链路变化由 coordinator 多路径调度更新。
     pub async fn set_task_auto_route(&self, task_id: &str, route: &str) -> Result<(), DbError> {
         sqlx::query("UPDATE tasks SET auto_route = $1 WHERE id = $2")
             .bind(route)

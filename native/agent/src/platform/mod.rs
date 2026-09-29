@@ -2,10 +2,15 @@
 //! `.torrent` 关联与 URL scheme 注册。
 //!
 //! 关联与 URL scheme 的注册目标是官方桌面程序：Windows 指向同级
-//! `fluxdown-desktop.exe`，macOS 指向 agent 所在的 `.app` bundle，Linux 指向
-//! 打包的 `com.fluxdown.app.desktop`。开机自启的目标是 agent 自身（`--autostart`），
-//! 由 agent 按托盘偏好决定是否再拉起桌面程序。全部函数同步阻塞，RPC 侧需放入
-//! `spawn_blocking`。
+//! `fluxdown-desktop.exe`，macOS 指向外层 `FluxDown.app` bundle（见
+//! [`host_bundle_id`]），Linux 指向打包的 `com.fluxdown.app.desktop`。开机自启的目标是
+//! agent 自身（`--autostart`），由 agent 按托盘偏好决定是否再拉起桌面程序。全部函数
+//! 同步阻塞，RPC 侧需放入 `spawn_blocking`。
+//!
+//! macOS 打包布局：agent 与 `fluxdownd` 位于辅助 bundle
+//! `FluxDown.app/Contents/Helpers/FluxDownAgent.app/Contents/MacOS/`（其 Info.plist 声明
+//! `LSUIElement`，常驻时不占 Dock），桌面程序位于外层 `FluxDown.app/Contents/MacOS/`。
+//! 不在该布局内（开发期 `target/release` 平铺）时按同级目录解析。
 
 mod autostart;
 mod file_association;
@@ -30,13 +35,81 @@ const DESKTOP_EXECUTABLE_NAME: &str = if cfg!(windows) {
     "fluxdown-desktop"
 };
 
-/// 与 agent 同目录的官方桌面程序；文件不存在时返回 `None`。
+/// 官方桌面程序：macOS 辅助 bundle 布局下取外层 `Contents/MacOS/`，否则取 agent 同级；
+/// 文件不存在时返回 `None`。
 #[must_use]
 pub fn desktop_executable() -> Option<PathBuf> {
-    let path = std::env::current_exe()
-        .ok()?
-        .with_file_name(DESKTOP_EXECUTABLE_NAME);
+    let agent = std::env::current_exe().ok()?;
+    #[cfg(target_os = "macos")]
+    if let Some(host_dir) = host_macos_dir(&agent) {
+        let path = host_dir.join(DESKTOP_EXECUTABLE_NAME);
+        return path.is_file().then_some(path);
+    }
+    let path = agent.with_file_name(DESKTOP_EXECUTABLE_NAME);
     path.is_file().then_some(path)
+}
+
+/// 辅助 bundle 的 bundle id = 外层 bundle id + 此后缀（打包脚本
+/// `scripts/package_gpui_macos.sh` 按此写入辅助 Info.plist）。
+#[cfg(target_os = "macos")]
+const HELPER_BUNDLE_ID_SUFFIX: &str = ".agent";
+
+/// agent 位于 `<Host>.app/Contents/Helpers/<Helper>.app/Contents/MacOS/` 时返回外层
+/// `<Host>.app/Contents/MacOS`；其他位置返回 `None`。
+#[cfg(target_os = "macos")]
+fn host_macos_dir(agent_exe: &Path) -> Option<PathBuf> {
+    let macos_dir = agent_exe.parent()?;
+    if !macos_dir.ends_with("Contents/MacOS") {
+        return None;
+    }
+    let helper_app = macos_dir.parent()?.parent()?;
+    if helper_app.extension()? != "app" {
+        return None;
+    }
+    let helpers = helper_app.parent()?;
+    let contents = helpers.parent()?;
+    if helpers.file_name()? != "Helpers" || contents.file_name()? != "Contents" {
+        return None;
+    }
+    if contents.parent()?.extension()? != "app" {
+        return None;
+    }
+    Some(contents.join("MacOS"))
+}
+
+/// `.torrent` 关联与 URL scheme 的注册目标：外层 `FluxDown.app` 的 bundle id。
+///
+/// 辅助 bundle 内由 Core Foundation 解析出的是辅助 bundle 自身的 id，按约定去掉
+/// [`HELPER_BUNDLE_ID_SUFFIX`] 得到外层 id；后缀不符说明打包错误，按不支持处理，
+/// 避免把关联登记到不声明 UTI / scheme 的辅助 bundle 上。
+#[cfg(target_os = "macos")]
+pub(crate) fn host_bundle_id() -> Option<String> {
+    let own = macos_cf::main_bundle_id()?;
+    let in_helper = std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| host_macos_dir(&exe).is_some());
+    host_id_from(own, in_helper)
+}
+
+#[cfg(target_os = "macos")]
+fn host_id_from(own: String, in_helper: bool) -> Option<String> {
+    if !in_helper {
+        return Some(own);
+    }
+    own.strip_suffix(HELPER_BUNDLE_ID_SUFFIX)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+}
+
+/// 释放关联时的接手程序：候选中第一个不是 FluxDown（`mine`）的 bundle id。
+///
+/// Launch Services 没有「无默认处理程序」状态，设空 bundle id 只会让系统回落到剩余候选；
+/// FluxDown 是唯一候选时返回 `None`，此时系统层面无法让出，由关联 opt-out 在捕获入口拦截。
+#[cfg(target_os = "macos")]
+fn successor_handler(candidates: Vec<String>, mine: &str) -> Option<String> {
+    candidates
+        .into_iter()
+        .find(|id| !id.is_empty() && !id.eq_ignore_ascii_case(mine))
 }
 
 /// 引擎下载中临时文件后缀（`fluxdown_engine::downloader::TEMP_EXT`）；agent 不依赖引擎，
@@ -242,18 +315,226 @@ fn launch_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
 
 #[cfg(windows)]
 fn launch_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
-    let mut command = if reveal {
-        let mut command = std::process::Command::new("explorer.exe");
-        command.arg(format!("/select,{}", path.display()));
-        command
-    } else {
-        let mut command = std::process::Command::new("cmd.exe");
-        command.arg("/c").arg("start").arg("").arg(path);
-        command
-    };
+    if reveal {
+        // 「在文件夹中显示」：
+        // 1) 第三方默认文件管理器兜底（#122，同 hub reveal_file.rs 的
+        //    platform_reveal_file）：OneCommander / Total Commander / Files
+        //    等只改 HKCR\Directory\shell\open\command、未挂 Explorer
+        //    Replacement 钩子的 FM 拦截不到 SHOpenFolderAndSelectItems——API
+        //    会直接拉起 Explorer 且返回成功，永远走不到回退；必须先探测，
+        //    命中即退化为「用第三方 FM 打开父目录」（不选中）。
+        // 2) Explorer 仍是默认：走标准 Shell API「打开父目录并选中」（见
+        //    sh_open_folder_and_select），失败回退 open 动词打开父目录，
+        //    保证至少有响应。
+        let dir = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent().unwrap_or(path).to_path_buf()
+        };
+        if default_dir_handler_is_third_party() {
+            tracing::debug!("reveal: third-party default file manager detected; opening dir");
+            return open_with_shell(&dir);
+        }
+        if !path.is_dir() && sh_open_folder_and_select(&path.to_string_lossy()) {
+            return Ok(());
+        }
+        tracing::debug!(
+            "reveal: SHOpenFolderAndSelectItems failed; falling back to ShellExecuteW open"
+        );
+        return open_with_shell(&dir);
+    }
+    open_with_shell(path)
+}
+
+/// 打开任意路径（文件走默认关联程序、目录走默认文件管理器）。
+///
+/// 与 hub `reveal_file.rs` 的 `platform_open_dir` 同一策略：优先直接调 Win32
+/// `ShellExecuteW`（"open" 默认 verb，双击的 API 本体，无 cmd 引号/元字符
+/// 解析风险）；失败才回退 `cmd /c start "" <path>`（start 内部同样走 open
+/// 关联；第一个空引号串是窗口标题，不能省）。
+#[cfg(windows)]
+fn open_with_shell(path: &Path) -> Result<(), PlatformError> {
+    use std::os::windows::process::CommandExt;
+
+    let text = path.to_string_lossy();
+    if shell_execute_open(&text) {
+        return Ok(());
+    }
+    tracing::debug!("ShellExecuteW failed; falling back to cmd /c start");
+    let mut command = std::process::Command::new("cmd.exe");
+    command.raw_arg(format!(r#"/c start "" "{text}""#));
     set_no_console_window(&mut command);
     command.spawn()?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 打开/定位的 Shell 调用与注册表探测：与 hub `reveal_file.rs` 同款实现的有意
+// 复制（crate 边界隔离），下列每个函数在 hub 都有同名对应，修改务必双份同步。
+// ---------------------------------------------------------------------------
+
+/// 直接调 Win32 `ShellExecuteW`（"open" 默认 verb）打开路径——微软官方的
+/// 「打开」调用（双击的 API 本体），系统按 open 动词关联解析默认处理程序。
+/// 与 `hub/src/reveal_file.rs` 的同名实现保持一致。
+/// 返回值 > 32 表示成功（Win32 约定）。
+#[cfg(windows)]
+fn shell_execute_open(path: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: wide/verb 均为有效的 NUL 结尾 UTF-16 缓冲，在调用期间存活；
+    // 其余参数按文档允许为空。
+    let h = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    h as usize > 32
+}
+
+/// 标准 Shell API：打开 `path` 所在父目录并选中 `path`（文件/目录皆可）。
+///
+/// `SHOpenFolderAndSelectItems` 是 Windows Shell 的标准「定位到文件夹视图」
+/// 调用，不硬编码 explorer.exe——文件夹视图由系统 Shell 打开。用 cidl=0 的
+/// 简写形式：`pidlFolder` 直接指向要选中的项，系统自动打开其父目录并选中
+/// 该项（见 MSDN 备注）。实现与 CLaunch 的 `openParentFolder` 同款：
+/// `SHParseDisplayName` 解析绝对 PIDL + `CoTaskMemFree` 释放 + 防御性 COM
+/// 初始化；失败返回 false，调用方回退为 open 动词打开父目录。
+///
+/// **同步注意**：本函数与 hub `reveal_file.rs` 的同名函数是有意复制的两份
+/// （crate 边界隔离），修改任一份务必同步另一份。
+///
+/// 文档要求先 CoInitialize：本函数运行在 RPC 处理线程上，这里做防御性
+/// 初始化——`hr < 0` 视为失败；S_OK/S_FALSE 都会取得本线程初始化引用，
+/// 结尾须配对 `CoUninitialize`。
+#[cfg(windows)]
+fn sh_open_folder_and_select(path: &str) -> bool {
+    use windows_sys::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize};
+    use windows_sys::Win32::UI::Shell::{SHOpenFolderAndSelectItems, SHParseDisplayName};
+
+    /// `COINIT_APARTMENTTHREADED`。
+    const COINIT_APARTMENTTHREADED: u32 = 2;
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: wide 为有效的 NUL 结尾 UTF-16 缓冲，在调用期间存活；其余参数
+    // 按文档允许为空。
+    let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+    if hr < 0 {
+        tracing::debug!(hr = format!("{hr:#x}"), "CoInitializeEx failed");
+        return false;
+    }
+
+    let mut pidl = std::ptr::null_mut();
+    // SAFETY: wide 存活于调用期间；ppidl 接收输出，sfgaoIn/psfgaoOut 传空。
+    // pbc 为 *mut c_void，须用 null_mut()——Rust 无 *const → *mut 隐式转换。
+    let hr_parse = unsafe {
+        SHParseDisplayName(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            &mut pidl,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if hr_parse < 0 || pidl.is_null() {
+        tracing::debug!(hr = format!("{hr_parse:#x}"), "SHParseDisplayName failed");
+        // SAFETY: 与上方取得初始化引用的 CoInitializeEx 配对。
+        unsafe { CoUninitialize() };
+        return false;
+    }
+
+    // cidl=0 简写：pidlFolder 直接指向要选中的项，系统打开其父目录并选中它。
+    // SAFETY: pidl 为 SHParseDisplayName 成功返回的有效 PIDL，调用后立即释放。
+    let hr_select = unsafe { SHOpenFolderAndSelectItems(pidl, 0, std::ptr::null(), 0) };
+    // SAFETY: 释放 SHParseDisplayName 按 COM 分配器返回的 PIDL。
+    unsafe { CoTaskMemFree(pidl.cast()) };
+    // SAFETY: 与上方取得初始化引用的 CoInitializeEx 配对。
+    unsafe { CoUninitialize() };
+    if hr_select < 0 {
+        tracing::debug!(
+            hr = format!("{hr_select:#x}"),
+            "SHOpenFolderAndSelectItems failed"
+        );
+        return false;
+    }
+    true
+}
+
+/// Windows：系统「打开目录」的默认处理程序是否已被替换成第三方文件管理器。
+///
+/// 读取 `HKCR\Directory\shell\<默认 verb>\command` 并解析其可执行文件名。
+/// 非 `explorer.exe` 时返回 `true`；键缺失、读取失败或仍是 Explorer 时返回
+/// `false`（保留 Shell API 的选中体验）。`<默认 verb>` 取 `Directory\shell`
+/// 的默认值，为空或 `none` 时回退到 `open`（第三方替换的常用写法）。只改了
+/// 此键的第三方 FM（OneCommander 等）拦截不到 `SHOpenFolderAndSelectItems`，
+/// 必须靠它兜底。与 hub `reveal_file.rs` 的同名函数保持一致。
+#[cfg(windows)]
+fn default_dir_handler_is_third_party() -> bool {
+    use winreg::RegKey;
+    use winreg::enums::HKEY_CLASSES_ROOT;
+
+    let hkcr = RegKey::predef(HKEY_CLASSES_ROOT);
+    let Ok(shell) = hkcr.open_subkey(r"Directory\shell") else {
+        return false;
+    };
+    let verb = shell.get_value::<String, _>("").unwrap_or_default();
+    let verb = verb.trim();
+    let verb = if verb.is_empty() || verb.eq_ignore_ascii_case("none") {
+        "open"
+    } else {
+        verb
+    };
+    let Ok(cmd_key) = hkcr.open_subkey(format!(r"Directory\shell\{verb}\command")) else {
+        return false;
+    };
+    let Ok(cmd) = cmd_key.get_value::<String, _>("") else {
+        return false;
+    };
+    match exe_basename(&cmd) {
+        Some(name) => !name.eq_ignore_ascii_case("explorer.exe"),
+        None => false,
+    }
+}
+
+/// 返回裸路径字符串中首个（不区分大小写）以 `.exe` 结尾的字节偏移；找不到
+/// 时返回 `None`。`.exe` 全为 ASCII，`to_ascii_lowercase` 不改变字节长度
+/// 与 UTF-8 边界，返回的偏移量可直接用于原字符串按字节切片。
+#[cfg(windows)]
+fn find_exe_end(cmd: &str) -> Option<usize> {
+    cmd.to_ascii_lowercase().find(".exe").map(|idx| idx + 4)
+}
+
+/// 从注册表 shell command 字符串解析出可执行文件的文件名（basename）。
+/// 支持带引号路径（`"C:\..\fm.exe" "%1"`）与裸路径
+/// (`%SystemRoot%\Explorer.exe /idlist,...`)；返回 `None` 表示无法解析。
+#[cfg(windows)]
+fn exe_basename(cmd: &str) -> Option<String> {
+    let cmd = cmd.trim();
+    let exe = if let Some(rest) = cmd.strip_prefix('"') {
+        rest.split('"').next().unwrap_or(rest)
+    } else {
+        // 裸路径可能含空格且未加引号写入注册表（如部分第三方文件管理器的安装
+        // 程序），不能简单按空白切分；取字符串中首个（不区分大小写）以
+        // ".exe" 结尾的位置，把它之前的内容整体当作可执行文件路径，大小写
+        // 按原样保留。找不到 ".exe" 时退回按空白切分。
+        match find_exe_end(cmd) {
+            Some(end) => &cmd[..end],
+            None => cmd.split_whitespace().next().unwrap_or(cmd),
+        }
+    };
+    let base = exe.rsplit(['\\', '/']).next().unwrap_or(exe).trim();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base.to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -280,22 +561,17 @@ fn registry_executable(executable: Option<&Path>) -> Result<String, PlatformErro
 #[cfg(windows)]
 mod windows_shell {
     /// `SHChangeNotify(SHCNE_ASSOCCHANGED)` 通知资源管理器关联已变化。
-    ///
-    /// 直接声明 FFI，避免为一个符号引入 `windows-sys` 的 `Win32_UI_Shell`。
     pub fn notify_association_changed() {
-        #[link(name = "shell32")]
-        unsafe extern "system" {
-            fn SHChangeNotify(
-                wEventId: i32,
-                uFlags: u32,
-                dwItem1: *const std::ffi::c_void,
-                dwItem2: *const std::ffi::c_void,
-            );
-        }
-        // SAFETY: SHCNE_ASSOCCHANGED (0x0800_0000) + SHCNF_IDLIST (0) 不读取
-        // item 指针，传 null 合法。
+        use windows_sys::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+
+        // SAFETY: SHCNE_ASSOCCHANGED + SHCNF_IDLIST 不读取 item 指针，传 null 合法。
         unsafe {
-            SHChangeNotify(0x0800_0000, 0, std::ptr::null(), std::ptr::null());
+            SHChangeNotify(
+                SHCNE_ASSOCCHANGED as i32,
+                SHCNF_IDLIST,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
         }
     }
 }
@@ -370,6 +646,69 @@ mod tests {
         let current = std::env::current_exe().expect("current exe");
         let sibling = current.with_file_name(DESKTOP_EXECUTABLE_NAME);
         assert_eq!(desktop_executable(), sibling.is_file().then_some(sibling));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn helper_bundle_resolves_host_macos_dir() {
+        let agent = Path::new(
+            "/Applications/FluxDown.app/Contents/Helpers/FluxDownAgent.app/Contents/MacOS/fluxdown-agent",
+        );
+        assert_eq!(
+            host_macos_dir(agent),
+            Some(PathBuf::from("/Applications/FluxDown.app/Contents/MacOS"))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn flat_or_foreign_layouts_are_not_helper_bundles() {
+        for agent in [
+            "/Applications/FluxDown.app/Contents/MacOS/fluxdown-agent",
+            "/repo/target/release/fluxdown-agent",
+            "/x/Helpers/FluxDownAgent.app/Contents/MacOS/fluxdown-agent",
+            "/x/Contents/Helpers/FluxDownAgent.app/Contents/MacOS/fluxdown-agent",
+            "/Applications/FluxDown.app/Contents/Helpers/Agent/Contents/MacOS/fluxdown-agent",
+        ] {
+            assert_eq!(host_macos_dir(Path::new(agent)), None, "{agent}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_bundle_id_strips_helper_suffix_only_inside_helper() {
+        assert_eq!(
+            host_id_from("com.fluxdown.app.agent".to_owned(), true).as_deref(),
+            Some("com.fluxdown.app")
+        );
+        assert_eq!(
+            host_id_from("com.fluxdown.app".to_owned(), false).as_deref(),
+            Some("com.fluxdown.app")
+        );
+        assert_eq!(host_id_from("com.fluxdown.app".to_owned(), true), None);
+        assert_eq!(host_id_from(".agent".to_owned(), true), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn release_hands_over_to_first_other_candidate_only() {
+        let mine = "com.fluxdown.app";
+        assert_eq!(
+            successor_handler(
+                vec![
+                    "COM.FLUXDOWN.APP".to_owned(),
+                    String::new(),
+                    "org.qbittorrent.qBittorrent".to_owned(),
+                    "org.transmissionbt.Transmission".to_owned(),
+                ],
+                mine,
+            )
+            .as_deref(),
+            Some("org.qbittorrent.qBittorrent")
+        );
+        // 唯一候选是自己：Launch Services 无处可让。
+        assert_eq!(successor_handler(vec![mine.to_owned()], mine), None);
+        assert_eq!(successor_handler(Vec::new(), mine), None);
     }
 
     #[test]

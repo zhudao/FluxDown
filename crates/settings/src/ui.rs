@@ -12,7 +12,7 @@
 
 use std::rc::Rc;
 
-use fluxdown_ui_components::{ButtonVariant, ControlExt as _, FluxIcon, card};
+use fluxdown_ui_components::{ButtonVariant, ControlExt as _, FluxIcon, card, dialog_title};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Div, ElementId, FontWeight, InteractiveElement as _,
@@ -20,11 +20,12 @@ use gpui::{
     Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    Disableable as _, Icon,
+    Disableable as _, Icon, WindowExt as _,
     button::Button,
     h_flex,
     input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction},
     menu::{DropdownMenu as _, PopupMenuItem},
+    scroll::ScrollableElement as _,
     switch::Switch,
     tooltip::Tooltip,
     v_flex,
@@ -302,6 +303,73 @@ impl Control {
     }
 }
 
+/// 标题旁「?」说明入口的文案：悬浮提示、对话框标题、正文（空行分段；段首
+/// 「引导语：」/「Lead: 」加粗成小标题）与关闭按钮。
+#[derive(Clone)]
+pub(crate) struct Explain {
+    pub hint: SharedString,
+    pub title: SharedString,
+    pub body: SharedString,
+    pub close: SharedString,
+}
+
+/// 打开说明对话框（只读，正文可滚动）。
+fn open_explain_dialog(explain: Explain, window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, move |dialog, _, cx| {
+        let explain = explain.clone();
+        dialog
+            .title(dialog_title(explain.title.clone(), cx))
+            .w(px(560.))
+            .content(move |content, _, cx| {
+                let tokens = active_theme(cx).tokens().clone();
+                let paragraphs = explain.body.split("\n\n").map(|paragraph| {
+                    let (lead, text) = paragraph
+                        .split_once('：')
+                        .or_else(|| paragraph.split_once(": "))
+                        .map_or((None, paragraph), |(lead, text)| (Some(lead), text));
+                    v_flex()
+                        .gap(tokens.spacing.xxs)
+                        .when_some(lead, |this, lead| {
+                            this.child(
+                                body_text(cx)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(SharedString::from(lead.to_owned())),
+                            )
+                        })
+                        .child(
+                            body_text(cx)
+                                .text_color(tokens.colors.muted_foreground)
+                                .child(SharedString::from(text.trim().to_owned())),
+                        )
+                });
+                content
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_h(px(460.))
+                            .gap(tokens.spacing.md)
+                            .overflow_y_scrollbar()
+                            .children(paragraphs),
+                    )
+                    .child(
+                        dialog_footer(
+                            None,
+                            [fluxdown_ui_components::button(
+                                "settings-explain-close",
+                                explain.close.clone(),
+                                ButtonVariant::Secondary,
+                                cx,
+                            )
+                            .on_click(|_, window, cx| window.close_dialog(cx))
+                            .into_any_element()],
+                            cx,
+                        )
+                        .pt(tokens.spacing.sm),
+                    )
+            })
+    });
+}
+
 /// 分组卡片内的一行。
 #[derive(Clone)]
 pub(crate) struct SettingsRow {
@@ -309,6 +377,8 @@ pub(crate) struct SettingsRow {
     pub(crate) description: Option<SharedString>,
     /// 标题旁的信息图标；悬浮显示完整说明（描述过长时的补充展开）。
     help: Option<SharedString>,
+    /// 标题旁的「?」入口；点击打开完整说明对话框。
+    explain: Option<Explain>,
     keywords: Vec<SharedString>,
     disabled: bool,
     vertical: bool,
@@ -325,6 +395,7 @@ impl SettingsRow {
             title: title.into(),
             description: None,
             help: None,
+            explain: None,
             keywords: Vec::new(),
             disabled: false,
             vertical: false,
@@ -344,6 +415,7 @@ impl SettingsRow {
             title: SharedString::default(),
             description: None,
             help: None,
+            explain: None,
             keywords: Vec::new(),
             disabled: false,
             vertical: false,
@@ -391,6 +463,13 @@ impl SettingsRow {
         self
     }
 
+    /// 标题旁附加「?」说明入口：悬浮显示提示，点击打开说明对话框。
+    #[must_use]
+    pub(crate) fn explain(mut self, explain: Explain) -> Self {
+        self.explain = Some(explain);
+        self
+    }
+
     fn matches(&self, query: &str) -> bool {
         if query.is_empty() {
             return true;
@@ -399,7 +478,17 @@ impl SettingsRow {
         hit(&self.title)
             || self.description.as_ref().is_some_and(hit)
             || self.help.as_ref().is_some_and(hit)
+            || self.explain.as_ref().is_some_and(|e| hit(&e.body))
             || self.keywords.iter().any(hit)
+    }
+
+    /// 除标题外参与搜索的文本：描述、帮助说明、关键词。
+    pub(crate) fn search_terms(&self) -> impl Iterator<Item = &SharedString> {
+        self.description
+            .iter()
+            .chain(self.help.iter())
+            .chain(self.explain.iter().map(|e| &e.body))
+            .chain(self.keywords.iter())
     }
 
     /// Flutter `_AdaptiveSections._weightOf` 的行权重。
@@ -464,6 +553,38 @@ impl SettingsRow {
                                     .size(extended.icon.sm)
                                     .text_color(extended.colors.text_tertiary),
                             ),
+                    );
+                }
+                if let Some(explain) = self.explain.clone() {
+                    let hint = explain.hint.clone();
+                    title_row = title_row.child(
+                        div()
+                            .id(ElementId::from(SharedString::from(format!(
+                                "{key}-explain"
+                            ))))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .justify_center()
+                            .size(px(14.))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(extended.colors.text_tertiary)
+                            .text_color(extended.colors.text_tertiary)
+                            .text_size(px(10.))
+                            .line_height(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .cursor_pointer()
+                            .hover(|style| {
+                                style
+                                    .border_color(tokens.colors.foreground)
+                                    .text_color(tokens.colors.foreground)
+                            })
+                            .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
+                            .on_click(move |_, window, cx| {
+                                open_explain_dialog(explain.clone(), window, cx);
+                            })
+                            .child("?"),
                     );
                 }
                 title_row
@@ -829,6 +950,15 @@ impl SettingsSection {
         self.rows.is_empty()
     }
 
+    /// 小节标题（搜索索引用作面包屑与补充文本）。
+    pub(crate) fn heading(&self) -> Option<&SharedString> {
+        self.title.as_ref()
+    }
+
+    pub(crate) fn rows(&self) -> &[SettingsRow] {
+        &self.rows
+    }
+
     fn filtered(&self, query: &str) -> Option<Self> {
         let title_hit = !query.is_empty()
             && (self
@@ -959,6 +1089,11 @@ impl SettingsTab {
         self
     }
 
+    /// 本 Tab 的分组（注入整页视图的 Tab 为空）。
+    pub(crate) fn section_list(&self) -> &[SettingsSection] {
+        &self.sections
+    }
+
     fn filtered(&self, query: &str) -> Option<Self> {
         if self.view.is_some() {
             return (query.is_empty() || self.label.to_lowercase().contains(query))
@@ -1076,6 +1211,10 @@ impl SettingsPage {
 
     pub(crate) fn nav_icon(&self) -> Icon {
         self.icon.clone()
+    }
+
+    pub(crate) fn tabs(&self) -> &[SettingsTab] {
+        &self.tabs
     }
 
     /// 按查询过滤；无命中返回 `None`（分类在搜索结果中隐藏）。

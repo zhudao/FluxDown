@@ -409,6 +409,8 @@ class S {
   String get detailActivityKindCdnFallback =>
       _r('detailActivityKindCdnFallback');
   String get detailActivityKindCdnSummary => _r('detailActivityKindCdnSummary');
+  String get detailActivityKindNicLinks => _r('detailActivityKindNicLinks');
+  String get detailActivityKindNicOff => _r('detailActivityKindNicOff');
   String get detailActivityKindJournalOverflow =>
       _r('detailActivityKindJournalOverflow');
   String get detailActivityJournalGap => _r('detailActivityJournalGap');
@@ -471,6 +473,23 @@ class S {
   String detailLogCdnSummaryNode(String ip, String bytes, String speed) =>
       _r('detailLogCdnSummaryNode', {'ip': ip, 'bytes': bytes, 'speed': speed});
   String get detailCdnNodeSys => _r('detailCdnNodeSys');
+  String detailCdnNodeNic(String name) =>
+      _r('detailCdnNodeNic', {'name': name});
+  String detailLogNicKick(String name, String reason) =>
+      _r('detailLogNicKick', {'name': name, 'reason': reason});
+  String detailLogNicLinks(String host, int n) =>
+      _r('detailLogNicLinks', {'host': host, 'n': n});
+  String detailLogNicSummary(String host) =>
+      _r('detailLogNicSummary', {'host': host});
+  String detailLogNicOff(String reason) =>
+      _r('detailLogNicOff', {'reason': reason});
+  String get detailNicOffProxy => _r('detailNicOffProxy');
+  String get detailNicOffFakeIp => _r('detailNicOffFakeIp');
+  String get detailNicOffLocalTarget => _r('detailNicOffLocalTarget');
+  String get detailNicOffVpn => _r('detailNicOffVpn');
+  String get detailNicOffPrimaryUnknown => _r('detailNicOffPrimaryUnknown');
+  String get detailNicOffNoExtra => _r('detailNicOffNoExtra');
+  String get detailNicOffDns => _r('detailNicOffDns');
   String get detailNotSet => _r('detailNotSet');
   String get detailFollowGlobal => _r('detailFollowGlobal');
   String get detailActionFolder => _r('detailActionFolder');
@@ -901,6 +920,7 @@ class S {
   String get ed2kLinkAssociationDesc => _r('ed2kLinkAssociationDesc');
   String get magnetLinkAssociation => _r('magnetLinkAssociation');
   String get magnetLinkAssociationDesc => _r('magnetLinkAssociationDesc');
+  String get associationOffIgnored => _r('associationOffIgnored');
   String get torrentAssocDialogTitle => _r('torrentAssocDialogTitle');
   String get torrentAssocDialogDesc => _r('torrentAssocDialogDesc');
   String get notifyOnComplete => _r('notifyOnComplete');
@@ -1155,6 +1175,11 @@ class S {
   String get autoMaxConnectionsDesc => _r('autoMaxConnectionsDesc');
   String get cdnMultiEnabled => _r('cdnMultiEnabled');
   String get cdnMultiEnabledDesc => _r('cdnMultiEnabledDesc');
+  String get multiNicEnabled => _r('multiNicEnabled');
+  String get multiNicEnabledDesc => _r('multiNicEnabledDesc');
+  String get multiNicHelpTitle => _r('multiNicHelpTitle');
+  String get multiNicHelpHint => _r('multiNicHelpHint');
+  String get multiNicHelp => _r('multiNicHelp');
   String get cdnMultiProxyConfirmTitle => _r('cdnMultiProxyConfirmTitle');
   String get cdnMultiProxyConfirmDescSystem =>
       _r('cdnMultiProxyConfirmDescSystem');
@@ -1660,6 +1685,9 @@ class S {
   List<String> get searchKeywordsCdnMulti =>
       _r('searchKeywordsCdnMulti').split(',')
         ..addAll(['cdn', 'node', 'multi-cdn', 'concurrent']);
+  List<String> get searchKeywordsMultiNic =>
+      _r('searchKeywordsMultiNic').split(',')
+        ..addAll(['nic', 'network', 'interface', 'multi-nic', 'aggregation']);
   List<String> get searchKeywordsSpeedLimit =>
       _r('searchKeywordsSpeedLimit').split(',')
         ..addAll(['speed', 'limit', 'bandwidth']);
@@ -2195,7 +2223,6 @@ class S {
   String get showSidebarRssDesc => _r('showSidebarRssDesc');
   String get rssSidebarEmptyHint => _r('rssSidebarEmptyHint');
   String get rssAddSource => _r('rssAddSource');
-  String get rssPageDescription => _r('rssPageDescription');
   String get rssSubscriptions => _r('rssSubscriptions');
   String rssUnreadCount(int n) => _r('rssUnreadCount', {'n': n});
   String rssSelectedCount(int n) => _r('rssSelectedCount', {'n': n});
@@ -2461,6 +2488,7 @@ class S {
   String get doctorHintCheckFirewall => _r('doctorHintCheckFirewall');
   String get doctorHintEnableProtocol => _r('doctorHintEnableProtocol');
   String get doctorHintProtocolClaimed => _r('doctorHintProtocolClaimed');
+  String get doctorHintAssociationOff => _r('doctorHintAssociationOff');
   String get doctorHintCheckDisk => _r('doctorHintCheckDisk');
   String get doctorActionReregister => _r('doctorActionReregister');
   String get doctorActionUseThisInstall => _r('doctorActionUseThisInstall');
@@ -2510,6 +2538,7 @@ class S {
     'check_firewall' => doctorHintCheckFirewall,
     'enable_protocol' => doctorHintEnableProtocol,
     'protocol_claimed' => doctorHintProtocolClaimed,
+    'association_off' => doctorHintAssociationOff,
     'check_disk' => doctorHintCheckDisk,
     _ => code,
   };

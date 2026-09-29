@@ -727,9 +727,12 @@ async fn download_track_coordinated(
         scope,
         p.spawn_gen,
         false, // DASH 轨：段数由轨长顾问决定，不走 hint 解封
-        // DASH 轨对不做 Auto 热切换（v1 边界：轨对是短分段串行流，切换收益
-        // 低且与 mux 时序纠缠）；启动期缓存决策/failover 已覆盖代理选择。
+        // DASH 轨对不做 Auto 多路径（v1 边界：轨对是短分段串行流，改道收益
+        // 低且与 mux 时序纠缠）；启动期先验起飞/failover 已覆盖代理选择。
         None,
+        // 轨对是大文件 HTTP 分段流，额外网卡链路直接增益；规划与挂载全在
+        // coordinator 内完成，与 mux 时序无关。
+        p.multi_nic.clone(),
     )
     .await;
 
