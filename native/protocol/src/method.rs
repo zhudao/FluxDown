@@ -15,6 +15,8 @@ pub const DAEMON_TASK_CREATE: &str = "daemon.task.create";
 pub const DAEMON_TASK_PAUSE: &str = "daemon.task.pause";
 pub const DAEMON_TASK_RESUME: &str = "daemon.task.resume";
 pub const DAEMON_TASK_RENAME: &str = "daemon.task.rename";
+/// 更换任务下载源地址（`{taskId, url}`，语义同旧 `PUT /api/v1/tasks/{id}/url`）。
+pub const DAEMON_TASK_CHANGE_URL: &str = "daemon.task.changeUrl";
 pub const DAEMON_TASK_DELETE: &str = "daemon.task.delete";
 pub const DAEMON_TASK_PAUSE_ALL: &str = "daemon.task.pauseAll";
 pub const DAEMON_TASK_RESUME_ALL: &str = "daemon.task.resumeAll";
@@ -47,6 +49,10 @@ pub const DAEMON_CONFIG_CLEAR_CONN_POLICY: &str = "daemon.config.clearConnPolicy
 pub const DAEMON_CONFIG_SYSTEM_PROXY: &str = "daemon.config.systemProxy";
 pub const DAEMON_SITE_AUTH_LIST: &str = "daemon.siteAuth.list";
 pub const DAEMON_SITE_AUTH_DELETE: &str = "daemon.siteAuth.delete";
+/// 读取单站点凭据详情（含明文密码；站点键会先按 `host` / `host:port` 归一化）。
+pub const DAEMON_SITE_AUTH_GET: &str = "daemon.siteAuth.get";
+/// 保存单站点 HTTP Basic 凭据，返回脱敏后的 `SiteAuthEntryDto`。
+pub const DAEMON_SITE_AUTH_SAVE: &str = "daemon.siteAuth.save";
 pub const DAEMON_SITE_AUTH_CLEAR: &str = "daemon.siteAuth.clear";
 /// 按下载链接匹配已保存的站点凭据（含明文密码，仅供本机官方 UI 表单回填）。
 pub const DAEMON_SITE_AUTH_MATCH: &str = "daemon.siteAuth.match";
@@ -127,6 +133,8 @@ pub const AGENT_SYNC_GET: &str = "agent.sync.get";
 pub const AGENT_SYNC_ENABLE: &str = "agent.sync.enable";
 pub const AGENT_SYNC_DISABLE: &str = "agent.sync.disable";
 pub const AGENT_SYNC_NOW: &str = "agent.sync.now";
+/// `SyncLocalOnlyParams` → `SyncStatusDto`：把同步目录键设为本设备专属 / 恢复同步。
+pub const AGENT_SYNC_SET_LOCAL_ONLY: &str = "agent.sync.setLocalOnly";
 /// FluxCloud 服务地址读取；正式构建 `editable=false`，地址恒为构建期固定值。
 pub const AGENT_CLOUD_ENDPOINT_GET: &str = "agent.cloud.endpointGet";
 /// 仅调试构建可用（对齐 Flutter `CloudApiConfig`）：覆盖/恢复 FluxCloud 服务地址，立即生效。
@@ -134,6 +142,26 @@ pub const AGENT_CLOUD_ENDPOINT_SET: &str = "agent.cloud.endpointSet";
 pub const AGENT_REMOTE_LIST: &str = "agent.remote.list";
 pub const AGENT_REMOTE_DISPATCH: &str = "agent.remote.dispatch";
 pub const AGENT_REMOTE_COMMAND: &str = "agent.remote.command";
+/// 局域网直连（L1）：展示本机配对码并开始广播 → `LinkPairingCodeDto`。
+pub const AGENT_LINK_PAIRING_CODE: &str = "agent.link.pairingCode";
+/// 停止展示配对码 / 停止配对广播。
+pub const AGENT_LINK_STOP_PAIRING: &str = "agent.link.stopPairing";
+/// `LinkDiscoveryParams`：开关 mDNS 发现；结果经 `LinkDiscoveredChanged` 推送。
+pub const AGENT_LINK_DISCOVERY_SET: &str = "agent.link.discovery.set";
+/// `LinkAddressParams` → `LinkDiscoveredPeer`：手动地址探测。
+pub const AGENT_LINK_PROBE: &str = "agent.link.probe";
+/// `LinkPairBeginParams` → `LinkPairBeginResponse`。
+pub const AGENT_LINK_PAIR_BEGIN: &str = "agent.link.pairBegin";
+/// `LinkPairFinishParams` → `LinkPairFinishResponse`。
+pub const AGENT_LINK_PAIR_FINISH: &str = "agent.link.pairFinish";
+/// `LinkApproveParams`：响应端确认 / 拒绝入站配对请求。
+pub const AGENT_LINK_APPROVE: &str = "agent.link.approve";
+/// `LinkDeviceParams`：解除配对。
+pub const AGENT_LINK_REMOVE: &str = "agent.link.remove";
+/// 探测全部已配对设备在线状态 → `Vec<LinkDeviceInfo>`（同时推送 `LinkedDevicesChanged`）。
+pub const AGENT_LINK_REFRESH: &str = "agent.link.refresh";
+/// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
+pub const AGENT_LINK_DISPATCH: &str = "agent.link.dispatch";
 
 pub const AGENT_PLAN_LIST: &str = "agent.plan.list";
 pub const AGENT_ORDER_CREATE: &str = "agent.order.create";
@@ -204,6 +232,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_PAUSE,
     DAEMON_TASK_RESUME,
     DAEMON_TASK_RENAME,
+    DAEMON_TASK_CHANGE_URL,
     DAEMON_TASK_DELETE,
     DAEMON_TASK_PAUSE_ALL,
     DAEMON_TASK_RESUME_ALL,
@@ -233,6 +262,8 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_CONFIG_SYSTEM_PROXY,
     DAEMON_SITE_AUTH_LIST,
     DAEMON_SITE_AUTH_DELETE,
+    DAEMON_SITE_AUTH_GET,
+    DAEMON_SITE_AUTH_SAVE,
     DAEMON_SITE_AUTH_CLEAR,
     DAEMON_SITE_AUTH_MATCH,
     DAEMON_RUNTIME_STATS,
@@ -304,11 +335,22 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_SYNC_ENABLE,
     AGENT_SYNC_DISABLE,
     AGENT_SYNC_NOW,
+    AGENT_SYNC_SET_LOCAL_ONLY,
     AGENT_CLOUD_ENDPOINT_GET,
     AGENT_CLOUD_ENDPOINT_SET,
     AGENT_REMOTE_LIST,
     AGENT_REMOTE_DISPATCH,
     AGENT_REMOTE_COMMAND,
+    AGENT_LINK_PAIRING_CODE,
+    AGENT_LINK_STOP_PAIRING,
+    AGENT_LINK_DISCOVERY_SET,
+    AGENT_LINK_PROBE,
+    AGENT_LINK_PAIR_BEGIN,
+    AGENT_LINK_PAIR_FINISH,
+    AGENT_LINK_APPROVE,
+    AGENT_LINK_REMOVE,
+    AGENT_LINK_REFRESH,
+    AGENT_LINK_DISPATCH,
     AGENT_PLAN_LIST,
     AGENT_ORDER_CREATE,
     AGENT_ORDER_GET,

@@ -3,13 +3,14 @@
  * 站点顶栏:沿页面导轨(rails)延伸的细线外框;下拉菜单纯 CSS(hover / focus-within),
  * 移动端菜单使用原生 Popover API(零 JS)。`D` 快捷键命中 `data-shortcut="d"` 的下载按钮。
  */
-import { ChevronDown, Menu, Moon, Search, Sun, X, Languages } from "lucide-react";
+import { ArrowRight, ChevronDown, Menu, Moon, Search, Sun, X, Languages } from "lucide-react";
 import { BrandIcon } from "../icons/brand";
 import Logo from "./Logo.astro";
 import { common } from "../../i18n/messages/common";
 import { href, switchLang, stripLang } from "../../i18n/routing";
 import { LANG_LABEL, type Lang } from "../../i18n/config";
 import { COMMUNITY_LINKS, GITHUB_URL, PRODUCT_LINKS, docsPath } from "../../lib/site-nav";
+import { stripBase } from "@/lib/base";
 
 interface Props {
   lang: Lang;
@@ -25,17 +26,31 @@ const menus = [
     id: "product",
     label: t.nav.product,
     links: PRODUCT_LINKS,
-    featured: { href: href("/download", lang), title: t.nav.featuredProduct, desc: t.nav.featuredProductDesc, external: false },
+    featured: {
+      href: href("/download", lang),
+      title: t.nav.featuredProduct,
+      desc: t.nav.featuredProductDesc,
+      cta: t.nav.featuredProductCta,
+      external: false,
+    },
   },
   {
     id: "community",
     label: t.nav.community,
     links: COMMUNITY_LINKS,
-    featured: { href: GITHUB_URL, title: t.nav.featuredCommunity, desc: t.nav.featuredCommunityDesc, external: true },
+    featured: {
+      href: GITHUB_URL,
+      title: t.nav.featuredCommunity,
+      desc: t.nav.featuredCommunityDesc,
+      cta: t.nav.featuredCommunityCta,
+      external: true,
+    },
   },
 ];
+// 产品特色卡的平台图标行:点明下载页覆盖的全部平台
+const featuredPlatforms = ["apple", "windows", "linux", "docker", "android"] as const;
 const flat = [
-  { label: t.nav.docs, href: docsPath(lang), active: Astro.url.pathname.startsWith("/docs") },
+  { label: t.nav.docs, href: href(docsPath(lang), lang), active: stripBase(Astro.url.pathname).startsWith("/docs") },
   { label: t.nav.pricing, href: href("/pricing", lang), active: path.startsWith("/pricing") },
   { label: t.nav.changelog, href: href("/changelog", lang), active: path.startsWith("/changelog") },
 ];
@@ -67,17 +82,28 @@ const isActive = (links: typeof PRODUCT_LINKS) =>
                 >
                   <span class="nav-feature-art" data-kind={menu.id} aria-hidden="true">
                     {menu.id === "product" ? (
-                      <span class="nav-feature-bar">
-                        <i /><i /><i /><i />
+                      <span class="flex flex-col items-center gap-3">
+                        <span class="nav-feature-bar">
+                          <i /><i /><i /><i />
+                        </span>
+                        <span class="nav-feature-platforms">
+                          {featuredPlatforms.map((name) => (
+                            <BrandIcon name={name} size={13} />
+                          ))}
+                        </span>
                       </span>
                     ) : (
                       <BrandIcon name="github" size={26} />
                     )}
                   </span>
-                  <span class="flex flex-col gap-1.5 p-3.5">
+                  <span class="flex flex-1 flex-col gap-1.5 p-3.5">
                     {menu.id === "product" && <span class="nav-feature-badge">{t.nav.newBadge}</span>}
                     <span class="text-[13.5px] font-medium leading-snug text-fg">{menu.featured.title}</span>
                     <span class="text-[12.5px] leading-relaxed text-subtle">{menu.featured.desc}</span>
+                    <span class="nav-feature-cta">
+                      {menu.featured.cta}
+                      <ArrowRight size={13} strokeWidth={2} />
+                    </span>
                   </span>
                 </a>
                 <div class="nav-links">
@@ -116,7 +142,7 @@ const isActive = (links: typeof PRODUCT_LINKS) =>
       <a href={GITHUB_URL} class="icon-btn hidden sm:inline-grid" aria-label={t.nav.github} target="_blank" rel="noopener">
         <BrandIcon name="github" size={16} />
       </a>
-      <a href={otherHref} class="icon-btn hidden sm:inline-grid" hreflang={other} aria-label={LANG_LABEL[other]} title={LANG_LABEL[other]}>
+      <a href={otherHref} class="icon-btn hidden sm:inline-grid" hreflang={other} data-lang-switch={other} aria-label={LANG_LABEL[other]} title={LANG_LABEL[other]}>
         <span class="mono text-[11.5px] font-semibold">{other === "zh" ? "中" : "EN"}</span>
       </a>
       <button type="button" class="icon-btn" data-theme-toggle aria-label={t.theme.toggle}>
@@ -164,7 +190,7 @@ const isActive = (links: typeof PRODUCT_LINKS) =>
       ))
     }
     <div class="mt-8 flex items-center gap-2 border-t border-line pt-6">
-      <a href={otherHref} class="btn btn-secondary btn-sm" hreflang={other}>
+      <a href={otherHref} class="btn btn-secondary btn-sm" hreflang={other} data-lang-switch={other}>
         <Languages size={14} strokeWidth={1.75} />
         {LANG_LABEL[other]}
       </a>
@@ -365,6 +391,32 @@ const isActive = (links: typeof PRODUCT_LINKS) =>
       100% {
         transform: scaleX(0.96);
       }
+    }
+    .nav-feature-platforms {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--fg-subtle);
+      transition: color 200ms;
+    }
+    .nav-feature:hover .nav-feature-platforms {
+      color: var(--fg-muted);
+    }
+    .nav-feature-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: auto;
+      padding-top: 6px;
+      font-size: 12.5px;
+      font-weight: 520;
+      color: var(--accent-ink);
+    }
+    .nav-feature-cta svg {
+      transition: transform 200ms var(--ease-out);
+    }
+    .nav-feature:hover .nav-feature-cta svg {
+      transform: translateX(3px);
     }
     .nav-feature-badge {
       align-self: flex-start;

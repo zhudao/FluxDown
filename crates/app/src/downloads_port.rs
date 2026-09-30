@@ -165,8 +165,15 @@ impl DownloadsPort for AgentDownloadsPort {
                     method::DAEMON_SITE_AUTH_MATCH,
                     serialize(fluxdown_protocol::SiteAuthMatchParams { url })?,
                 ),
-                DownloadsCommand::RemoteDispatch(params) => (method::AGENT_REMOTE_DISPATCH, params),
-                DownloadsCommand::RemoteCommand(params) => (method::AGENT_REMOTE_COMMAND, params),
+                DownloadsCommand::RemoteDispatch(params) => {
+                    (method::AGENT_REMOTE_DISPATCH, serialize(params)?)
+                }
+                DownloadsCommand::LinkDispatch(params) => {
+                    (method::AGENT_LINK_DISPATCH, serialize(params)?)
+                }
+                DownloadsCommand::RemoteCommand(params) => {
+                    (method::AGENT_REMOTE_COMMAND, serialize(params)?)
+                }
                 DownloadsCommand::OpenTask { task_id } => (
                     method::AGENT_PLATFORM_OPEN_TASK,
                     json!({ "taskId": task_id }),
@@ -175,6 +182,7 @@ impl DownloadsPort for AgentDownloadsPort {
                     method::AGENT_PLATFORM_REVEAL_TASK,
                     json!({ "taskId": task_id }),
                 ),
+                DownloadsCommand::RescanFiles => (method::DAEMON_TASK_RESCAN, json!({})),
                 DownloadsCommand::SubmitTorrentFile { path } => (
                     method::AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
                     json!({ "path": path, "silent": true }),

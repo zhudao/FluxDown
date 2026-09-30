@@ -15,6 +15,7 @@ use crate::event_hub::AgentEventHub;
 use crate::gateway::{GatewayService, GatewayShell, load_or_create_bearer};
 use crate::lifecycle::Lifecycle;
 use crate::power::PowerService;
+use crate::server_mode::{ServerHandle, ServerHandleParts, ServerRuntime, TokenSeed};
 use crate::shell::{ShellHost, ShellServices, ShellState};
 use crate::state::{AgentState, StateError, StateStore};
 use crate::supervisor::DaemonSupervisor;
@@ -38,7 +39,7 @@ pub fn run_blocking(host: ShellHost) -> AgentResult {
 }
 
 #[cfg(unix)]
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
 
     let Ok(mut terminate) = signal(SignalKind::terminate()) else {
@@ -59,13 +60,23 @@ async fn shutdown_signal() {
 
 /// GUI 子系统进程没有控制台时 Ctrl-C 处理器可能注册失败：失败即永不触发，而不是立刻退出。
 #[cfg(not(unix))]
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     if tokio::signal::ctrl_c().await.is_err() {
         std::future::pending::<()>().await;
     }
 }
 
 pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
+    run_with(cancel, host, None).await
+}
+
+/// [`run`] 的完整形态：`server` 为 `Some` 时按 `--server` 契约装配（见 [`crate::server_mode`]）。
+pub(crate) async fn run_with(
+    cancel: CancellationToken,
+    host: ShellHost,
+    server: Option<ServerRuntime>,
+) -> AgentResult {
+    let server_config = server.as_ref().map(|server| &server.config);
     let paths = AgentPaths::resolve()?;
     let store = match StateStore::open(paths.agent_data_dir.clone()).await {
         Ok(store) => Arc::new(store),
@@ -79,15 +90,21 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         Err(error) => return Err(error.into()),
     };
     let mut state = store.load().await?;
-    initialize_device_identity(&mut state, &store).await?;
+    initialize_device_identity(&mut state, &store, server_config, &paths.daemon_data_dir).await?;
 
     // 先绑定 UI Gateway：实际端口进入状态与快照，后续 Doctor/兼容 API 都据此探测。
-    let override_bind = std::env::var("FLUXDOWN_AGENT_BIND").ok();
-    let listener = TcpListener::bind(gateway_bind_address(
-        state.gateway.lan_enabled,
-        override_bind.as_deref(),
-    )?)
-    .await?;
+    // server 模式只由 `FLUXDOWN_BIND` 决定（允许非回环，不看 `lan_enabled`）。
+    let listener = match server_config {
+        Some(config) => TcpListener::bind(config.bind).await?,
+        None => {
+            let override_bind = std::env::var("FLUXDOWN_AGENT_BIND").ok();
+            TcpListener::bind(gateway_bind_address(
+                state.gateway.lan_enabled,
+                override_bind.as_deref(),
+            )?)
+            .await?
+        }
+    };
     let bound = listener.local_addr()?;
     if state.gateway.port != bound.port() {
         state.gateway.port = bound.port();
@@ -96,7 +113,19 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
     tracing::info!(address = %bound, "fluxdown-agent gateway listening");
 
     let daemon_address = daemon_socket_address(&paths.daemon_rpc_url)?;
-    let supervisor = Arc::new(DaemonSupervisor::new(daemon_address));
+    // 演示模式：把生效的演示 URL 交给 daemon（内置演示 URL 依赖本进程实际监听端口）。
+    let daemon_env = server_config
+        .and_then(|config| config.effective_demo_url(bound))
+        .map(|url| vec![("FLUXDOWN_DEMO_URL".to_owned(), url)])
+        .unwrap_or_default();
+    let supervisor = Arc::new(
+        DaemonSupervisor::new(daemon_address)
+            .with_extra_env(daemon_env)
+            .with_stderr_log(
+                crate::log_export::agent_log_dir(&paths.agent_data_dir)
+                    .join("fluxdownd.stderr.log"),
+            ),
+    );
     let daemon_bearer = load_daemon_bearer(&paths, &supervisor).await?;
     let daemon_config = DaemonClientConfig {
         rpc_url: paths.daemon_rpc_url.clone(),
@@ -130,6 +159,18 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         supervisor,
         paths.daemon_data_dir.clone(),
     ));
+    if let Some(server) = &server {
+        // SIGTERM / SIGINT → 与 `system.shutdown` 同一条完全退出路径（先关停 daemon）。
+        let quit = server.quit.clone();
+        let lifecycle = lifecycle.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                () = quit.cancelled() => lifecycle.request_quit(),
+                () = cancel.cancelled() => {}
+            }
+        });
+    }
     let shell = ShellState::new(host.availability, daemon.clone(), events.clone());
     let power = Arc::new(PowerService::new(events.clone()));
     let power_task = tokio::spawn(power.clone().run(cancel.clone()));
@@ -143,6 +184,17 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
     );
 
     let shared_state = Arc::new(tokio::sync::Mutex::new(state));
+    // 局域网直连（L1）：先建服务，legacy 迁移完成后由 readiness 任务 `start`；
+    // 桌面默认只监听回环时 `bound` 让它自动关闭广播 / 回连地址自报。
+    let link = crate::link::LinkService::new(crate::link::LinkServiceParts {
+        events: events.clone(),
+        state: shared_state.clone(),
+        store: store.clone(),
+        tasks: Arc::new(crate::link::DaemonTaskCreator::new(daemon.clone())),
+        bound,
+        server_mode: server.is_some(),
+    });
+    let link_task = tokio::spawn(link.clone().run(cancel.clone()));
     let analytics_task = tokio::spawn(
         crate::analytics::AnalyticsWorker::new(shared_state.clone(), store.clone())?
             .run(cancel.clone()),
@@ -163,6 +215,14 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         let token = config.token.clone();
         (config, switches, token)
     };
+    let (ready_tx, ready_rx) = tokio::sync::watch::channel(false);
+    let bootstrap = server_config.map(|config| ServerBootstrap {
+        seed: TokenSeed {
+            preset: config.token.clone(),
+            force: config.token_force,
+        },
+        ready: ready_tx,
+    });
     let readiness_task = tokio::spawn(await_daemon_ready(DaemonReadiness {
         daemon: daemon.clone(),
         state: shared_state.clone(),
@@ -171,12 +231,15 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         api_switches: api_switches.clone(),
         api_token: api_token.clone(),
         cancel: cancel.clone(),
+        server: bootstrap,
+        link: link.clone(),
     }));
+    let shared_state_for_server = shared_state.clone();
     let cloud_client = crate::cloud::CloudClient::new(
-        std::env::var("FLUXCLOUD_BASE_URL")
-            .ok()
-            .or_else(|| option_env!("FLUXCLOUD_BASE_URL").map(str::to_owned))
-            .unwrap_or_else(|| "http://127.0.0.1:8720".to_owned()),
+        fluxcloud_base_url(
+            std::env::var("FLUXCLOUD_BASE_URL").ok(),
+            option_env!("FLUXCLOUD_BASE_URL"),
+        ),
         shared_state.clone(),
         store.clone(),
     )?
@@ -203,6 +266,13 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         store.clone(),
     ));
     let remote_task = tokio::spawn(remote.clone().run(cancel.clone()));
+    let device_meta_task = tokio::spawn(
+        Arc::new(crate::device_meta::DeviceMetaService::new(
+            cloud_api.clone(),
+            events.clone(),
+        ))
+        .run(cancel.clone()),
+    );
     let cdn_task = tokio::spawn(
         crate::cdn_worker::CdnWorker::new(
             cloud_api.clone(),
@@ -217,22 +287,30 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         shell.clone(),
     ));
     let blobs = Arc::new(crate::capture::DaemonBlobClient::new(&daemon_config)?);
-    let mut nmh_task = tokio::spawn(
-        crate::nmh::NmhService::new(daemon.clone(), capture.clone()).run(cancel.clone()),
-    );
+    let mut nmh_task = if server.is_some() {
+        // server 模式没有浏览器扩展中继：不启动 NMH IPC 也不注册 native messaging host；
+        // 占位任务永不完成，退出时 abort。
+        tokio::spawn(std::future::pending::<Result<(), std::io::Error>>())
+    } else {
+        tokio::spawn(
+            crate::nmh::NmhService::new(daemon.clone(), capture.clone()).run(cancel.clone()),
+        )
+    };
     // 浏览器扩展靠 NMH 注册找到中继：启动时按归属规则自愈，不与并存的另一份 FluxDown 互相覆盖。
-    tokio::task::spawn_blocking(|| match crate::nmh::registry::auto_register() {
-        Ok(crate::nmh::registry::AutoRegisterOutcome::UpToDate) => {
-            tracing::debug!("NMH registration up to date");
-        }
-        Ok(crate::nmh::registry::AutoRegisterOutcome::Registered(relay)) => {
-            tracing::info!(relay = %relay.display(), "NMH registration repaired");
-        }
-        Err(error) => tracing::warn!(error = %error, "NMH auto-registration failed"),
-    });
+    if server.is_none() {
+        tokio::task::spawn_blocking(|| match crate::nmh::registry::auto_register() {
+            Ok(crate::nmh::registry::AutoRegisterOutcome::UpToDate) => {
+                tracing::debug!("NMH registration up to date");
+            }
+            Ok(crate::nmh::registry::AutoRegisterOutcome::Registered(relay)) => {
+                tracing::info!(relay = %relay.display(), "NMH registration repaired");
+            }
+            Err(error) => tracing::warn!(error = %error, "NMH auto-registration failed"),
+        });
+    }
     let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
         daemon.clone(),
-        daemon_config,
+        daemon_config.clone(),
         events.clone(),
         shared_state.clone(),
         store.clone(),
@@ -243,28 +321,32 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         "CARGO_PKG_VERSION"
     ))?);
     let cloud = Arc::new(cloud_api);
-    let gateway_service = Arc::new(GatewayService::new(
-        daemon.clone(),
-        events.clone(),
-        auth,
-        cloud,
-        sync,
-        remote,
-        capture.clone(),
-        blobs,
-        diagnostics,
-        update,
-        shared_state,
-        store.clone(),
-        api_switches,
-        api_token,
-        GatewayShell {
-            shell: shell.clone(),
-            power: power.clone(),
-            lifecycle: lifecycle.clone(),
-            notifier,
-        },
-    ));
+    let gateway_service = Arc::new(
+        GatewayService::new(
+            daemon.clone(),
+            events.clone(),
+            auth,
+            cloud,
+            sync,
+            remote,
+            capture.clone(),
+            blobs.clone(),
+            diagnostics.clone(),
+            update,
+            shared_state,
+            store.clone(),
+            api_switches,
+            api_token.clone(),
+            GatewayShell {
+                shell: shell.clone(),
+                power: power.clone(),
+                lifecycle: lifecycle.clone(),
+                notifier,
+            },
+        )
+        .with_server_mode(server.is_some())
+        .with_link(link.clone()),
+    );
     let bearer = load_or_create_bearer(
         store.data_dir(),
         std::env::var_os("FLUXDOWN_AGENT_TOKEN_FILE")
@@ -285,13 +367,41 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
         cancel.clone(),
     ));
     #[cfg(feature = "desktop")]
-    crate::clipboard_watch::spawn(events.clone(), gateway_service.clone(), cancel.clone());
-    if let Ok(Err(error)) =
-        tokio::task::spawn_blocking(crate::platform::migrate_legacy_autostart).await
+    if server.is_none() {
+        crate::clipboard_watch::spawn(events.clone(), gateway_service.clone(), cancel.clone());
+    }
+    if server.is_none()
+        && let Ok(Err(error)) =
+            tokio::task::spawn_blocking(crate::platform::migrate_legacy_autostart).await
     {
         tracing::warn!(error = %error, "could not migrate legacy autostart entry");
     }
-    let api_host = Arc::new(AgentApiHost::new(daemon, events, capture));
+    let server_handle = match server_config {
+        Some(config) => {
+            crate::server_mode::log_web_ui(config);
+            Some(Arc::new(ServerHandle::new(ServerHandleParts {
+                token: api_token.clone(),
+                state: shared_state_for_server,
+                store: store.clone(),
+                events: events.clone(),
+                ready: ready_rx,
+                diagnostics,
+                blobs: blobs.clone(),
+                daemon: daemon_config.clone(),
+                webroot: config.webroot.clone(),
+                demo: config.effective_demo_url(bound).is_some(),
+            })?))
+        }
+        None => None,
+    };
+    let api_host = Arc::new(AgentApiHost::new(
+        daemon,
+        events,
+        capture,
+        blobs.clone(),
+        link.clone(),
+        server_config.and_then(|config| config.language.clone()),
+    ));
     let (result, nmh_completed): (Result<(), Box<dyn std::error::Error + Send + Sync>>, bool) = tokio::select! {
         gateway = crate::gateway::serve(
             listener,
@@ -300,6 +410,7 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
             api_config,
             bearer,
             cancel.clone(),
+            server_handle,
         ) => (gateway.map_err(Into::into), false),
         nmh = &mut nmh_task => {
             let error = match nmh {
@@ -320,11 +431,17 @@ pub async fn run(cancel: CancellationToken, host: ShellHost) -> AgentResult {
     let _ = cdn_task.await;
     let _ = sync_task.await;
     let _ = remote_task.await;
+    let _ = link_task.await;
+    let _ = device_meta_task.await;
     let _ = effects_task.await;
     let _ = analytics_task.await;
     let _ = power_task.await;
     let _ = shell_task.await;
     if !nmh_completed {
+        if server.is_some() {
+            // server 模式的 NMH 占位任务永不自行结束。
+            nmh_task.abort();
+        }
         let _ = nmh_task.await;
     }
     result
@@ -339,6 +456,14 @@ struct DaemonReadiness {
     api_switches: Arc<fluxdown_api::server::ApiRuntimeSwitches>,
     api_token: fluxdown_api::auth::TokenCell,
     cancel: CancellationToken,
+    server: Option<ServerBootstrap>,
+    link: Arc<crate::link::LinkService>,
+}
+
+/// server 模式在 daemon 就绪后的一次性引导：预置密钥策略 + 就绪信号。
+struct ServerBootstrap {
+    seed: TokenSeed,
+    ready: tokio::sync::watch::Sender<bool>,
 }
 
 /// Gateway 已先行服务；这里等 daemon 首次就绪并完成一次性 legacy 迁移。失败即取消 agent，
@@ -352,15 +477,35 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
         api_switches,
         api_token,
         cancel,
+        server,
+        link,
     } = readiness;
     let work = async {
-        daemon
-            .wait_ready(Duration::from_secs(30))
-            .await
-            .map_err(|error| {
-                std::io::Error::other(format!("daemon startup failed: {:?}", error.code))
-            })?;
+        // 慢盘 / NAS 冷启动可能远超 30s：daemon 客户端自己持续重连，这里持续等待并周期性
+        // 报告状态；只有 agent 退出（信号 / daemon 致命错误 → cancel）才结束等待。
+        let started = std::time::Instant::now();
+        while daemon.wait_ready(DAEMON_READY_POLL).await.is_err() {
+            tracing::warn!(
+                waited_secs = started.elapsed().as_secs(),
+                "fluxdownd is not ready yet; still waiting"
+            );
+        }
+        let fresh = state.lock().await.gateway_migration_revision.is_none();
         crate::link::migrate_legacy_state(&daemon, &state, &store, &events).await?;
+        // 迁移可能写入 daemon 时代的身份与名册：互联必须在它之后才加载 / 生成身份。
+        // 失败只影响局域网互联（`agent.link.*` 报 Unavailable），不拖垮下载与云功能。
+        if let Err(error) = link.start().await {
+            tracing::warn!(error = %error, "device link could not start");
+        }
+        if let Some(server) = &server {
+            let mut state = state.lock().await;
+            if crate::server_mode::apply_bootstrap(&mut state, fresh, &server.seed) {
+                store.save(&state).await?;
+                events.publish(fluxdown_protocol::AgentEvent::GatewayChanged(
+                    state.gateway.clone(),
+                ));
+            }
+        }
         let state = state.lock().await;
         api_switches.update(
             state.gateway.takeover_enabled,
@@ -370,6 +515,10 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
             state.gateway.cors_enabled,
         );
         api_token.set(state.gateway_user_token.clone());
+        // 令牌与开关都已就位：放行首次设置 / 状态接口（避免 setup 在迁移前落定、被迁移覆盖）。
+        if let Some(server) = &server {
+            let _ = server.ready.send(true);
+        }
         Ok(())
     };
     // agent 退出（信号 / 托盘退出 / daemon 致命错误）时不再等待，避免拖住关停。
@@ -429,16 +578,47 @@ fn spawn_daemon_projection(
     })
 }
 
+/// 每轮等待 daemon 就绪的时长；超时只记录状态并继续等待。
+const DAEMON_READY_POLL: Duration = Duration::from_secs(30);
+
+/// FluxCloud 服务地址：运行期环境变量 > 构建期注入 > 本地默认。空串（CI 未配置 secret 时传入）视为未设置。
+fn fluxcloud_base_url(runtime: Option<String>, build_time: Option<&str>) -> String {
+    runtime
+        .filter(|url| !url.trim().is_empty())
+        .or_else(|| {
+            build_time
+                .filter(|url| !url.trim().is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "http://127.0.0.1:8720".to_owned())
+}
+
 async fn initialize_device_identity(
     state: &mut AgentState,
     store: &StateStore,
+    server: Option<&crate::server_mode::ServerConfig>,
+    engine_data_dir: &Path,
 ) -> Result<(), crate::state::StateError> {
     let mut changed = false;
     let first_run = state.device_id.is_empty();
     if first_run {
-        state.device_id = uuid::Uuid::new_v4().to_string();
-        state.gateway.takeover_enabled = true;
-        state.gateway.jsonrpc_enabled = true;
+        // 沿用 Flutter 时代的 `cloud_device_id`（同一台机器迁移到 GPUI 后云端仍视为同一设备，
+        // 不多占设备名额）；找不到才生成新的。headless 实例不继承同机桌面安装版的身份。
+        match crate::device_identity::load_flutter_identity(engine_data_dir, server.is_none()).await
+        {
+            Some(legacy) => {
+                state.device_id = legacy.device_id;
+                if let Some(name) = legacy.device_name {
+                    state.device_name = name;
+                }
+            }
+            None => state.device_id = uuid::Uuid::new_v4().to_string(),
+        }
+        // server 模式的兼容 API 分组在 daemon 迁移完成后由 `server_mode::apply_bootstrap` 决定。
+        if server.is_none() {
+            state.gateway.takeover_enabled = true;
+            state.gateway.jsonrpc_enabled = true;
+        }
         changed = true;
     }
     let valid_name = {
@@ -446,10 +626,7 @@ async fn initialize_device_identity(
         (1..=64).contains(&length)
     };
     if !valid_name {
-        state.device_name = std::env::var("HOSTNAME")
-            .ok()
-            .filter(|name| (1..=64).contains(&name.trim().chars().count()))
-            .unwrap_or_else(|| "FluxDown".to_owned());
+        state.device_name = crate::device_identity::detect_device_name().await;
         changed = true;
     }
     if state.platform.is_empty() {
@@ -462,8 +639,14 @@ async fn initialize_device_identity(
             || credentials.session.is_none()
     }) {
         state.credentials = None;
+        // 凭证被判定无效：账号维度状态（同步水位 / 脏键 / 远程任务）随之隔离。
+        state.bind_account(None);
         changed = true;
     }
+    // 升级前的状态没有 `account_uid`：已登录时归属当前会话账号。
+    let before = state.account_uid.clone();
+    state.adopt_session_account();
+    changed |= state.account_uid != before;
     if changed {
         store.save(state).await?;
     }
@@ -572,14 +755,7 @@ struct AgentPaths {
 
 impl AgentPaths {
     fn resolve() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let project = directories::ProjectDirs::from("dev", "zerx", "FluxDown")
-            .ok_or("could not resolve application data directory")?;
-        let root = std::env::var_os("FLUXDOWN_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| project.data_dir().to_owned());
-        let agent_data_dir = std::env::var_os("FLUXDOWN_AGENT_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| root.join("agent"));
+        let agent_data_dir = resolve_agent_data_dir()?;
         // daemon 的 bearer 与进程租约落在 engine 数据目录（`fluxdown_engine::data_dir::resolve_data_dir`），
         // 与 agent 自己的 ProjectDirs 根不同；未显式指定时必须按同一规则推导，否则永远等不到 token。
         let daemon_data_dir = std::env::var_os("FLUXDOWN_DATA_DIR")
@@ -597,6 +773,22 @@ impl AgentPaths {
             daemon_rpc_url,
         })
     }
+}
+
+/// agent 数据目录：`FLUXDOWN_AGENT_DATA_DIR`，否则 `<FLUXDOWN_DATA_DIR 或 ProjectDirs 数据目录>/agent`。
+/// 日志初始化与运行期装配共用，避免两处目录漂移。
+pub fn resolve_agent_data_dir() -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(dir) = std::env::var_os("FLUXDOWN_AGENT_DATA_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let root = match std::env::var_os("FLUXDOWN_DATA_DIR") {
+        Some(root) => PathBuf::from(root),
+        None => directories::ProjectDirs::from("dev", "zerx", "FluxDown")
+            .ok_or("could not resolve application data directory")?
+            .data_dir()
+            .to_owned(),
+    };
+    Ok(root.join("agent"))
 }
 
 /// 镜像 `fluxdown_engine::data_dir::resolve_data_dir_inner` 的默认目录（agent 不依赖 engine）。

@@ -105,6 +105,18 @@ impl WindowRegistry {
         });
     }
 
+    /// 承载全局提示（配对确认框、登录失效通知）的窗口：当前活动的主 / 设置窗口优先，
+    /// 其次主窗口，再次设置窗口；这两类窗口都由 `Root` 托管浮层。
+    pub fn overlay_window(cx: &App) -> Option<AnyWindowHandle> {
+        let registry = cx.global::<Self>();
+        let main = registry.open.get(&WindowKey::Main).copied();
+        let settings = registry.open.get(&WindowKey::Settings).copied();
+        cx.active_window()
+            .filter(|active| Some(*active) == main || Some(*active) == settings)
+            .or(main)
+            .or(settings)
+    }
+
     /// 打开或聚焦窗口。已开 → `activate_window` 并返回 `None`。
     pub fn open_or_focus<V: Render>(
         cx: &mut App,
@@ -123,7 +135,14 @@ impl WindowRegistry {
             registry.open.remove(&key);
             registry.ids.remove(&handle.window_id());
         }
-        match cx.open_window(crate::app_icon::window_options(options), build) {
+        let label = format!("{key:?}");
+        let opened_at = std::time::Instant::now();
+        let options = crate::app_icon::window_options(options);
+        let result = cx.open_window(options, move |window, cx| {
+            crate::logging::observe_new_window(label, opened_at, window, cx);
+            build(window, cx)
+        });
+        match result {
             Ok(handle) => {
                 let any: AnyWindowHandle = handle.into();
                 let registry = cx.global_mut::<Self>();
@@ -132,7 +151,7 @@ impl WindowRegistry {
                 Some(handle)
             }
             Err(error) => {
-                eprintln!("failed to open FluxDown window: {error:#}");
+                log::error!("failed to open FluxDown window {key:?}: {error:#}");
                 None
             }
         }

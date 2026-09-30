@@ -30,6 +30,13 @@ impl CloudApi {
         .await
     }
 
+    /// `PATCH /devices/current`：按令牌里的设备定位本机，上报默认目录 / 路径风格 / 版本。
+    /// 旧版云端没有该端点（404）——调用方应忽略。
+    pub async fn patch_current_device<P: Serialize>(&self, body: &P) -> Result<Value, CloudError> {
+        self.authed(Method::PATCH, "/api/v1/devices/current", Some(body))
+            .await
+    }
+
     pub async fn rename_device(&self, id: &str, name: &str) -> Result<Value, CloudError> {
         self.authed(
             Method::PATCH,
@@ -247,6 +254,24 @@ impl CloudApi {
 
     pub async fn clear_session(&self) -> Result<(), CloudError> {
         self.client.clear_session().await
+    }
+
+    /// 非用户主动结束会话：先发 `SessionRevoked(reason)` 再清会话。
+    pub async fn revoke_session(
+        &self,
+        reason: fluxdown_protocol::ErrorReason,
+    ) -> Result<(), CloudError> {
+        self.client.revoke_session(reason).await
+    }
+
+    /// 当前登录账号 id；未登录为 `None`。
+    pub async fn current_user_id(&self) -> Option<String> {
+        self.client.current_user_id().await
+    }
+
+    /// 同步本机设备名（重命名当前设备后使用）。
+    pub async fn set_device_name(&self, name: &str) -> Result<(), CloudError> {
+        self.client.set_device_name(name).await
     }
 
     #[must_use]

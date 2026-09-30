@@ -9,6 +9,7 @@ on:
       - "website/**"
   workflow_dispatch: {} # 允许在 Actions 页面手动触发
 
+# 与 deploy-website-v2.yml 同组：两者共用服务器上同一个仓库检出（fetch + reset），必须串行
 concurrency:
   group: deploy-website
   cancel-in-progress: false # 部署不可中途取消，排队执行

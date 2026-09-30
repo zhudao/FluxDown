@@ -12,6 +12,7 @@ use std::{
 use fluxdown_protocol::{
     AgentEvent, DaemonEvent, DaemonRuntimeStatsDto, ServiceEvent, ShellStatusDto,
 };
+use fluxdown_ui_account::AccountHost;
 use fluxdown_ui_downloads::DownloadView;
 use fluxdown_ui_i18n::{I18nCatalog, I18nError, Translator, system_locale};
 use fluxdown_ui_settings::{SettingsStore, SettingsView, component_locale};
@@ -76,14 +77,14 @@ pub(crate) struct Desktop {
     pub session: Entity<AgentSession>,
     pub client: Arc<AgentClient>,
     pub settings_store: Entity<SettingsStore>,
+    /// 账户 / 设备 / 局域网配对状态：设置页与「添加设备」对话框共享。
+    pub account_host: Entity<AccountHost>,
     pub menu_bar: Entity<AppMenuBar>,
     /// 主窗口内的下载页（主窗口关闭后失效）。
     pub main_downloads: Option<WeakEntity<DownloadView>>,
     pub main_shell: Option<WeakEntity<ShellView>>,
     /// 设置窗口内的设置页（窗口关闭后失效）：命令面板据此定位设置项。
     pub settings_view: Option<WeakEntity<SettingsView>>,
-    /// 最新偏好（快照 + `PreferencesChanged` 折叠）。
-    pub preferences: BTreeMap<String, serde_json::Value>,
     /// 最新运行时统计（关窗 / 退出提示用）。
     pub runtime_stats: DaemonRuntimeStatsDto,
     /// agent 托盘可用性与驻留策略：决定关闭主窗口是只退出界面还是完全退出。
@@ -107,8 +108,20 @@ impl Desktop {
         Self::global(cx).runtime_stats.active_tasks
     }
 
+    /// 当前偏好：`SettingsStore` 的读视图（agent 快照 / 事件 + 本进程尚未回执的本地写入）。
+    pub fn preferences(cx: &App) -> &BTreeMap<String, serde_json::Value> {
+        Self::global(cx).settings_store.read(cx).preferences()
+    }
+
     pub fn pref(cx: &App, key: &str) -> Option<serde_json::Value> {
-        Self::global(cx).preferences.get(key).cloned()
+        Self::preferences(cx).get(key).cloned()
+    }
+
+    /// 写偏好：界面状态由偏好派生，任何改动偏好派生状态的入口都只写这里，
+    /// 由 [`observe_preferences`] 统一投影，避免「内存已改、偏好未写」被下一次快照回弹。
+    pub fn set_pref(cx: &mut App, key: &str, value: serde_json::Value) {
+        let store = Self::global(cx).settings_store.clone();
+        store.update(cx, |store, cx| store.set_pref(key, value, cx));
     }
 }
 
@@ -125,8 +138,14 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
     let _instance_lock =
         match acquire_or_activate(&instance_dir, &endpoint, &message, launch.activate_existing)? {
             LaunchDisposition::Primary(lock) => lock,
-            LaunchDisposition::Activated => return Ok(RunOutcome::Completed),
-            LaunchDisposition::NoPrimary => return Ok(RunOutcome::NoPrimary),
+            LaunchDisposition::Activated => {
+                log::info!("another desktop instance is primary; request forwarded, exiting");
+                return Ok(RunOutcome::Completed);
+            }
+            LaunchDisposition::NoPrimary => {
+                log::info!("--activate-existing without a primary instance; exiting");
+                return Ok(RunOutcome::NoPrimary);
+            }
         };
     let (activate_tx, mut activate_rx) = mpsc::channel::<ActivationRequest>(16);
     // Unix sockets can bind before Tokio starts, so parallel starters are queued immediately.
@@ -181,18 +200,19 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             Cow::Borrowed(MI_SANS_MEDIUM),
             Cow::Borrowed(MI_SANS_SEMIBOLD),
         ]) {
-            eprintln!("failed to load FluxDown UI fonts: {error:#}");
+            log::error!("failed to load FluxDown UI fonts: {error:#}");
             return;
         }
 
         gpui_component::init(cx);
+        crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
         // 导入主题须在首个偏好快照前注册，`custom:<id>` 偏好才能直接命中；
         // 库内缺失的 id 由主题 crate 回退到该槽位的内置默认主题。
         let theme_library = FsThemeLibrary::new(app_data_dir().join("themes"));
         for failure in fluxdown_ui_settings::install_theme_library(Arc::new(theme_library), cx) {
-            eprintln!("failed to load imported theme: {failure}");
+            log::warn!("failed to load imported theme: {failure}");
         }
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
@@ -203,6 +223,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         let settings_store =
             cx.new(|_| SettingsStore::new(Arc::new(AgentSettingsPort::new(agent_client.clone()))));
         attach(&session, &settings_store, cx);
+        let account_host = crate::account_host::install(&translator, &session, &agent_client, cx);
         let quit_store = settings_store.clone();
         cx.on_app_quit(move |cx| {
             let calls = quit_store.update(cx, |store, _| store.drain_pending_calls());
@@ -226,35 +247,30 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             session: session.clone(),
             client: agent_client.clone(),
             settings_store,
+            account_host,
             menu_bar,
             main_downloads: None,
             main_shell: None,
             settings_view: None,
-            preferences: BTreeMap::new(),
             runtime_stats: DaemonRuntimeStatsDto::default(),
             shell: ShellStatusDto::default(),
             quitting: false,
         });
 
-        // 会话 → 偏好 / 运行时统计折叠进 Desktop；外观与语言随偏好变化。
+        // 会话 → 运行时统计 / 外壳状态折叠进 Desktop。偏好不在此处理：`SettingsStore` 已订阅同一
+        // 会话并叠加本地未回执编辑，外观与语言只从它投影（见 `observe_preferences`）。
+        observe_preferences(cx);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
                 if let Some(body) = crate::session::agent_body(snapshot) {
-                    let values = body.preferences.values.clone();
                     let stats = body.daemon.runtime_stats.clone();
                     let shell = body.shell.clone();
                     let desktop = Desktop::global_mut(cx);
-                    desktop.preferences = values;
                     desktop.runtime_stats = stats;
                     desktop.shell = shell;
-                    apply_preferences(cx);
                 }
             }
             SessionSignal::Event(frame) => match &frame.event {
-                ServiceEvent::Agent(AgentEvent::PreferencesChanged(prefs)) => {
-                    Desktop::global_mut(cx).preferences = prefs.values.clone();
-                    apply_preferences(cx);
-                }
                 ServiceEvent::Agent(AgentEvent::ShellChanged(shell)) => {
                     Desktop::global_mut(cx).shell = shell.clone();
                 }
@@ -273,7 +289,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                 _ => {}
             },
             SessionSignal::Fatal(error) => {
-                eprintln!("fatal FluxDown agent error: {:?}", error.code);
+                log::error!("fatal FluxDown agent error: {:?}", error.code);
             }
             SessionSignal::ServiceStopped => crate::lifecycle::service_stopped(cx),
             SessionSignal::Stale => {}
@@ -522,12 +538,27 @@ fn after_first_snapshot(cx: &mut App, run: fn(&mut App)) {
     }));
 }
 
-/// 偏好快照 → 全局外观与语言。每次快照/偏好事件都幂等应用。
-fn apply_preferences(cx: &mut App) {
-    let values = Desktop::global(cx).preferences.clone();
+/// 偏好 → 全局外观、活动栏与语言。唯一的投影入口：主题 / 语言等由偏好派生的全局状态只在这里
+/// 修改，界面控件只写偏好（[`Desktop::set_pref`] / `SettingsStore::set_pref`）。偏好视图含本地
+/// 未回执编辑，快照或无关键的事件回流都不会把刚做的改动回弹。
+fn observe_preferences(cx: &mut App) {
+    let store = Desktop::global(cx).settings_store.clone();
+    let mut applied = BTreeMap::new();
+    cx.observe(&store, move |store, cx| {
+        let values = store.read(cx).preferences();
+        if *values == applied {
+            return;
+        }
+        applied.clone_from(values);
+        apply_preferences(&applied, cx);
+    })
+    .detach();
+}
+
+fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
     let translator = Desktop::global(cx).translator.clone();
-    fluxdown_ui_theme::apply_appearance_preferences(&values, cx);
-    apply_activity_bar_preferences(&values, cx);
+    fluxdown_ui_theme::apply_appearance_preferences(values, cx);
+    apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
         .get("general.locale")
         .and_then(serde_json::Value::as_str)
@@ -564,7 +595,10 @@ fn capture_calls(
     client: &Arc<AgentClient>,
     urls: Vec<String>,
     files: Vec<std::path::PathBuf>,
-) -> Vec<(String, crate::agent_client::AgentFuture<serde_json::Value>)> {
+) -> Vec<(
+    &'static str,
+    crate::agent_client::AgentFuture<serde_json::Value>,
+)> {
     use fluxdown_protocol::capture_link::{OpenAssociation, normalize_capture_url};
     let mut calls = Vec::with_capacity(urls.len() + files.len());
     for url in urls {
@@ -579,7 +613,7 @@ fn capture_calls(
                 "association": association,
             })),
         );
-        calls.push((url, future));
+        calls.push(("link", future));
     }
     for file in files {
         let path = file.display().to_string();
@@ -591,7 +625,7 @@ fn capture_calls(
                 "association": OpenAssociation::Torrent,
             })),
         );
-        calls.push((path, future));
+        calls.push(("torrent file", future));
     }
     calls
 }
@@ -609,9 +643,9 @@ pub(crate) fn submit_captures_detached(
     }
     let calls = capture_calls(client, urls, files);
     client.spawn_background(async move {
-        for (source, future) in calls {
+        for (kind, future) in calls {
             if let Err(error) = future.await {
-                eprintln!("failed to submit {source}: {:?}", error.code);
+                log::warn!("failed to submit captured {kind}: {:?}", error.code);
             }
         }
         let _ = done.send(());
@@ -619,28 +653,61 @@ pub(crate) fn submit_captures_detached(
     finished
 }
 
-/// 桌面数据根目录：与 agent 同一规则（`FLUXDOWN_DATA_DIR` 优先，否则与 agent token 同一
-/// ProjectDirs 数据目录）。
-fn app_data_dir() -> std::path::PathBuf {
-    if let Some(path) = env::var_os("FLUXDOWN_DATA_DIR") {
-        return path.into();
+/// 桌面侧推导的 agent 路径；规则与 `fluxdown_agent::runtime::resolve_agent_data_dir` 一致，
+/// 否则设了 `FLUXDOWN_DATA_DIR` 时界面会去另一个目录找 bearer，永远连不上自己拉起的 agent。
+#[derive(Debug, PartialEq, Eq)]
+struct DesktopPaths {
+    /// 数据根：`FLUXDOWN_DATA_DIR`，否则 ProjectDirs 数据目录。
+    data_root: std::path::PathBuf,
+    /// `FLUXDOWN_AGENT_DATA_DIR`，否则 `<数据根>/agent`。
+    agent_data_dir: std::path::PathBuf,
+    /// `FLUXDOWN_AGENT_TOKEN_FILE`，否则 `<agent 数据目录>/agent.token`。
+    agent_token: std::path::PathBuf,
+}
+
+impl DesktopPaths {
+    fn from_env() -> Self {
+        Self::resolve(
+            |name| env::var_os(name),
+            directories::ProjectDirs::from("dev", "zerx", "FluxDown")
+                .map(|project| project.data_dir().to_owned()),
+        )
     }
-    directories::ProjectDirs::from("dev", "zerx", "FluxDown")
-        .map_or_else(std::path::PathBuf::new, |project| {
-            project.data_dir().to_owned()
-        })
+
+    fn resolve(
+        lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+        project_data_dir: Option<std::path::PathBuf>,
+    ) -> Self {
+        let data_root = lookup("FLUXDOWN_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .or(project_data_dir)
+            .unwrap_or_default();
+        let agent_data_dir = lookup("FLUXDOWN_AGENT_DATA_DIR")
+            .map_or_else(|| data_root.join("agent"), std::path::PathBuf::from);
+        let agent_token = lookup("FLUXDOWN_AGENT_TOKEN_FILE").map_or_else(
+            || agent_data_dir.join("agent.token"),
+            std::path::PathBuf::from,
+        );
+        Self {
+            data_root,
+            agent_data_dir,
+            agent_token,
+        }
+    }
+}
+
+/// 桌面数据根目录（导入主题等）。
+fn app_data_dir() -> std::path::PathBuf {
+    DesktopPaths::from_env().data_root
+}
+
+/// agent 数据目录；诊断日志写在其下 `logs/`。
+pub(crate) fn agent_data_dir() -> std::path::PathBuf {
+    DesktopPaths::from_env().agent_data_dir
 }
 
 fn agent_token_path() -> std::path::PathBuf {
-    if let Some(path) = env::var_os("FLUXDOWN_AGENT_TOKEN_FILE") {
-        return path.into();
-    }
-    if let Some(path) = env::var_os("FLUXDOWN_AGENT_DATA_DIR") {
-        return std::path::PathBuf::from(path).join("agent.token");
-    }
-    directories::ProjectDirs::from("dev", "zerx", "FluxDown")
-        .map(|project| project.data_dir().join("agent").join("agent.token"))
-        .unwrap_or_else(|| std::path::PathBuf::from("agent.token"))
+    DesktopPaths::from_env().agent_token
 }
 
 #[cfg(test)]
@@ -649,6 +716,56 @@ mod tests {
 
     fn test_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("fluxdown-app-{label}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn paths_follow_the_agent_resolution_rules() {
+        use std::path::PathBuf;
+
+        let project = Some(PathBuf::from("/project"));
+        let resolve = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            DesktopPaths::resolve(
+                |name| {
+                    vars.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.into())
+                },
+                project.clone(),
+            )
+        };
+
+        let defaults = resolve(&[]);
+        assert_eq!(
+            defaults.agent_token,
+            PathBuf::from("/project/agent/agent.token")
+        );
+
+        // 只设数据根：token 必须跟着 agent 落到 `<root>/agent`（曾经仍读 ProjectDirs）。
+        let rooted = resolve(&[("FLUXDOWN_DATA_DIR", "/root")]);
+        assert_eq!(rooted.data_root, PathBuf::from("/root"));
+        assert_eq!(rooted.agent_data_dir, PathBuf::from("/root/agent"));
+        assert_eq!(rooted.agent_token, PathBuf::from("/root/agent/agent.token"));
+
+        let agent_dir = resolve(&[
+            ("FLUXDOWN_DATA_DIR", "/root"),
+            ("FLUXDOWN_AGENT_DATA_DIR", "/agent-state"),
+        ]);
+        assert_eq!(agent_dir.data_root, PathBuf::from("/root"));
+        assert_eq!(
+            agent_dir.agent_token,
+            PathBuf::from("/agent-state/agent.token")
+        );
+
+        let token_file = resolve(&[
+            ("FLUXDOWN_AGENT_DATA_DIR", "/agent-state"),
+            ("FLUXDOWN_AGENT_TOKEN_FILE", "/secrets/token"),
+        ]);
+        assert_eq!(token_file.agent_data_dir, PathBuf::from("/agent-state"));
+        assert_eq!(token_file.agent_token, PathBuf::from("/secrets/token"));
     }
 
     #[test]

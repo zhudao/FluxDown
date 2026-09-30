@@ -679,6 +679,16 @@ pub struct ChangeTaskUrlRequest {
     pub url: String,
 }
 
+/// `daemon.task.changeUrl` 参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeTaskUrlParams {
+    pub task_id: String,
+    /// 新下载地址（http(s)/ftp，或待解封装的 `thunder://` 链接）。
+    pub url: String,
+}
+
 /// 设置插件启用状态请求体。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1153,6 +1163,12 @@ pub struct LinkDeviceInfo {
     pub online: bool,
     pub paired_at: i64,
     pub last_seen_at: i64,
+    /// 对端自报的默认下载目录（经已认证链路获取；旧版对端为 `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_save_dir: Option<String>,
+    /// 对端自报的路径风格（旧版对端为 `None`，可按 `platform` 推断）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_style: Option<crate::agent::PathStyle>,
 }
 
 /// 发现快照响应（`GET /api/v1/link/discovered`）。
@@ -1745,6 +1761,15 @@ pub struct SiteAuthSaveRequest {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SiteAuthDeleteParams {
+    pub site: String,
+}
+
+/// `daemon.siteAuth.get` 参数：`site` 可写 `host` / `host:port` 或完整 URL，服务端归一化后查询；
+/// 结果为 [`SiteAuthCredentialDto`] 或 `null`。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SiteAuthGetParams {
     pub site: String,
 }
 

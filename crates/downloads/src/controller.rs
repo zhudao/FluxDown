@@ -8,16 +8,23 @@ use std::{
 
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, CloudDevice, DaemonEvent, DaemonRuntimeStatsDto, DaemonSnapshot,
-    GroupDto, LinkDeviceInfo, QueueDto, RemoteTaskDto, ServiceEvent, TaskActivityPage,
-    TaskActivityQuery, TaskDto, TaskRuntimeDto, WsServerMsg,
+    GroupDto, LinkDeviceInfo, LinkDispatchParams, QueueDto, RemoteCommandParams,
+    RemoteDispatchParams, RemoteTaskDto, ServiceEvent, TaskActivityPage, TaskActivityQuery,
+    TaskDto, TaskRuntimeDto, WsServerMsg,
 };
 
-use crate::model::{CategoryIndex, DownloadTaskView, TaskState, TaskStore};
+use crate::model::{
+    CategoryIndex, DownloadTaskView, TaskState, TaskStore,
+    devices::{DeviceEntry, local_device_id, other_devices},
+};
 
 /// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
 pub const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
 /// 偏好：新建下载默认沿用上次保存目录。
 pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
+/// 本机偏好：新建下载「下载到」上次选择的目标（`local` / `cloud:<id>` / `link:<fp>`），
+/// 设备本地，不进云同步。
+pub const LAST_DOWNLOAD_TARGET_PREF: &str = "download.last_target";
 
 pub type PortFuture<T> =
     Pin<Box<dyn Future<Output = Result<T, fluxdown_protocol::RpcErrorData>> + Send + 'static>>;
@@ -125,14 +132,21 @@ pub enum DownloadsCommand {
     SiteAuthMatch {
         url: String,
     },
-    RemoteDispatch(serde_json::Value),
-    RemoteCommand(serde_json::Value),
+    /// 经 FluxCloud 把链接下发到账号内另一台设备（`agent.remote.dispatch`）。
+    RemoteDispatch(RemoteDispatchParams),
+    /// 下发到局域网已配对设备（`agent.link.dispatch`）。
+    LinkDispatch(LinkDispatchParams),
+    /// 远程任务控制（`agent.remote.command`）。
+    RemoteCommand(RemoteCommandParams),
     OpenTask {
         task_id: String,
     },
     RevealTask {
         task_id: String,
     },
+    /// 重扫已完成任务的产物是否仍在下载目录（`daemon.task.rescan`，结果经
+    /// `fileMissingChanged` 事件回流）。
+    RescanFiles,
     /// 本机 `.torrent` 文件：agent 读取、上传 blob 后按捕获路径建任务。
     SubmitTorrentFile {
         path: String,
@@ -216,6 +230,8 @@ pub struct DownloadsController {
     runtime_stats: DaemonRuntimeStatsDto,
     preferences: BTreeMap<String, serde_json::Value>,
     categories: Rc<CategoryIndex>,
+    /// 本机在云账号里的设备 id（会话优先，名册 `is_current` 兜底；未登录为 `None`）。
+    session_device: Option<String>,
     stale: bool,
 }
 
@@ -241,6 +257,7 @@ impl DownloadsController {
             runtime_stats: DaemonRuntimeStatsDto::default(),
             preferences: BTreeMap::new(),
             categories: Rc::new(CategoryIndex::from_preference(None)),
+            session_device: None,
             stale: true,
         }
     }
@@ -251,6 +268,10 @@ impl DownloadsController {
         self.remote.clone_from(&snapshot.remote_tasks);
         self.cloud_devices.clone_from(&snapshot.cloud_devices);
         self.linked_devices.clone_from(&snapshot.linked_devices);
+        self.session_device = snapshot
+            .session
+            .as_ref()
+            .map(|session| session.device.device_id.clone());
         self.absorb_daemon_context(&snapshot.daemon);
         self.set_preferences(&snapshot.preferences.values);
         self.stale = !snapshot.daemon_connected;
@@ -291,6 +312,21 @@ impl DownloadsController {
             }
             AgentEvent::CloudDevicesChanged(devices) => {
                 self.cloud_devices.clone_from(devices);
+                // 名册里的 `is_current` 可能决定本机 id：镜像行过滤随之刷新。
+                self.rebuild_remote();
+                true
+            }
+            // 会话结束（登出 / 被撤销）后不再展示旧账号的设备与远程任务。
+            AgentEvent::SessionChanged(session) => {
+                self.session_device = session
+                    .as_ref()
+                    .as_ref()
+                    .map(|session| session.device.device_id.clone());
+                if self.session_device.is_none() {
+                    self.cloud_devices.clear();
+                    self.remote.clear();
+                }
+                self.rebuild_remote();
                 true
             }
             AgentEvent::LinkedDevicesChanged(devices) => {
@@ -370,14 +406,16 @@ impl DownloadsController {
         &self.group_summaries
     }
 
+    /// 本机的云设备 id（未登录 / 名册未就绪为 `None`）。
     #[must_use]
-    pub(crate) fn cloud_devices(&self) -> &[CloudDevice] {
-        &self.cloud_devices
+    pub(crate) fn local_device_id(&self) -> Option<String> {
+        local_device_id(self.session_device.as_deref(), &self.cloud_devices)
     }
 
+    /// 「其他设备」：云设备（去掉本机、去重）+ 已配对设备，同名已消歧。
     #[must_use]
-    pub(crate) fn linked_devices(&self) -> &[LinkDeviceInfo] {
-        &self.linked_devices
+    pub(crate) fn other_devices(&self) -> Vec<DeviceEntry> {
+        other_devices(&self.cloud_devices, &self.linked_devices)
     }
 
     #[must_use]
@@ -609,6 +647,21 @@ impl DownloadsController {
                 self.rebuild_row(ix);
                 true
             }
+            DaemonEvent::Engine(WsServerMsg::FileMissingChanged { updates }) => {
+                let mut changed = false;
+                for update in updates {
+                    let Some(ix) = self.store.find_local(&update.task_id) else {
+                        continue;
+                    };
+                    if self.local[ix].file_missing == update.missing {
+                        continue;
+                    }
+                    self.local[ix].file_missing = update.missing;
+                    self.rebuild_row(ix);
+                    changed = true;
+                }
+                changed
+            }
             _ => false,
         }
     }
@@ -662,7 +715,14 @@ impl DownloadsController {
     }
 
     fn rebuild_remote(&mut self) {
-        let rows = self.remote.iter().map(DownloadTaskView::remote).collect();
+        let local = self.local_device_id();
+        let rows = self
+            .remote
+            .iter()
+            // 目标是本机的任务已在本地落成真实任务；再显示云端镜像行会重复。
+            .filter(|task| local.as_deref().is_none_or(|id| task.to_device != id))
+            .map(DownloadTaskView::remote)
+            .collect();
         self.store.replace_remote(rows);
     }
 
@@ -724,8 +784,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DaemonEvent, DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult,
-        PortFuture, WsServerMsg,
+        AgentEvent, DaemonEvent, DownloadsCommand, DownloadsController, DownloadsPort,
+        DownloadsResult, PortFuture, ServiceEvent, WsServerMsg,
     };
 
     struct NullPort;
@@ -812,6 +872,45 @@ mod tests {
         assert_eq!(rows[0].speed_bytes_per_second, Some(1024));
         assert_eq!(rows[0].eta_seconds, Some(3));
         assert_eq!(rows[0].progress, 0.25);
+    }
+
+    #[test]
+    fn file_missing_changes_patch_completed_rows_and_self_heal() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let mut done = task("done");
+        done.status = 3;
+        done.file_name = "done.bin".to_owned();
+        controller.local.push(done);
+        controller.rebuild_all();
+        assert!(controller.store().local()[0].has_local_file());
+
+        let missing = |missing: bool| {
+            DaemonEvent::Engine(WsServerMsg::FileMissingChanged {
+                updates: vec![
+                    fluxdown_protocol::FileMissingUpdateDto {
+                        task_id: "done".to_owned(),
+                        missing,
+                    },
+                    // 已不在列表里的任务：忽略。
+                    fluxdown_protocol::FileMissingUpdateDto {
+                        task_id: "gone".to_owned(),
+                        missing: true,
+                    },
+                ],
+            })
+        };
+        assert!(controller.apply_daemon_event(&missing(true)));
+        {
+            let rows = controller.store().local();
+            assert!(rows[0].is_file_missing());
+            assert!(!rows[0].has_local_file());
+        }
+        // 重复上报同一状态不算变化，不触发重绘。
+        assert!(!controller.apply_daemon_event(&missing(true)));
+
+        // 文件移回原目录：标记翻回，行重新可打开 / 拖出。
+        assert!(controller.apply_daemon_event(&missing(false)));
+        assert!(controller.store().local()[0].has_local_file());
     }
 
     #[test]
@@ -1000,5 +1099,45 @@ mod tests {
         }));
         assert!(controller.store().local()[0].error_message.is_empty());
         assert!(controller.task_dto("t").unwrap().error_message.is_empty());
+    }
+
+    fn agent(event: AgentEvent) -> ServiceEvent {
+        ServiceEvent::Agent(event)
+    }
+
+    fn remote_task(id: &str, from: &str, to: &str) -> fluxdown_protocol::RemoteTaskDto {
+        serde_json::from_value(json!({
+            "id": id, "fromDevice": from, "toDevice": to,
+            "url": "https://example.com/a", "status": "downloading"
+        }))
+        .expect("remote task")
+    }
+
+    #[test]
+    fn remote_rows_skip_tasks_targeting_this_device_and_clear_when_session_ends() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let devices = serde_json::from_value(json!([
+            {"id":"1","deviceId":"dev-me","name":"Me","isCurrent":true},
+            {"id":"2","deviceId":"dev-mac","name":"Mac"}
+        ]))
+        .expect("devices");
+        controller.apply_event(&agent(AgentEvent::CloudDevicesChanged(devices)));
+        controller.apply_event(&agent(AgentEvent::RemoteTasksChanged(vec![
+            // 本机发出去的任务：显示。
+            remote_task("sent", "dev-me", "dev-mac"),
+            // 别的设备下发给本机的任务：本地已有真实任务，云端镜像行不显示。
+            remote_task("received", "dev-mac", "dev-me"),
+        ])));
+        let store = controller.store();
+        let rows = store.remote();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].to_device, "dev-mac");
+        drop(rows);
+
+        // 登出 / 会话被撤销：不留旧账号的设备与任务。
+        controller.apply_event(&agent(AgentEvent::SessionChanged(Box::new(None))));
+        assert!(controller.store().remote().is_empty());
+        assert!(controller.other_devices().is_empty());
+        assert_eq!(controller.local_device_id(), None);
     }
 }

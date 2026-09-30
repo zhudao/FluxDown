@@ -2,6 +2,7 @@
 // 发布构建为 GUI 子系统：双击 / 由 agent 拉起时不弹控制台窗口。
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod account_host;
 mod account_port;
 mod actions;
 mod activity;
@@ -15,8 +16,10 @@ mod downloads_port;
 mod instance_ipc;
 mod launch;
 mod lifecycle;
+mod logging;
 mod menus;
 mod power;
+mod preference_writes;
 mod progress_windows;
 mod service_bootstrap;
 mod session;
@@ -26,8 +29,20 @@ mod windows;
 
 use std::process::ExitCode;
 
+/// mimalloc 全局分配器：GPUI 每帧大量小对象分配，吞吐与碎片均优于系统默认分配器。
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
-    exit_code(app::run())
+    logging::init();
+    let result = app::run();
+    logging::finish(
+        result
+            .as_ref()
+            .err()
+            .map(|error| error as &dyn std::error::Error),
+    );
+    exit_code(result)
 }
 
 fn exit_code(result: Result<app::RunOutcome, app::AppError>) -> ExitCode {

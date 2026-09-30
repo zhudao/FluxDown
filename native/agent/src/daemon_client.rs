@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, EventFrame, RequestId, RpcErrorData, RpcNotification, RpcRequest,
-    RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
+    ApplicationErrorCode, EventFrame, RequestId, RpcErrorData, RpcErrorObject, RpcNotification,
+    RpcRequest, RpcResponse, ServiceHello, ServiceRole, Snapshot, SnapshotBody,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -66,7 +66,7 @@ pub enum DaemonClientEvent {
 struct ClientCommand {
     method: String,
     params: Option<Value>,
-    ack: oneshot::Sender<Result<Value, RpcErrorData>>,
+    ack: oneshot::Sender<Result<Value, RpcErrorObject>>,
 }
 
 /// 首次连上 daemon 之前（agent 冷启动，Gateway 已先行服务）的调用等待上限，与 agent 启动
@@ -127,11 +127,24 @@ impl DaemonClient {
     }
 
     /// 提交类型化 RPC 调用。首次连上之前等待就绪（有上限）；之后断线期间立即失败。
+    /// 错误只保留稳定应用错误详情；需要 daemon 错误消息（稳定错误码字符串）的调用用
+    /// [`Self::call_detailed`]。
     pub async fn call<P: Serialize, R: DeserializeOwned>(
         &self,
         method: &str,
         params: Option<P>,
     ) -> Result<R, RpcErrorData> {
+        self.call_detailed(method, params)
+            .await
+            .map_err(|error| error.data.unwrap_or_else(internal_error))
+    }
+
+    /// 同 [`Self::call`]，但失败时保留 daemon 返回的完整 JSON-RPC 错误对象（含 `message`）。
+    pub async fn call_detailed<P: Serialize, R: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<P>,
+    ) -> Result<R, RpcErrorObject> {
         if !self.is_connected() && !self.settled.load(Ordering::Acquire) {
             tokio::select! {
                 _ = self.cancel.cancelled() => {}
@@ -141,10 +154,13 @@ impl DaemonClient {
             }
         }
         if !self.is_connected() {
-            return Err(unavailable_error());
+            return Err(unavailable_object());
         }
         let params = match params {
-            Some(params) => Some(serde_json::to_value(params).map_err(|_| internal_error())?),
+            Some(params) => Some(
+                serde_json::to_value(params)
+                    .map_err(|_| RpcErrorObject::application("invalid params", internal_error()))?,
+            ),
             None => None,
         };
         let (ack, response) = oneshot::channel();
@@ -155,9 +171,10 @@ impl DaemonClient {
                 ack,
             })
             .await
-            .map_err(|_| unavailable_error())?;
-        let value = response.await.map_err(|_| unavailable_error())??;
-        serde_json::from_value(value).map_err(|_| internal_error())
+            .map_err(|_| unavailable_object())?;
+        let value = response.await.map_err(|_| unavailable_object())??;
+        serde_json::from_value(value)
+            .map_err(|_| RpcErrorObject::application("invalid daemon result", internal_error()))
     }
 
     pub async fn wait_ready(&self, timeout: Duration) -> Result<(), RpcErrorData> {
@@ -218,6 +235,27 @@ impl DaemonClient {
             ready: Arc::new(Notify::new()),
             cancel: CancellationToken::new(),
         }
+    }
+
+    /// 已连接的客户端：记录每次调用的方法与参数并回 `{}`，供断言 agent 发给 daemon 的命令。
+    pub(crate) fn recording() -> (Self, Arc<tokio::sync::Mutex<Vec<(String, Option<Value>)>>>) {
+        let (commands, mut receiver) = mpsc::channel::<ClientCommand>(16);
+        let calls = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let sink = calls.clone();
+        tokio::spawn(async move {
+            while let Some(command) = receiver.recv().await {
+                sink.lock().await.push((command.method, command.params));
+                let _ = command.ack.send(Ok(Value::Object(serde_json::Map::new())));
+            }
+        });
+        let client = Self {
+            commands,
+            connected: Arc::new(AtomicBool::new(true)),
+            settled: Arc::new(AtomicBool::new(true)),
+            ready: Arc::new(Notify::new()),
+            cancel: CancellationToken::new(),
+        };
+        (client, calls)
     }
 }
 
@@ -326,7 +364,7 @@ async fn run_client(
 
 fn fail_queued_commands(commands: &mut mpsc::Receiver<ClientCommand>) {
     while let Ok(command) = commands.try_recv() {
-        let _ = command.ack.send(Err(unavailable_error()));
+        let _ = command.ack.send(Err(unavailable_object()));
     }
 }
 
@@ -437,7 +475,7 @@ async fn run_connected(
     buffered: Vec<EventFrame>,
 ) -> Result<(), ()> {
     let mut next_id = 10_i64;
-    let mut pending = HashMap::<i64, oneshot::Sender<Result<Value, RpcErrorData>>>::new();
+    let mut pending = HashMap::<i64, oneshot::Sender<Result<Value, RpcErrorObject>>>::new();
     let mut cursor = snapshot_cursor;
     for frame in buffered {
         if frame.epoch == cursor.0 {
@@ -478,8 +516,7 @@ async fn run_connected(
                         if let Some(RequestId::Integer(id)) = failure.id
                             && let Some(ack) = pending.remove(&id)
                         {
-                            let error = failure.error.data.unwrap_or_else(internal_error);
-                            let _ = ack.send(Err(error));
+                            let _ = ack.send(Err(failure.error));
                         }
                     }
                 }
@@ -487,7 +524,7 @@ async fn run_connected(
         }
     }
     for (_, ack) in pending {
-        let _ = ack.send(Err(unavailable_error()));
+        let _ = ack.send(Err(unavailable_object()));
     }
     Err(())
 }
@@ -600,6 +637,10 @@ pub enum DaemonClientError {
 
 fn unavailable_error() -> RpcErrorData {
     RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+}
+
+fn unavailable_object() -> RpcErrorObject {
+    RpcErrorObject::application("daemon unavailable", unavailable_error())
 }
 
 fn internal_error() -> RpcErrorData {

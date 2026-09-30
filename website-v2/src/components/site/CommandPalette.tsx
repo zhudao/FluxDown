@@ -9,6 +9,8 @@ import { common } from "@/i18n/messages/common";
 import type { Lang } from "@/i18n/config";
 import { searchDocs, type SearchDoc } from "@/lib/docs-search";
 import { GITHUB_URL } from "@/lib/site-nav";
+import { withBase } from "@/lib/base";
+import { rememberLocale } from "@/lib/locale-pref";
 
 interface PaletteLink {
   label: string;
@@ -47,7 +49,7 @@ export default function CommandPalette({ lang, links, altLangHref }: Props) {
     dialog.showModal();
     requestAnimationFrame(() => inputRef.current?.focus());
     if (!docs) {
-      fetch(`/docs/search-${lang}.json`)
+      fetch(withBase(`/docs/search-${lang}.json`))
         .then((res) => (res.ok ? res.json() : []))
         .then((data: SearchDoc[]) => setDocs(data))
         .catch(() => setDocs([]));
@@ -103,7 +105,10 @@ export default function CommandPalette({ lang, links, altLangHref }: Props) {
         group: "actions",
         label: t.switchLang,
         icon: <Languages size={15} strokeWidth={1.75} />,
-        run: () => go(altLangHref),
+        run: () => {
+          rememberLocale(lang === "en" ? "zh" : "en");
+          go(altLangHref);
+        },
       },
       {
         id: "action:github",
