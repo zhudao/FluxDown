@@ -1,8 +1,9 @@
 //! 局域网直连（L1）服务：把 `fluxdown_link::LinkManager` 装配进 agent。
 //!
 //! 职责：
-//! - **响应端**：兼容 API 的 `/ping`（`linkFingerprint`）、`pair/hello`、`pair/confirm`、
-//!   数据面 `link/tasks` 与 `link/info`；入站配对请求进快照 / 事件，由 `agent.link.approve` 决定；
+//! - **响应端**：兼容 API 的 `/ping`（`linkFingerprint`）、`pair/hello`、`pair/reveal`、
+//!   `pair/confirm`、数据面 `link/tasks` 与 `link/info`；入站配对请求（揭示被受理后）进快照 /
+//!   事件，由 `agent.link.approve` 决定；
 //!   接单时按契约做目录回退（非本机风格绝对路径 → 本机默认目录；带目录建任务失败 → 去掉目录重试）。
 //! - **发起端**：mDNS 发现（`LinkDiscoveredChanged`）、手动地址探测、配对（SAS 由 UI 核对）、
 //!   解除配对、在线探测（`LinkDeviceInfo.online` 真实值）、下发任务、经已认证链路交换
@@ -23,7 +24,7 @@ use fluxdown_api::service::{ApiError, link_unsupported};
 use fluxdown_link::pairing::{CODE_TTL_SECS, DECISION_WINDOW_SECS};
 use fluxdown_link::{
     DiscoveredPeer, DiscoveryKind, LinkEngineEvent, LinkError, LinkManager, LinkOptions,
-    LinkResult, PairConfirmOutcome, PeerAddress, PeerInfo, SelfInfo, WireHello,
+    LinkResult, PairConfirmOutcome, PeerAddress, PeerInfo, SelfInfo, WireHello, WireReveal,
 };
 use fluxdown_protocol::{
     AgentEvent, ApplicationErrorCode, CreateTaskRequest, DaemonCreateTaskParams, ErrorReason,
@@ -31,8 +32,8 @@ use fluxdown_protocol::{
     LinkDeviceParams, LinkDiscoveredPeer, LinkDiscoveryParams, LinkDispatchParams,
     LinkDispatchResult, LinkPairBeginParams, LinkPairBeginResponse, LinkPairConfirmOutcome,
     LinkPairConfirmRequest, LinkPairFinishParams, LinkPairFinishResponse, LinkPairHelloRequest,
-    LinkPairHelloResponse, LinkPairingCodeDto, LinkPairingRequestDto, LinkPingInfo,
-    LinkTaskRequest, PathStyle, RpcErrorData, method,
+    LinkPairHelloResponse, LinkPairRevealRequest, LinkPairRevealResponse, LinkPairingCodeDto,
+    LinkPairingRequestDto, LinkPingInfo, LinkTaskRequest, PathStyle, RpcErrorData, method,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -93,6 +94,7 @@ impl LinkTaskCreator for DaemonTaskCreator {
                     torrent_blob_id: None,
                     // 对端下发的任务没有人在本机确认选择框：全选文件直接开始。
                     unattended: true,
+                    hint_file_size: None,
                 }),
             )
             .await
@@ -194,9 +196,26 @@ pub fn rpc_error(error: &LinkOpError, context: ErrorContext) -> RpcErrorData {
                 false,
                 Some(ErrorReason::PairingNotFluxDown),
             ),
+            // 配对阶段：地址上出示的身份与发现指纹不符，按身份校验失败提示；
+            // 已配对设备上：拨通的不是那台设备，按离线处理。
             LinkError::IdentityMismatch(_) => {
-                (Code::Conflict, false, Some(ErrorReason::PeerOffline))
+                let reason = if context == ErrorContext::Pairing {
+                    ErrorReason::PairingSignatureInvalid
+                } else {
+                    ErrorReason::PeerOffline
+                };
+                (Code::Conflict, false, Some(reason))
             }
+            LinkError::CommitmentMismatch => (
+                Code::InvalidArgument,
+                false,
+                Some(ErrorReason::PairingSignatureInvalid),
+            ),
+            LinkError::UnsupportedVersion => (
+                Code::Conflict,
+                false,
+                Some(ErrorReason::PairingVersionMismatch),
+            ),
             LinkError::Unauthorized => {
                 (Code::Unauthorized, false, Some(ErrorReason::PeerNotPaired))
             }
@@ -245,6 +264,8 @@ fn api_error(error: LinkError) -> ApiError {
         | LinkError::RejectedByPeer
         | LinkError::PairingTimeout
         | LinkError::IdentityMismatch(_)
+        | LinkError::CommitmentMismatch
+        | LinkError::UnsupportedVersion
         | LinkError::NotFluxDown(_) => ApiError::BadRequest(error.to_string()),
         LinkError::Unreachable | LinkError::Unavailable => ApiError::Unavailable,
         LinkError::Io(_) | LinkError::Store(_) => ApiError::Internal(error.to_string()),
@@ -287,24 +308,61 @@ fn valid_url(url: &str) -> bool {
         && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
-fn valid_file_name(name: &str) -> bool {
+/// 远端（已配对设备 / 云端）下发的文件名：单一路径分量，且不是 Windows 保留设备名。
+#[must_use]
+pub fn valid_file_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_FILE_NAME_LEN
         && !name.contains(['/', '\\', '\0'])
         && name != "."
         && name != ".."
+        && !is_reserved_device_name(name)
+}
+
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '\t'])
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        other => {
+            let digit = other
+                .strip_prefix("COM")
+                .or_else(|| other.strip_prefix("LPT"));
+            digit.is_some_and(|rest| {
+                let mut chars = rest.chars();
+                matches!(chars.next(), Some('1'..='9' | '¹' | '²' | '³')) && chars.next().is_none()
+            })
+        }
+    }
 }
 
 fn valid_save_dir(dir: &str) -> bool {
     dir.len() <= MAX_SAVE_DIR_LEN && !dir.contains('\0')
 }
 
-/// 接单目录：对端给的保存目录必须是**本机路径风格**的绝对路径才采用，否则（含空串）返回
-/// `None`，由 daemon 使用本机默认目录（例如 Windows 设备下发 `C:\Downloads` 给 macOS）。
+/// 目录不含 `..` 段，且不是 UNC / 设备命名空间路径（`\\host\share`、`\\?\`、`\\.\`）：
+/// 后者在 Windows 上创建目录会主动触发对外 SMB 认证。
+fn is_plain_local_dir(dir: &str) -> bool {
+    if dir.contains('\0') || dir.split(['/', '\\']).any(|segment| segment == "..") {
+        return false;
+    }
+    let mut chars = dir.chars();
+    let is_separator = |c: char| c == '/' || c == '\\';
+    !(chars.next().is_some_and(is_separator) && chars.next().is_some_and(is_separator))
+}
+
+/// 接单目录：对端给的保存目录必须是**本机路径风格**的绝对路径且通过 [`is_plain_local_dir`]
+/// 才采用，否则（含空串）返回 `None`，由 daemon 使用本机默认目录（例如 Windows 设备下发
+/// `C:\Downloads` 给 macOS）。云端接单与局域网互联共用这一规则。
 #[must_use]
 pub fn resolve_receive_dir(save_dir: &str) -> Option<String> {
     let dir = save_dir.trim();
-    (!dir.is_empty() && PathStyle::current().is_absolute(dir)).then(|| dir.to_owned())
+    (!dir.is_empty() && PathStyle::current().is_absolute(dir) && is_plain_local_dir(dir))
+        .then(|| dir.to_owned())
 }
 
 fn build_task_request(
@@ -453,7 +511,7 @@ impl LinkService {
             } else {
                 std::env::consts::OS.to_owned()
             }),
-            app_version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            app_version: Some(fluxdown_protocol::APP_VERSION.to_owned()),
         };
         let options = LinkOptions {
             api_port: self.bound.port(),
@@ -534,6 +592,9 @@ impl LinkService {
                 LinkEngineEvent::Unpaired(fingerprint) => {
                     lock(&self.online).remove(&fingerprint);
                     self.publish_devices().await;
+                }
+                LinkEngineEvent::IncomingCancelled { session_id } => {
+                    self.drop_requests(|request| request.session_id == session_id);
                 }
                 LinkEngineEvent::IncomingPairing {
                     session_id,
@@ -798,21 +859,20 @@ impl LinkService {
         let records = manager.list_devices().await?;
         let before = self.devices().await;
         let probes = records.iter().map(|record| async move {
-            let online = manager.is_online(&record.fingerprint).await;
-            if online && (force_info || record.info == PeerInfo::default()) {
-                self.exchange_info(&record.fingerprint).await;
-            }
+            // 超时只判定这一台设备离线，不连累同轮里已经探测成功的其他设备。
+            let probe = async {
+                let online = manager.is_online(&record.fingerprint).await;
+                if online && (force_info || record.info == PeerInfo::default()) {
+                    self.exchange_info(&record.fingerprint).await;
+                }
+                online
+            };
+            let online = tokio::time::timeout(PROBE_ROUND_TIMEOUT, probe)
+                .await
+                .unwrap_or(false);
             (record.fingerprint.clone(), online)
         });
-        let results =
-            tokio::time::timeout(PROBE_ROUND_TIMEOUT, futures_util::future::join_all(probes))
-                .await
-                .unwrap_or_else(|_| {
-                    records
-                        .iter()
-                        .map(|record| (record.fingerprint.clone(), false))
-                        .collect()
-                });
+        let results = futures_util::future::join_all(probes).await;
         *lock(&self.online) = results.into_iter().collect();
         let after = self.devices().await;
         if force_info || roster_signature(&before) != roster_signature(&after) {
@@ -967,9 +1027,10 @@ impl LinkService {
     ) -> Result<LinkPairHelloResponse, ApiError> {
         let manager = self.api_manager()?;
         let wire = WireHello {
+            protocol_version: req.protocol_version,
             code: req.code,
-            initiator_eph_pub: req.initiator_eph_pub,
             initiator_id_pub: req.initiator_id_pub,
+            initiator_commit: req.initiator_commit,
             initiator_sig: req.initiator_sig,
             name: req.name,
             platform: non_empty(req.platform),
@@ -978,14 +1039,31 @@ impl LinkService {
         };
         let resp = manager.pair_hello_wire(wire, source).map_err(api_error)?;
         Ok(LinkPairHelloResponse {
+            protocol_version: resp.protocol_version,
             session_id: resp.session_id,
             responder_eph_pub: resp.responder_eph_pub,
+            responder_nonce: resp.responder_nonce,
             responder_id_pub: resp.responder_id_pub,
-            responder_sig: resp.responder_sig,
             name: resp.name,
             platform: resp.platform.unwrap_or_default(),
             app_version: resp.app_version.unwrap_or_default(),
-            sas: resp.sas,
+        })
+    }
+
+    pub async fn api_pair_reveal(
+        &self,
+        req: LinkPairRevealRequest,
+    ) -> Result<LinkPairRevealResponse, ApiError> {
+        let manager = self.api_manager()?;
+        let resp = manager
+            .pair_reveal_wire(WireReveal {
+                session_id: req.session_id,
+                initiator_eph_pub: req.initiator_eph_pub,
+                initiator_nonce: req.initiator_nonce,
+            })
+            .map_err(api_error)?;
+        Ok(LinkPairRevealResponse {
+            responder_sig: resp.responder_sig,
         })
     }
 

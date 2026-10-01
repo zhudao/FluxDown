@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useT } from '../../../../i18n'
 import { LATER_QUEUE_ID, MAIN_QUEUE_ID, rpc, useDaemon } from '../../../../lib/rpc'
 import type { QueueDto } from '../../../../lib/rpc'
+import { rpcErrorText } from '../../../../lib/rpcErrorText'
 import { Button, Switch, toast } from '../../../../ui'
 import {
   DaemonEnumRow,
@@ -16,7 +17,6 @@ import {
   SettingsSection,
   TextField,
   optionalText,
-  rpcErrorText,
   setDaemon,
   setDaemonBool,
   useDaemonNumber,
@@ -107,6 +107,7 @@ function BehaviorSection() {
       <DaemonSwitchRow configKey="use_server_time" titleKey="useServerTime" descKey="useServerTimeDesc" />
       <DaemonEnumRow configKey="file_exists_behavior" titleKey="fileExistsBehavior" descKey="fileExistsBehaviorDesc" labelPrefix="fileExists" />
       <DaemonEnumRow configKey="file_missing_action" titleKey="fileMissingAction" descKey="fileMissingActionDesc" labelPrefix="fileMissing" />
+      <DaemonSwitchRow configKey="idle_file_scan" titleKey="idleFileScan" descKey="idleFileScanDesc" />
       <DefaultQueueRow />
     </SettingsSection>
   )

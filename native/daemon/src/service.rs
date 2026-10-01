@@ -13,10 +13,10 @@ use fluxdown_engine::log_info;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
     ApplicationErrorCode, CdnConfigApplyParams, CdnReportAckParams, CreateGroupRequest,
-    CreateQueueRequest, DaemonConfigPatch, DaemonCreateTaskParams, MigrationAckParams,
-    RpcErrorData, RpcErrorObject, RpcRequest, RpcResponse, SelectionResolutionDto, ServiceHello,
-    SiteAuthCredentialDto, SiteAuthDeleteParams, SiteAuthMatchParams, SnapshotBody,
-    TaskActivityQuery,
+    CreateQueueRequest, DaemonConfigPatch, DaemonCreateTaskParams, DaemonDeleteTasksParams,
+    DaemonTaskIdsParams, MigrationAckParams, RpcErrorData, RpcErrorObject, RpcRequest, RpcResponse,
+    SelectionResolutionDto, ServiceHello, SiteAuthCredentialDto, SiteAuthDeleteParams,
+    SiteAuthMatchParams, SnapshotBody, TaskActivityQuery,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -225,6 +225,7 @@ impl DaemonService {
             }
             method::DAEMON_TASK_CHANGE_URL => {
                 let params = parse_params::<fluxdown_protocol::ChangeTaskUrlParams>(params)?;
+                self.demo_guard(&params.url)?;
                 self.execute_unit(ActorOperation::ChangeTaskUrl {
                     task_id: params.task_id,
                     url: params.url,
@@ -251,6 +252,28 @@ impl DaemonService {
                     seed_time_limit_minutes: params.seed_time_limit_minutes,
                     inactive_time_limit_minutes: params.inactive_time_limit_minutes,
                     upload_limit_bps: params.upload_limit_bps,
+                })
+                .await
+            }
+            method::DAEMON_TASK_PAUSE_MANY => {
+                let params = parse_params::<DaemonTaskIdsParams>(params)?;
+                self.execute_unit(ActorOperation::PauseTasks {
+                    task_ids: params.task_ids,
+                })
+                .await
+            }
+            method::DAEMON_TASK_RESUME_MANY => {
+                let params = parse_params::<DaemonTaskIdsParams>(params)?;
+                self.execute_unit(ActorOperation::ResumeTasks {
+                    task_ids: params.task_ids,
+                })
+                .await
+            }
+            method::DAEMON_TASK_DELETE_MANY => {
+                let params = parse_params::<DaemonDeleteTasksParams>(params)?;
+                self.execute_unit(ActorOperation::DeleteTasks {
+                    task_ids: params.task_ids,
+                    delete_files: params.delete_files,
                 })
                 .await
             }
@@ -361,6 +384,9 @@ impl DaemonService {
             method::DAEMON_GROUP_CREATE => {
                 let request = parse_params::<CreateGroupRequest>(params)?;
                 self.demo_guard(&request.source_url)?;
+                if !request.items.is_empty() {
+                    self.demo_forbid("group items")?;
+                }
                 let spec = self.group_spec(request);
                 match self
                     .actor
@@ -538,15 +564,16 @@ impl DaemonService {
                 to_value(match_site_auth(&json, &params.url))
             }
             method::DAEMON_RSS_LIST_SOURCES => {
-                let sources = self
-                    .db
-                    .load_all_rss_sources()
-                    .await
-                    .map_err(|error| internal_error(format!("{error:#}")))?
-                    .into_iter()
-                    .map(fluxdown_engine_protocol::rss_source_info_to_dto)
-                    .collect::<Vec<_>>();
-                to_value(sources)
+                match self.actor.execute(ActorOperation::RssListSources).await {
+                    Ok(ActorResult::RssSources(sources)) => to_value(
+                        sources
+                            .into_iter()
+                            .map(fluxdown_engine_protocol::rss_source_info_to_dto)
+                            .collect::<Vec<_>>(),
+                    ),
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
             }
             method::DAEMON_RSS_GET_ITEMS => {
                 let params = parse_params::<RssSourceIdParams>(params)?;
@@ -564,6 +591,7 @@ impl DaemonService {
                 to_value(items)
             }
             method::DAEMON_RSS_CREATE_SOURCE => {
+                self.demo_forbid("RSS sources")?;
                 let source = parse_params::<fluxdown_protocol::RssSourceDto>(params)?;
                 match self
                     .actor
@@ -582,6 +610,7 @@ impl DaemonService {
                 }
             }
             method::DAEMON_RSS_UPDATE_SOURCE => {
+                self.demo_forbid("RSS sources")?;
                 let source = parse_params::<fluxdown_protocol::RssSourceDto>(params)?;
                 let source_id = source.source_id.clone();
                 if source_id.trim().is_empty() {
@@ -704,7 +733,12 @@ impl DaemonService {
                 self.plugin_manager()?
                     .update_settings(&params.identity, &entries)
                     .await
-                    .map_err(|error| invalid_argument("entries", &error.to_string()))?;
+                    .map_err(|error| match error {
+                        fluxdown_engine::plugin::PluginError::InvalidSetting { key, message } => {
+                            invalid_argument(&key, &message)
+                        }
+                        other => invalid_argument("entries", &other.to_string()),
+                    })?;
                 self.publish_plugins().await?;
                 Ok(json!({ "ok": true }))
             }
@@ -748,6 +782,20 @@ impl DaemonService {
                 })
             }
             #[cfg(feature = "plugins")]
+            method::DAEMON_PLUGIN_RELOAD_DEV => {
+                let params = parse_params::<PluginIdentityParams>(params)?;
+                let result = self.plugin_manager()?.reload_dev(&params.identity).await;
+                // 失败也要广播：load_all 已刷新快照（加载失败原因 / 新 manifest），
+                // 列表必须与引擎一致。
+                self.publish_plugins().await?;
+                result.map_err(|error| plugin_package_error("identity", &error))?;
+                let missing_components = self.plugin_missing_components(&params.identity).await;
+                to_value(fluxdown_protocol::InstalledPlugin {
+                    identity: params.identity,
+                    missing_components,
+                })
+            }
+            #[cfg(feature = "plugins")]
             method::DAEMON_PLUGIN_UNINSTALL => {
                 let params = parse_params::<PluginIdentityParams>(params)?;
                 self.plugin_manager()?
@@ -779,7 +827,7 @@ impl DaemonService {
                 let identity = self
                     .market_client()
                     .await?
-                    .install_latest(&request.plugin_id)
+                    .install_latest(&request.plugin_id, request.version.as_deref())
                     .await
                     .map_err(|error| market_error(&error))?;
                 let missing_components = self.plugin_missing_components(&identity).await;
@@ -809,6 +857,7 @@ impl DaemonService {
             | method::DAEMON_PLUGIN_UPDATE_SETTINGS
             | method::DAEMON_PLUGIN_INSTALL
             | method::DAEMON_PLUGIN_INSTALL_DEV
+            | method::DAEMON_PLUGIN_RELOAD_DEV
             | method::DAEMON_PLUGIN_UNINSTALL
             | method::DAEMON_PLUGIN_MARKET_LIST
             | method::DAEMON_PLUGIN_MARKET_INSTALL
@@ -967,7 +1016,10 @@ impl DaemonService {
                 }))
             }
             method::DAEMON_DIAGNOSTICS_PREPARE_LOG_EXPORT => {
-                let snapshot = self.events.snapshot();
+                let mut snapshot = self.events.snapshot();
+                if let SnapshotBody::Daemon(body) = &mut snapshot.body {
+                    crate::log_redact::redact_snapshot(body);
+                }
                 let bytes = serde_json::to_vec(&snapshot)
                     .map_err(|error| internal_error(error.to_string()))?;
                 let export_id = self
@@ -1054,6 +1106,12 @@ impl DaemonService {
     async fn create_task(&self, params: Option<Value>) -> Result<Value, RpcErrorObject> {
         let params = parse_params::<DaemonCreateTaskParams>(params)?;
         self.demo_guard(&params.request.url)?;
+        if params.torrent_blob_id.is_some()
+            || params.request.torrent_b64.is_some()
+            || params.request.audio_url.is_some()
+        {
+            self.demo_forbid("torrent / audio attachments")?;
+        }
         if params.torrent_blob_id.is_some() && params.request.torrent_b64.is_some() {
             return Err(invalid_argument(
                 "torrentBlobId",
@@ -1079,7 +1137,7 @@ impl DaemonService {
             .execute(ActorOperation::CreateTask {
                 request: Box::new(params.request),
                 torrent_file_bytes: bytes,
-                hint_file_size: 0,
+                hint_file_size: params.hint_file_size.filter(|size| *size > 0).unwrap_or(0),
                 unattended: params.unattended,
             })
             .await;
@@ -1171,6 +1229,15 @@ impl DaemonService {
                 "url",
                 "demo mode: only the designated demo file can be downloaded",
             ))
+        }
+    }
+
+    /// 演示模式下整体禁用的入口（RSS 自动下载、外部附件等会绕过 URL 守卫）。
+    fn demo_forbid(&self, what: &str) -> Result<(), RpcErrorObject> {
+        if self.demo_url.is_some() {
+            Err(unsupported_error(&format!("demo mode: {what} is disabled")))
+        } else {
+            Ok(())
         }
     }
 
@@ -1507,6 +1574,7 @@ impl DaemonService {
             )
             .unwrap_or(u32::MAX),
             total_download_bps: snapshot.runtime_stats.total_download_bps,
+            retry_pending_tasks: snapshot.runtime_stats.retry_pending_tasks,
             total_upload_bps: snapshot.runtime_stats.total_upload_bps,
             disk_free_bytes: fluxdown_engine::disk_space::available_space_checked(
                 std::path::PathBuf::from(&save_dir),
@@ -1872,6 +1940,11 @@ fn market_error(error: &fluxdown_engine::plugin::MarketError) -> RpcErrorObject 
             false,
             ErrorReason::PluginYanked,
         ),
+        MarketError::VersionChanged { .. } => (
+            ApplicationErrorCode::Conflict,
+            false,
+            ErrorReason::MarketVersionChanged,
+        ),
         MarketError::AllMirrorsFailed | MarketError::HashMismatch { .. } => (
             ApplicationErrorCode::Unavailable,
             true,
@@ -1933,7 +2006,7 @@ mod tests {
 
     #[test]
     fn site_auth_match_uses_engine_site_key_including_non_default_port() {
-        let store = r#"{"example.com":{"user":"u","pass":"p"},"example.com:8443":{"user":"alt","pass":"q"}}"#;
+        let store = r#"{"https://example.com":{"user":"u","pass":"p"},"https://example.com:8443":{"user":"alt","pass":"q"}}"#;
         let matched = match_site_auth(store, "https://EXAMPLE.com/files/a.bin?x=1")
             .expect("default port matches bare host");
         assert_eq!(
@@ -1942,12 +2015,16 @@ mod tests {
                 matched.user.as_str(),
                 matched.pass.as_str()
             ),
-            ("example.com", "u", "p")
+            ("https://example.com", "u", "p")
         );
         let alt = match_site_auth(store, "https://example.com:8443/a.bin")
             .expect("explicit non-default port matches host:port");
         assert_eq!(alt.user, "alt");
         assert!(match_site_auth(store, "https://other.example.com/a.bin").is_none());
+        assert!(
+            match_site_auth(store, "http://example.com/a.bin").is_none(),
+            "https 凭据不得套用到同 host 的 http 请求"
+        );
         assert!(match_site_auth(store, "magnet:?xt=urn:btih:abc").is_none());
         assert!(match_site_auth("not json", "https://example.com/a.bin").is_none());
     }

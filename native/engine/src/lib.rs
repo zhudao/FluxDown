@@ -31,6 +31,8 @@ pub mod hls_downloader;
 #[cfg(feature = "link")]
 pub mod link;
 pub mod logger;
+/// 下载来源标记（Windows Zone.Identifier / macOS quarantine）。
+pub mod mark_of_the_web;
 pub mod meta_prober;
 pub mod model;
 /// 多网卡聚合下载：网卡枚举、链路规划与出口绑定。
@@ -56,6 +58,7 @@ pub mod speed_limiter;
 /// 通用订阅 provider 接口（RSS 与插件订阅共用）。
 pub mod subscription;
 pub mod task_activity;
+mod temp_file_guard;
 /// `thunder://` 链接解析（迅雷专有 base64 封装：`AA<真实地址>ZZ`）。
 pub mod thunder;
 pub mod tracker_subscription;
@@ -188,8 +191,9 @@ pub struct Engine {
     /// 解析后的数据目录（含 override）。供宿主调用 `components::*` API
     /// （ffmpeg 探测/安装）时传入,与引擎内部使用的目录保持一致。
     pub data_dir: PathBuf,
-    /// 唯一写入者租约；字段顺序保证在数据库句柄之后释放。
-    _write_guard: db::EngineWriteGuard,
+    /// 唯一写入者租约；字段顺序保证在数据库句柄之后释放。宿主经
+    /// [`Self::write_guard`] 取得共享句柄做租约心跳。
+    write_guard: Arc<db::EngineWriteGuard>,
 }
 
 impl Engine {
@@ -338,7 +342,7 @@ impl Engine {
         manager.webhook().attach_db(db.clone()).await;
         Ok(Self {
             db,
-            _write_guard: write_guard,
+            write_guard: Arc::new(write_guard),
             manager,
             selector,
             data_dir,
@@ -346,6 +350,13 @@ impl Engine {
             activity_journal,
         })
     }
+
+    /// 唯一写入者租约的共享句柄；宿主心跳周期性调用其 `verify_lease()`，
+    /// 租约被他人夺走时及时停机。
+    pub fn write_guard(&self) -> Arc<db::EngineWriteGuard> {
+        self.write_guard.clone()
+    }
+
     /// 等待事件队列中的活动全部持久化；停机前调用以免内存尾部丢失。
     pub async fn flush_task_activity(&self) -> Result<(), String> {
         self.activity_journal.flush().await

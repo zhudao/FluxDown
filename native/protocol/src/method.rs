@@ -22,6 +22,11 @@ pub const DAEMON_TASK_PAUSE_ALL: &str = "daemon.task.pauseAll";
 pub const DAEMON_TASK_RESUME_ALL: &str = "daemon.task.resumeAll";
 pub const DAEMON_TASK_RESCAN: &str = "daemon.task.rescan";
 pub const DAEMON_TASK_SET_SEED_LIMITS: &str = "daemon.task.setSeedLimits";
+/// 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。
+pub const DAEMON_TASK_PAUSE_MANY: &str = "daemon.task.pauseMany";
+pub const DAEMON_TASK_RESUME_MANY: &str = "daemon.task.resumeMany";
+/// 批量删除（`{taskIds, deleteFiles}`）：语义同批量暂停。
+pub const DAEMON_TASK_DELETE_MANY: &str = "daemon.task.deleteMany";
 
 pub const DAEMON_QUEUE_LIST: &str = "daemon.queue.list";
 pub const DAEMON_QUEUE_CREATE: &str = "daemon.queue.create";
@@ -74,6 +79,8 @@ pub const DAEMON_PLUGIN_SET_ENABLED: &str = "daemon.plugin.setEnabled";
 pub const DAEMON_PLUGIN_UPDATE_SETTINGS: &str = "daemon.plugin.updateSettings";
 pub const DAEMON_PLUGIN_INSTALL: &str = "daemon.plugin.install";
 pub const DAEMON_PLUGIN_INSTALL_DEV: &str = "daemon.plugin.installDev";
+/// 重新加载 dev 插件（`{identity}`）：重读 manifest + 源码并校验，失败保留登记。
+pub const DAEMON_PLUGIN_RELOAD_DEV: &str = "daemon.plugin.reloadDev";
 pub const DAEMON_PLUGIN_UNINSTALL: &str = "daemon.plugin.uninstall";
 pub const DAEMON_PLUGIN_MARKET_LIST: &str = "daemon.plugin.marketList";
 pub const DAEMON_PLUGIN_MARKET_INSTALL: &str = "daemon.plugin.marketInstall";
@@ -181,6 +188,8 @@ pub const AGENT_PLATFORM_INTEGRATION_GET: &str = "agent.platform.integrationGet"
 pub const AGENT_PLATFORM_SET_AUTOSTART: &str = "agent.platform.setAutostart";
 pub const AGENT_PLATFORM_SET_FILE_ASSOCIATION: &str = "agent.platform.setFileAssociation";
 pub const AGENT_PLATFORM_SET_URL_PROTOCOL: &str = "agent.platform.setUrlProtocol";
+/// 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。
+pub const AGENT_PLATFORM_FILE_ICON: &str = "agent.platform.fileIcon";
 pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
 /// 从本机 `.torrent` 文件建任务：agent 读文件、上传 daemon blob 后调用 `daemon.task.create`。
 pub const AGENT_CAPTURE_SUBMIT_TORRENT_FILE: &str = "agent.capture.submitTorrentFile";
@@ -238,6 +247,9 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_RESUME_ALL,
     DAEMON_TASK_RESCAN,
     DAEMON_TASK_SET_SEED_LIMITS,
+    DAEMON_TASK_PAUSE_MANY,
+    DAEMON_TASK_RESUME_MANY,
+    DAEMON_TASK_DELETE_MANY,
     DAEMON_QUEUE_LIST,
     DAEMON_QUEUE_CREATE,
     DAEMON_QUEUE_UPDATE,
@@ -282,6 +294,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_PLUGIN_UPDATE_SETTINGS,
     DAEMON_PLUGIN_INSTALL,
     DAEMON_PLUGIN_INSTALL_DEV,
+    DAEMON_PLUGIN_RELOAD_DEV,
     DAEMON_PLUGIN_UNINSTALL,
     DAEMON_PLUGIN_MARKET_LIST,
     DAEMON_PLUGIN_MARKET_INSTALL,
@@ -368,6 +381,7 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PLATFORM_SET_AUTOSTART,
     AGENT_PLATFORM_SET_FILE_ASSOCIATION,
     AGENT_PLATFORM_SET_URL_PROTOCOL,
+    AGENT_PLATFORM_FILE_ICON,
     AGENT_CAPTURE_SUBMIT,
     AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
     AGENT_CAPTURE_LIST,
@@ -382,6 +396,31 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_POWER_DISARM,
     SERVICE_EVENT,
 ];
+
+/// 会等待网络、下载或外部 IO 的 daemon 方法。daemon 对这些方法按请求并发处理，
+/// agent 网关也把它们放到独立于普通 daemon 命令的通道，避免长耗时调用堵住暂停/恢复/设置写入。
+pub const SLOW_DAEMON_METHODS: &[&str] = &[
+    DAEMON_COMPONENT_LIST_VERSIONS,
+    DAEMON_COMPONENT_INSTALL,
+    DAEMON_PLUGIN_AUTH,
+    DAEMON_PLUGIN_INSTALL,
+    DAEMON_PLUGIN_INSTALL_DEV,
+    DAEMON_PLUGIN_MARKET_LIST,
+    DAEMON_PLUGIN_MARKET_INSTALL,
+    DAEMON_GROUP_RESOLVE_PREVIEW,
+    DAEMON_RSS_VALIDATE,
+    DAEMON_CONFIG_PROXY_TEST,
+    DAEMON_WEBHOOK_TEST,
+    DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,
+    DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH,
+    DAEMON_FS_LIST,
+];
+
+/// 是否属于 [`SLOW_DAEMON_METHODS`]。
+#[must_use]
+pub fn is_slow_daemon_method(method_name: &str) -> bool {
+    SLOW_DAEMON_METHODS.contains(&method_name)
+}
 
 /// 规范DAEMON_CAPABILITIES。
 pub const DAEMON_CAPABILITIES: &[&str] = &[

@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::http_client::LazyHttpClient;
 use crate::state::{AgentState, StateStore};
 
 const BAKED_APP_KEY: &str = match option_env!("FLUXDOWN_ANALYTICS_APP_KEY") {
@@ -18,16 +19,14 @@ const DEFAULT_ENDPOINT: &str =
 pub struct AnalyticsWorker {
     state: Arc<Mutex<AgentState>>,
     store: Arc<StateStore>,
-    client: reqwest::Client,
+    client: LazyHttpClient,
     endpoint: String,
     app_key: String,
 }
 
 impl AnalyticsWorker {
-    pub fn new(
-        state: Arc<Mutex<AgentState>>,
-        store: Arc<StateStore>,
-    ) -> Result<Self, reqwest::Error> {
+    #[must_use]
+    pub fn new(state: Arc<Mutex<AgentState>>, store: Arc<StateStore>) -> Self {
         let endpoint = std::env::var("FLUXDOWN_ANALYTICS_ENDPOINT")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -36,15 +35,15 @@ impl AnalyticsWorker {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| BAKED_APP_KEY.to_owned());
-        Ok(Self {
+        Self {
             state,
             store,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()?,
+            client: LazyHttpClient::new(|| {
+                reqwest::Client::builder().timeout(Duration::from_secs(15))
+            }),
             endpoint,
             app_key,
-        })
+        }
     }
 
     pub async fn run(self, cancel: CancellationToken) {
@@ -65,8 +64,8 @@ impl AnalyticsWorker {
     }
 
     async fn report_once(&self) {
-        let (enabled, device_id, installed, last_day) = {
-            let state = self.state.lock().await;
+        let (enabled, analytics_id, installed, last_day) = {
+            let mut state = self.state.lock().await;
             let enabled = state
                 .preferences
                 .values
@@ -74,16 +73,23 @@ impl AnalyticsWorker {
                 .or_else(|| state.preferences.values.get("general.analytics_enabled"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
+            if enabled && state.analytics_id.is_empty() {
+                state.analytics_id = uuid::Uuid::new_v4().to_string();
+                if let Err(error) = self.store.save(&state).await {
+                    tracing::warn!(error = %error, "persisting analytics id failed");
+                }
+            }
             (
                 enabled,
-                state.device_id.clone(),
+                state.analytics_id.clone(),
                 state.analytics_install_reported,
                 state.analytics_last_active_day,
             )
         };
-        if !enabled || device_id.is_empty() {
+        if !enabled || analytics_id.is_empty() {
             return;
         }
+        let device_id = analytics_id;
         let mut install_reported = installed;
         if !installed && self.track("app_installed", &device_id).await {
             install_reported = true;
@@ -110,15 +116,21 @@ impl AnalyticsWorker {
                 "systemProps": {
                     "osName": os_name(),
                     "osVersion": std::env::consts::ARCH,
-                    "appVersion": env!("CARGO_PKG_VERSION"),
+                    "appVersion": fluxdown_protocol::APP_VERSION,
                     "locale": "",
                     "isDebug": cfg!(debug_assertions),
                 },
                 "props": {"edition": "desktop-agent"},
             }]
         });
-        match self
-            .client
+        let client = match self.client.get().await {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::debug!(error = %error, event_name, "analytics client unavailable");
+                return false;
+            }
+        };
+        match client
             .post(&self.endpoint)
             .header("App-Key", &self.app_key)
             .json(&payload)

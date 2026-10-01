@@ -412,6 +412,7 @@ fn sample_task(id: &str, status: i32) -> TaskDto {
         rss_source_id: String::new(),
         origin_url: String::new(),
         auto_route: String::new(),
+        source_bytes: Default::default(),
         queue_order: 0,
         uploaded_bytes: 0,
         uploaded_at_completion: 0,
@@ -422,6 +423,7 @@ fn sample_task(id: &str, status: i32) -> TaskDto {
         seed_post_ratio_limit_milli: -2,
         seed_time_limit_minutes: -2,
         seed_inactive_time_limit_minutes: -2,
+        seed_upload_limit_bps: 0,
     }
 }
 
@@ -920,10 +922,10 @@ async fn jsonrpc_tell_status_returns_seeded_task_fields_and_live_speed() {
 
 #[tokio::test]
 async fn jsonrpc_change_global_option_calls_apply_config_with_mapped_keys() {
-    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let server = TestServer::start(MockHost::new(), |c| c.token.set("S")).await;
     let body = json!({
         "jsonrpc": "2.0", "id": 1, "method": "aria2.changeGlobalOption",
-        "params": [{"dir": "/data", "max-overall-download-limit": "5M"}]
+        "params": ["token:S", {"dir": "/data", "max-overall-download-limit": "5M"}]
     })
     .to_string();
     let resp = server
@@ -937,6 +939,21 @@ async fn jsonrpc_change_global_option_calls_apply_config_with_mapped_keys() {
         applied[0].get("speed_limit_bytes").unwrap(),
         &(5 * 1024 * 1024).to_string()
     );
+}
+
+#[tokio::test]
+async fn jsonrpc_change_global_option_dir_rejected_without_token() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "aria2.changeGlobalOption",
+        "params": [{"dir": "/data", "max-overall-download-limit": "5M"}]
+    })
+    .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    assert_eq!(resp.json()["error"]["code"], 1);
+    assert!(server.host.applied_config().is_empty());
 }
 
 #[tokio::test]
@@ -1339,6 +1356,26 @@ async fn create_task_empty_url_returns_400() {
         .await;
     assert_eq!(resp.status, 400);
     assert!(server.host.created().is_empty());
+}
+
+#[tokio::test]
+async fn create_task_accepts_torrent_only_body() {
+    let server = TestServer::start(MockHost::new(), |c| {
+        c.token.set("T");
+        c.management_enabled = true;
+    })
+    .await;
+    let body = json!({"url": "", "torrentB64": "dGVzdA=="}).to_string();
+    let resp = server
+        .send(&request(
+            "POST",
+            routes::API_TASKS,
+            &[("X-FluxDown-Token", "T")],
+            &body,
+        ))
+        .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(server.host.created().len(), 1);
 }
 
 #[tokio::test]
@@ -2019,6 +2056,231 @@ async fn runtime_switches_hot_toggle_routes_and_cors_without_rebinding() {
         ))
         .await;
     assert_eq!(disabled_again.status, 404);
+}
+
+// ---------------------------------------------------------------------------
+// 浏览器来源门禁 / Host 校验 / WS 会话热更新
+// ---------------------------------------------------------------------------
+
+fn jsonrpc_version_body() -> String {
+    json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.getVersion", "params": []}).to_string()
+}
+
+#[tokio::test]
+async fn jsonrpc_post_with_cross_site_origin_is_rejected_by_default() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let resp = server
+        .send(&request(
+            "POST",
+            routes::JSONRPC,
+            &[("Origin", "https://evil.example")],
+            &jsonrpc_version_body(),
+        ))
+        .await;
+    assert_eq!(resp.status, 403);
+    let resp = server
+        .send(&request(
+            "POST",
+            routes::DOWNLOAD,
+            &[
+                ("Origin", "https://evil.example"),
+                ("X-FluxDown-Client", "x"),
+            ],
+            r#"{"url":"https://example.com/a"}"#,
+        ))
+        .await;
+    assert_eq!(resp.status, 403);
+    assert!(server.host.created().is_empty());
+}
+
+#[tokio::test]
+async fn jsonrpc_post_allows_extension_same_origin_and_originless() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    for origin in [
+        Some("chrome-extension://abcdef"),
+        Some("moz-extension://1234"),
+        Some("http://127.0.0.1"),
+        None,
+    ] {
+        let headers: Vec<(&str, &str)> = origin.map(|o| ("Origin", o)).into_iter().collect();
+        let resp = server
+            .send(&request(
+                "POST",
+                routes::JSONRPC,
+                &headers,
+                &jsonrpc_version_body(),
+            ))
+            .await;
+        assert_eq!(resp.status, 200, "origin={origin:?}");
+    }
+}
+
+#[tokio::test]
+async fn cors_allow_all_lets_cross_site_origin_through() {
+    let server = TestServer::start(MockHost::new(), |c| c.cors_allow_all = true).await;
+    let resp = server
+        .send(&request(
+            "POST",
+            routes::JSONRPC,
+            &[("Origin", "https://aria-ng.example")],
+            &jsonrpc_version_body(),
+        ))
+        .await;
+    assert_eq!(resp.status, 200);
+}
+
+#[tokio::test]
+async fn ws_upgrade_with_cross_site_origin_is_rejected() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let resp = server
+        .send(&request(
+            "GET",
+            routes::JSONRPC,
+            &[
+                ("Origin", "https://evil.example"),
+                ("Connection", "Upgrade"),
+                ("Upgrade", "websocket"),
+                ("Sec-WebSocket-Version", "13"),
+                ("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ],
+            "",
+        ))
+        .await;
+    assert_eq!(resp.status, 403);
+}
+
+#[tokio::test]
+async fn loopback_listener_rejects_foreign_host_header() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let raw = "GET /ping HTTP/1.1\r\nHost: rebind.attacker.example:17800\r\n\r\n";
+    assert_eq!(server.send(raw).await.status, 403);
+    for host in ["localhost:17800", "[::1]:17800", "127.0.0.1:17800"] {
+        let raw = format!("GET /ping HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        assert_eq!(server.send(&raw).await.status, 200, "host={host}");
+    }
+}
+
+#[tokio::test]
+async fn lan_mode_does_not_restrict_host_header() {
+    let server = TestServer::start(MockHost::new(), |c| c.lan_enabled = true).await;
+    let raw = "GET /ping HTTP/1.1\r\nHost: 192.168.1.5:17800\r\n\r\n";
+    assert_eq!(server.send(raw).await.status, 200);
+}
+
+#[tokio::test]
+async fn ws_session_closes_when_jsonrpc_switch_turned_off() {
+    let switches = Arc::new(ApiRuntimeSwitches::new(true, true, false, false, false));
+    let configured = switches.clone();
+    let server = TestServer::start(MockHost::new(), move |config| {
+        config.runtime_switches = Some(configured);
+    })
+    .await;
+    let mut ws = server.ws_connect().await;
+    switches.update(true, false, false, false, false);
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "WS session must be dropped after the switch is turned off"
+    );
+}
+
+#[tokio::test]
+async fn ws_session_closes_when_token_rotates() {
+    let cell = crate::auth::TokenCell::new("");
+    let shared = cell.clone();
+    let server = TestServer::start(MockHost::new(), move |config| {
+        config.token = shared;
+    })
+    .await;
+    let mut ws = server.ws_connect().await;
+    cell.set("fresh");
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                None | Some(Err(_)) | Some(Ok(WsMessage::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "WS session must be dropped after the token changes"
+    );
+}
+
+#[tokio::test]
+async fn require_token_rejects_takeover_and_jsonrpc_until_a_token_exists() {
+    let cell = crate::auth::TokenCell::new("");
+    let shared = cell.clone();
+    let server = TestServer::start(MockHost::new(), move |config| {
+        config.token = shared;
+        config.require_token = true;
+    })
+    .await;
+
+    let jsonrpc = server
+        .send(&request(
+            "POST",
+            routes::JSONRPC,
+            &[],
+            &jsonrpc_version_body(),
+        ))
+        .await;
+    assert_eq!(jsonrpc.status, 403);
+    assert_eq!(jsonrpc.json()["message"], server::SETUP_REQUIRED_MESSAGE);
+    let takeover = server
+        .send(&request(
+            "POST",
+            routes::DOWNLOAD,
+            &[("X-FluxDown-Client", "script")],
+            r#"{"url":"https://a.com/f.zip","filename":"f.zip"}"#,
+        ))
+        .await;
+    assert_eq!(takeover.status, 403);
+    assert_eq!(takeover.json()["message"], server::SETUP_REQUIRED_MESSAGE);
+    assert!(
+        server.ws_connect_err().await.is_err(),
+        "WS upgrade must be refused before the access key is set"
+    );
+    assert_eq!(
+        server
+            .send(&request("GET", routes::PING, &[], ""))
+            .await
+            .status,
+        200
+    );
+
+    cell.set("flux2026");
+    let denied = server
+        .send(&request(
+            "POST",
+            routes::JSONRPC,
+            &[],
+            &jsonrpc_version_body(),
+        ))
+        .await;
+    assert_eq!(denied.status, 200);
+    assert_eq!(denied.json()["error"]["message"], "Unauthorized");
+    let allowed = server
+        .send(&request(
+            "POST",
+            routes::JSONRPC,
+            &[("X-FluxDown-Token", "flux2026")],
+            &jsonrpc_version_body(),
+        ))
+        .await;
+    assert_eq!(allowed.status, 200);
+    assert!(allowed.json().get("error").is_none(), "{}", allowed.body);
+    assert!(server.ws_connect_err().await.is_ok());
 }
 
 // ---------------------------------------------------------------------------

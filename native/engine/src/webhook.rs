@@ -30,10 +30,9 @@ use hmac::{Mac, SimpleHmac};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore};
 
 use crate::db::{Db, WebhookDeliveryRow};
-use crate::downloader;
 use crate::events::{EngineEvent, EventSink};
 use crate::logger::log_info;
 use crate::proxy_config::ProxyConfig;
@@ -63,6 +62,13 @@ const MAX_ATTEMPTS: u32 = 4;
 const RETRY_BASE_SECS: u64 = 2;
 /// 出站全局并发上限。
 const MAX_CONCURRENT_DELIVERIES: usize = 4;
+
+/// 单个端点待投递队列的上限。端点离线时队列只会积压，满了丢**最旧**的一条
+/// （过期通知价值最低），丢弃以一条汇总记录的形式出现在投递日志里。
+const MAX_QUEUED_JOBS_PER_ENDPOINT: usize = 256;
+
+/// 遵守 `Retry-After` 时的等待上限。
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// 日志里请求/响应体的截断长度（字符）。
 const MAX_LOG_BODY: usize = 2000;
 /// 日志变化推给宿主的最小间隔。千级批量任务完成时每条投递都推一份 100 条
@@ -221,31 +227,96 @@ fn default_true() -> bool {
 
 /// 单个 webhook 端点配置。持久化为 `webhook.endpoints` 里的一个 JSON 元素。
 ///
-/// 全字段 `default`：老配置缺字段不会让整份配置解析失败。
+/// 全字段 `default`：老配置缺字段不会让整份配置解析失败；类型不符的字段同样回退
+/// 默认值（见 [`lenient`]），一个手改坏的字段不会让整条端点失效。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct EndpointSpec {
+    #[serde(deserialize_with = "lenient::string")]
     pub id: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub name: String,
     /// 见 [`Preset`]；未知值按 [`Preset::Custom`] 处理。
+    #[serde(deserialize_with = "lenient::string")]
     pub preset: String,
+    #[serde(deserialize_with = "lenient::string")]
     pub url: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", deserialize_with = "lenient::bool_or_true")]
     pub enabled: bool,
     /// 订阅的事件 wire 名；空 = 不投递任何事件。
+    #[serde(deserialize_with = "lenient::strings")]
     pub events: Vec<String>,
     /// 队列过滤：空 = 全部队列。
+    #[serde(deserialize_with = "lenient::string")]
     pub queue_id: String,
     /// 自定义请求头（可覆盖 `Content-Type`，承载各服务 token）。
+    #[serde(deserialize_with = "lenient::string_map")]
     pub headers: BTreeMap<String, String>,
     /// 自定义 body 模板；空 = 用预设默认模板。
+    #[serde(deserialize_with = "lenient::string")]
     pub body_template: String,
     /// 非空则开启 HMAC-SHA256 签名。
+    #[serde(deserialize_with = "lenient::string")]
     pub sign_secret: String,
     /// 允许 `http://` 明文（仅建议局域网设备）。
+    #[serde(deserialize_with = "lenient::bool_or_false")]
     pub allow_http: bool,
     /// 经全局代理发送（默认直连——局域网端点走代理必失败）。
+    #[serde(deserialize_with = "lenient::bool_or_false")]
     pub use_proxy: bool,
+}
+
+/// 端点字段的宽松反序列化：类型不符回退默认值，数组 / 映射里的非字符串项丢弃。
+/// 规则与 GPUI `sections::webhook::EndpointSpec`、Web `parseEndpoint` 逐字段一致，
+/// 三端对同一份配置看到同一组端点。
+mod lenient {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+
+    pub(super) fn string<'de, D: Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+        Ok(match Value::deserialize(de)? {
+            Value::String(value) => value,
+            _ => String::new(),
+        })
+    }
+
+    pub(super) fn bool_or_true<'de, D: Deserializer<'de>>(de: D) -> Result<bool, D::Error> {
+        Ok(Value::deserialize(de)?.as_bool().unwrap_or(true))
+    }
+
+    pub(super) fn bool_or_false<'de, D: Deserializer<'de>>(de: D) -> Result<bool, D::Error> {
+        Ok(Value::deserialize(de)?.as_bool().unwrap_or(false))
+    }
+
+    pub(super) fn strings<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<String>, D::Error> {
+        Ok(match Value::deserialize(de)? {
+            Value::Array(items) => items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Value::String(value) => Some(value),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
+
+    pub(super) fn string_map<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> Result<BTreeMap<String, String>, D::Error> {
+        Ok(match Value::deserialize(de)? {
+            Value::Object(map) => map
+                .into_iter()
+                .filter_map(|(key, value)| match value {
+                    Value::String(value) => Some((key, value)),
+                    _ => None,
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        })
+    }
 }
 
 impl EndpointSpec {
@@ -731,18 +802,108 @@ struct Job {
     event: Arc<WebhookEvent>,
 }
 
+/// 队列满时被丢弃的投递的汇总（由 worker 下次取活前写进投递日志）。
+struct DroppedJobs {
+    count: u32,
+    /// 最近一条被丢弃投递所属的端点与事件。
+    spec: EndpointSpec,
+    event: &'static str,
+}
+
+#[derive(Default)]
+struct QueueState {
+    jobs: VecDeque<Job>,
+    dropped: Option<DroppedJobs>,
+    closed: bool,
+}
+
+/// worker 下一步该做的事。
+enum QueueStep {
+    Deliver(Job),
+    ReportDropped(DroppedJobs),
+    Closed,
+}
+
+/// 单个端点的有界 FIFO 投递队列。
+///
+/// 入队在 `emit` 里同步完成，**同端点的顺序在入队那一刻就定死了**；队列满时丢
+/// 最旧的一条并累计到 [`DroppedJobs`]，`emit` 永远不阻塞。
+struct EndpointQueue {
+    state: StdMutex<QueueState>,
+    wake: Notify,
+}
+
+impl EndpointQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: StdMutex::new(QueueState::default()),
+            wake: Notify::new(),
+        })
+    }
+
+    fn push(&self, job: Job) {
+        if let Ok(mut guard) = self.state.lock() {
+            let state = &mut *guard;
+            if state.jobs.len() >= MAX_QUEUED_JOBS_PER_ENDPOINT
+                && let Some(old) = state.jobs.pop_front()
+            {
+                let event = old.event.kind.wire();
+                match &mut state.dropped {
+                    Some(dropped) => {
+                        dropped.count = dropped.count.saturating_add(1);
+                        dropped.spec = old.spec;
+                        dropped.event = event;
+                    }
+                    None => {
+                        state.dropped = Some(DroppedJobs {
+                            count: 1,
+                            spec: old.spec,
+                            event,
+                        });
+                    }
+                }
+            }
+            state.jobs.push_back(job);
+        }
+        self.wake.notify_one();
+    }
+
+    /// 关闭队列（dispatcher 释放时），唤醒 worker 让其退出。
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+        }
+        self.wake.notify_one();
+    }
+
+    /// 取下一步；队列为空且未关闭时返回 `None`（worker 应等待唤醒）。
+    /// 先汇报丢弃，再投递，保证日志里的丢弃记录不会被一直忙碌的 worker 饿住。
+    fn take(&self) -> Option<QueueStep> {
+        let Ok(mut state) = self.state.lock() else {
+            return Some(QueueStep::Closed);
+        };
+        if state.closed {
+            return Some(QueueStep::Closed);
+        }
+        if let Some(dropped) = state.dropped.take() {
+            return Some(QueueStep::ReportDropped(dropped));
+        }
+        state.jobs.pop_front().map(QueueStep::Deliver)
+    }
+}
+
 struct Inner {
     endpoints: StdRwLock<Vec<EndpointSpec>>,
     log: StdMutex<VecDeque<WebhookDelivery>>,
     clients: StdRwLock<Arc<Clients>>,
-    /// 同端点串行队列：`endpoint_id → 该端点 worker 的入口`。
+    /// 同端点串行队列：`endpoint_id → 该端点的有界队列`。
     ///
-    /// **顺序在 `emit` 里同步 `send` 的那一刻就定死了**，与后续调度无关。
+    /// **顺序在 `emit` 里同步入队的那一刻就定死了**，与后续调度无关。
     /// 早先的实现是「每条事件 spawn 一个任务 + 端点级 async Mutex」——在
     /// 多线程 runtime（headless server 的 `#[tokio::main]`）上，两个任务抢锁
     /// 的先后是真随机的，实测出现过 `queue.drained` 抢在 `task.completed`
     /// 前面送达。串行 ≠ 保序，这里必须是队列。
-    workers: StdMutex<HashMap<String, mpsc::UnboundedSender<Job>>>,
+    workers: StdMutex<HashMap<String, Arc<EndpointQueue>>>,
     sema: Arc<Semaphore>,
     instance: InstanceInfo,
     /// 有无启用端点的快速判据，避免每次事件都拿读锁。
@@ -832,14 +993,29 @@ impl WebhookDispatcher {
 
     /// 从 `webhook.endpoints` 的 JSON 值热重载端点表。
     ///
-    /// 解析失败时**保留旧表并记日志**——一份手改坏了的配置不该让通知静默消失。
+    /// 整份不是 JSON 数组时**保留旧表并记日志**——一份手改坏了的配置不该让通知
+    /// 静默消失；数组里的非对象元素逐项跳过，字段级类型错误按 [`lenient`] 回退。
     pub fn reload_endpoints(&self, json: &str) {
         let trimmed = json.trim();
         let parsed: Vec<EndpointSpec> = if trimmed.is_empty() {
             Vec::new()
         } else {
-            match serde_json::from_str(trimmed) {
-                Ok(v) => v,
+            match serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+                Ok(items) => {
+                    let total = items.len();
+                    let list: Vec<EndpointSpec> = items
+                        .into_iter()
+                        .filter(serde_json::Value::is_object)
+                        .filter_map(|item| serde_json::from_value(item).ok())
+                        .collect();
+                    if list.len() < total {
+                        log_info!(
+                            "[webhook] skipped {} malformed endpoint entries",
+                            total - list.len()
+                        );
+                    }
+                    list
+                }
                 Err(e) => {
                     log_info!("[webhook] endpoints config parse error, keeping previous: {e}");
                     return;
@@ -921,8 +1097,8 @@ impl WebhookDispatcher {
         let dispatched = targets.len();
         let event = Arc::new(event);
         for spec in targets {
-            let tx = self.inner.worker_for(&spec.id);
-            let _ = tx.send(Job {
+            let queue = self.inner.worker_for(&spec.id);
+            queue.push(Job {
                 spec,
                 event: event.clone(),
             });
@@ -947,12 +1123,11 @@ impl WebhookDispatcher {
 }
 
 fn build_clients(proxy_config: &ProxyConfig) -> Clients {
-    // UA 传空 → downloader 用内置 `FluxDown/<version>`（设计要求的固定 UA）。
-    let direct = downloader::build_client(&ProxyConfig::default(), "").unwrap_or_else(|e| {
+    let direct = build_webhook_client(&ProxyConfig::default()).unwrap_or_else(|e| {
         log_info!("[webhook] direct client build failed, using default: {e}");
         Client::new()
     });
-    let proxied = downloader::build_client(proxy_config, "").unwrap_or_else(|e| {
+    let proxied = build_webhook_client(proxy_config).unwrap_or_else(|e| {
         log_info!("[webhook] proxied client build failed, falling back to direct: {e}");
         direct.clone()
     });
@@ -962,15 +1137,75 @@ fn build_clients(proxy_config: &ProxyConfig) -> Clients {
 /// 端点 worker：从队列里逐条取，串行投递。队列的 FIFO 语义就是投递保序的
 /// 全部实现——worker 里没有任何锁。
 ///
-/// dispatcher 释放后（`Weak::upgrade` 失败）自行退出。
-fn spawn_worker(inner: std::sync::Weak<Inner>, mut rx: mpsc::UnboundedReceiver<Job>) {
+/// dispatcher 释放后（队列被 `Inner::drop` 关闭或 `Weak::upgrade` 失败）自行退出。
+fn spawn_worker(inner: std::sync::Weak<Inner>, queue: Arc<EndpointQueue>) {
     tokio::spawn(async move {
-        while let Some(job) = rx.recv().await {
+        loop {
+            let Some(step) = queue.take() else {
+                queue.wake.notified().await;
+                continue;
+            };
             let Some(inner) = inner.upgrade() else { break };
-            let record = inner.deliver(&job.spec, &job.event, MAX_ATTEMPTS).await;
-            inner.push_log(record);
+            match step {
+                QueueStep::Closed => break,
+                QueueStep::ReportDropped(dropped) => {
+                    inner.push_log(dropped_record(&dropped));
+                }
+                QueueStep::Deliver(job) => {
+                    let record = inner
+                        .deliver_impl(&job.spec, &job.event, MAX_ATTEMPTS, true)
+                        .await;
+                    inner.push_log(record);
+                }
+            }
         }
     });
+}
+
+/// 队列满丢弃的汇总投递记录（失败、0 次尝试）。
+fn dropped_record(dropped: &DroppedJobs) -> WebhookDelivery {
+    let spec = &dropped.spec;
+    let url = if spec.preset() == Preset::Ntfy {
+        ntfy_endpoint(spec.url.trim()).0
+    } else {
+        spec.url.trim().to_string()
+    };
+    log_info!(
+        "[webhook] endpoint={} queue full, dropped {} oldest pending delivery(ies)",
+        spec.display_name(),
+        dropped.count
+    );
+    WebhookDelivery {
+        delivery_id: uuid::Uuid::new_v4().to_string(),
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        event: dropped.event.to_string(),
+        endpoint_id: spec.id.clone(),
+        endpoint_name: spec.display_name(),
+        url,
+        request_headers: String::new(),
+        request_body: String::new(),
+        status_code: 0,
+        response_body: String::new(),
+        latency_ms: 0,
+        attempts: 0,
+        success: false,
+        error: format!(
+            "dropped {} queued delivery(ies): endpoint queue full (limit {MAX_QUEUED_JOBS_PER_ENDPOINT}), oldest discarded",
+            dropped.count
+        ),
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let map = self
+            .workers
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for queue in map.values() {
+            queue.close();
+        }
+    }
 }
 
 impl Inner {
@@ -1070,23 +1305,23 @@ impl Inner {
         self.sink.read().ok().and_then(|s| s.clone())
     }
 
-    /// 取（必要时惰性创建）某端点的投递 worker。
+    /// 取（必要时惰性创建）某端点的投递队列并起 worker。
     ///
-    /// worker 持 `Weak<Inner>`：`Inner` 持有 sender，worker 若持强引用就是
+    /// worker 持 `Weak<Inner>`：`Inner` 持有队列，worker 若持强引用就是
     /// 引用环，dispatcher 永远不会释放。
-    fn worker_for(self: &Arc<Self>, id: &str) -> mpsc::UnboundedSender<Job> {
-        let (tx, rx) = mpsc::unbounded_channel::<Job>();
+    fn worker_for(self: &Arc<Self>, id: &str) -> Arc<EndpointQueue> {
+        let queue = EndpointQueue::new();
         let Ok(mut map) = self.workers.lock() else {
             // 锁中毒：退化为一次性 worker，宁可乱序也不丢事件。
-            spawn_worker(Arc::downgrade(self), rx);
-            return tx;
+            spawn_worker(Arc::downgrade(self), queue.clone());
+            return queue;
         };
         if let Some(existing) = map.get(id) {
             return existing.clone();
         }
-        spawn_worker(Arc::downgrade(self), rx);
-        map.insert(id.to_string(), tx.clone());
-        tx
+        spawn_worker(Arc::downgrade(self), queue.clone());
+        map.insert(id.to_string(), queue.clone());
+        queue
     }
 
     fn vars(&self, event: &WebhookEvent, ntfy_topic: &str) -> Vars {
@@ -1140,12 +1375,34 @@ impl Inner {
         body.to_string()
     }
 
-    /// 投递一条事件到一个端点，含重试。返回投递记录（成败都返回）。
+    /// 投递一条事件到一个端点，含重试，不复查端点表（「发送测试」的草稿端点不在表里）。
     async fn deliver(
         &self,
         spec: &EndpointSpec,
         event: &WebhookEvent,
         max_attempts: u32,
+    ) -> WebhookDelivery {
+        self.deliver_impl(spec, event, max_attempts, false).await
+    }
+
+    /// 端点当前是否仍在端点表里且启用。
+    fn endpoint_active(&self, id: &str) -> bool {
+        self.endpoints
+            .read()
+            .map(|list| list.iter().any(|e| e.id == id && e.enabled))
+            .unwrap_or(false)
+    }
+
+    /// 投递一条事件到一个端点，含重试。返回投递记录（成败都返回）。
+    ///
+    /// `recheck_endpoint` 为真时，**每次尝试前**重新确认端点仍存在且启用：
+    /// 排队/退避期间被删除或停用的端点不再收到请求。
+    async fn deliver_impl(
+        &self,
+        spec: &EndpointSpec,
+        event: &WebhookEvent,
+        max_attempts: u32,
+        recheck_endpoint: bool,
     ) -> WebhookDelivery {
         let delivery_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now();
@@ -1227,8 +1484,8 @@ impl Inner {
             .join("\n");
 
         // ---- 出站限流（同端点保序由调用方的 worker 队列保证）----
-        let permit = self.sema.clone().acquire_owned().await;
-        if permit.is_err() {
+        // 许可只在单次请求期间持有，退避 sleep 期间释放，避免离线端点占满全局并发。
+        if self.sema.is_closed() {
             record.error = "webhook dispatcher shut down".to_string();
             return record;
         }
@@ -1247,7 +1504,15 @@ impl Inner {
 
         let started = std::time::Instant::now();
         for attempt in 1..=max_attempts {
+            if recheck_endpoint && !self.endpoint_active(&spec.id) {
+                record.error = "endpoint removed or disabled; delivery cancelled".to_string();
+                break;
+            }
             record.attempts = attempt as i32;
+            let Ok(permit) = self.sema.clone().acquire_owned().await else {
+                record.error = "webhook dispatcher shut down".to_string();
+                break;
+            };
             let mut req = client
                 .post(&target_url)
                 .timeout(REQUEST_TIMEOUT)
@@ -1255,21 +1520,48 @@ impl Inner {
             for (k, v) in &headers {
                 req = req.header(k, v);
             }
-            match req.send().await {
+            let mut retry_after: Option<Duration> = None;
+            let result = req.send().await;
+            let outcome = match result {
                 Ok(resp) => {
                     let status = resp.status();
                     record.status_code = status.as_u16() as i32;
+                    if !status.is_success() {
+                        retry_after = resp
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(parse_retry_after);
+                    }
+                    let location = if status.is_redirection() {
+                        resp.headers()
+                            .get(reqwest::header::LOCATION)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|l| url_host(l).unwrap_or_default())
+                    } else {
+                        None
+                    };
                     let text = resp.text().await.unwrap_or_default();
                     record.response_body = truncate(&text, MAX_LOG_BODY);
                     if status.is_success() {
                         record.success = true;
                         record.error = String::new();
-                        break;
-                    }
-                    record.error = format!("HTTP {}", status.as_u16());
-                    // 4xx = 配置错误，重试只会刷日志。
-                    if status.is_client_error() {
-                        break;
+                        true
+                    } else if status.is_redirection() {
+                        record.error = match location {
+                            Some(host) if !host.is_empty() => format!(
+                                "HTTP {} redirect to {host} not followed; set the final URL",
+                                status.as_u16()
+                            ),
+                            _ => format!(
+                                "HTTP {} redirect not followed; set the final URL",
+                                status.as_u16()
+                            ),
+                        };
+                        true
+                    } else {
+                        record.error = format!("HTTP {}", status.as_u16());
+                        !is_retryable_status(status)
                     }
                 }
                 Err(e) => {
@@ -1277,13 +1569,21 @@ impl Inner {
                     record.error = if e.is_timeout() {
                         "request timed out".to_string()
                     } else {
-                        e.to_string()
+                        // reqwest 的错误文本带完整 URL（可能含令牌），URL 已单独记录在 record。
+                        e.without_url().to_string()
                     };
+                    false
                 }
+            };
+            drop(permit);
+            if outcome {
+                break;
             }
             if attempt < max_attempts {
-                let delay = RETRY_BASE_SECS.saturating_mul(1u64 << (attempt - 1));
-                tokio::time::sleep(Duration::from_secs(delay)).await;
+                let backoff =
+                    Duration::from_secs(RETRY_BASE_SECS.saturating_mul(1u64 << (attempt - 1)));
+                let delay = retry_after.map_or(backoff, |ra| ra.min(MAX_RETRY_AFTER));
+                tokio::time::sleep(delay).await;
             }
         }
         record.latency_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
@@ -1292,16 +1592,72 @@ impl Inner {
         }
         if !record.success {
             log_info!(
-                "[webhook] delivery failed: endpoint={} event={} attempts={} status={} error={}",
+                "[webhook] delivery failed: endpoint={} host={} event={} attempts={} status={} error={}",
                 record.endpoint_name,
+                url_host(&target_url).unwrap_or_default(),
                 record.event,
                 record.attempts,
                 record.status_code,
-                record.error
+                crate::logger::sanitize_log_str(&record.error)
             );
         }
         record
     }
+}
+
+/// 408/429 是暂时性失败，值得重试；其余 4xx 是配置错误。
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    !status.is_client_error() || status.as_u16() == 408 || status.as_u16() == 429
+}
+
+/// 解析 `Retry-After` 的秒数形式；HTTP-date 形式忽略，回退指数退避。
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// 只取 host，日志里不出现路径/query 中的密钥。
+fn url_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+}
+
+/// webhook 专用 client：不跟随重定向，避免 https→http 降级或跨主机时
+/// 把签名与自定义令牌头转发出去；也不启用 cookie。
+fn build_webhook_client(proxy_config: &ProxyConfig) -> Result<Client, reqwest::Error> {
+    use crate::proxy_config::{ProxyMode, detect_system_proxy};
+    let mut builder = Client::builder()
+        .user_agent(format!("FluxDown/{}", env!("FLUXDOWN_APP_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15));
+    let manual = |cfg: &ProxyConfig| -> Option<reqwest::Proxy> {
+        let url = cfg.to_proxy_url()?;
+        let mut proxy = reqwest::Proxy::all(&url).ok()?;
+        if !cfg.username.is_empty() {
+            proxy = proxy.basic_auth(&cfg.username, &cfg.password);
+        }
+        if !cfg.no_proxy_list.is_empty() {
+            proxy = proxy.no_proxy(reqwest::NoProxy::from_string(
+                &crate::proxy_config::normalize_no_proxy(&cfg.no_proxy_list),
+            ));
+        }
+        Some(proxy)
+    };
+    builder = match proxy_config.mode {
+        ProxyMode::Manual => match manual(proxy_config) {
+            Some(p) => builder.proxy(p),
+            None => builder.no_proxy(),
+        },
+        ProxyMode::System => match detect_system_proxy() {
+            Ok(Some(sys)) => match manual(&sys) {
+                Some(p) => builder.proxy(p),
+                None => builder.no_proxy(),
+            },
+            _ => builder.no_proxy(),
+        },
+        ProxyMode::None | ProxyMode::Auto => builder.no_proxy(),
+    };
+    builder.build()
 }
 
 /// `{event.summary}` 的默认取值——一行人类可读摘要。
@@ -1613,6 +1969,53 @@ mod tests {
             mask_header_value("Content-Type", "application/json"),
             "application/json"
         );
+    }
+
+    #[test]
+    fn rate_limit_and_timeout_are_retryable_other_4xx_are_not() {
+        use reqwest::StatusCode;
+        assert!(is_retryable_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(is_retryable_status(StatusCode::BAD_GATEWAY));
+        assert!(!is_retryable_status(StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_only() {
+        assert_eq!(parse_retry_after(" 7 "), Some(Duration::from_secs(7)));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn url_host_drops_path_and_query_secrets() {
+        assert_eq!(
+            url_host("https://api.telegram.org/bot1:SECRET/send?token=x").as_deref(),
+            Some("api.telegram.org")
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_is_not_followed_and_not_retried() {
+        let server = spawn_mock("HTTP/1.1 302 Found");
+        let d = dispatcher();
+        let record = d
+            .inner
+            .deliver(
+                &EndpointSpec {
+                    id: "e302".to_string(),
+                    url: format!("http://{}/hook", server.addr),
+                    allow_http: true,
+                    ..Default::default()
+                },
+                &WebhookEvent::sample(),
+                MAX_ATTEMPTS,
+            )
+            .await;
+        assert!(!record.success);
+        assert_eq!(record.status_code, 302);
+        assert_eq!(record.attempts, 1);
+        assert!(record.error.contains("redirect"), "{}", record.error);
     }
 
     // ---- 投递语义（真实 HTTP，最小 mock 服务器） ----
@@ -1963,6 +2366,83 @@ mod tests {
         Ok(())
     }
 
+    /// 离线端点的队列有界：满了丢最旧的，丢弃汇总先于后续投递被取出，
+    /// 其余投递仍按入队顺序。
+    #[test]
+    fn endpoint_queue_drops_oldest_when_full_and_reports_it() {
+        let queue = EndpointQueue::new();
+        let extra = 3;
+        for i in 0..(MAX_QUEUED_JOBS_PER_ENDPOINT + extra) {
+            queue.push(Job {
+                spec: EndpointSpec::default(),
+                event: Arc::new(WebhookEvent::task(
+                    WebhookEventKind::TaskCompleted,
+                    WebhookTask::default(),
+                    i.to_string(),
+                    String::new(),
+                )),
+            });
+        }
+        let Some(QueueStep::ReportDropped(dropped)) = queue.take() else {
+            panic!("dropped summary must come first");
+        };
+        assert_eq!(dropped.count as usize, extra);
+        let mut delivered = Vec::new();
+        while let Some(QueueStep::Deliver(job)) = queue.take() {
+            delivered.push(job.event.queue_id.clone());
+        }
+        assert_eq!(delivered.len(), MAX_QUEUED_JOBS_PER_ENDPOINT);
+        assert_eq!(delivered.first().map(String::as_str), Some("3"));
+        let expected_last = (MAX_QUEUED_JOBS_PER_ENDPOINT + extra - 1).to_string();
+        assert_eq!(delivered.last(), Some(&expected_last));
+    }
+
+    /// 退避期间端点被删除：下一次尝试前复查，不再发请求，记录里写明取消原因。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removed_endpoint_cancels_pending_retry() -> Result<(), String> {
+        let server = spawn_mock("HTTP/1.1 503 Service Unavailable");
+        let d = dispatcher();
+        d.reload_endpoints(&format!(
+            r#"[{{"id":"gone","name":"mock","url":"http://{}/h","enabled":true,"allowHttp":true,
+                 "events":["task.completed"]}}]"#,
+            server.addr
+        ));
+        d.emit(WebhookEvent::task(
+            WebhookEventKind::TaskCompleted,
+            WebhookTask::default(),
+            "main".to_string(),
+            "Main".to_string(),
+        ));
+        for _ in 0..100 {
+            if server.hits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        d.reload_endpoints("[]");
+        for _ in 0..250 {
+            if !d.deliveries().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        let log = d.deliveries();
+        let record = log.first().ok_or("no delivery record")?;
+        assert_eq!(
+            server.hits.load(Ordering::SeqCst),
+            1,
+            "no request after removal"
+        );
+        assert_eq!(record.attempts, 1);
+        assert!(!record.success);
+        assert!(
+            record.error.contains("removed or disabled"),
+            "error: {}",
+            record.error
+        );
+        Ok(())
+    }
+
     #[test]
     fn bad_config_json_keeps_previous_endpoints() {
         let d = dispatcher();
@@ -1972,6 +2452,35 @@ mod tests {
         assert_eq!(d.endpoints().len(), 1, "parse failure must not wipe config");
         d.reload_endpoints("[]");
         assert!(d.endpoints().is_empty());
+    }
+
+    #[test]
+    fn malformed_fields_fall_back_and_non_object_entries_are_skipped() {
+        let d = dispatcher();
+        d.reload_endpoints(
+            r#"[
+                {"id":"a","url":"https://x.dev/h","enabled":"yes","allowHttp":1,
+                 "events":["task.completed",7],"headers":{"X-Ok":"1","X-Bad":2},"queueId":null},
+                "junk",
+                {"id":"b","url":"https://y.dev/h","enabled":false,"events":"task.failed"}
+            ]"#,
+        );
+        let list = d.endpoints();
+        assert_eq!(
+            list.len(),
+            2,
+            "one bad field must not drop the whole endpoint"
+        );
+        assert!(
+            list[0].enabled,
+            "non-bool enabled falls back to the default (on)"
+        );
+        assert!(!list[0].allow_http);
+        assert_eq!(list[0].events, ["task.completed"]);
+        assert_eq!(list[0].headers.len(), 1);
+        assert!(list[0].queue_id.is_empty());
+        assert!(!list[1].enabled);
+        assert!(list[1].events.is_empty());
     }
 
     #[test]

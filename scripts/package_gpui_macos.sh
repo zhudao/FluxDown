@@ -50,7 +50,7 @@ if [ "${SKIP_BUILD:-0}" != 1 ]; then
   for arch in $ARCHS; do
     triple=$(triple_of "$arch")
     echo "== build $triple (min macOS $(min_of "$arch"))"
-    MACOSX_DEPLOYMENT_TARGET=$(min_of "$arch") cargo build --locked --release --target "$triple" \
+    FLUXDOWN_APP_VERSION="${FLUXDOWN_APP_VERSION:-$VERSION}" MACOSX_DEPLOYMENT_TARGET=$(min_of "$arch") cargo build --locked --release --target "$triple" \
       -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon -p fluxdown_nmh \
       --features fluxdown_agent/desktop --bins
   done
@@ -93,7 +93,7 @@ place fluxdown_nmh "$HELPER/Contents/MacOS/fluxdown_nmh"
 # ── 图标 ──
 ICONSET="$WORK/AppIcon.iconset"
 mkdir -p "$ICONSET"
-SRC_ICONS="macos/Runner/Assets.xcassets/AppIcon.appiconset"
+SRC_ICONS="assets/logo/macos"
 for pair in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x \
   256:256x256 512:256x256@2x 512:512x512 1024:512x512@2x; do
   cp "$SRC_ICONS/app_icon_${pair%%:*}.png" "$ICONSET/icon_${pair#*:}.png"
@@ -101,9 +101,9 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 cp "$APP/Contents/Resources/AppIcon.icns" "$HELPER/Contents/Resources/AppIcon.icns"
 
-# ── 外层 Info.plist：以 Flutter 版为底，保留 URL scheme / .torrent 文档类型 / UTI ──
+# ── 外层 Info.plist：以 packaging/macos/Info.plist 为模板，含 URL scheme / .torrent 文档类型 / UTI ──
 PL="$APP/Contents/Info.plist"
-cp macos/Runner/Info.plist "$PL"
+cp packaging/macos/Info.plist "$PL"
 plutil -replace CFBundleDevelopmentRegion -string en "$PL"
 plutil -replace CFBundleExecutable -string fluxdown-desktop "$PL"
 plutil -replace CFBundleIconFile -string AppIcon "$PL"
@@ -114,8 +114,6 @@ plutil -replace CFBundleVersion -string "$PLIST_VERSION" "$PL"
 plutil -replace LSMinimumSystemVersion -string "$LSMIN" "$PL"
 plutil -replace NSHumanReadableCopyright -string "Copyright © 2026 FluxDown" "$PL"
 plutil -replace NSHighResolutionCapable -bool true "$PL"
-plutil -remove FLTEnableImpeller "$PL"
-plutil -remove NSMainNibFile "$PL"
 plutil -lint "$PL"
 
 # ── 辅助 bundle Info.plist：LSUIElement 让常驻 agent 不出现在 Dock ──
@@ -158,8 +156,15 @@ plutil -lint "$HPL"
 
 # ── 签名：由内到外，Hardened Runtime + 时间戳 ──
 KC=
+ORIG_KCS=()
 SIGN_ARGS=()
-cleanup() { [ -n "$KC" ] && security delete-keychain "$KC" 2>/dev/null || true; }
+cleanup() {
+  # 先恢复用户搜索列表再删除临时钥匙串，避免残留指向已删除文件的条目。
+  if [ ${#ORIG_KCS[@]} -gt 0 ]; then
+    security list-keychains -d user -s "${ORIG_KCS[@]}" 2>/dev/null || true
+  fi
+  if [ -n "$KC" ]; then security delete-keychain "$KC" 2>/dev/null || true; fi
+}
 trap cleanup EXIT
 if [ -n "${MACOS_CERT_P12_PATH:-}" ]; then
   KC="$WORK/signing.keychain-db"
@@ -168,7 +173,14 @@ if [ -n "${MACOS_CERT_P12_PATH:-}" ]; then
   security set-keychain-settings "$KC"
   security unlock-keychain -p "$KC_PASS" "$KC"
   security import "$MACOS_CERT_P12_PATH" -k "$KC" -P "${MACOS_CERT_PASSWORD:?MACOS_CERT_PASSWORD required}" -T /usr/bin/codesign >/dev/null
-  security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" >/dev/null
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KC_PASS" "$KC" >/dev/null
+  # codesign 的证书链与私钥访问走用户搜索列表，临时钥匙串必须在其中。
+  while IFS= read -r line; do
+    line=${line//\"/}
+    line=${line#"${line%%[![:space:]]*}"}
+    [ -n "$line" ] && ORIG_KCS+=("$line")
+  done < <(security list-keychains -d user)
+  security list-keychains -d user -s "$KC" ${ORIG_KCS[@]+"${ORIG_KCS[@]}"}
   IDENTITY=$(security find-identity -v -p codesigning "$KC" | sed -nE 's/.*"(Developer ID Application: [^"]+)".*/\1/p' | head -1)
   [ -n "$IDENTITY" ] || { echo "no Developer ID Application identity in p12" >&2; exit 1; }
   SIGN_ARGS=(--keychain "$KC" --timestamp --options runtime)

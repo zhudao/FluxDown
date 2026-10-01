@@ -3,17 +3,19 @@
 // 令牌 = 访问密钥（gateway user token）：查看/复制、重新生成、自定义（须过 token-policy），
 // 修改后同步更新本浏览器保存的密钥以保持会话。
 
+import { useNavigate } from '@tanstack/react-router'
 import { Copy, Eye, EyeOff, RefreshCw, Check } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 import { useT } from '../../../../i18n'
 import { copyText } from '../../../../lib/copy'
-import { updateStoredToken } from '../../../../lib/access'
+import { clearToken, updateStoredToken } from '../../../../lib/access'
 import { rpc, useAgent } from '../../../../lib/rpc'
 import type { GatewayPatchParams, GatewayStatusDto } from '../../../../lib/rpc'
 import { ACCESS_KEY_MAX_LEN, ACCESS_KEY_MIN_LEN, validateAccessKey } from '../../../../lib/token-policy'
 import type { AccessKeyIssue } from '../../../../lib/token-policy'
+import { rpcErrorText } from '../../../../lib/rpcErrorText'
 import { Button, Icon, Input, Switch, confirmDialog, toast } from '../../../../ui'
-import { SettingsCustomRow, SettingsPage, SettingsRow, SettingsSection, rpcErrorText, useSettingsReadOnly } from '../../kit'
+import { SettingsCustomRow, SettingsPage, SettingsRow, SettingsSection, useSettingsReadOnly } from '../../kit'
 
 type FlagKey = 'takeoverEnabled' | 'jsonrpcEnabled' | 'apiEnabled' | 'mcpEnabled' | 'corsEnabled'
 
@@ -215,6 +217,12 @@ function AccessKeyRow({ configured }: { configured: boolean }) {
 
 export function ApiSettings() {
   const t = useT()
+  const navigate = useNavigate()
+  const signOut = () => {
+    // 清凭证即触发 ConnectionController 断开连接；随后回登录页。
+    clearToken()
+    void navigate({ to: '/login', replace: true })
+  }
   const gateway = useAgent((snapshot) => snapshot.gateway, null)
   const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80')
 
@@ -229,6 +237,11 @@ export function ApiSettings() {
         <AddressRow titleKey="apiServiceMcp" path="/mcp" />
         <AddressRow titleKey="apiServiceApi" path="/api/v1" />
         {gateway ? <AccessKeyRow configured={gateway.userTokenConfigured} /> : <SettingsCustomRow>{null}</SettingsCustomRow>}
+        <SettingsRow title={t('webLogoutTitle')} description={t('webLogoutDesc')}>
+          <Button variant="outline" onClick={signOut}>
+            {t('accountLogout')}
+          </Button>
+        </SettingsRow>
       </SettingsSection>
       {gateway ? (
         <SettingsSection title={t('apiServiceFeaturesTitle')} subtitle={t('apiServiceFeaturesDesc')}>

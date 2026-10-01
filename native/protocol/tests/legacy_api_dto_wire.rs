@@ -141,6 +141,7 @@ fn task_dto_serializes_camel_case_with_correct_values() {
         rss_source_id: String::new(),
         origin_url: String::new(),
         auto_route: String::new(),
+        source_bytes: Default::default(),
         queue_order: 7,
         uploaded_bytes: 42,
         uploaded_at_completion: 7,
@@ -151,6 +152,7 @@ fn task_dto_serializes_camel_case_with_correct_values() {
         seed_post_ratio_limit_milli: -2,
         seed_time_limit_minutes: -2,
         seed_inactive_time_limit_minutes: -2,
+        seed_upload_limit_bps: 0,
     };
     let v = serde_json::to_value(&dto).unwrap();
     assert_eq!(v["taskId"], "t1");

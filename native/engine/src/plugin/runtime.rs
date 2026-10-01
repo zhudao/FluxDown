@@ -339,6 +339,16 @@ pub enum PluginError {
     MissingRequiredSetting(String),
     #[error("插件运行时错误: {0}")]
     Runtime(String),
+    /// 插件目录 / dev 登记存在但加载失败；内容即加载诊断原文。
+    #[error("插件加载失败: {0}")]
+    LoadFailed(String),
+    /// 指定标识没有 dev 登记（只有 dev 插件支持重新加载）。
+    #[error("不是开发模式插件: {0}")]
+    NotDevPlugin(String),
+    /// 某个设置项的值不合法（类型/范围/选项/pattern）或设置键不存在；`key` 供宿主把
+    /// 错误归因到具体字段，`message` 是面向用户的原因。
+    #[error("{message}")]
+    InvalidSetting { key: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +459,55 @@ pub struct YtdlpSpec {
     pub subdir: Option<String>,
     /// 本次调用超时（毫秒）。缺省取 bridge 默认值，并被 bridge 上限裁剪。
     pub timeout_ms: Option<u64>,
+    /// 宿主在 JS 边界注入（不来自插件 JSON）：排队等待 yt-dlp 并发槽的时间由此
+    /// 从脚本墙钟里扣除，避免排队被误判为插件自身超时。
+    #[serde(skip)]
+    pub wall_pause: Option<Arc<WallPause>>,
+}
+
+/// 累计「不应计入脚本墙钟」的排队等待时长（含进行中的等待）。
+#[derive(Debug, Default)]
+pub struct WallPause {
+    state: std::sync::Mutex<WallPauseState>,
+}
+
+#[derive(Debug, Default)]
+struct WallPauseState {
+    done: Duration,
+    waiting: usize,
+    since: Option<std::time::Instant>,
+}
+
+/// 一次排队等待的 RAII 守卫：drop 时结算（覆盖 future 被取消）。
+pub struct WallPauseGuard(Arc<WallPause>);
+
+impl WallPause {
+    pub fn wait(self: &Arc<Self>) -> WallPauseGuard {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.waiting == 0 {
+            s.since = Some(std::time::Instant::now());
+        }
+        s.waiting += 1;
+        WallPauseGuard(self.clone())
+    }
+
+    /// 已结算 + 进行中的等待总时长。
+    pub fn total(&self) -> Duration {
+        let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.done + s.since.map(|t| t.elapsed()).unwrap_or_default()
+    }
+}
+
+impl Drop for WallPauseGuard {
+    fn drop(&mut self) {
+        let mut s = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        s.waiting = s.waiting.saturating_sub(1);
+        if s.waiting == 0
+            && let Some(t) = s.since.take()
+        {
+            s.done += t.elapsed();
+        }
+    }
 }
 
 /// `flux.ytdlp.run(spec)` 的返回值。`stdout`/`stderr` 均按 bridge 上限截断。
@@ -509,6 +568,11 @@ pub trait ScriptRuntime: Send + Sync {
 
     /// 用 JS `RegExp` 测试 `value` 是否匹配 `pattern`；pattern 非法时返回 false。
     fn regex_test(&self, pattern: &str, value: &str) -> bool;
+
+    /// 宿主并发上限变化时同步 resolve/subscription 的并发容量（实际容量
+    /// `max(max_concurrent, 内部 worker 数)`）。上限放大后，新增并发槽里的插件
+    /// 解析任务才不会因拿不到 permit 而 `Overloaded`。
+    fn set_resolve_capacity(&self, max_concurrent: usize);
 
     /// 调用 `globalThis.resolve(ctx)`。返回 `Ok(None)` = 放行不改写。
     /// `settings_json` 为 manager 预构建的**类型化**只读设置 JSON 对象字符串
@@ -712,6 +776,10 @@ pub trait PluginBridge: Send + Sync {
     ) -> Result<YtdlpOutcome, PluginError> {
         Err(PluginError::Runtime("此 bridge 不支持 yt-dlp".to_string()))
     }
+
+    /// 卸载插件时清理其 bridge 自持的 scratch 工作区（flux.fs / yt-dlp cwd）。
+    /// 默认无操作（无工作区的 bridge）。
+    async fn remove_plugin_workspace(&self, _plugin_id: &str) {}
 }
 
 #[cfg(test)]

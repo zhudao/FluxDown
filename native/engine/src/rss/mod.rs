@@ -63,6 +63,22 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TORRENT_BYTES: usize = 4 * 1024 * 1024;
 /// 首轮抓取的历史条目所带的原因码。
 pub const REASON_SEED_SKIPPED: &str = "seed_skipped";
+/// 种子抓取失败时写入条目 `reason` 的稳定码（条目保持 New，派发时排后并进入退避）。
+pub const REASON_TORRENT_FETCH_FAILED: &str = "torrent_fetch_failed";
+/// 种子抓取失败后首次退避时长（秒），此后每次失败翻倍。
+const TORRENT_RETRY_BASE_SECS: i64 = 600;
+/// 种子抓取退避时长上限（秒）。
+const TORRENT_RETRY_MAX_SECS: i64 = 24 * 60 * 60;
+/// 种子的标准 MIME 类型。
+const TORRENT_MIME: &str = "application/x-bittorrent";
+
+/// 第 `failures` 次连续抓取失败后的退避秒数：`base × 2^(failures-1)`，封顶 24 小时。
+pub(crate) fn torrent_retry_delay_secs(failures: i64) -> i64 {
+    let shift = u32::try_from((failures - 1).clamp(0, 30)).unwrap_or(0);
+    TORRENT_RETRY_BASE_SECS
+        .saturating_mul(1i64 << shift)
+        .min(TORRENT_RETRY_MAX_SECS)
+}
 
 /// off-actor 抓取的回流结果。
 #[derive(Debug)]
@@ -88,6 +104,17 @@ pub struct RssValidateOutcome {
     pub items: Vec<RssItemInfo>,
     /// 失败原因（空 = 验证通过）。
     pub error: String,
+}
+
+/// 「立即抓取」的派发结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RssRefreshOutcome {
+    /// 已派发一次新的抓取。
+    Started,
+    /// 该订阅已有抓取在途——幂等，结果会经正常回流到达，无需重复触发。
+    AlreadyRunning,
+    /// 订阅不存在。
+    NotFound,
 }
 
 /// off-actor worker 回流到 actor 的两类结果。
@@ -152,6 +179,9 @@ pub struct RssDownloadPlan {
     pub size_hint: i64,
     /// 该订阅是否开启「自动下载时通知」。
     pub notify: bool,
+    /// 下载目标声明的 MIME 类型（小写、不含参数；空 = 未声明，或二段解析条目）。
+    /// `application/x-bittorrent` 视为种子，不要求 URL 带 `.torrent` 扩展名。
+    pub enclosure_type: String,
 }
 
 impl RssDownloadPlan {
@@ -175,17 +205,49 @@ impl RssDownloadPlan {
     /// // magnet 由引擎既有五路分派直接处理，不走种子抓取
     /// assert!(!plan("magnet:?xt=urn:btih:deadbeef").is_torrent_file());
     /// assert!(!plan("https://cdn.example/ep01.mp4").is_torrent_file());
+    /// // PT / Jackett 的无扩展名下载链接：靠 feed 声明的 MIME 识别
+    /// let typed = RssDownloadPlan {
+    ///     url: "https://pt.example/download?id=1".to_string(),
+    ///     enclosure_type: "application/x-bittorrent".to_string(),
+    ///     ..Default::default()
+    /// };
+    /// assert!(typed.is_torrent_file());
     /// ```
     #[must_use]
     pub fn is_torrent_file(&self) -> bool {
         if crate::bt_downloader::is_magnet_url(&self.url) {
             return false;
         }
-        let lowered = self.url.to_ascii_lowercase();
-        let path = lowered.split(['?', '#']).next().unwrap_or(&lowered);
-        // 少数 PT 站把真实文件名放进 query（`…/dl.php?file=x.torrent`），一并认。
-        path.ends_with(".torrent") || lowered.contains(".torrent")
+        self.enclosure_type == TORRENT_MIME || url_looks_like_torrent(&self.url)
     }
+}
+
+/// URL 形态判定（见 [`RssDownloadPlan::is_torrent_file`]）。除 `.torrent`
+/// 字样外，认两种不含扩展名的常见种子下载形态：NexusPHP 的
+/// `download.php?…passkey=…` 与 Jackett 的 `/dl/<indexer>/?jackett_apikey=…`。
+fn url_looks_like_torrent(url: &str) -> bool {
+    if crate::bt_downloader::is_magnet_url(url) {
+        return false;
+    }
+    let lowered = url.to_ascii_lowercase();
+    let (path, query) = {
+        let no_fragment = lowered.split('#').next().unwrap_or(&lowered);
+        match no_fragment.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (no_fragment, ""),
+        }
+    };
+    // 少数 PT 站把真实文件名放进 query（`…/dl.php?file=x.torrent`），一并认。
+    if path.ends_with(".torrent") || lowered.contains(".torrent") {
+        return true;
+    }
+    let has_param = |key: &str| {
+        query
+            .split('&')
+            .any(|kv| kv.split('=').next().is_some_and(|k| k == key))
+    };
+    (path.ends_with("/download.php") && has_param("passkey"))
+        || (path.contains("/dl/") && has_param("jackett_apikey"))
 }
 
 /// 订阅调度与条目状态机。
@@ -230,9 +292,18 @@ impl RssManager {
 
     /// 从 DB 装载全部订阅到内存镜像。由 [`crate::Engine::new`] 调用，宿主无需
     /// 记得这一步。
+    ///
+    /// 重新装载时，已在内存里的订阅其**运行态列**（抓取时间戳 / 错误 / 退避 /
+    /// 首轮标记）以内存为准：无语义变化的抓取只更新内存不落库（见
+    /// [`RssManager::record_runtime`]），DB 里的运行态可能偏旧，直接覆盖会把
+    /// due 判定回退成「立刻再抓一次」。其余字段（用户可编辑列、未读数）以 DB
+    /// 为准。
     pub async fn load(&mut self) {
         match self.db.load_all_rss_sources().await {
-            Ok(sources) => self.sources = sources,
+            Ok(mut fresh) => {
+                merge_runtime_from_memory(&mut fresh, &self.sources);
+                self.sources = fresh;
+            }
             Err(e) => log_error!("[rss] failed to load sources: {}", e),
         }
     }
@@ -255,6 +326,11 @@ impl RssManager {
     /// 广播订阅列表（含未读计数，重新读库以刷新 badge）。
     pub async fn broadcast_sources(&mut self) {
         self.load().await;
+        self.emit_sources_snapshot();
+    }
+
+    /// 直接用内存镜像推订阅列表快照，不读库。
+    fn emit_sources_snapshot(&self) {
         self.sink
             .emit(EngineEvent::RssSourcesChanged(self.sources.clone()));
     }
@@ -305,12 +381,29 @@ impl RssManager {
     /// 更新订阅的用户可编辑字段。运行态（退避账本/首轮标记）不受影响。
     pub async fn update_source(&mut self, mut source: RssSourceInfo) -> bool {
         source.normalize();
-        if source.source_id.is_empty() || self.source(&source.source_id).is_none() {
+        let Some(old) = self.source(&source.source_id).cloned() else {
             return false;
-        }
+        };
+
         if let Err(e) = self.db.update_rss_source(&source).await {
             log_error!("[rss] update source failed: {}", e);
             return false;
+        }
+        if let Some(seeded) = runtime_reset_on_update(&old, &source) {
+            // 来源/鉴权变化：旧的失败退避与错误不再适用，`last_fetch_at = 0`
+            // 让下一次 tick 立即重抓（与新建路径一致）。
+            self.persist_runtime(
+                &source.source_id,
+                &RuntimeUpdate {
+                    last_fetch_at: 0,
+                    last_success_at: old.last_success_at,
+                    last_error: String::new(),
+                    fail_count: 0,
+                    seeded,
+                    name: source.name.clone(),
+                },
+            )
+            .await;
         }
         self.broadcast_sources().await;
         true
@@ -386,13 +479,22 @@ impl RssManager {
 
     /// 立即抓取一个订阅（侧边栏「立即刷新」/ REST `POST /rss/{id}/refresh`）。
     ///
-    /// 忽略 due 判定但仍尊重 `in_flight`——连点刷新不该并发打同一个站点。
-    pub fn refresh_now(&mut self, source_id: &str, proxy: &ProxyConfig, global_ua: &str) -> bool {
-        if self.in_flight.contains(source_id) || self.source(source_id).is_none() {
-            return false;
+    /// 忽略 due 判定但仍尊重 `in_flight`——连点刷新不该并发打同一个站点，
+    /// 此时返回 [`RssRefreshOutcome::AlreadyRunning`]（幂等，不是错误）。
+    pub fn refresh_now(
+        &mut self,
+        source_id: &str,
+        proxy: &ProxyConfig,
+        global_ua: &str,
+    ) -> RssRefreshOutcome {
+        if self.source(source_id).is_none() {
+            return RssRefreshOutcome::NotFound;
+        }
+        if self.in_flight.contains(source_id) {
+            return RssRefreshOutcome::AlreadyRunning;
         }
         self.dispatch_fetch(source_id, unix_now(), proxy, global_ua);
-        true
+        RssRefreshOutcome::Started
     }
 
     fn dispatch_fetch(&mut self, source_id: &str, now: i64, proxy: &ProxyConfig, global_ua: &str) {
@@ -598,12 +700,30 @@ impl RssManager {
             } else {
                 plan.user_agent.clone()
             },
-            proxy: resolve_proxy(&plan.proxy_url, proxy),
+            proxy: ProxyConfig::default(),
         };
         let referrer = plan.referrer.clone();
+        // 与 feed 抓取同一套 Auto 失败转移：feed 靠候选代理才抓得到的站点，
+        // 其 `.torrent` 下载同样需要，否则整条 RSS→BT 链路在 Auto 下不可用。
+        let direct_proxy = resolve_proxy(&plan.proxy_url, proxy);
+        let eligible = plan.proxy_url.is_empty() && proxy.mode == ProxyMode::Auto;
+        let global_proxy = proxy.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let (bytes, error) = match fetch_torrent(&request, &referrer).await {
+            let result = fetch_with_auto_failover(
+                &request.url,
+                direct_proxy,
+                eligible,
+                &global_proxy,
+                |proxy_cfg| {
+                    let mut req = request.clone();
+                    req.proxy = proxy_cfg;
+                    let referrer = referrer.clone();
+                    async move { fetch_torrent(&req, &referrer).await }
+                },
+            )
+            .await;
+            let (bytes, error) = match result {
                 Ok(bytes) => (bytes, String::new()),
                 Err(e) => (Vec::new(), e),
             };
@@ -650,17 +770,24 @@ impl RssManager {
                 source.display_name(),
                 outcome.error
             );
-            self.persist_runtime(
-                &source.source_id,
-                now,
-                source.last_success_at,
-                &outcome.error,
-                fail_count,
-                source.seeded,
-                &source.name,
-            )
-            .await;
-            self.broadcast_sources().await;
+            let persisted = self
+                .record_runtime(
+                    &source.source_id,
+                    RuntimeUpdate {
+                        last_fetch_at: now,
+                        last_success_at: source.last_success_at,
+                        last_error: outcome.error.clone(),
+                        fail_count,
+                        seeded: source.seeded,
+                        name: source.name.clone(),
+                    },
+                )
+                .await;
+            if persisted {
+                self.broadcast_sources().await;
+            } else {
+                self.emit_sources_snapshot();
+            }
             return Vec::new();
         }
 
@@ -756,10 +883,12 @@ impl RssManager {
         if let Err(e) = self.db.insert_rss_items(&rows).await {
             log_error!("[rss] persist items failed: {}", e);
         }
-        if let Err(e) = self
-            .db
-            .prune_rss_items(&source.source_id, MAX_ITEMS_PER_SOURCE)
-            .await
+        // 没有新条目就不会超量，省掉一次空 DELETE（仍要扫 rss_items 索引）。
+        if fresh > 0
+            && let Err(e) = self
+                .db
+                .prune_rss_items(&source.source_id, MAX_ITEMS_PER_SOURCE)
+                .await
         {
             log_error!("[rss] prune items failed: {}", e);
         }
@@ -770,7 +899,18 @@ impl RssManager {
         } else {
             source.name.clone()
         };
-        self.persist_runtime(&source.source_id, now, now, "", 0, true, &name)
+        let persisted = self
+            .record_runtime(
+                &source.source_id,
+                RuntimeUpdate {
+                    last_fetch_at: now,
+                    last_success_at: now,
+                    last_error: String::new(),
+                    fail_count: 0,
+                    seeded: true,
+                    name,
+                },
+            )
             .await;
 
         // 派发：`New` 状态的条目按发布时间从旧到新取，单轮不超过上限。
@@ -778,7 +918,7 @@ impl RssManager {
         // seeding 这一轮被突然灌下去）。
         let plans = if source.auto_download && !first_round {
             self.db
-                .rss_dispatchable_items(&source.source_id, source.max_per_fetch)
+                .rss_dispatchable_items(&source.source_id, source.max_per_fetch, now)
                 .await
                 .unwrap_or_default()
                 .iter()
@@ -801,7 +941,14 @@ impl RssManager {
         if fresh > 0 || backfilled > 0 || resolver_backfilled > 0 || !plans.is_empty() {
             self.broadcast_items(&source.source_id, Vec::new()).await;
         }
-        self.broadcast_sources().await;
+        if persisted || fresh > 0 || backfilled > 0 || resolver_backfilled > 0 || !plans.is_empty()
+        {
+            self.broadcast_sources().await;
+        } else {
+            // 纯时间戳前进：DB 没动，未读数也没变，直接从内存镜像推快照，
+            // 既让 UI「上次检查」前进，又不必为此重读库。
+            self.emit_sources_snapshot();
+        }
         plans
     }
 
@@ -814,42 +961,155 @@ impl RssManager {
         {
             log_error!("[rss] mark downloaded failed: {}", e);
         }
+        self.clear_item_backoff(source_id, guid).await;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn persist_runtime(
-        &mut self,
-        source_id: &str,
-        last_fetch_at: i64,
-        last_success_at: i64,
-        last_error: &str,
-        fail_count: i32,
-        seeded: bool,
-        name: &str,
-    ) {
+    /// 种子抓取失败：条目保持 New 并带失败码，指数退避到期后才再参与自动派发
+    /// （手动下载不受退避限制）。
+    pub async fn record_torrent_failure(&self, source_id: &str, guid: &str) {
+        match self
+            .db
+            .record_rss_fetch_failure(
+                source_id,
+                guid,
+                REASON_TORRENT_FETCH_FAILED,
+                unix_now(),
+                torrent_retry_delay_secs,
+            )
+            .await
+        {
+            Ok(failures) => log_info!(
+                "[rss] torrent fetch failure #{} for {}/{}, next auto attempt in {}s",
+                failures,
+                source_id,
+                guid,
+                torrent_retry_delay_secs(failures)
+            ),
+            Err(e) => log_error!("[rss] record torrent failure failed: {}", e),
+        }
+    }
+
+    /// 清零条目的种子抓取失败计数与退避（建任务成功或用户手动下载时）。
+    pub async fn clear_item_backoff(&self, source_id: &str, guid: &str) {
+        if let Err(e) = self.db.clear_rss_item_backoff(source_id, guid).await {
+            log_error!("[rss] clear item backoff failed: {}", e);
+        }
+    }
+
+    /// 回写运行态并同步内存镜像（无条件落库）。用于编辑订阅后的重置等
+    /// 必须让 DB 立即反映的场景；抓取回流走 [`Self::record_runtime`]。
+    async fn persist_runtime(&mut self, source_id: &str, update: &RuntimeUpdate) {
         if let Err(e) = self
             .db
             .set_rss_source_runtime(
                 source_id,
-                last_fetch_at,
-                last_success_at,
-                last_error,
-                fail_count,
-                seeded,
-                name,
+                update.last_fetch_at,
+                update.last_success_at,
+                &update.last_error,
+                update.fail_count,
+                update.seeded,
+                &update.name,
             )
             .await
         {
             log_error!("[rss] persist runtime failed: {}", e);
         }
-        if let Some(s) = self.sources.iter_mut().find(|s| s.source_id == source_id) {
-            s.last_fetch_at = last_fetch_at;
-            s.last_success_at = last_success_at;
-            s.last_error = last_error.to_string();
-            s.fail_count = fail_count;
-            s.seeded = seeded;
-            s.name = name.to_string();
+        self.apply_runtime_to_memory(source_id, update);
+    }
+
+    /// 抓取回流的运行态回写：**仅语义变化时落库**，纯时间戳前进只更新内存。
+    ///
+    /// NAS 空闲静默：定时拉取若没有新条目、错误/退避/名称/首轮标记都没变，
+    /// 每次只会把 `last_fetch_at`/`last_success_at` 往前推——为此写一次
+    /// SQLite（WAL 回写会唤醒休眠硬盘）毫无收益。内存镜像始终是最新值
+    /// （due 判定与 UI「上次检查」都读它，见 [`RssManager::load`] 的合并），
+    /// 下次有语义变化的落库会把累计的时间戳一并带上。
+    ///
+    /// 代价：进程重启后 DB 里的时间戳可能偏旧，该源会被判定为到期并立即多
+    /// 拉一次，然后恢复正常节奏——可接受。
+    ///
+    /// 返回是否真的写了库。
+    async fn record_runtime(&mut self, source_id: &str, update: RuntimeUpdate) -> bool {
+        let needs_persist = self
+            .source(source_id)
+            .is_none_or(|old| runtime_needs_persist(old, &update));
+        if needs_persist {
+            self.persist_runtime(source_id, &update).await;
+        } else {
+            self.apply_runtime_to_memory(source_id, &update);
         }
+        needs_persist
+    }
+
+    fn apply_runtime_to_memory(&mut self, source_id: &str, update: &RuntimeUpdate) {
+        if let Some(s) = self.sources.iter_mut().find(|s| s.source_id == source_id) {
+            s.last_fetch_at = update.last_fetch_at;
+            s.last_success_at = update.last_success_at;
+            s.last_error.clone_from(&update.last_error);
+            s.fail_count = update.fail_count;
+            s.seeded = update.seeded;
+            s.name.clone_from(&update.name);
+        }
+    }
+}
+
+/// 一次抓取/重置后要回写的运行态列（对应 `rss_sources` 的运行列）。
+struct RuntimeUpdate {
+    last_fetch_at: i64,
+    last_success_at: i64,
+    last_error: String,
+    fail_count: i32,
+    seeded: bool,
+    name: String,
+}
+
+/// 运行态回写是否有「语义变化」需要落库（纯函数）。
+///
+/// 不算语义变化的：`last_fetch_at`/`last_success_at` 前进（仅影响 due 判定与
+/// UI 显示，内存里始终保持最新）；`fail_count` 增长但生效退避间隔不变（已
+/// 封顶，或用户配置间隔本就高于封顶）——退避行为重启前后等价，只是重启后
+/// UI 上的「连续失败 n 次」可能比内存里少。
+/// 算变化的：错误文本、首轮标记、订阅名、生效退避间隔。
+fn runtime_needs_persist(old: &RssSourceInfo, update: &RuntimeUpdate) -> bool {
+    if old.last_error != update.last_error || old.seeded != update.seeded || old.name != update.name
+    {
+        return true;
+    }
+    let mut next = old.clone();
+    next.fail_count = update.fail_count;
+    effective_interval_secs(old) != effective_interval_secs(&next)
+}
+
+/// 把内存镜像里的运行态列覆盖到刚从 DB 装载的订阅上（按 `source_id` 匹配）。
+fn merge_runtime_from_memory(fresh: &mut [RssSourceInfo], memory: &[RssSourceInfo]) {
+    for s in fresh {
+        if let Some(mem) = memory.iter().find(|m| m.source_id == s.source_id) {
+            s.last_fetch_at = mem.last_fetch_at;
+            s.last_success_at = mem.last_success_at;
+            s.last_error.clone_from(&mem.last_error);
+            s.fail_count = mem.fail_count;
+            s.seeded = mem.seeded;
+        }
+    }
+}
+
+/// 编辑订阅后是否需要重置运行态。返回 `Some(seeded)` 表示要清零失败退避、
+/// 清空错误并让下一轮 tick 立即重抓，`seeded` 为重置后的首轮标记：
+/// url / provider 变化＝新 feed，其历史条目必须重新只播种不下载（`false`）；
+/// 仅 Cookie / UA / 代理变化＝同一 feed，保留原标记。无关字段变化返回 `None`。
+fn runtime_reset_on_update(old: &RssSourceInfo, new: &RssSourceInfo) -> Option<bool> {
+    let feed_changed = old.url != new.url
+        || old.provider_id != new.provider_id
+        || old.provider_config != new.provider_config;
+    let auth_changed = old.cookies != new.cookies
+        || old.user_agent != new.user_agent
+        || old.proxy_url != new.proxy_url;
+    if feed_changed {
+        Some(false)
+    } else if auth_changed {
+        Some(old.seeded)
+    } else {
+        None
     }
 }
 
@@ -929,6 +1189,7 @@ fn item_from_parsed(source_id: &str, parsed: &parser::ParsedItem, fetched_at: i6
         title: parsed.title.clone(),
         link: parsed.link.clone(),
         enclosure_url: parsed.enclosure_url.clone(),
+        enclosure_type: parsed.enclosure_type.clone(),
         resolver_item: parsed.resolver_item.clone(),
         enclosure_length: parsed.enclosure_length,
         pub_date: parsed.pub_date,
@@ -959,6 +1220,12 @@ fn plan_for(source: &RssSourceInfo, item: &RssItemInfo) -> RssDownloadPlan {
             String::new()
         },
         size_hint: item.enclosure_length,
+        // 二段解析条目的下载地址是页面链接，enclosure 的类型与它无关。
+        enclosure_type: if item.resolver_item.is_empty() {
+            item.enclosure_type.clone()
+        } else {
+            String::new()
+        },
         notify: source.notify_on_download,
     }
 }
@@ -977,16 +1244,16 @@ fn resolve_proxy(proxy_url: &str, global: &ProxyConfig) -> ProxyConfig {
 /// [`auto_proxy::resolve_candidates`] 给出的候选（手动字段优先于系统代理）
 /// 各重试一次，命中即返回；全部候选也失败则返回最后一次错误。
 /// `eligible = false` 时只跑一次给定配置，行为与不做失败转移一致。
-async fn fetch_with_auto_failover<F, Fut>(
+async fn fetch_with_auto_failover<T, F, Fut>(
     url: &str,
     direct_config: ProxyConfig,
     eligible: bool,
     global: &ProxyConfig,
     mut attempt: F,
-) -> Result<ParsedFeed, String>
+) -> Result<T, String>
 where
     F: FnMut(ProxyConfig) -> Fut,
-    Fut: Future<Output = Result<ParsedFeed, String>>,
+    Fut: Future<Output = Result<T, String>>,
 {
     let first_error = match attempt(direct_config).await {
         Ok(feed) => return Ok(feed),
@@ -1115,11 +1382,119 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        MAX_BACKOFF_SECS, due_sources, effective_interval_secs, feed_origin,
-        fetch_with_auto_failover, plan_for, rule_of,
+        MAX_BACKOFF_SECS, RuntimeUpdate, due_sources, effective_interval_secs, feed_origin,
+        fetch_with_auto_failover, plan_for, rule_of, runtime_needs_persist,
+        runtime_reset_on_update, torrent_retry_delay_secs, url_looks_like_torrent,
     };
     use crate::proxy_config::{ProxyConfig, ProxyMode};
     use crate::rss::model::{RssItemInfo, RssItemStatus, RssSourceInfo};
+
+    fn mem_source(fail_count: i32, last_error: &str) -> RssSourceInfo {
+        RssSourceInfo {
+            source_id: "s1".to_string(),
+            name: "feed".to_string(),
+            interval_minutes: 30,
+            seeded: true,
+            fail_count,
+            last_error: last_error.to_string(),
+            last_fetch_at: 100,
+            last_success_at: 100,
+            ..Default::default()
+        }
+    }
+
+    fn update_of(old: &RssSourceInfo) -> RuntimeUpdate {
+        RuntimeUpdate {
+            last_fetch_at: old.last_fetch_at + 1800,
+            last_success_at: old.last_success_at + 1800,
+            last_error: old.last_error.clone(),
+            fail_count: old.fail_count,
+            seeded: old.seeded,
+            name: old.name.clone(),
+        }
+    }
+
+    #[test]
+    fn healthy_refetch_with_only_timestamps_advancing_is_not_persisted() {
+        let old = mem_source(0, "");
+        assert!(!runtime_needs_persist(&old, &update_of(&old)));
+    }
+
+    #[test]
+    fn semantic_runtime_changes_are_persisted() {
+        let healthy = mem_source(0, "");
+
+        let mut u = update_of(&healthy);
+        u.last_error = "HTTP 500".to_string();
+        u.fail_count = 1;
+        assert!(runtime_needs_persist(&healthy, &u), "first failure");
+
+        let mut u = update_of(&healthy);
+        u.seeded = false;
+        assert!(runtime_needs_persist(&healthy, &u), "seeded flag flipped");
+
+        let mut u = update_of(&healthy);
+        u.name = "renamed by feed title".to_string();
+        assert!(runtime_needs_persist(&healthy, &u), "name backfilled");
+
+        let failing = mem_source(2, "HTTP 500");
+        let mut u = update_of(&failing);
+        u.last_error.clear();
+        u.fail_count = 0;
+        assert!(runtime_needs_persist(&failing, &u), "recovery clears error");
+
+        let mut u = update_of(&failing);
+        u.last_error = "timeout".to_string();
+        assert!(runtime_needs_persist(&failing, &u), "different error text");
+
+        let mut u = update_of(&failing);
+        u.fail_count = 3;
+        assert!(
+            runtime_needs_persist(&failing, &u),
+            "backoff interval still growing (2 -> 3 failures)"
+        );
+    }
+
+    #[test]
+    fn repeated_identical_failure_at_backoff_cap_is_not_persisted() {
+        // 30min × 2^4 = 8h 已越过 6h 封顶：再失败只是计数增长，退避间隔不变。
+        let capped = mem_source(4, "HTTP 500");
+        let mut u = update_of(&capped);
+        u.fail_count = 5;
+        assert!(!runtime_needs_persist(&capped, &u));
+
+        // 用户配置的间隔本就高于封顶（24h）：任何失败计数增长都不改变间隔。
+        let mut slow = mem_source(1, "HTTP 500");
+        slow.interval_minutes = 24 * 60;
+        let mut u = update_of(&slow);
+        u.fail_count = 2;
+        assert!(!runtime_needs_persist(&slow, &u));
+    }
+
+    #[test]
+    fn reload_keeps_in_memory_runtime_but_takes_user_fields_from_db() {
+        // DB 里的运行态偏旧（无语义变化的抓取没落库），用户字段已被编辑。
+        let mut db_row = mem_source(0, "");
+        db_row.last_fetch_at = 10;
+        db_row.last_success_at = 10;
+        db_row.name = "edited name".to_string();
+        db_row.unread_count = 7;
+        let mut fresh = vec![db_row, source("other", 30, 5)];
+
+        let mut mem = mem_source(3, "HTTP 500");
+        mem.last_fetch_at = 9_999;
+        mem.last_success_at = 8_888;
+        super::merge_runtime_from_memory(&mut fresh, &[mem]);
+
+        assert_eq!(fresh[0].last_fetch_at, 9_999);
+        assert_eq!(fresh[0].last_success_at, 8_888);
+        assert_eq!(fresh[0].fail_count, 3);
+        assert_eq!(fresh[0].last_error, "HTTP 500");
+        assert_eq!(fresh[0].name, "edited name");
+        assert_eq!(fresh[0].unread_count, 7);
+        // 内存里没有的订阅（新建）保持 DB 值。
+        assert_eq!(fresh[1].last_fetch_at, 5);
+    }
 
     fn source(id: &str, interval: i32, last_fetch: i64) -> RssSourceInfo {
         RssSourceInfo {
@@ -1288,6 +1663,7 @@ mod tests {
             title: title.to_string(),
             link: format!("https://feed.test/item/{guid}"),
             enclosure_url: format!("https://feed.test/dl/{guid}.torrent"),
+            enclosure_type: String::new(),
             resolver_item: String::new(),
             enclosure_length: size,
             pub_date,
@@ -1668,7 +2044,7 @@ mod tests {
         let global = auto_proxy_global();
         let attempts = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let attempts_clone = attempts.clone();
-        let result = fetch_with_auto_failover(
+        let result = fetch_with_auto_failover::<ParsedFeed, _, _>(
             "http://feed.test/rss",
             ProxyConfig::default(),
             false, // 订阅有专属代理，或全局非 Auto：不重试
@@ -1729,7 +2105,7 @@ mod tests {
         let global = auto_proxy_global();
         let attempts = std::sync::Arc::new(std::sync::Mutex::new(0u32));
         let attempts_clone = attempts.clone();
-        let result = fetch_with_auto_failover(
+        let result = fetch_with_auto_failover::<ParsedFeed, _, _>(
             "http://feed.test/rss",
             ProxyConfig::default(),
             true,
@@ -1746,5 +2122,83 @@ mod tests {
         assert_eq!(result, Err("failed（auto 候选代理均已重试）".to_string()));
         // 直连 + 手动候选至少 2 次；测试机若配置了系统代理会再多一次系统候选。
         assert!(*attempts.lock().expect("lock") >= 2);
+    }
+
+    #[test]
+    fn torrent_url_detection_covers_extensionless_private_tracker_links() {
+        assert!(url_looks_like_torrent(
+            "https://pt.example/download.php?id=1&passkey=abc"
+        ));
+        assert!(url_looks_like_torrent(
+            "https://jackett.local/dl/indexer/?jackett_apikey=k&path=Zm9v&file=x"
+        ));
+        assert!(url_looks_like_torrent(
+            "https://mikanani.me/Download/a.torrent"
+        ));
+        // 无 passkey 的 download.php 可能是任意文件，不能误判为种子。
+        assert!(!url_looks_like_torrent(
+            "https://site.example/download.php?id=1"
+        ));
+        assert!(!url_looks_like_torrent("magnet:?xt=urn:btih:deadbeef"));
+        assert!(!url_looks_like_torrent("https://cdn.example/ep01.mp4"));
+    }
+
+    /// feed 声明 `application/x-bittorrent` 即视为种子（无扩展名的 PT 链接也是），
+    /// 二段解析条目的下载地址是页面链接，不受 enclosure 类型影响。
+    #[test]
+    fn declared_torrent_mime_marks_plan_as_torrent() {
+        let s = RssSourceInfo::default();
+        let item = RssItemInfo {
+            guid: "g".to_string(),
+            enclosure_url: "https://pt.example/dl?id=7".to_string(),
+            enclosure_type: "application/x-bittorrent".to_string(),
+            ..Default::default()
+        };
+        assert!(plan_for(&s, &item).is_torrent_file());
+
+        let untyped = RssItemInfo {
+            enclosure_type: String::new(),
+            ..item.clone()
+        };
+        assert!(!plan_for(&s, &untyped).is_torrent_file());
+
+        let resolver = RssItemInfo {
+            link: "https://site.example/page/7".to_string(),
+            resolver_item: "ep:7".to_string(),
+            ..item
+        };
+        assert!(!plan_for(&s, &resolver).is_torrent_file());
+    }
+
+    #[test]
+    fn torrent_retry_delay_doubles_and_is_capped() {
+        assert_eq!(torrent_retry_delay_secs(1), 600);
+        assert_eq!(torrent_retry_delay_secs(2), 1200);
+        assert_eq!(torrent_retry_delay_secs(3), 2400);
+        assert_eq!(torrent_retry_delay_secs(40), 24 * 60 * 60);
+    }
+
+    #[test]
+    fn update_resets_runtime_only_when_feed_or_auth_changes() {
+        let old = RssSourceInfo {
+            url: "https://a.test/rss".to_string(),
+            seeded: true,
+            fail_count: 5,
+            ..Default::default()
+        };
+        let same = old.clone();
+        assert_eq!(runtime_reset_on_update(&old, &same), None);
+
+        let mut renamed = old.clone();
+        renamed.name = "n".to_string();
+        assert_eq!(runtime_reset_on_update(&old, &renamed), None);
+
+        let mut new_cookie = old.clone();
+        new_cookie.cookies = "uid=1".to_string();
+        assert_eq!(runtime_reset_on_update(&old, &new_cookie), Some(true));
+
+        let mut new_url = old.clone();
+        new_url.url = "https://b.test/rss".to_string();
+        assert_eq!(runtime_reset_on_update(&old, &new_url), Some(false));
     }
 }

@@ -78,6 +78,8 @@ pub struct AgentState {
     pub gateway_migration_revision: Option<u64>,
     pub analytics_install_reported: bool,
     pub analytics_last_active_day: u64,
+    /// 匿名统计专用随机 ID；刻意与 FluxCloud `device_id` 分离，统计无法关联到账号 / 设备。
+    pub analytics_id: String,
     /// 调试构建下用户覆盖的 FluxCloud 地址；正式构建启动时忽略（锁定固定地址）。
     pub cloud_base_url_override: Option<String>,
 }
@@ -192,6 +194,14 @@ pub struct StateStore {
     acl_dir_ready: bool,
 }
 
+/// Windows 上锁争用是 `ERROR_LOCK_VIOLATION`，std 不把它映射为 `WouldBlock`。
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error
+            .raw_os_error()
+            .is_some_and(|code| fs2::lock_contended_error().raw_os_error() == Some(code))
+}
+
 impl StateStore {
     /// 打开状态目录并获取 `<data-dir>/agent.lock`。
     pub async fn open(data_dir: PathBuf) -> Result<Self, StateError> {
@@ -205,7 +215,7 @@ impl StateStore {
             .write(true)
             .open(lock_path)?;
         lock.try_lock_exclusive().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock {
+            if is_lock_contended(&error) {
                 StateError::Locked
             } else {
                 StateError::Io(error)
@@ -416,16 +426,25 @@ async fn current_user_sid() -> Result<String, StateError> {
     if !output.status.success() {
         return Err(StateError::Acl("whoami /user failed".to_owned()));
     }
-    let text =
-        String::from_utf8(output.stdout).map_err(|error| StateError::Acl(error.to_string()))?;
-    let sid = text
-        .split(',')
-        .nth(1)
-        .map(|value| value.trim().trim_matches('"'))
-        .filter(|value| value.starts_with("S-1-"))
-        .ok_or_else(|| StateError::Acl("could not parse current SID".to_owned()))?
-        .to_owned();
+    let sid = parse_whoami_sid(&output.stdout)
+        .ok_or_else(|| StateError::Acl("could not parse current SID".to_owned()))?;
     Ok(SID.get_or_init(|| sid).clone())
+}
+
+/// 从 `whoami /user /fo csv /nh` 的原始输出取 SID。
+///
+/// 输出按控制台 OEM 代码页编码（简体中文系统为 GBK），计算机名 / 用户名含非 ASCII 字符时不是
+/// 合法 UTF-8。SID 是末尾字段且纯 ASCII，`,` 也不会出现在任何多字节编码的尾字节里，所以按字节
+/// 切出末字段再解码，与代码页无关。
+#[cfg(any(windows, test))]
+fn parse_whoami_sid(output: &[u8]) -> Option<String> {
+    let field = output.rsplit(|&byte| byte == b',').next()?;
+    let sid = std::str::from_utf8(field).ok()?.trim().trim_matches('"');
+    (sid.starts_with("S-1-")
+        && sid
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then(|| sid.to_owned())
 }
 
 #[cfg(windows)]
@@ -486,6 +505,32 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::{AgentState, PersistedSyncEntry, StateError, StateStore};
+
+    #[test]
+    fn platform_lock_contention_error_is_recognized() {
+        assert!(super::is_lock_contended(&fs2::lock_contended_error()));
+        assert!(super::is_lock_contended(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        assert!(!super::is_lock_contended(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+    }
+
+    #[test]
+    fn whoami_sid_is_parsed_from_non_utf8_oem_output() {
+        // 简体中文系统的 OEM 代码页（GBK）输出，计算机名与用户名为「张三」：整行不是合法 UTF-8。
+        let gbk = b"\"\xd5\xc5\xc8\xfd-PC\\\xd5\xc5\xc8\xfd\",\"S-1-5-21-1-2-3-1001\"\r\n";
+        assert_eq!(
+            super::parse_whoami_sid(gbk).as_deref(),
+            Some("S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(
+            super::parse_whoami_sid(b"\"pc\\user\",\"S-1-5-21-1-2-3-1001\"\r\n").as_deref(),
+            Some("S-1-5-21-1-2-3-1001")
+        );
+        assert_eq!(super::parse_whoami_sid(b"garbage"), None);
+    }
 
     fn temp_dir(label: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

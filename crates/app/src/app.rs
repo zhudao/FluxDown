@@ -1,7 +1,6 @@
 //! composition root：一个 agent 会话、一个窗口注册表、全局菜单与动作；各窗口按需装配。
 
 use std::{
-    borrow::Cow,
     collections::BTreeMap,
     env,
     path::Path,
@@ -31,17 +30,11 @@ use crate::settings_port::AgentSettingsPort;
 use crate::theme_library::FsThemeLibrary;
 use crate::windows::WindowRegistry;
 
-const MI_SANS_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Regular.ttf");
-const MI_SANS_MEDIUM: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Medium.ttf");
-const MI_SANS_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/MiSans-Semibold.ttf");
-
 /// 事件泵单次批量上限。
 const EVENT_BATCH: usize = 256;
 /// 次实例等待刚启动主实例的 IPC 端点就绪、或等待旧主实例释放锁的最长时间。
 const ACTIVATION_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-/// 冷启动服务时等首个快照决定是否只留托盘的上限；到期仍未拿到快照就开窗（显示连接态）。
-const COLD_LAUNCH_DECISION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 桌面入口完成后的进程语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,15 +188,6 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         }
     });
     application.run(move |cx| {
-        if let Err(error) = cx.text_system().add_fonts(vec![
-            Cow::Borrowed(MI_SANS_REGULAR),
-            Cow::Borrowed(MI_SANS_MEDIUM),
-            Cow::Borrowed(MI_SANS_SEMIBOLD),
-        ]) {
-            log::error!("failed to load FluxDown UI fonts: {error:#}");
-            return;
-        }
-
         gpui_component::init(cx);
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
@@ -341,6 +325,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 不依赖主窗口存在。
         crate::windows::selection::install(cx);
         crate::windows::new_download::install_captures(cx);
+        crate::plugin_notices::install(cx);
         crate::progress_windows::install(cx);
         if let Some(task_id) = launch.progress_task.clone() {
             // 须先于下方「无待确认即退出」登记：意图的界面保活会推迟那次退出。
@@ -365,7 +350,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             return;
         }
         // 连接在 GPUI 初始化前已开始：热启动时首个快照几乎与事件循环同时到达，等它到了再开窗，
-        // 首帧就是完整数据、主题与语言，不闪「正在连接」；冷启动（需拉起后台）最多等连接宽限。
+        // 首帧就是完整数据、主题与语言，不闪「正在连接」；冷启动（需拉起后台）等到会话宽限到期。
         after_session_settled(cx, crate::windows::main::reveal);
     });
 
@@ -426,65 +411,30 @@ fn open_main_minimized(cx: &mut App) {
     }
 }
 
-/// 普通启动的开窗判定。
+/// 普通启动的开窗判定：会话就绪（快照、宽限到期或致命错误）后执行。
 ///
-/// - agent 已在运行（本进程没拉起它）：与其他启动一样，会话就绪（快照或连接宽限到期）即开窗。
-/// - 本进程冷启动了 agent：不按连接宽限开窗（冷启动必然超过宽限），等首个快照读偏好——
-///   agent 在 daemon 就绪前就已带偏好与外壳状态提供快照。偏好开启且托盘可见时不开窗、
-///   只退出界面，托盘由 agent 驻留；致命错误或 [`COLD_LAUNCH_DECISION_TIMEOUT`] 到期仍开窗。
+/// - agent 已在运行（本进程没拉起它）：与其他启动一样直接开窗。
+/// - 本进程冷启动了 agent：会话对首个快照放宽宽限（见 `session::COLD_START_GRACE`），这里据
+///   首个快照读偏好——agent 在 daemon 就绪前就已带偏好与外壳状态提供快照。偏好开启且托盘
+///   可见时不开窗、只退出界面，托盘由 agent 驻留；致命错误或宽限到期仍开窗。
 fn decide_plain_launch(bootstrap: Arc<ServiceBootstrap>, cx: &mut App) {
-    let session = Desktop::global(cx).session.clone();
-    if let Some(snapshot) = session.read(cx).latest().cloned() {
-        finish_plain_launch(bootstrap.spawned_agent(), Some(&snapshot), cx);
-        return;
-    }
-    let subscription = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let holder = std::rc::Rc::clone(&subscription);
-    let signal_bootstrap = bootstrap.clone();
-    *subscription.borrow_mut() = Some(cx.subscribe(&session, move |_, signal, cx| {
-        let cold = signal_bootstrap.spawned_agent();
-        let decided = match signal {
-            SessionSignal::Snapshot(_) | SessionSignal::Fatal(_) => true,
-            // 冷启动时连接宽限到期是预期的，继续等快照。
-            SessionSignal::Stale => !cold,
-            _ => false,
-        };
-        if decided && holder.borrow_mut().take().is_some() {
-            let snapshot = match signal {
-                SessionSignal::Snapshot(snapshot) => Some(snapshot.as_ref()),
-                _ => None,
-            };
-            finish_plain_launch(cold, snapshot, cx);
+    after_session_settled(cx, move |cx| {
+        let snapshot = Desktop::global(cx).session.read(cx).latest().cloned();
+        let tray_only = bootstrap.spawned_agent()
+            && snapshot
+                .as_deref()
+                .and_then(crate::session::agent_body)
+                .is_some_and(launch::start_in_tray);
+        if tray_only {
+            crate::lifecycle::quit_ui(cx);
+        } else {
+            crate::windows::main::reveal(cx);
         }
-    }));
-    let timeout_holder = subscription;
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(COLD_LAUNCH_DECISION_TIMEOUT)
-            .await;
-        cx.update(|cx| {
-            if timeout_holder.borrow_mut().take().is_some() {
-                crate::windows::main::reveal(cx);
-            }
-        });
-    })
-    .detach();
-}
-
-fn finish_plain_launch(cold: bool, snapshot: Option<&fluxdown_protocol::Snapshot>, cx: &mut App) {
-    let tray_only = cold
-        && snapshot
-            .and_then(crate::session::agent_body)
-            .is_some_and(launch::start_in_tray);
-    if tray_only {
-        crate::lifecycle::quit_ui(cx);
-    } else {
-        crate::windows::main::reveal(cx);
-    }
+    });
 }
 
 /// 会话已就绪（拿到快照或已确认离线）立即执行，否则等到就绪后执行一次。
-fn after_session_settled(cx: &mut App, run: fn(&mut App)) {
+fn after_session_settled(cx: &mut App, run: impl FnOnce(&mut App) + 'static) {
     let session = Desktop::global(cx).session.clone();
     if session.read(cx).is_settled() {
         run(cx);
@@ -492,11 +442,13 @@ fn after_session_settled(cx: &mut App, run: fn(&mut App)) {
     }
     let subscription = std::rc::Rc::new(std::cell::RefCell::new(None));
     let holder = std::rc::Rc::clone(&subscription);
+    let mut run = Some(run);
     *subscription.borrow_mut() = Some(cx.subscribe(&session, move |_, signal, cx| {
         if matches!(
             signal,
             SessionSignal::Snapshot(_) | SessionSignal::Stale | SessionSignal::Fatal(_)
         ) && holder.borrow_mut().take().is_some()
+            && let Some(run) = run.take()
         {
             run(cx);
         }
@@ -653,11 +605,11 @@ pub(crate) fn submit_captures_detached(
     finished
 }
 
-/// 桌面侧推导的 agent 路径；规则与 `fluxdown_agent::runtime::resolve_agent_data_dir` 一致，
-/// 否则设了 `FLUXDOWN_DATA_DIR` 时界面会去另一个目录找 bearer，永远连不上自己拉起的 agent。
+/// 桌面侧推导的 agent 路径；镜像 `native/agent/src/runtime.rs` 的 `resolve_agent_data_dir`。
+/// 桌面端不依赖 agent crate，只解析路径；旧状态的便携迁移由 agent 独占处理。
 #[derive(Debug, PartialEq, Eq)]
 struct DesktopPaths {
-    /// 数据根：`FLUXDOWN_DATA_DIR`，否则 ProjectDirs 数据目录。
+    /// 数据根：`FLUXDOWN_DATA_DIR`，否则（Windows 便携版）`<exe>/portable_data`，否则 ProjectDirs 数据目录。
     data_root: std::path::PathBuf,
     /// `FLUXDOWN_AGENT_DATA_DIR`，否则 `<数据根>/agent`。
     agent_data_dir: std::path::PathBuf,
@@ -669,6 +621,7 @@ impl DesktopPaths {
     fn from_env() -> Self {
         Self::resolve(
             |name| env::var_os(name),
+            portable_data_dir(),
             directories::ProjectDirs::from("dev", "zerx", "FluxDown")
                 .map(|project| project.data_dir().to_owned()),
         )
@@ -676,10 +629,12 @@ impl DesktopPaths {
 
     fn resolve(
         lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+        portable_data_dir: Option<std::path::PathBuf>,
         project_data_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let data_root = lookup("FLUXDOWN_DATA_DIR")
             .map(std::path::PathBuf::from)
+            .or(portable_data_dir)
             .or(project_data_dir)
             .unwrap_or_default();
         let agent_data_dir = lookup("FLUXDOWN_AGENT_DATA_DIR")
@@ -694,6 +649,27 @@ impl DesktopPaths {
             agent_token,
         }
     }
+}
+
+/// Windows 便携版：`<exe>/portable` 标记存在时数据在 `<exe>/portable_data`（与 agent 同判定）。
+#[cfg(windows)]
+fn portable_data_dir() -> Option<std::path::PathBuf> {
+    portable_data_dir_for_exe(&env::current_exe().ok()?)
+}
+
+/// 标记使用 `exists()`，与 `native/agent/src/runtime.rs` 的 `portable_data_dir` 一致。
+#[cfg(any(windows, test))]
+fn portable_data_dir_for_exe(exe: &Path) -> Option<std::path::PathBuf> {
+    let exe_dir = exe.parent()?;
+    exe_dir
+        .join("portable")
+        .exists()
+        .then(|| exe_dir.join("portable_data"))
+}
+
+#[cfg(not(windows))]
+fn portable_data_dir() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// 桌面数据根目录（导入主题等）。
@@ -734,6 +710,7 @@ mod tests {
                         .find(|(key, _)| key == name)
                         .map(|(_, value)| value.into())
                 },
+                None,
                 project.clone(),
             )
         };
@@ -766,6 +743,111 @@ mod tests {
         ]);
         assert_eq!(token_file.agent_data_dir, PathBuf::from("/agent-state"));
         assert_eq!(token_file.agent_token, PathBuf::from("/secrets/token"));
+    }
+
+    #[test]
+    fn portable_data_precedes_project_dirs_but_not_env() {
+        use std::path::PathBuf;
+
+        let portable = Some(PathBuf::from("/exe/portable_data"));
+        let project = Some(PathBuf::from("/project"));
+        let paths = DesktopPaths::resolve(|_| None, portable.clone(), project.clone());
+        assert_eq!(
+            paths.agent_data_dir,
+            PathBuf::from("/exe/portable_data/agent")
+        );
+        assert_eq!(
+            paths.agent_token,
+            PathBuf::from("/exe/portable_data/agent/agent.token")
+        );
+        let env_root = DesktopPaths::resolve(
+            |name| (name == "FLUXDOWN_DATA_DIR").then(|| "/root".into()),
+            portable.clone(),
+            project.clone(),
+        );
+        assert_eq!(env_root.agent_data_dir, PathBuf::from("/root/agent"));
+        assert_eq!(
+            env_root.agent_token,
+            PathBuf::from("/root/agent/agent.token")
+        );
+
+        let env_agent = DesktopPaths::resolve(
+            |name| (name == "FLUXDOWN_AGENT_DATA_DIR").then(|| "/agent-state".into()),
+            portable.clone(),
+            project.clone(),
+        );
+        assert_eq!(env_agent.data_root, PathBuf::from("/exe/portable_data"));
+        assert_eq!(env_agent.agent_data_dir, PathBuf::from("/agent-state"));
+        assert_eq!(
+            env_agent.agent_token,
+            PathBuf::from("/agent-state/agent.token")
+        );
+
+        let env_all = DesktopPaths::resolve(
+            |name| match name {
+                "FLUXDOWN_DATA_DIR" => Some("/root".into()),
+                "FLUXDOWN_AGENT_DATA_DIR" => Some("/agent-state".into()),
+                "FLUXDOWN_AGENT_TOKEN_FILE" => Some("/secrets/token".into()),
+                _ => None,
+            },
+            portable,
+            project,
+        );
+        assert_eq!(env_all.data_root, PathBuf::from("/root"));
+        assert_eq!(env_all.agent_data_dir, PathBuf::from("/agent-state"));
+        assert_eq!(env_all.agent_token, PathBuf::from("/secrets/token"));
+    }
+
+    #[test]
+    fn missing_portable_marker_keeps_project_paths() {
+        let dir = test_dir("no-portable-marker");
+        let portable = dir.join("portable_data");
+        std::fs::create_dir_all(&portable).expect("create unmarked portable data directory");
+        let project = dir.join("project");
+        let paths = DesktopPaths::resolve(
+            |_| None,
+            portable_data_dir_for_exe(&dir.join("FluxDown.exe")),
+            Some(project.clone()),
+        );
+        assert_eq!(paths.data_root, project);
+        assert_eq!(paths.agent_data_dir, project.join("agent"));
+        assert_eq!(paths.agent_token, project.join("agent/agent.token"));
+        std::fs::remove_dir_all(dir).expect("remove unmarked fixture");
+    }
+
+    #[test]
+    fn portable_marker_selects_agent_paths_for_files_and_directories() {
+        let dir = test_dir("portable-marker");
+        let agent_dir = dir.join("portable_data/agent");
+        std::fs::create_dir_all(&agent_dir).expect("create portable agent directory");
+        std::fs::write(agent_dir.join("agent.token"), "portable-token")
+            .expect("write portable agent token");
+        let marker = dir.join("portable");
+        for directory_marker in [false, true] {
+            if directory_marker {
+                std::fs::create_dir(&marker).expect("create directory marker");
+            } else {
+                std::fs::write(&marker, "").expect("create file marker");
+            }
+            let paths = DesktopPaths::resolve(
+                |_| None,
+                portable_data_dir_for_exe(&dir.join("FluxDown.exe")),
+                Some(dir.join("project")),
+            );
+            assert_eq!(paths.data_root, dir.join("portable_data"));
+            assert_eq!(paths.agent_data_dir, agent_dir);
+            assert_eq!(paths.agent_token, agent_dir.join("agent.token"));
+            assert_eq!(
+                std::fs::read_to_string(&paths.agent_token).expect("read portable agent token"),
+                "portable-token"
+            );
+            if directory_marker {
+                std::fs::remove_dir(&marker).expect("remove directory marker");
+            } else {
+                std::fs::remove_file(&marker).expect("remove file marker");
+            }
+        }
+        std::fs::remove_dir_all(dir).expect("remove portable fixture");
     }
 
     #[test]

@@ -1969,6 +1969,10 @@ class S {
       _r('pluginOpUninstallFailed', {'message': message});
   String pluginOpEnabledFailed(String message) =>
       _r('pluginOpEnabledFailed', {'message': message});
+  String get pluginReloadTooltip => _r('pluginReloadTooltip');
+  String get pluginOpReloadSuccess => _r('pluginOpReloadSuccess');
+  String pluginOpReloadFailed(String message) =>
+      _r('pluginOpReloadFailed', {'message': message});
   String pluginOpGenericFailed(String message) =>
       _r('pluginOpGenericFailed', {'message': message});
   String get pluginDepsMissingTitle => _r('pluginDepsMissingTitle');
@@ -2395,6 +2399,8 @@ class S {
   String get webhookRegenerate => _r('webhookRegenerate');
   String get webhookCopy => _r('webhookCopy');
   String get webhookCopied => _r('webhookCopied');
+  String get detailCopyError => _r('detailCopyError');
+  String get detailErrorCopied => _r('detailErrorCopied');
   String get webhookFieldAllowHttp => _r('webhookFieldAllowHttp');
   String get webhookAllowHttpDesc => _r('webhookAllowHttpDesc');
   String get webhookFieldUseProxy => _r('webhookFieldUseProxy');

@@ -1,7 +1,8 @@
 use std::{
-    cell::Cell,
-    collections::{HashMap, HashSet},
+    cell::{Cell, RefCell},
+    collections::{HashMap, HashSet, VecDeque},
     rc::Rc,
+    time::Instant,
 };
 
 use fluxdown_protocol::{RemoteCommandAction, RemoteCommandParams, RemoteTaskStatus};
@@ -9,8 +10,9 @@ use fluxdown_ui_components::{CheckState, FluxIcon, check_mark, tabular_numbers};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Edges, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement as _, IntoElement, Modifiers, MouseButton, ParentElement, Pixels, Render,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled, WeakEntity, Window, div,
+    InteractiveElement as _, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled, Task, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -24,13 +26,19 @@ use gpui_component::{
 };
 
 use crate::{
-    components::task_drag::DraggedTasks,
+    batch::{MAX_IN_FLIGHT, coalesce_commands, retry_copy, retry_delay},
+    components::{
+        file_icon::{SystemFileIcon, system_file_icon},
+        task_drag::DraggedTasks,
+    },
     controller::DownloadsCommand,
     model::{
         CategoryIndex, DownloadFilter, DownloadTaskView, RowId, RowKey, SidebarSelection, TaskKind,
         TaskProtocol, TaskSource, TaskState, TaskStore,
+        counts::SidebarCounts,
         dispatch::DispatchSummary,
         format_bytes,
+        row_order::RowOrder,
         view_prefs::{DateBucket, SortDir, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key},
     },
     pages::downloads::DownloadView,
@@ -39,13 +47,13 @@ use crate::{
 
 /// 固定左侧选择列宽（含表格左侧留白）：平时显示文件类型图标，行悬停 / 已选中 /
 /// 存在任意选中时换成复选框。
-const SELECTION_COLUMN_WIDTH: f32 = 36.;
+pub(crate) const SELECTION_COLUMN_WIDTH: f32 = 36.;
 /// 表头拖拽调宽的上限（下限按列取 [`DownloadColumnKind::min_width`]）。
 const MAX_COLUMN_WIDTH: f32 = 480.;
 /// 文件名列拖宽上限（长文件名需要比其他列更宽的空间）。
 const FILE_NAME_MAX_WIDTH: f32 = 1600.;
 /// 表头高。DataTable 的 `Size` 同时决定表头行高；任务行高由 `render_tr` 按密度覆盖。
-const TABLE_HEADER_HEIGHT: f32 = 28.;
+pub(crate) const TABLE_HEADER_HEIGHT: f32 = 28.;
 /// 表格右侧留白（`render_last_empty_col`），与选择列内含的左侧留白对称（≈ spacing.sm）。
 const TABLE_TRAILING_GUTTER: f32 = 8.;
 /// 表头列分隔线高（常驻的拖宽提示，悬停时由拖宽柄全高高亮接管）。
@@ -60,6 +68,8 @@ const PROGRESS_GAP: f32 = 8.;
 const PAUSED_BAR_ALPHA: f32 = 0.4;
 /// 行悬停操作按钮边长。
 const ROW_ACTION_SIZE: f32 = 24.;
+/// 舒适密度下系统文件图标相对 `icon.lg`（16）的倍数：24px，与双行文字块（约 34px）协调。
+const FILE_ICON_COMFORTABLE_SCALE: f32 = 1.5;
 /// 选中底色左右内缩（inset 样式）。
 const SELECTED_INSET_X: f32 = 4.;
 /// 分组头内容高；行槽位（与任务行等高，uniform_list 要求）多出的部分作上方留白。
@@ -166,7 +176,7 @@ impl DownloadColumnKind {
         matches!(self, Self::Size | Self::Speed | Self::Eta | Self::Created)
     }
 
-    /// 点击表头切换到的排序键；「状态」列回到智能排序（状态优先级）。
+    /// 点击表头切换到的排序键。
     fn sort_key(self) -> Option<ViewSortKey> {
         match self {
             Self::FileName => Some(ViewSortKey::Name),
@@ -174,7 +184,7 @@ impl DownloadColumnKind {
             Self::Size => Some(ViewSortKey::Size),
             Self::Speed => Some(ViewSortKey::Speed),
             Self::Created => Some(ViewSortKey::Created),
-            Self::Status => Some(ViewSortKey::Smart),
+            Self::Status => Some(ViewSortKey::Status),
             _ => None,
         }
     }
@@ -265,6 +275,33 @@ struct GroupBucket {
     key: String,
     label: SharedString,
     order: i64,
+}
+
+/// 上次计算的侧栏计数及其有效期键（存储 generation + 分类索引身份）。
+struct CountsCache {
+    generation: u64,
+    categories: Rc<CategoryIndex>,
+    counts: Rc<SidebarCounts>,
+}
+
+/// 按 key 分桶：桶顺序为 key 首次出现的顺序，桶元数据取首个成员的；用 key → 下标的
+/// 哈希表定位，分桶数很多时（如按站点分组）仍是线性。
+fn group_by_key<B, V>(
+    items: impl IntoIterator<Item = (B, V)>,
+    key_of: impl Fn(&B) -> &str,
+) -> Vec<(B, Vec<V>)> {
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<(B, Vec<V>)> = Vec::new();
+    for (bucket, value) in items {
+        match index.get(key_of(&bucket)) {
+            Some(&ix) => groups[ix].1.push(value),
+            None => {
+                index.insert(key_of(&bucket).to_owned(), groups.len());
+                groups.push((bucket, vec![value]));
+            }
+        }
+    }
+    groups
 }
 
 /// 侧栏选中项到表格筛选的投影。
@@ -438,9 +475,26 @@ pub(crate) struct DownloadTableDelegate {
     pub(crate) columns: Vec<DownloadColumn>,
     store: Rc<TaskStore>,
     categories: Rc<CategoryIndex>,
+    /// 侧栏计数缓存（侧栏渲染经不可变引用读取，故内部可变）。
+    counts: RefCell<Option<CountsCache>>,
     visible: Vec<VisibleRow>,
     seen_generation: u64,
+    /// 上次重算时存储的结构计数；未变说明只有行内容变化，可沿用上次的行顺序。
+    seen_structure: u64,
+    /// 全量排序所得的分组前顺序，不是 RowOrder 保持期内显示的顺序。
+    sorted_rows: Vec<RowId>,
+    seen_sort_values: u64,
+    seen_view_fields: u64,
+    sorted_group_date: Option<chrono::NaiveDate>,
+    #[cfg(test)]
+    force_full_sort: bool,
+    #[cfg(test)]
+    full_sort_count: usize,
     view_dirty: bool,
+    /// 行顺序稳定器：指针活动期间 / 动态排序键限频内推迟内容变化引起的重排。
+    row_order: RowOrder,
+    /// 被推迟的重排的补偿定时器（到期后强制按最新排序重排）。
+    reorder_timer: Option<Task<()>>,
     selected_tasks: HashSet<RowKey>,
     selection_anchor: Option<RowKey>,
     filter: TableFilter,
@@ -478,9 +532,21 @@ impl DownloadTableDelegate {
                 .collect(),
             store,
             categories: Rc::new(CategoryIndex::default()),
+            counts: RefCell::new(None),
             visible: Vec::new(),
             seen_generation: u64::MAX,
+            seen_structure: u64::MAX,
+            sorted_rows: Vec::new(),
+            seen_sort_values: u64::MAX,
+            seen_view_fields: u64::MAX,
+            sorted_group_date: None,
+            #[cfg(test)]
+            force_full_sort: false,
+            #[cfg(test)]
+            full_sort_count: 0,
             view_dirty: true,
+            row_order: RowOrder::default(),
+            reorder_timer: None,
             selected_tasks: HashSet::new(),
             selection_anchor: None,
             filter: TableFilter::Download(DownloadFilter::ALL),
@@ -673,23 +739,24 @@ impl DownloadTableDelegate {
             && (self.file_name_width_for(viewport) - self.applied_file_width.get()).abs() >= 0.5
     }
 
-    /// 表头点击排序：已是当前排序键则翻转方向（智能排序无方向，保持不变），
-    /// 否则切到该键并取列的默认方向。返回偏好是否改变。
+    /// 表头点击排序，三档循环：列默认方向 → 反方向 → 恢复默认排序（智能：添加顺序）。
+    /// 返回偏好是否改变。
     fn toggle_sort(&mut self, kind: DownloadColumnKind) -> bool {
         let Some(key) = kind.sort_key() else {
             return false;
         };
-        if self.prefs.sort_key == key {
-            if key == ViewSortKey::Smart {
-                return false;
-            }
-            self.prefs.sort_dir = match self.prefs.sort_dir {
+        let default_dir = kind.default_sort_dir();
+        if self.prefs.sort_key != key {
+            self.prefs.sort_key = key;
+            self.prefs.sort_dir = default_dir;
+        } else if self.prefs.sort_dir == default_dir {
+            self.prefs.sort_dir = match default_dir {
                 SortDir::Asc => SortDir::Desc,
                 SortDir::Desc => SortDir::Asc,
             };
         } else {
-            self.prefs.sort_key = key;
-            self.prefs.sort_dir = kind.default_sort_dir();
+            self.prefs.sort_key = ViewSortKey::Smart;
+            self.prefs.sort_dir = SortDir::default();
         }
         self.view_dirty = true;
         true
@@ -736,13 +803,20 @@ impl DownloadTableDelegate {
 
     /// 存储变化或视图参数变化时重算可见行。返回是否重算。
     pub(crate) fn refresh_view(&mut self) -> bool {
+        self.refresh_view_at(Instant::now())
+    }
+
+    fn refresh_view_at(&mut self, now: Instant) -> bool {
         let generation = self.store.generation();
         if !self.view_dirty && generation == self.seen_generation {
             return false;
         }
+        let structure = self.store.structure_generation();
+        let content_only = !self.view_dirty && structure == self.seen_structure;
         self.seen_generation = generation;
+        self.seen_structure = structure;
         self.view_dirty = false;
-        self.visible = self.compute_visible();
+        self.visible = self.compute_visible(content_only, now);
         // 选中集只保留当前筛选 + 搜索下仍在视图内的任务（已删除、被侧栏切换 / 搜索 /
         // 状态变化筛掉的一律移出），选择条计数与快捷键批量动作都只作用于看得见的任务。
         // 折叠分组内的任务仍属于当前视图，不因折叠而取消选中。
@@ -760,13 +834,26 @@ impl DownloadTableDelegate {
         true
     }
 
+    /// 表格内指针活动（移动 / 滚动 / 按下）：推迟由行内容变化引起的重排，避免行在光标下跳走。
+    pub(crate) fn note_pointer_activity(&mut self) {
+        self.row_order.note_interaction(Instant::now());
+    }
+
+    fn reorder_deadline(&self) -> Option<Instant> {
+        self.row_order.deadline(self.prefs.sort_key.is_live())
+    }
+
+    fn needs_reorder_timer(&self) -> bool {
+        self.reorder_timer.is_none() && self.reorder_deadline().is_some()
+    }
+
     fn matches_query(&self, task: &DownloadTaskView) -> bool {
         if self.query.is_empty() {
             return true;
         }
-        task.name.to_lowercase().contains(&self.query)
-            || task.url.to_lowercase().contains(&self.query)
-            || task.site.to_lowercase().contains(&self.query)
+        task.name_fold.contains(&self.query)
+            || task.url_fold.contains(&self.query)
+            || task.site_fold.contains(&self.query)
     }
 
     fn matches_filter(&self, task: &DownloadTaskView) -> bool {
@@ -780,22 +867,60 @@ impl DownloadTableDelegate {
         }
     }
 
-    fn compute_visible(&self) -> Vec<VisibleRow> {
-        let local = self.store.local();
-        let remote = self.store.remote();
-        let mut rows: Vec<(RowId, &DownloadTaskView)> = local
-            .iter()
-            .enumerate()
-            .map(|(ix, task)| (RowId::Local(ix), task))
-            .chain(
-                remote
-                    .iter()
-                    .enumerate()
-                    .map(|(ix, task)| (RowId::Remote(ix), task)),
-            )
-            .filter(|(_, task)| self.matches_filter(task) && self.matches_query(task))
-            .collect();
-        rows.sort_by(|(_, left), (_, right)| self.prefs.compare(left, right));
+    fn compute_visible(&mut self, content_only: bool, now: Instant) -> Vec<VisibleRow> {
+        let store = Rc::clone(&self.store);
+        let local = store.local();
+        let remote = store.remote();
+        let sort_values = store.sort_generation(self.prefs.sort_key);
+        let view_fields = store.view_fields_generation();
+        let group_date =
+            (self.prefs.group_by == ViewGroupBy::Date).then(|| chrono::Local::now().date_naive());
+        let reuse_sorted = content_only
+            && sort_values == self.seen_sort_values
+            && view_fields == self.seen_view_fields
+            && group_date == self.sorted_group_date;
+        #[cfg(test)]
+        let reuse_sorted = reuse_sorted && !self.force_full_sort;
+        let mut rows: Vec<(RowId, &DownloadTaskView)> = if reuse_sorted {
+            self.sorted_rows
+                .iter()
+                .filter_map(|&id| {
+                    let task = match id {
+                        RowId::Local(ix) => local.get(ix),
+                        RowId::Remote(ix) => remote.get(ix),
+                    };
+                    task.map(|task| (id, task))
+                })
+                .collect()
+        } else {
+            local
+                .iter()
+                .enumerate()
+                .map(|(ix, task)| (RowId::Local(ix), task))
+                .chain(
+                    remote
+                        .iter()
+                        .enumerate()
+                        .map(|(ix, task)| (RowId::Remote(ix), task)),
+                )
+                .filter(|(_, task)| self.matches_filter(task) && self.matches_query(task))
+                .collect()
+        };
+        if !reuse_sorted {
+            rows.sort_by(|(_, left), (_, right)| self.prefs.compare(left, right));
+            self.sorted_rows.clear();
+            self.sorted_rows.extend(rows.iter().map(|(id, _)| *id));
+            self.seen_sort_values = sort_values;
+            self.seen_view_fields = view_fields;
+            self.sorted_group_date = group_date;
+            #[cfg(test)]
+            {
+                self.full_sort_count += 1;
+            }
+        }
+        // 即使排序输入不变，也照常应用保持期：过期顺序和动态键的重排时钟必须一致。
+        let live_key = self.prefs.sort_key.is_live();
+        let rows = self.row_order.apply(rows, content_only, live_key, now);
 
         if self.prefs.group_by == ViewGroupBy::None {
             return rows
@@ -804,17 +929,11 @@ impl DownloadTableDelegate {
                 .collect();
         }
 
-        let mut buckets: Vec<(GroupBucket, Vec<RowId>)> = Vec::new();
-        for (id, task) in rows {
-            let bucket = self.group_bucket(task);
-            match buckets
-                .iter_mut()
-                .find(|(existing, _)| existing.key == bucket.key)
-            {
-                Some((_, ids)) => ids.push(id),
-                None => buckets.push((bucket, vec![id])),
-            }
-        }
+        let mut buckets = group_by_key(
+            rows.into_iter()
+                .map(|(id, task)| (self.group_bucket(task), id)),
+            |bucket: &GroupBucket| bucket.key.as_str(),
+        );
         buckets.sort_by(|(left, _), (right, _)| {
             left.order
                 .cmp(&right.order)
@@ -847,7 +966,7 @@ impl DownloadTableDelegate {
             ViewGroupBy::Status => GroupBucket {
                 key: format!("status:{}", state_group_key(task.state)),
                 label: strings.state_label(task.state),
-                order: i64::from(task.state.smart_rank()),
+                order: i64::from(task.state.status_rank()),
             },
             ViewGroupBy::Date => {
                 let bucket = DateBucket::of(task.created_at_secs);
@@ -946,32 +1065,41 @@ impl DownloadTableDelegate {
             .collect()
     }
 
-    pub(crate) fn count_matching(&self, filter: &DownloadFilter) -> usize {
+    /// 侧栏计数：按存储 generation 与分类索引缓存，一次扫描得出全部桶。
+    fn sidebar_counts(&self) -> Rc<SidebarCounts> {
+        let generation = self.store.generation();
+        let mut cache = self.counts.borrow_mut();
+        if let Some(cached) = cache.as_ref()
+            && cached.generation == generation
+            && Rc::ptr_eq(&cached.categories, &self.categories)
+        {
+            return Rc::clone(&cached.counts);
+        }
         let local = self.store.local();
         let remote = self.store.remote();
-        local
-            .iter()
-            .chain(remote.iter())
-            .filter(|task| filter.matches(task, &self.categories))
-            .count()
+        let counts = Rc::new(SidebarCounts::compute(
+            local.iter().chain(remote.iter()),
+            &self.categories,
+        ));
+        *cache = Some(CountsCache {
+            generation,
+            categories: Rc::clone(&self.categories),
+            counts: Rc::clone(&counts),
+        });
+        counts
     }
 
-    pub(crate) fn count_where(&self, predicate: impl Fn(&DownloadTaskView) -> bool) -> usize {
-        let local = self.store.local();
-        let remote = self.store.remote();
-        local
-            .iter()
-            .chain(remote.iter())
-            .filter(|t| predicate(t))
-            .count()
+    pub(crate) fn count_matching(&self, filter: &DownloadFilter) -> usize {
+        self.sidebar_counts().filter(filter)
     }
 
     pub(crate) fn count_in_queue(&self, queue_id: &str) -> usize {
-        self.store
-            .local()
-            .iter()
-            .filter(|task| task.queue_id == queue_id)
-            .count()
+        self.sidebar_counts().queue(queue_id)
+    }
+
+    /// 设备计数：与表格筛选同一规则（[`SidebarSelection::device_matches`]）。
+    pub(crate) fn count_device(&self, device_id: &str) -> usize {
+        self.sidebar_counts().device(device_id)
     }
 
     fn shown_columns_count(&self) -> usize {
@@ -1056,7 +1184,7 @@ impl DownloadTableDelegate {
         self.selection_anchor = None;
     }
 
-    fn select_task(&mut self, key: RowKey, modifiers: Modifiers) {
+    pub(crate) fn select_task(&mut self, key: RowKey, modifiers: Modifiers) {
         if modifiers.shift
             && let Some(anchor) = self.selection_anchor.clone()
         {
@@ -1252,7 +1380,8 @@ impl DownloadTableDelegate {
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .map(str::to_owned),
-            TaskState::Pending | TaskState::Completed => None,
+            TaskState::Pending => self.strings.queued_label(task),
+            TaskState::Completed => None,
         }
     }
 
@@ -1275,36 +1404,46 @@ impl DownloadTableDelegate {
         }
     }
 
-    /// 固定左列：平时显示文件类型图标（元数据加载中为 Spinner）；行悬停时经
-    /// `group_hover` 换成复选框；行已选中或存在任意选中时复选框常显。
+    /// 固定左列：平时显示系统文件图标（取不到时回退为按类型的图标，元数据加载中为
+    /// Spinner）；行悬停时经 `group_hover` 换成复选框；行已选中或存在任意选中时复选框常显。
     /// 隐藏（`invisible`）的元素不绘制、不注册鼠标监听，不会拦截行点击。
     fn render_selection_cell(
         &self,
         row_ix: usize,
         task: &DownloadTaskView,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> AnyElement {
         let theme = active_theme(cx);
         let muted = theme.tokens().colors.muted_foreground;
+        let hover_border = theme.tokens().colors.foreground.opacity(0.7);
         let icon_sizes = theme.extended().icon;
         let key = task.key.clone();
         let selected = self.selected_tasks.contains(&key);
         let checkbox_pinned = selected || !self.selected_tasks.is_empty();
         let glyph = (!checkbox_pinned).then(|| {
             if task.metadata_pending {
-                Spinner::new()
+                return Spinner::new()
                     .with_size(icon_sizes.md)
                     .icon(IconName::LoaderCircle)
                     .color(muted)
-                    .into_any_element()
+                    .into_any_element();
+            }
+            // 舒适双行给系统图标更大的尺寸（与两行文字等高感），紧凑单行与文字同高。
+            let size = if self.prefs.density.two_line() {
+                icon_sizes.lg * FILE_ICON_COMFORTABLE_SCALE
             } else {
-                Icon::new(self.kind_visual(task.kind).0)
+                icon_sizes.lg
+            };
+            match system_file_icon(task, size, window, cx) {
+                SystemFileIcon::Ready(icon) => icon,
+                SystemFileIcon::Loading => div().size(size).into_any_element(),
+                SystemFileIcon::Unavailable => Icon::new(self.kind_visual(task.kind).0)
                     .size(icon_sizes.lg)
                     .text_color(muted)
-                    .into_any_element()
+                    .into_any_element(),
             }
         });
-        let hover_border = theme.tokens().colors.foreground.opacity(0.7);
         let checkbox = div()
             .id(("download-task-multi-select", row_ix))
             .p(px(4.))
@@ -1512,11 +1651,14 @@ impl DownloadTableDelegate {
     }
 
     /// 行悬停操作（最后一个可见列右端浮层）：暂停 / 继续 / 重试 / 打开 + 在文件夹中
-    /// 显示。底色与行悬停一致（选中时叠加选中色），点击不改变选中。
+    /// 显示；停靠详情面板未打开时再加「详情」（面板打开后单击行即切换详情，按钮多余），
+    /// 舒适与紧凑密度一致。底色与行悬停一致（选中时叠加选中色），除「详情」外点击不
+    /// 改变选中。
     fn render_row_actions(&self, task: &DownloadTaskView, cx: &App) -> Option<AnyElement> {
         let host = self.host.as_ref()?;
         let is_local = task.key.is_local();
-        let mut actions = row_actions(task.state, is_local, task.file_missing)
+        let with_detail = !self.prefs.detail_open;
+        let mut actions = row_actions(task.state, is_local, task.file_missing, with_detail)
             .filter(|action| {
                 is_local
                     || action
@@ -1538,6 +1680,7 @@ impl DownloadTableDelegate {
                 RowAction::Retry => (FluxIcon::RotateCw, self.strings.resume.clone()),
                 RowAction::Open => (FluxIcon::ExternalLink, self.strings.open_file.clone()),
                 RowAction::Reveal => (FluxIcon::FolderOpen, self.strings.open_folder.clone()),
+                RowAction::Detail => (FluxIcon::PanelRight, self.strings.detail.clone()),
             };
             let host = host.clone();
             let key = task.key.clone();
@@ -1552,14 +1695,19 @@ impl DownloadTableDelegate {
                 .hover(move |style| style.bg(pressed).text_color(foreground))
                 .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, _, cx| {
+                .on_click(move |_, window, cx| {
                     cx.stop_propagation();
+                    let key = key.clone();
                     let _ = host.update(cx, |view, cx| {
+                        let Some(command) = action.command() else {
+                            view.show_row_detail(key, window, cx);
+                            return;
+                        };
                         let command = view
                             .controller
                             .store()
                             .get(&key)
-                            .and_then(|row| task_command(&row, action.command()));
+                            .and_then(|row| task_command(&row, command));
                         if let Some(command) = command {
                             view.execute_commands(vec![command], cx);
                         }
@@ -1616,8 +1764,15 @@ impl DownloadTableDelegate {
                 });
         let key = key.to_owned();
         let on_click = cx.listener(move |table, _: &ClickEvent, _, cx| {
-            table.delegate_mut().toggle_group_collapsed(&key);
-            table.delegate_mut().refresh_view();
+            let delegate = table.delegate_mut();
+            delegate.toggle_group_collapsed(&key);
+            delegate.refresh_view();
+            // 折叠记忆随视图偏好持久化；表格实体此刻正被更新，放到帧外调用。
+            if let Some(host) = delegate.host.clone() {
+                cx.defer(move |cx| {
+                    let _ = host.update(cx, |view, cx| view.schedule_persist_prefs(cx));
+                });
+            }
             table.refresh(cx);
             cx.notify();
         });
@@ -2050,13 +2205,14 @@ impl TableDelegate for DownloadTableDelegate {
         };
         let numeric = kind.is_numeric();
         let sort_key = kind.sort_key();
-        // 只有当前排序列显示方向箭头；智能排序没有方向，不显示。
-        let arrow = sort_key
-            .filter(|key| *key == self.prefs.sort_key && *key != ViewSortKey::Smart)
-            .map(|_| match self.prefs.sort_dir {
-                SortDir::Asc => FluxIcon::ArrowUp,
-                SortDir::Desc => FluxIcon::ArrowDown,
-            });
+        // 只有当前排序列显示方向箭头；智能（默认）排序不对应任何列。
+        let arrow =
+            sort_key
+                .filter(|key| *key == self.prefs.sort_key)
+                .map(|_| match self.prefs.sort_dir {
+                    SortDir::Asc => FluxIcon::ArrowUp,
+                    SortDir::Desc => FluxIcon::ArrowDown,
+                });
         let on_click = sort_key.map(|_| {
             cx.listener(move |table, event: &ClickEvent, _, cx| {
                 // 拖动列头换位后在原列松开也会产生 click，位移过大时不当作排序。
@@ -2211,7 +2367,7 @@ impl TableDelegate for DownloadTableDelegate {
         &mut self,
         row_ix: usize,
         col_ix: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let id = match self.visible.get(row_ix) {
@@ -2237,7 +2393,7 @@ impl TableDelegate for DownloadTableDelegate {
         let task: &DownloadTaskView = &task;
 
         if col_ix == 0 {
-            return self.render_selection_cell(row_ix, task, cx);
+            return self.render_selection_cell(row_ix, task, window, cx);
         }
 
         let Some(kind) = self.shown_column(col_ix).map(|column| column.kind) else {
@@ -2331,12 +2487,16 @@ impl TableDelegate for DownloadTableDelegate {
         self.move_shown_column(col_ix, to_ix);
     }
 
+    /// 右键选中必须在这里完成：gpui-component 在鼠标冒泡阶段先 `window.defer` 排队构建
+    /// 菜单，随后行监听才 emit `RightClickedRow`；effect 按 FIFO 执行，订阅者收到事件时
+    /// 菜单早已按旧选区构建完毕（无选中 → 空菜单不显示，只剩复选框常显；已选他行 →
+    /// 菜单作用于旧选区）。`right_clicked_row` 在派发时同步写入，构建时可靠。
     fn context_menu(
         &mut self,
         row_ix: usize,
         menu: PopupMenu,
         _window: &mut Window,
-        _cx: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> PopupMenu {
         let menu = match self.action_context.clone() {
             Some(handle) => menu.action_context(handle),
@@ -2344,7 +2504,13 @@ impl TableDelegate for DownloadTableDelegate {
         };
         match self.visible.get(row_ix).cloned() {
             Some(VisibleRow::GroupHeader { key, .. }) => self.group_context_menu(&key, menu),
-            Some(VisibleRow::Task(_)) => self.task_context_menu(menu),
+            Some(VisibleRow::Task(_)) => {
+                if let Some(key) = self.row_key_at(row_ix) {
+                    self.select_task_for_context_menu(key);
+                    cx.notify();
+                }
+                self.task_context_menu(menu)
+            }
             None => menu,
         }
     }
@@ -2377,7 +2543,7 @@ pub(crate) struct SelectionSummary {
     pub(crate) any_resumable: bool,
 }
 
-/// 行悬停操作；执行时映射为 [`ToolbarCommand`]，与工具栏 / 右键菜单同一命令路径。
+/// 行悬停操作；除「详情」外执行时映射为 [`ToolbarCommand`]，与工具栏 / 右键菜单同一命令路径。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RowAction {
     Pause,
@@ -2386,24 +2552,28 @@ pub(crate) enum RowAction {
     Retry,
     Open,
     Reveal,
+    /// 在停靠面板中查看详情（与右键「详情」同一入口）。
+    Detail,
 }
 
 impl RowAction {
-    fn command(self) -> ToolbarCommand {
+    /// 对应的工具栏命令；「详情」不是任务命令，返回 `None`。
+    fn command(self) -> Option<ToolbarCommand> {
         match self {
-            Self::Pause => ToolbarCommand::Pause,
-            Self::Resume | Self::Retry => ToolbarCommand::Resume,
-            Self::Open => ToolbarCommand::Open,
-            Self::Reveal => ToolbarCommand::Reveal,
+            Self::Pause => Some(ToolbarCommand::Pause),
+            Self::Resume | Self::Retry => Some(ToolbarCommand::Resume),
+            Self::Open => Some(ToolbarCommand::Open),
+            Self::Reveal => Some(ToolbarCommand::Reveal),
+            Self::Detail => None,
         }
     }
 
-    /// 远程任务上对应的云端动作（打开 / 显示没有远程对应）。
+    /// 远程任务上对应的云端动作（打开 / 显示 / 详情没有远程对应）。
     fn remote_action(self) -> Option<RemoteCommandAction> {
         match self {
             Self::Pause => Some(RemoteCommandAction::Pause),
             Self::Resume | Self::Retry => Some(RemoteCommandAction::Resume),
-            Self::Open | Self::Reveal => None,
+            Self::Open | Self::Reveal | Self::Detail => None,
         }
     }
 
@@ -2414,18 +2584,20 @@ impl RowAction {
             Self::Retry => "download-row-action-retry",
             Self::Open => "download-row-action-open",
             Self::Reveal => "download-row-action-reveal",
+            Self::Detail => "download-row-action-detail",
         }
     }
 }
 
 /// 行悬停操作集合：下载中 / 排队 → 暂停；暂停 → 继续；失败 → 重试；完成 → 打开
-/// 文件（仅本地，且文件仍在下载目录）；本地任务再加「在文件夹中显示」。远程任务只给
-/// 可用操作：已结束的远程任务（失败 / 取消 / 完成）不能「继续」——云端只接受暂停中
-/// 任务的继续。
+/// 文件（仅本地，且文件仍在下载目录）；本地任务再加「在文件夹中显示」，`with_detail`
+/// 时最后加「详情」（远程任务没有本机详情）。远程任务只给可用操作：已结束的远程任务
+/// （失败 / 取消 / 完成）不能「继续」——云端只接受暂停中任务的继续。
 pub(crate) fn row_actions(
     state: TaskState,
     is_local: bool,
     file_missing: bool,
+    with_detail: bool,
 ) -> impl Iterator<Item = RowAction> {
     let primary = match state {
         TaskState::Downloading | TaskState::Pending => Some(RowAction::Pause),
@@ -2436,6 +2608,7 @@ pub(crate) fn row_actions(
     primary
         .into_iter()
         .chain(is_local.then_some(RowAction::Reveal))
+        .chain((is_local && with_detail).then_some(RowAction::Detail))
 }
 
 /// 单任务命令：本地任务走 daemon；远程任务只有暂停 / 继续 / 删除经 `agent.remote.command`
@@ -2570,6 +2743,9 @@ fn meta_cell(text: impl Into<SharedString>, color: Hsla, numeric: bool, cx: &App
 /// 文件名列吸收剩余宽度：prepaint 测得容器宽后只做比较，确需更新时用
 /// `window.defer` 在帧外写入代理并 `refresh`（不在 prepaint 里同步更新实体），
 /// 写入后期望值与已应用值一致，下一帧不再触发，避免逐帧重算或抖动。
+///
+/// 行顺序稳定：表格内指针活动推迟内容变化引起的重排；prepaint 发现有被推迟的重排
+/// 时安排补偿定时器（[`arm_reorder_timer`]）。
 pub(crate) fn render_download_table(
     id: &'static str,
     table_state: &Entity<TableState<DownloadTableDelegate>>,
@@ -2584,6 +2760,10 @@ pub(crate) fn render_download_table(
         .min_h_0()
         .overflow_hidden()
         .bg(active_theme(cx).tokens().colors.surface)
+        .on_mouse_move(note_pointer::<MouseMoveEvent>(table_state))
+        .on_scroll_wheel(note_pointer::<ScrollWheelEvent>(table_state))
+        .capture_any_mouse_down(note_pointer::<MouseDownEvent>(table_state))
+        .capture_any_mouse_down(clear_context_row_on_left_press(table_state))
         .child(
             div().absolute().inset_0().child(
                 DataTable::new(table_state)
@@ -2595,17 +2775,97 @@ pub(crate) fn render_download_table(
         )
         .on_prepaint(move |bounds, window, cx| {
             let width = f32::from(bounds.size.width);
-            if !observed.read(cx).delegate().viewport_needs_sync(width) {
+            let delegate = observed.read(cx).delegate();
+            let sync_width = delegate.viewport_needs_sync(width);
+            let arm_timer = delegate.needs_reorder_timer();
+            if !sync_width && !arm_timer {
                 return;
             }
             window.defer(cx, move |_, cx| {
                 observed.update(cx, |table, cx| {
-                    if table.delegate_mut().set_viewport_width(width) {
+                    if sync_width && table.delegate_mut().set_viewport_width(width) {
                         table.refresh(cx);
+                    }
+                    if arm_timer {
+                        arm_reorder_timer(table, cx);
                     }
                 });
             });
         })
+}
+
+/// 表格指针事件监听：只记录活动时刻，不触发重绘。
+fn note_pointer<E: 'static>(
+    table_state: &Entity<TableState<DownloadTableDelegate>>,
+) -> impl Fn(&E, &mut Window, &mut App) + 'static {
+    let table_state = table_state.clone();
+    move |_, _, cx| {
+        table_state.update(cx, |table, _| table.delegate_mut().note_pointer_activity());
+    }
+}
+
+/// 表格内左键按下即清除右键高亮行。
+///
+/// 两张表都 `row_selectable(false)`，选择由委托自管，DataTable 内置的「左键点行清除
+/// `right_clicked_row`」分支因此不会执行；它自带的 `on_mouse_down_out` 又只管表格外的
+/// 点击。不补这一步，右键过的行边框会一直残留（改选别的任务也不消失），
+/// [`arm_reorder_timer`] 也会把它当作菜单仍开着而无限顺延重排。
+///
+/// 捕获阶段注册：勾选框 / 行内按钮在冒泡阶段 `stop_propagation` 也拦不住。只认左键，
+/// 右键另一行由 DataTable 自己改写高亮；菜单浮层 `occlude`，点菜单项不会走到这里，
+/// 而菜单是右键当帧 `window.defer` 构建的，此时清除不影响菜单内容。
+fn clear_context_row_on_left_press(
+    table_state: &Entity<TableState<DownloadTableDelegate>>,
+) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
+    let table_state = table_state.clone();
+    move |event, _, cx| {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        table_state.update(cx, |table, cx| {
+            if table.right_clicked_row().is_some() {
+                table.set_right_clicked_row(None, cx);
+            }
+        });
+    }
+}
+
+/// 为被推迟的重排安排定时器。到期时右键菜单仍开着（高亮行按下标定位，重排会让高亮
+/// 落到别的任务上）或指针又活动过则顺延；否则强制按最新排序重排一次。
+fn arm_reorder_timer(
+    table: &mut TableState<DownloadTableDelegate>,
+    cx: &mut Context<TableState<DownloadTableDelegate>>,
+) {
+    let delegate = table.delegate_mut();
+    if delegate.reorder_timer.is_some() {
+        return;
+    }
+    let Some(deadline) = delegate.reorder_deadline() else {
+        return;
+    };
+    let delay = deadline.saturating_duration_since(Instant::now());
+    delegate.reorder_timer = Some(cx.spawn(async move |this, cx| {
+        cx.background_executor().timer(delay).await;
+        let _ = this.update(cx, |table, cx| {
+            let menu_open = table.right_clicked_row().is_some();
+            let now = Instant::now();
+            let delegate = table.delegate_mut();
+            delegate.reorder_timer = None;
+            if menu_open {
+                delegate.row_order.note_interaction(now);
+            }
+            match delegate.reorder_deadline() {
+                Some(deadline) if deadline > now => arm_reorder_timer(table, cx),
+                Some(_) => {
+                    delegate.view_dirty = true;
+                    if delegate.refresh_view_at(now) {
+                        cx.notify();
+                    }
+                }
+                None => {}
+            }
+        });
+    }));
 }
 
 impl DownloadView {
@@ -2671,9 +2931,12 @@ impl DownloadView {
         self.execute_commands(commands, cx);
     }
 
-    /// 逐条执行；任一失败在页面横幅提示（按错误 `reason` 给出原因，同一批里先失败的
-    /// 错误一直保留，后完成的成功不会冲掉它）。只含一条单任务「继续」/「重新下载」时，
-    /// 成功后通知宿主这是一次交互式开始（批量选择不逐个弹进度窗口）。
+    /// 执行一批命令。同类多任务的暂停 / 继续 / 删除先合并成批量 RPC
+    /// （见 [`coalesce_commands`]），其余命令按 [`MAX_IN_FLIGHT`] 限制并发；幂等命令被
+    /// agent 以可重试的 `Unavailable` 拒绝时退避重试。任一失败在页面横幅提示（按错误
+    /// `reason` 给出原因，同一批里先失败的错误一直保留，后完成的成功不会冲掉它）。
+    /// 只含一条单任务「继续」/「重新下载」时，成功后通知宿主这是一次交互式开始
+    /// （批量选择不逐个弹进度窗口）。
     pub(crate) fn execute_commands(
         &mut self,
         commands: Vec<DownloadsCommand>,
@@ -2684,31 +2947,61 @@ impl DownloadView {
             [DownloadsCommand::Redownload(request, _)] if !request.start_paused => Some(None),
             _ => None,
         };
-        let batch = Rc::new(std::cell::RefCell::new(DispatchSummary::default()));
-        for command in commands {
-            // 打开失败多半是文件已被删除 / 移走：立即重扫，让行上的丢失标记跟上磁盘现状。
-            let rescan_on_failure = matches!(command, DownloadsCommand::OpenTask { .. });
-            let future = self.controller.execute(command);
-            let interactive_start = interactive_start.clone();
+        let queue = Rc::new(RefCell::new(VecDeque::from(coalesce_commands(commands))));
+        let batch = Rc::new(RefCell::new(DispatchSummary::default()));
+        let workers = queue.borrow().len().min(MAX_IN_FLIGHT);
+        for _ in 0..workers {
+            let queue = Rc::clone(&queue);
             let batch = Rc::clone(&batch);
+            let interactive_start = interactive_start.clone();
             cx.spawn(async move |this, cx| {
-                let result = future.await;
-                batch.borrow_mut().record(&result);
-                let _ = this.update(cx, |this, cx| {
-                    if rescan_on_failure && result.is_err() {
-                        this.rescan_files_now(cx);
-                    }
-                    this.last_error = batch.borrow().first_error.as_ref().map(|error| {
-                        SharedString::from(error_text(this.translator.read(cx), error))
+                loop {
+                    let Some(mut command) = queue.borrow_mut().pop_front() else {
+                        break;
+                    };
+                    // 打开失败多半是文件已被删除 / 移走：立即重扫，让行上的丢失标记跟上磁盘现状。
+                    let rescan_on_failure = matches!(command, DownloadsCommand::OpenTask { .. });
+                    let mut retries = 0_u32;
+                    let result = loop {
+                        let replay = retry_copy(&command);
+                        let Ok((future, stale)) = this.update(cx, |this, _| {
+                            (this.controller.execute(command), this.controller.is_stale())
+                        }) else {
+                            return;
+                        };
+                        let result = future.await;
+                        let wait = match (&result, replay) {
+                            (Err(error), Some(replay)) if !stale => {
+                                retry_delay(error, retries).map(|delay| (delay, replay))
+                            }
+                            _ => None,
+                        };
+                        let Some((delay, replay)) = wait else {
+                            break result;
+                        };
+                        cx.background_executor().timer(delay).await;
+                        command = replay;
+                        retries += 1;
+                    };
+                    batch.borrow_mut().record(&result);
+                    let interactive_start = interactive_start.clone();
+                    let batch = Rc::clone(&batch);
+                    let _ = this.update(cx, |this, cx| {
+                        if rescan_on_failure && result.is_err() {
+                            this.rescan_files_now(cx);
+                        }
+                        this.last_error = batch.borrow().first_error.as_ref().map(|error| {
+                            SharedString::from(error_text(this.translator.read(cx), error))
+                        });
+                        if let (Ok(result), Some(resumed)) = (&result, interactive_start) {
+                            // 继续：原任务 ID；重新下载：响应里的新任务 ID。
+                            let started =
+                                resumed.map_or_else(|| result.created_task_ids(), |id| vec![id]);
+                            this.notify_user_started(&started, cx);
+                        }
+                        cx.notify();
                     });
-                    if let (Ok(result), Some(resumed)) = (&result, interactive_start) {
-                        // 继续：原任务 ID；重新下载：响应里的新任务 ID。
-                        let started =
-                            resumed.map_or_else(|| result.created_task_ids(), |id| vec![id]);
-                        this.notify_user_started(&started, cx);
-                    }
-                    cx.notify();
-                });
+                }
             })
             .detach();
         }
@@ -2721,18 +3014,24 @@ impl DownloadView {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, rc::Rc};
+    use std::{
+        collections::HashSet,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
 
     use fluxdown_ui_i18n::{I18nCatalog, I18nError};
     use gpui::Modifiers;
 
     use super::{
         DownloadColumnKind, DownloadTableDelegate, DownloadsCommand, RowAction, SelectionSummary,
-        ToolbarCommand, VisibleRow, percent_label, row_actions, task_command,
+        TableFilter, ToolbarCommand, VisibleRow, group_by_key, percent_label, row_actions,
+        task_command,
     };
     use crate::{
         model::{
-            DownloadTaskView, RowKey, TaskState, TaskStore,
+            CategoryIndex, DownloadFilter, DownloadStatusFilter, DownloadTaskView, RowKey,
+            TaskSource, TaskState, TaskStore,
             view_prefs::{SortDir, ViewGroupBy, ViewPrefs, ViewSortKey},
         },
         strings::DownloadStrings,
@@ -2955,8 +3254,10 @@ mod tests {
     #[test]
     fn grouping_inserts_headers_and_collapsing_hides_members() -> Result<(), I18nError> {
         let mut delegate = delegate(&[1, 3, 1, 3])?;
-        let mut prefs = ViewPrefs::default();
-        prefs.group_by = ViewGroupBy::Status;
+        let prefs = ViewPrefs {
+            group_by: ViewGroupBy::Status,
+            ..ViewPrefs::default()
+        };
         delegate.set_prefs(prefs);
         delegate.refresh_view();
         assert_eq!(delegate.visible.len(), 6);
@@ -2987,10 +3288,47 @@ mod tests {
     }
 
     #[test]
+    fn group_by_key_matches_linear_bucketing() {
+        // 交错重复的 key：桶顺序为首次出现顺序，成员保持原相对顺序。
+        let keys = ["b", "a", "b", "c", "a", "d", "b", "e", "c", "a"];
+        let items: Vec<(String, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| ((*key).to_owned(), index))
+            .collect();
+        let mut expected: Vec<(String, Vec<usize>)> = Vec::new();
+        for (key, value) in items.iter().cloned() {
+            match expected.iter_mut().find(|(existing, _)| *existing == key) {
+                Some((_, members)) => members.push(value),
+                None => expected.push((key, vec![value])),
+            }
+        }
+        assert_eq!(group_by_key(items, |key: &String| key.as_str()), expected);
+    }
+
+    #[test]
+    fn search_matches_url_and_site_case_insensitively() -> Result<(), I18nError> {
+        // 文件名（f0.bin / f1.bin）不含查询词，命中只能来自链接 / 站点。
+        let mut delegate = delegate(&[1, 3])?;
+        delegate.set_query("EXAMPLE.com/FILE");
+        delegate.refresh_view();
+        assert_eq!(delegate.visible.len(), 2);
+        delegate.set_query("Example.COM");
+        delegate.refresh_view();
+        assert_eq!(delegate.visible.len(), 2);
+        delegate.set_query("other.org");
+        delegate.refresh_view();
+        assert!(delegate.visible.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn shift_range_selection_skips_group_headers() -> Result<(), I18nError> {
         let mut delegate = delegate(&[1, 3, 1, 3])?;
-        let mut prefs = ViewPrefs::default();
-        prefs.group_by = ViewGroupBy::Status;
+        let prefs = ViewPrefs {
+            group_by: ViewGroupBy::Status,
+            ..ViewPrefs::default()
+        };
         delegate.set_prefs(prefs);
         delegate.refresh_view();
         let first = delegate.row_key_at(1).expect("first task");
@@ -3101,8 +3439,452 @@ mod tests {
         Ok(())
     }
 
+    fn paired_delegates(
+        statuses: &[i32],
+    ) -> Result<(DownloadTableDelegate, DownloadTableDelegate), I18nError> {
+        let seed = delegate(statuses)?;
+        let fast = DownloadTableDelegate::new(seed.strings.clone(), Rc::clone(&seed.store));
+        let mut full = DownloadTableDelegate::new(seed.strings.clone(), Rc::clone(&seed.store));
+        full.force_full_sort = true;
+        Ok((fast, full))
+    }
+
+    fn refresh_pair(
+        fast: &mut DownloadTableDelegate,
+        full: &mut DownloadTableDelegate,
+        now: Instant,
+    ) {
+        assert_eq!(fast.refresh_view_at(now), full.refresh_view_at(now));
+        assert_eq!(fast.visible, full.visible);
+        assert_eq!(fast.selected_tasks, full.selected_tasks);
+        assert_eq!(fast.selection_anchor, full.selection_anchor);
+        assert_eq!(fast.reorder_deadline(), full.reorder_deadline());
+    }
+
     #[test]
-    fn header_click_flips_current_key_and_switches_to_column_default() -> Result<(), I18nError> {
+    fn unchanged_sort_values_match_full_sort_across_event_sequences() -> Result<(), I18nError> {
+        let sort_keys = [
+            ViewSortKey::Smart,
+            ViewSortKey::Created,
+            ViewSortKey::Name,
+            ViewSortKey::Size,
+            ViewSortKey::Progress,
+            ViewSortKey::Speed,
+            ViewSortKey::Status,
+        ];
+        let groupings = [
+            ViewGroupBy::None,
+            ViewGroupBy::Status,
+            ViewGroupBy::Date,
+            ViewGroupBy::Type,
+            ViewGroupBy::Queue,
+            ViewGroupBy::Site,
+            ViewGroupBy::Group,
+        ];
+        for sort_key in sort_keys {
+            for sort_dir in [SortDir::Asc, SortDir::Desc] {
+                for group_by in groupings {
+                    let (mut fast, mut full) = paired_delegates(&[1, 1, 0, 3, 2, 4])?;
+                    let template = fast.store.local()[0].clone();
+                    let mut remote = template.clone();
+                    remote.key = RowKey::Remote("remote".into());
+                    remote.source = TaskSource::Remote;
+                    remote.to_device = "device".into();
+                    fast.store.replace_remote(vec![remote]);
+                    let categories = Rc::new(CategoryIndex::from_dtos(
+                        fluxdown_protocol::CustomCategoryDto::builtin_defaults(),
+                    ));
+                    fast.set_categories(Rc::clone(&categories));
+                    full.set_categories(categories);
+                    let prefs = ViewPrefs {
+                        sort_key,
+                        sort_dir,
+                        group_by,
+                        ..ViewPrefs::default()
+                    };
+                    fast.set_prefs(prefs.clone());
+                    full.set_prefs(prefs);
+                    let start = Instant::now();
+                    refresh_pair(&mut fast, &mut full, start);
+                    fast.select_all_tasks();
+                    full.select_all_tasks();
+                    let mut random = 0xa076_1d64_78bd_642f_u64;
+                    for step in 1..=192 {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        let now = start + Duration::from_millis(step * 137);
+                        if let Some(deadline) = fast.reorder_deadline().filter(|at| *at <= now) {
+                            fast.view_dirty = true;
+                            full.view_dirty = true;
+                            refresh_pair(&mut fast, &mut full, deadline);
+                        }
+                        let count = fast.store.local().len();
+                        let ix = (random >> 32) as usize % count;
+                        let mut row = fast.store.local()[ix].clone();
+                        match random % 16 {
+                            0 => {
+                                row.downloaded_bytes += 1;
+                                row.progress = (random % 101) as f32 / 100.;
+                                fast.store.set_local(ix, row);
+                            }
+                            1 => {
+                                row.speed_bytes_per_second = Some(random % 500);
+                                fast.store.set_local(ix, row);
+                            }
+                            2 => {
+                                row.size_bytes = random % 200;
+                                fast.store.set_local(ix, row);
+                            }
+                            3 => {
+                                row.state = if row.state == TaskState::Completed {
+                                    TaskState::Downloading
+                                } else {
+                                    TaskState::Completed
+                                };
+                                fast.store.set_local(ix, row);
+                            }
+                            4 => {
+                                row.boosted = !row.boosted;
+                                row.preparing = !row.preparing;
+                                row.queue_position = (random % 5) as u32;
+                                fast.store.set_local(ix, row);
+                            }
+                            5 => {
+                                row.queue_order += 1;
+                                fast.store.set_local(ix, row);
+                            }
+                            6 => {
+                                row.name = format!("episode{}.zip", random % 12);
+                                row.name_fold = row.name.to_lowercase();
+                                row.file_extension = "zip".into();
+                                fast.store.set_local(ix, row);
+                            }
+                            7 => {
+                                row.queue_id = format!("queue{}", random % 3);
+                                row.group_id = format!("group{}", random % 2);
+                                row.referrer = format!("https://site{}.test/page", random % 4);
+                                fast.store.set_local(ix, row);
+                            }
+                            8 => {
+                                let query = if fast.query.is_empty() { "episode" } else { "" };
+                                fast.set_query(query);
+                                full.set_query(query);
+                            }
+                            9 => {
+                                if let Some(key) = fast.visible.iter().find_map(|row| match row {
+                                    VisibleRow::GroupHeader { key, .. } => Some(key.clone()),
+                                    VisibleRow::Task(_) => None,
+                                }) {
+                                    fast.toggle_group_collapsed(&key);
+                                    full.toggle_group_collapsed(&key);
+                                }
+                            }
+                            10 => {
+                                let mut rows = fast.store.local().to_vec();
+                                rows[ix].progress = (random % 101) as f32 / 100.;
+                                rows[ix].speed_bytes_per_second = Some(random % 500);
+                                fast.store.replace_local(rows);
+                                let rows = fast.store.remote().to_vec();
+                                fast.store.replace_remote(rows);
+                            }
+                            11 => {
+                                if count > 3 {
+                                    fast.store.swap_remove_local(ix);
+                                } else {
+                                    let mut added = template.clone();
+                                    added.key = RowKey::Local(format!("added{step}"));
+                                    fast.store.push_local(added);
+                                }
+                            }
+                            12 => {
+                                fast.row_order.note_interaction(now);
+                                full.row_order.note_interaction(now);
+                            }
+                            13 => {
+                                row.created_at_secs += 1;
+                                fast.store.set_local(ix, row);
+                            }
+                            14 => {
+                                let filter = match random >> 8 & 3 {
+                                    0 => TableFilter::Download(DownloadFilter::ALL),
+                                    1 => TableFilter::Download(DownloadFilter::status(
+                                        DownloadStatusFilter::Incomplete,
+                                    )),
+                                    2 => TableFilter::Queue("main".into()),
+                                    _ => TableFilter::Device("device".into()),
+                                };
+                                fast.set_filter(filter.clone());
+                                full.set_filter(filter);
+                            }
+                            _ => {
+                                row.runtime_connected = !row.runtime_connected;
+                                row.eta_seconds = Some(random % 600);
+                                fast.store.set_local(ix, row);
+                            }
+                        }
+                        refresh_pair(&mut fast, &mut full, now);
+                        if step % 19 == 0
+                            && let Some(key) = fast.visible_task_keys().first().cloned()
+                        {
+                            fast.select_task(key.clone(), Modifiers::default());
+                            full.select_task(key, Modifiers::default());
+                        }
+                    }
+                    assert!(fast.full_sort_count < full.full_sort_count);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cached_sorted_input_preserves_deferred_reorder_and_live_clock() -> Result<(), I18nError> {
+        for sort_key in [ViewSortKey::Speed, ViewSortKey::Progress] {
+            let (mut fast, mut full) = paired_delegates(&[1, 1])?;
+            let prefs = ViewPrefs {
+                sort_key,
+                ..ViewPrefs::default()
+            };
+            fast.set_prefs(prefs.clone());
+            full.set_prefs(prefs);
+            let now = Instant::now();
+            refresh_pair(&mut fast, &mut full, now);
+            let previous = fast.visible.clone();
+            let mut row = fast.store.local()[1].clone();
+            row.speed_bytes_per_second = Some(100);
+            row.progress = 0.8;
+            fast.store.set_local(1, row);
+            refresh_pair(&mut fast, &mut full, now + Duration::from_millis(100));
+            assert_eq!(fast.visible, previous);
+            let deadline = fast.reorder_deadline().expect("live sort deferred");
+            let sorts = fast.full_sort_count;
+            let mut row = fast.store.local()[1].clone();
+            row.eta_seconds = Some(3);
+            fast.store.set_local(1, row);
+            refresh_pair(&mut fast, &mut full, now + Duration::from_millis(200));
+            assert_eq!(fast.full_sort_count, sorts);
+            assert_eq!(fast.reorder_deadline(), Some(deadline));
+
+            let mut row = fast.store.local()[1].clone();
+            row.eta_seconds = Some(2);
+            fast.store.set_local(1, row);
+            refresh_pair(&mut fast, &mut full, deadline);
+            assert_eq!(fast.full_sort_count, sorts);
+            assert_eq!(
+                fast.visible_task_keys(),
+                [RowKey::Local("t1".into()), RowKey::Local("t0".into())]
+            );
+            assert_eq!(fast.reorder_deadline(), None);
+
+            let mut row = fast.store.local()[0].clone();
+            row.speed_bytes_per_second = Some(200);
+            row.progress = 0.9;
+            fast.store.set_local(0, row);
+            refresh_pair(&mut fast, &mut full, deadline + Duration::from_millis(100));
+            assert_eq!(
+                fast.visible_task_keys(),
+                [RowKey::Local("t1".into()), RowKey::Local("t0".into())]
+            );
+            assert_eq!(
+                fast.reorder_deadline(),
+                Some(deadline + Duration::from_secs(2))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn changed_sort_keys_and_tie_breakers_take_full_path() -> Result<(), I18nError> {
+        for sort_key in [
+            ViewSortKey::Smart,
+            ViewSortKey::Created,
+            ViewSortKey::Name,
+            ViewSortKey::Size,
+            ViewSortKey::Progress,
+            ViewSortKey::Speed,
+            ViewSortKey::Status,
+        ] {
+            let (mut fast, mut full) = paired_delegates(&[1, 1])?;
+            let prefs = ViewPrefs {
+                sort_key,
+                ..ViewPrefs::default()
+            };
+            fast.set_prefs(prefs.clone());
+            full.set_prefs(prefs);
+            let now = Instant::now();
+            refresh_pair(&mut fast, &mut full, now);
+            let sorts = fast.full_sort_count;
+            let mut row = fast.store.local()[0].clone();
+            row.eta_seconds = Some(10);
+            fast.store.set_local(0, row);
+            refresh_pair(&mut fast, &mut full, now + Duration::from_millis(10));
+            assert_eq!(fast.full_sort_count, sorts);
+            let mut row = fast.store.local()[0].clone();
+            match sort_key {
+                ViewSortKey::Smart => row.boosted = true,
+                ViewSortKey::Created => row.created_at_secs += 1,
+                ViewSortKey::Name => {
+                    row.name = "a.bin".into();
+                    row.name_fold = "a.bin".into();
+                }
+                ViewSortKey::Size => row.size_bytes += 1,
+                ViewSortKey::Progress => row.progress = 0.5,
+                ViewSortKey::Speed => row.speed_bytes_per_second = Some(10),
+                ViewSortKey::Status => row.state = TaskState::Completed,
+            }
+            fast.store.set_local(0, row);
+            refresh_pair(&mut fast, &mut full, now + Duration::from_millis(20));
+            assert_eq!(fast.full_sort_count, sorts + 1);
+            let mut row = fast.store.local()[0].clone();
+            row.queue_order += 1;
+            fast.store.set_local(0, row);
+            refresh_pair(&mut fast, &mut full, now + Duration::from_millis(30));
+            assert_eq!(fast.full_sort_count, sorts + 2);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_and_view_changes_invalidate_cached_sort() -> Result<(), I18nError> {
+        let (mut fast, mut full) = paired_delegates(&[1, 1, 3])?;
+        let now = Instant::now();
+        fast.set_prefs(ViewPrefs::default());
+        full.set_prefs(ViewPrefs::default());
+        refresh_pair(&mut fast, &mut full, now);
+        let mut expected = fast.full_sort_count;
+        let rows = fast.store.local().to_vec();
+        let structure = fast.store.structure_generation();
+        fast.store.replace_local(rows);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(10));
+        expected += 1;
+        assert_eq!(fast.full_sort_count, expected);
+        assert_eq!(fast.store.structure_generation(), structure);
+        fast.store.replace_remote(Vec::new());
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(20));
+        expected += 1;
+        assert_eq!(fast.full_sort_count, expected);
+        fast.prefs_mut().sort_key = ViewSortKey::Name;
+        full.prefs_mut().sort_key = ViewSortKey::Name;
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(30));
+        expected += 1;
+        assert_eq!(fast.full_sort_count, expected);
+        let categories = Rc::new(CategoryIndex::default());
+        fast.set_categories(Rc::clone(&categories));
+        full.set_categories(categories);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(40));
+        expected += 1;
+        assert_eq!(fast.full_sort_count, expected);
+        fast.select_all_tasks();
+        full.select_all_tasks();
+        fast.set_query("f0");
+        full.set_query("f0");
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(50));
+        expected += 1;
+        assert_eq!(fast.full_sort_count, expected);
+        assert_eq!(fast.selected_keys(), [RowKey::Local("t0".into())]);
+        let filter = TableFilter::Download(DownloadFilter::status(DownloadStatusFilter::Completed));
+        fast.set_filter(filter.clone());
+        full.set_filter(filter);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(60));
+        expected += 1;
+        assert_eq!(fast.full_sort_count, expected);
+        assert!(fast.selected_tasks.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn smart_sort_tracks_effective_tiers_and_queue_slots() -> Result<(), I18nError> {
+        let (mut fast, mut full) = paired_delegates(&[1, 0])?;
+        let now = Instant::now();
+        fast.set_prefs(ViewPrefs::default());
+        full.set_prefs(ViewPrefs::default());
+        refresh_pair(&mut fast, &mut full, now);
+        let sorts = fast.full_sort_count;
+        let mut active = fast.store.local()[0].clone();
+        active.queue_position = 9;
+        active.preparing = true;
+        fast.store.set_local(0, active);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(10));
+        assert_eq!(fast.full_sort_count, sorts);
+
+        let mut queued = fast.store.local()[1].clone();
+        queued.queue_position = 1;
+        fast.store.set_local(1, queued);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(20));
+        assert_eq!(fast.full_sort_count, sorts + 1);
+        let mut queued = fast.store.local()[1].clone();
+        queued.preparing = true;
+        fast.store.set_local(1, queued);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(30));
+        assert_eq!(fast.full_sort_count, sorts + 2);
+        let mut preparing = fast.store.local()[1].clone();
+        preparing.queue_position = 3;
+        fast.store.set_local(1, preparing);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(40));
+        assert_eq!(fast.full_sort_count, sorts + 2);
+        let mut preparing = fast.store.local()[1].clone();
+        preparing.boosted = true;
+        fast.store.set_local(1, preparing);
+        refresh_pair(&mut fast, &mut full, now + Duration::from_millis(50));
+        assert_eq!(fast.full_sort_count, sorts + 3);
+        Ok(())
+    }
+
+    #[test]
+    fn unordered_progress_values_conservatively_take_full_path() -> Result<(), I18nError> {
+        let (mut fast, mut full) = paired_delegates(&[1, 1])?;
+        let prefs = ViewPrefs {
+            sort_key: ViewSortKey::Progress,
+            ..ViewPrefs::default()
+        };
+        fast.set_prefs(prefs.clone());
+        full.set_prefs(prefs);
+        let now = Instant::now();
+        refresh_pair(&mut fast, &mut full, now);
+        let sorts = fast.full_sort_count;
+        for (step, progress) in [f32::NAN, f32::NAN, 0.5].into_iter().enumerate() {
+            let mut row = fast.store.local()[0].clone();
+            row.progress = progress;
+            fast.store.set_local(0, row);
+            refresh_pair(
+                &mut fast,
+                &mut full,
+                now + Duration::from_millis((step as u64 + 1) * 10),
+            );
+            assert_eq!(fast.full_sort_count, sorts + step + 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn state_change_under_pointer_keeps_row_order_until_hold_ends() -> Result<(), I18nError> {
+        // 两个下载中任务：活跃档按添加正序，t1（created 99）在 t0（created 100）之前。
+        let mut delegate = delegate(&[1, 1])?;
+        let t0 = RowKey::Local("t0".into());
+        let t1 = RowKey::Local("t1".into());
+        assert_eq!(delegate.visible_task_keys(), [t1.clone(), t0.clone()]);
+
+        let now = Instant::now();
+        delegate.row_order.note_interaction(now);
+        // t1 下载完成，按智能排序应沉到历史档；指针仍在表格上，行不动。
+        let mut done = delegate.store.local()[1].clone();
+        done.state = TaskState::Completed;
+        delegate.store.set_local(1, done);
+        assert!(delegate.refresh_view_at(now + Duration::from_millis(100)));
+        assert_eq!(delegate.visible_task_keys(), [t1.clone(), t0.clone()]);
+
+        // 保持期结束，补偿定时器强制重排。
+        let deadline = delegate.reorder_deadline().expect("reorder deferred");
+        delegate.view_dirty = true;
+        assert!(delegate.refresh_view_at(deadline));
+        assert_eq!(delegate.visible_task_keys(), [t0, t1]);
+        assert_eq!(delegate.reorder_deadline(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn header_click_cycles_default_dir_reverse_then_reset() -> Result<(), I18nError> {
         let mut delegate = delegate(&[1])?;
         assert_eq!(delegate.prefs.sort_key, ViewSortKey::Smart);
 
@@ -3113,24 +3895,33 @@ mod tests {
         );
         assert!(delegate.toggle_sort(DownloadColumnKind::FileName));
         assert_eq!(delegate.prefs.sort_dir, SortDir::Desc);
+        // 第三次点击恢复默认排序。
+        assert!(delegate.toggle_sort(DownloadColumnKind::FileName));
+        assert_eq!(delegate.prefs.sort_key, ViewSortKey::Smart);
 
+        // 切到别的列从该列默认方向开始，即使上一列停在反方向。
+        assert!(delegate.toggle_sort(DownloadColumnKind::Size));
         assert!(delegate.toggle_sort(DownloadColumnKind::Size));
         assert_eq!(
             (delegate.prefs.sort_key, delegate.prefs.sort_dir),
-            (ViewSortKey::Size, SortDir::Desc)
+            (ViewSortKey::Size, SortDir::Asc)
         );
-
-        // 状态列回到智能排序；智能排序无方向，再点不变。
+        assert!(delegate.toggle_sort(DownloadColumnKind::Status));
+        assert_eq!(
+            (delegate.prefs.sort_key, delegate.prefs.sort_dir),
+            (ViewSortKey::Status, SortDir::Desc)
+        );
+        assert!(delegate.toggle_sort(DownloadColumnKind::Status));
         assert!(delegate.toggle_sort(DownloadColumnKind::Status));
         assert_eq!(delegate.prefs.sort_key, ViewSortKey::Smart);
-        assert!(!delegate.toggle_sort(DownloadColumnKind::Status));
+
         assert!(!delegate.toggle_sort(DownloadColumnKind::Protocol));
         Ok(())
     }
 
     #[test]
     fn row_actions_offer_only_available_operations() {
-        let actions = |state, local| row_actions(state, local, false).collect::<Vec<_>>();
+        let actions = |state, local| row_actions(state, local, false, false).collect::<Vec<_>>();
         assert_eq!(
             actions(TaskState::Downloading, true),
             [RowAction::Pause, RowAction::Reveal]
@@ -3149,8 +3940,17 @@ mod tests {
         assert!(actions(TaskState::Failed, false).is_empty());
         // 文件已被删除 / 移走的已完成任务：不给「打开」，仍可「在文件夹中显示」。
         assert_eq!(
-            row_actions(TaskState::Completed, true, true).collect::<Vec<_>>(),
+            row_actions(TaskState::Completed, true, true, false).collect::<Vec<_>>(),
             [RowAction::Reveal]
+        );
+        // 「详情」排在最后，只给本地任务（远程任务没有本机详情）。
+        assert_eq!(
+            row_actions(TaskState::Paused, true, false, true).collect::<Vec<_>>(),
+            [RowAction::Resume, RowAction::Reveal, RowAction::Detail]
+        );
+        assert_eq!(
+            row_actions(TaskState::Paused, false, false, true).collect::<Vec<_>>(),
+            [RowAction::Resume]
         );
     }
 

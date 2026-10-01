@@ -7,6 +7,8 @@ import { t } from '../../../i18n'
 import { downloadTaskFile, rpc } from '../../../lib/rpc'
 import type { CreateTaskRequest, RemoteCommandParams } from '../../../lib/rpc'
 import { confirmDialog, toast } from '../../../ui'
+import { toastRpcError } from '../../../lib/rpcToast'
+import { planTaskCommand } from './batchPlan'
 import { PLUGIN_ERROR_PREFIX, shareUrl } from './task'
 import type { DownloadTaskView } from './task'
 
@@ -15,7 +17,7 @@ async function guarded(work: () => Promise<unknown>): Promise<boolean> {
     await work()
     return true
   } catch (error) {
-    toast.error(error)
+    toastRpcError(error)
     return false
   }
 }
@@ -25,7 +27,7 @@ async function guardedAll(jobs: readonly (() => Promise<unknown>)[]): Promise<bo
   const results = await Promise.allSettled(jobs.map((job) => job()))
   const failed = results.find((result) => result.status === 'rejected')
   if (failed && failed.status === 'rejected') {
-    toast.error(failed.reason)
+    toastRpcError(failed.reason)
     return false
   }
   return true
@@ -39,33 +41,40 @@ function remoteCommand(view: DownloadTaskView, action: RemoteCommandParams['acti
 }
 
 export function pauseViews(views: readonly DownloadTaskView[]): Promise<boolean> {
-  return guardedAll(
-    views.map((view) =>
-      view.source === 'local' ? () => rpc.daemon.task.pause({ taskId: view.taskId }) : remoteCommand(view, 'pause'),
-    ),
-  )
+  const plan = planTaskCommand(views, 'pause')
+  const [only] = plan.localIds
+  const local = plan.batch
+    ? [() => rpc.daemon.task.pauseMany(plan.localIds)]
+    : only !== undefined
+      ? [() => rpc.daemon.task.pause({ taskId: only })]
+      : []
+  return guardedAll([...local, ...plan.remote.map((view) => remoteCommand(view, 'pause'))])
 }
 
 /** 继续（失败任务同为 resume，UI 上叫重试）。 */
 export function resumeViews(views: readonly DownloadTaskView[]): Promise<boolean> {
-  return guardedAll(
-    views.map((view) =>
-      view.source === 'local' ? () => rpc.daemon.task.resume({ taskId: view.taskId }) : remoteCommand(view, 'resume'),
-    ),
-  )
+  const plan = planTaskCommand(views, 'resume')
+  const [only] = plan.localIds
+  const local = plan.batch
+    ? [() => rpc.daemon.task.resumeMany(plan.localIds)]
+    : only !== undefined
+      ? [() => rpc.daemon.task.resume({ taskId: only })]
+      : []
+  return guardedAll([...local, ...plan.remote.map((view) => remoteCommand(view, 'resume'))])
 }
 
 export const pauseAll = () => guarded(() => rpc.daemon.task.pauseAll())
 export const resumeAll = () => guarded(() => rpc.daemon.task.resumeAll())
 
 export function deleteViews(views: readonly DownloadTaskView[], deleteFiles: boolean): Promise<boolean> {
-  return guardedAll(
-    views.map((view) =>
-      view.source === 'local'
-        ? () => rpc.daemon.task.delete({ taskId: view.taskId, deleteFiles })
-        : remoteCommand(view, 'delete', deleteFiles),
-    ),
-  )
+  const plan = planTaskCommand(views, 'delete')
+  const [only] = plan.localIds
+  const local = plan.batch
+    ? [() => rpc.daemon.task.deleteMany(plan.localIds, deleteFiles)]
+    : only !== undefined
+      ? [() => rpc.daemon.task.delete({ taskId: only, deleteFiles })]
+      : []
+  return guardedAll([...local, ...plan.remote.map((view) => remoteCommand(view, 'delete', deleteFiles))])
 }
 
 /** 「删除任务及文件」二次确认；确认后执行。 */
@@ -151,8 +160,9 @@ export function copyUrls(views: readonly DownloadTaskView[]): void {
   toast.key('urlCopied', 'success')
 }
 
-/** 只有本地已完成任务有可下载的最终文件。 */
-export const isDownloadable = (view: DownloadTaskView): boolean => view.source === 'local' && view.state === 'completed'
+/** 只有本地已完成且文件仍在磁盘上的任务有可下载的最终文件。 */
+export const isDownloadable = (view: DownloadTaskView): boolean =>
+  view.source === 'local' && view.state === 'completed' && !view.fileMissing
 
 /** 浏览器下载已完成文件（替代 GPUI 的「打开文件」）；多文件间隔触发以免被浏览器合并拦截。 */
 export function downloadViewsFiles(views: readonly DownloadTaskView[]): void {

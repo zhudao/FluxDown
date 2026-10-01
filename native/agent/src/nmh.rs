@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use fluxdown_api::service::LiveSpeed;
 use fluxdown_protocol::{DownloadRequest, TaskDto};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +14,7 @@ use crate::daemon_client::DaemonClient;
 
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const MAX_BATCH_ITEMS: usize = 1000;
+const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 const MAX_COMPLETED_TASKS: usize = 10;
 
 #[derive(Deserialize)]
@@ -98,16 +100,33 @@ impl PipeResponse {
 pub struct NmhService {
     daemon: Arc<DaemonClient>,
     capture: Arc<CaptureService>,
+    task_events: Option<crate::task_events::TaskEventHub>,
 }
 
 impl NmhService {
     #[must_use]
     pub fn new(daemon: Arc<DaemonClient>, capture: Arc<CaptureService>) -> Self {
-        Self { daemon, capture }
+        Self {
+            daemon,
+            capture,
+            task_events: None,
+        }
     }
 
-    pub async fn run(self, cancel: CancellationToken) -> Result<(), std::io::Error> {
-        run_server(self, cancel).await
+    /// 注入实时速率来源；未注入时 `tasks` 应答的速度恒为 0。
+    #[must_use]
+    pub fn with_task_events(mut self, task_events: crate::task_events::TaskEventHub) -> Self {
+        self.task_events = Some(task_events);
+        self
+    }
+
+    /// `ready` 在 IPC 端点开始监听后触发；端点不可用时随错误一起被丢弃。
+    pub async fn run(
+        self,
+        cancel: CancellationToken,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<(), std::io::Error> {
+        run_server(self, cancel, ready).await
     }
 
     async fn dispatch(&self, message: PipeMessage) -> PipeResponse {
@@ -151,16 +170,14 @@ impl NmhService {
             Err(error) => return PipeResponse::error(msg_id, error.to_string()),
         };
         let count = batch.items.len();
-        for request in batch.items {
-            if let Err(error) = self
-                .capture
-                .submit(request, crate::capture::CaptureOrigin::External)
-                .await
-            {
-                return PipeResponse::error(msg_id, error.to_string());
-            }
+        match self
+            .capture
+            .submit_many(batch.items, crate::capture::CaptureOrigin::External)
+            .await
+        {
+            Ok(_) => PipeResponse::ok(msg_id, format!("batch accepted ({count} items)")),
+            Err(error) => PipeResponse::error(msg_id, error.to_string()),
         }
-        PipeResponse::ok(msg_id, format!("batch accepted ({count} items)"))
     }
 
     async fn task_list(&self, msg_id: u64) -> PipeResponse {
@@ -172,7 +189,12 @@ impl NmhService {
             Ok(tasks) => tasks,
             Err(error) => return PipeResponse::error(msg_id, format!("{:?}", error.code)),
         };
-        PipeResponse::tasks(msg_id, select_task_briefs(tasks))
+        let speeds = self
+            .task_events
+            .as_ref()
+            .map(crate::task_events::TaskEventHub::live_speeds)
+            .unwrap_or_default();
+        PipeResponse::tasks(msg_id, select_task_briefs(tasks, &speeds))
     }
 
     async fn task_operation(&self, msg_id: u64, payload: Value) -> PipeResponse {
@@ -228,7 +250,10 @@ impl NmhService {
     }
 }
 
-fn select_task_briefs(tasks: Vec<TaskDto>) -> Vec<TaskBrief> {
+fn select_task_briefs(
+    tasks: Vec<TaskDto>,
+    speeds: &std::collections::HashMap<String, LiveSpeed>,
+) -> Vec<TaskBrief> {
     let (mut completed, active): (Vec<_>, Vec<_>) =
         tasks.into_iter().partition(|task| task.status == 3);
     completed
@@ -238,12 +263,14 @@ fn select_task_briefs(tasks: Vec<TaskDto>) -> Vec<TaskBrief> {
         .into_iter()
         .chain(completed)
         .map(|task| TaskBrief {
+            speed: speeds
+                .get(&task.task_id)
+                .map_or(0, |speed| speed.download_bps),
             task_id: task.task_id,
             file_name: task.file_name,
             status: task.status,
             downloaded_bytes: task.downloaded_bytes,
             total_bytes: task.total_bytes,
-            speed: 0,
             error_message: task.error_message,
             created_at: task.created_at,
         })
@@ -285,13 +312,24 @@ where
 }
 
 #[cfg(unix)]
-async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
+async fn run_server(
+    service: NmhService,
+    cancel: CancellationToken,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-    let path = unix_socket_path();
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
+    let path = unix_socket_path().ok_or_else(endpoint_unavailable)?;
+    let dir = path.parent().ok_or_else(endpoint_unavailable)?;
+    // 0700 目录：其它用户无法进入、连接或抢占 socket 路径；属主不是当前用户时 chmod 失败，
+    // 端点直接不可用而不是退回共享位置。
+    tokio::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .await?;
+    tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
+    let owner_uid = tokio::fs::metadata(dir).await?.uid();
     if tokio::fs::try_exists(&path).await? {
         match tokio::net::UnixStream::connect(&path).await {
             Ok(_) => {
@@ -305,6 +343,7 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
     }
     let listener = tokio::net::UnixListener::bind(&path)?;
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+    let _ = ready.send(());
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -313,7 +352,20 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
                 return Ok(());
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let stream = match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        // 瞬时 accept 错误（如 fd 耗尽）退避重试，不让 NMH 端点连带终止 agent。
+                        tracing::warn!(error = %error, "NMH socket accept failed");
+                        tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                        continue;
+                    }
+                };
+                // 0700 目录之外的纵深防御：对端 uid 必须等于 socket 目录属主（本进程用户）。
+                if !stream.peer_cred().is_ok_and(|cred| cred.uid() == owner_uid) {
+                    tracing::warn!("NMH socket rejected a connection from another user");
+                    continue;
+                }
                 let service = service.clone();
                 tokio::spawn(async move {
                     if let Err(error) = handle_stream(stream, service).await {
@@ -325,46 +377,57 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
     }
 }
 
-#[cfg(target_os = "linux")]
-fn unix_socket_path() -> std::path::PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || std::path::PathBuf::from("/tmp/fluxdown.sock"),
-        |home| std::path::PathBuf::from(home).join(".local/share/fluxdown/fluxdown.sock"),
-    )
+/// Unix IPC socket：`<数据目录>/ipc/fluxdown.sock`，`ipc` 是仅当前用户可进入的 0700 目录。
+/// 数据目录刻意放在 home 下：宿主与 Flatpak/Snap 沙箱都可达（`$XDG_RUNTIME_DIR` 在沙箱内会被
+/// 重映射）。中继（`native/nmh/src/main.rs` 的 `socket_path_under`）独立推导同一路径，
+/// 两侧测试用同一组字面量钉住。
+#[cfg(any(unix, test))]
+fn socket_path_under(home: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    let data_dir = home
+        .join("Library")
+        .join("Application Support")
+        .join("fluxdown");
+    #[cfg(not(target_os = "macos"))]
+    let data_dir = home.join(".local").join("share").join("fluxdown");
+    data_dir.join("ipc").join("fluxdown.sock")
 }
 
-#[cfg(target_os = "macos")]
-fn unix_socket_path() -> std::path::PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || std::path::PathBuf::from("/tmp/fluxdown.sock"),
-        |home| {
-            std::path::PathBuf::from(home)
-                .join("Library/Application Support/fluxdown/fluxdown.sock")
-        },
-    )
-}
-
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
-fn unix_socket_path() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(
-        || std::path::PathBuf::from("/tmp/fluxdown.sock"),
-        |dir| std::path::PathBuf::from(dir).join("fluxdown.sock"),
-    )
+/// 无 home 目录时没有端点（不回退到任何共享目录）。
+#[cfg(unix)]
+fn unix_socket_path() -> Option<std::path::PathBuf> {
+    directories::BaseDirs::new().map(|dirs| socket_path_under(dirs.home_dir()))
 }
 
 #[cfg(windows)]
-async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<(), std::io::Error> {
+async fn run_server(
+    service: NmhService,
+    cancel: CancellationToken,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<(), std::io::Error> {
     use tokio::net::windows::named_pipe::ServerOptions;
 
+    let pipe_name = pipe_name().ok_or_else(endpoint_unavailable)?;
     let mut first = true;
+    let mut ready = Some(ready);
     loop {
         let server = ServerOptions::new()
             .first_pipe_instance(first)
-            .create(PIPE_NAME)?;
+            .create(&pipe_name)?;
         first = false;
+        if let Some(ready) = ready.take() {
+            let _ = ready.send(());
+        }
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            connected = server.connect() => connected?,
+            connected = server.connect() => {
+                if let Err(error) = connected {
+                    // 单个客户端的握手失败不应让整个 NMH 端点（乃至 agent）退出。
+                    tracing::warn!(error = %error, "NMH pipe connect failed");
+                    tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                    continue;
+                }
+            }
         }
         let service = service.clone();
         tokio::spawn(async move {
@@ -375,33 +438,72 @@ async fn run_server(service: NmhService, cancel: CancellationToken) -> Result<()
     }
 }
 
-/// 中继拨号的 IPC 端点（unix socket 路径或命名管道名）。
+/// 中继拨号的 IPC 端点（unix socket 路径或命名管道名）；无法确定当前用户时为 `unavailable`。
 #[must_use]
 pub fn ipc_endpoint() -> String {
     #[cfg(unix)]
     {
-        unix_socket_path().display().to_string()
+        unix_socket_path().map_or_else(
+            || "unavailable".to_owned(),
+            |path| path.display().to_string(),
+        )
     }
     #[cfg(windows)]
     {
-        PIPE_NAME.to_owned()
+        pipe_name().unwrap_or_else(|| "unavailable".to_owned())
     }
 }
 
+/// Windows Named Pipe for the current account: `\\.\pipe\fluxdown-<account>`。账户名转小写后，
+/// `[a-z0-9]` 之外的每个字节编码为 `_xx`（下划线本身也编码），不同账户不会落到同一管道。
+/// 中继（`native/nmh/src/main.rs` 的 `pipe_name_for`）独立推导同一名字，两侧测试用同一组字面量钉住。
+#[cfg(any(windows, test))]
+fn pipe_name_for(user: &str) -> Option<String> {
+    if user.is_empty() {
+        return None;
+    }
+    let mut name = String::from(r"\\.\pipe\fluxdown-");
+    for byte in user.to_lowercase().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    Some(name)
+}
+
 #[cfg(windows)]
-const PIPE_NAME: &str = r"\\.\pipe\fluxdown";
+fn pipe_name() -> Option<String> {
+    std::env::var("USERNAME")
+        .ok()
+        .and_then(|user| pipe_name_for(&user))
+}
 
 /// 以中继的长度帧协议向本进程 IPC 端点发送 `ping`，成功返回 `pong` 载荷。
 pub async fn probe_ipc(timeout: std::time::Duration) -> Result<String, std::io::Error> {
     tokio::time::timeout(timeout, async {
         #[cfg(unix)]
-        let stream = tokio::net::UnixStream::connect(unix_socket_path()).await?;
+        let stream = {
+            let path = unix_socket_path().ok_or_else(endpoint_unavailable)?;
+            tokio::net::UnixStream::connect(path).await?
+        };
         #[cfg(windows)]
-        let stream = tokio::net::windows::named_pipe::ClientOptions::new().open(PIPE_NAME)?;
+        let stream = {
+            let name = pipe_name().ok_or_else(endpoint_unavailable)?;
+            tokio::net::windows::named_pipe::ClientOptions::new().open(name)?
+        };
         ping_stream(stream).await
     })
     .await
     .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "IPC ping timed out"))?
+}
+
+fn endpoint_unavailable() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "native messaging IPC endpoint is unavailable (no home directory / account name)",
+    )
 }
 
 async fn ping_stream<S>(mut stream: S) -> Result<String, std::io::Error>
@@ -447,8 +549,10 @@ where
 /// 同一台机器可能并存多份 FluxDown（Flutter / GPUI、安装版 / 开发构建），它们共用
 /// 同一个注册入口（类 Unix 的启动脚本、Windows 的 HKCU 键）。启动自愈
 /// [`auto_register`] 按 [`may_take_over`] 的归属规则决定是否改指向本安装，避免两份
-/// 安装每次启动互相覆盖；Doctor 的显式修复 [`register`] 总是指向本安装。
-/// 判定规则与 `native/hub/src/nmh_registry.rs` 逐条一致，改一处必须同步另一处。
+/// 安装每次启动互相覆盖；但另一份安装的中继若实测连不到正在运行的本 agent（端点或帧
+/// 协议不同），保留它只会让扩展显示未连接，此时总是接管。Doctor 的显式修复 [`register`]
+/// 总是指向本安装。按路径判定的归属规则与 `native/hub/src/nmh_registry.rs` 一致，
+/// 改一处必须同步另一处；连通性实测只在 agent 侧。
 pub mod registry {
     use std::io;
     use std::path::{Path, PathBuf};
@@ -637,43 +741,75 @@ pub mod registry {
         }
     }
 
-    /// 启动自愈能否把注册改指向本安装：未注册、失效或已是本安装时总可以；另一份健康
-    /// 安装只在它是开发构建/临时路径、而本安装不是时才被接管，其余情况保持先到者。
-    fn may_take_over(owner: RelayOwner, registered: &Path, current: &Path) -> bool {
+    /// 启动自愈能否把注册改指向本安装：未注册、失效或已是本安装时总可以。另一份安装的中继
+    /// 实测连不到正在运行的本 agent（`reaches_agent == Some(false)`）时必须接管；能连通或
+    /// 无从实测（`None`）时，只在它是开发构建/临时路径、而本安装不是时才接管，其余保持先到者。
+    fn may_take_over(
+        owner: RelayOwner,
+        registered: &Path,
+        current: &Path,
+        reaches_agent: Option<bool>,
+    ) -> bool {
         match owner {
             RelayOwner::Missing | RelayOwner::Broken | RelayOwner::Current => true,
             RelayOwner::OtherInstall => {
-                is_transient_relay(registered) && !is_transient_relay(current)
+                reaches_agent == Some(false)
+                    || (is_transient_relay(registered) && !is_transient_relay(current))
             }
         }
     }
 
-    /// 查找中继二进制：先看 agent 同级目录（发布形态），再看 cargo workspace `target/`（开发）。
+    /// 中继只认 agent 同级目录里的那一份：它与本 agent 出自同一次构建，端点与帧协议必然一致。
+    /// 不回退到其它构建目录（例如另一 profile 的 `target/`）：那里的中继可能停在旧端点，
+    /// 注册它等于让扩展连不上。
     fn find_nmh_exe() -> Result<PathBuf, io::Error> {
-        if let Ok(exe) = std::env::current_exe() {
-            let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
-            if let Some(dir) = canonical.parent() {
-                let candidate = dir.join(NMH_EXE_NAME);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let exe = std::env::current_exe()?;
+        let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
+        canonical
             .parent()
-            .and_then(Path::parent);
-        if let Some(workspace) = workspace_root {
-            for profile in ["debug", "release"] {
-                let candidate = workspace.join("target").join(profile).join(NMH_EXE_NAME);
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{NMH_EXE_NAME} not found. Build it with: cargo build -p fluxdown_nmh"),
-        ))
+            .map(|dir| dir.join(NMH_EXE_NAME))
+            .filter(|candidate| candidate.is_file())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "{NMH_EXE_NAME} not found next to {}. Build it with: cargo build -p fluxdown_nmh",
+                        canonical.display()
+                    ),
+                )
+            })
+    }
+
+    /// 实测另一份安装的中继的上限；免拉起的 `ping` 在本机往返只需毫秒级。
+    const RELAY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// 像浏览器那样拉起中继（参数为扩展 origin）并经它发一条 `ping`：拿到本进程 IPC 端点
+    /// 回的 `pong` 才说明这份中继与正在运行的 agent 端点、帧协议一致。超时或任何失败都算
+    /// 连不到；子进程随句柄丢弃被结束。
+    async fn relay_reaches_agent(relay: &Path) -> bool {
+        let mut command = tokio::process::Command::new(relay);
+        command
+            .arg(CHROME_EXTENSION_ID)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let Ok(mut child) = command.spawn() else {
+            return false;
+        };
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return false;
+        };
+        let reply = tokio::time::timeout(
+            RELAY_PROBE_TIMEOUT,
+            super::ping_stream(tokio::io::join(stdout, stdin)),
+        )
+        .await;
+        matches!(reply, Ok(Ok(_)))
     }
 
     /// 显式修复：把全部注册改指向本安装的中继。
@@ -681,15 +817,31 @@ pub mod registry {
         register_with(&find_nmh_exe()?)
     }
 
-    /// 启动自愈：注册缺失、失效或不完整时按归属规则重写，完好时不碰任何文件。
-    pub fn auto_register() -> Result<AutoRegisterOutcome, io::Error> {
-        let diagnosis = diagnose();
+    /// 启动自愈：注册缺失、失效、不完整，或指向连不到本 agent 的另一份中继时按归属规则重写，
+    /// 完好时不碰任何文件。`endpoint_live` 表示本进程 IPC 端点已在监听：只有这时另一份安装的
+    /// 中继才能实测连通性，否则只按路径规则判定。
+    pub async fn auto_register(endpoint_live: bool) -> Result<AutoRegisterOutcome, io::Error> {
+        let diagnosis = tokio::task::spawn_blocking(diagnose)
+            .await
+            .map_err(io::Error::other)?;
         if diagnosis.exe_path.is_empty() {
             return Err(io::Error::new(io::ErrorKind::NotFound, diagnosis.exe_error));
         }
         let current = PathBuf::from(&diagnosis.exe_path);
         let registered = PathBuf::from(&diagnosis.registered_relay);
-        let relay = if may_take_over(diagnosis.relay_owner, &registered, &current) {
+        let reaches_agent = if endpoint_live && diagnosis.relay_owner == RelayOwner::OtherInstall {
+            let reachable = relay_reaches_agent(&registered).await;
+            if !reachable {
+                tracing::info!(
+                    relay = %registered.display(),
+                    "registered NMH relay cannot reach this agent; registering this installation's relay"
+                );
+            }
+            Some(reachable)
+        } else {
+            None
+        };
+        let relay = if may_take_over(diagnosis.relay_owner, &registered, &current, reaches_agent) {
             current
         } else {
             registered.clone()
@@ -705,7 +857,10 @@ pub mod registry {
         if complete {
             return Ok(AutoRegisterOutcome::UpToDate);
         }
-        register_with(&relay)?;
+        let target = relay.clone();
+        tokio::task::spawn_blocking(move || register_with(&target))
+            .await
+            .map_err(io::Error::other)??;
         Ok(AutoRegisterOutcome::Registered(relay))
     }
 
@@ -748,25 +903,40 @@ pub mod registry {
         }
 
         #[test]
-        fn healthy_other_install_is_only_taken_over_from_a_dev_build() {
+        fn other_install_is_kept_only_while_it_reaches_this_agent() {
             let other_installed = Path::new("/opt/fluxdown/fluxdown_nmh");
-            assert!(!may_take_over(
-                RelayOwner::OtherInstall,
-                other_installed,
-                Path::new(INSTALLED)
-            ));
-            assert!(!may_take_over(
-                RelayOwner::OtherInstall,
-                other_installed,
-                Path::new(DEV)
-            ));
-            assert!(may_take_over(
-                RelayOwner::OtherInstall,
-                Path::new(DEV),
-                Path::new(INSTALLED)
-            ));
+            // 能连通或无从实测时保持先到者，只有开发构建让位给安装版。
+            for reaches_agent in [Some(true), None] {
+                assert!(!may_take_over(
+                    RelayOwner::OtherInstall,
+                    other_installed,
+                    Path::new(INSTALLED),
+                    reaches_agent
+                ));
+                assert!(!may_take_over(
+                    RelayOwner::OtherInstall,
+                    other_installed,
+                    Path::new(DEV),
+                    reaches_agent
+                ));
+                assert!(may_take_over(
+                    RelayOwner::OtherInstall,
+                    Path::new(DEV),
+                    Path::new(INSTALLED),
+                    reaches_agent
+                ));
+            }
+            // 连不到本 agent 的中继（旧端点 / 旧帧协议）对本次运行无用：开发构建也要接管。
+            for current in [INSTALLED, DEV] {
+                assert!(may_take_over(
+                    RelayOwner::OtherInstall,
+                    other_installed,
+                    Path::new(current),
+                    Some(false)
+                ));
+            }
             for owner in [RelayOwner::Missing, RelayOwner::Broken, RelayOwner::Current] {
-                assert!(may_take_over(owner, other_installed, Path::new(DEV)));
+                assert!(may_take_over(owner, other_installed, Path::new(DEV), None));
             }
         }
 
@@ -1514,8 +1684,78 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MAX_BATCH_ITEMS, NmhService, PipeMessage, handle_stream, ping_stream, select_task_briefs,
+        MAX_BATCH_ITEMS, NmhService, PipeMessage, handle_stream, ping_stream, pipe_name_for,
+        select_task_briefs, socket_path_under,
     };
+
+    /// 与 `native/nmh/src/main.rs` 的 `unix_socket_lives_in_a_private_per_user_ipc_dir`
+    /// 使用同一组字面量：agent 与中继各自推导端点，必须算出同一路径。
+    #[test]
+    fn unix_socket_lives_in_a_private_per_user_ipc_dir() {
+        let (home, expected) = if cfg!(target_os = "macos") {
+            (
+                "/Users/alice",
+                "/Users/alice/Library/Application Support/fluxdown/ipc/fluxdown.sock",
+            )
+        } else {
+            (
+                "/home/alice",
+                "/home/alice/.local/share/fluxdown/ipc/fluxdown.sock",
+            )
+        };
+        assert_eq!(
+            socket_path_under(std::path::Path::new(home)),
+            std::path::PathBuf::from(expected)
+        );
+    }
+
+    /// 与 `native/nmh/src/main.rs` 的 `pipe_name_is_per_user_and_injective` 使用同一组字面量。
+    #[test]
+    fn pipe_name_is_per_user_and_injective() {
+        assert_eq!(
+            pipe_name_for("Alice Smith").as_deref(),
+            Some(r"\\.\pipe\fluxdown-alice_20smith")
+        );
+        assert_eq!(
+            pipe_name_for("a_b"),
+            Some(r"\\.\pipe\fluxdown-a_5fb".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("a b"),
+            Some(r"\\.\pipe\fluxdown-a_20b".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("张三").as_deref(),
+            Some(r"\\.\pipe\fluxdown-_e5_bc_a0_e4_b8_89")
+        );
+        assert_eq!(pipe_name_for(""), None);
+        assert_ne!(pipe_name_for("alice"), pipe_name_for("bob"));
+        // Windows 账户名不区分大小写。
+        assert_eq!(pipe_name_for("ALICE"), pipe_name_for("alice"));
+    }
+    #[test]
+    fn task_panel_reports_live_download_speed() {
+        let task = |id: &str| -> fluxdown_protocol::TaskDto {
+            serde_json::from_value(json!({
+                "taskId": id, "url": "https://example.com/a", "fileName": "a",
+                "saveDir": "/tmp", "status": 1, "downloadedBytes": 1, "totalBytes": 2,
+                "errorMessage": "", "createdAt": "1", "proxyUrl": "", "queueId": "main",
+                "checksum": ""
+            }))
+            .expect("task")
+        };
+        let mut speeds = std::collections::HashMap::new();
+        speeds.insert(
+            "fast".to_owned(),
+            fluxdown_api::service::LiveSpeed {
+                download_bps: 4096,
+                upload_bps: 1,
+            },
+        );
+        let selected = select_task_briefs(vec![task("fast"), task("idle")], &speeds);
+        assert_eq!(selected[0].speed, 4096);
+        assert_eq!(selected[1].speed, 0);
+    }
 
     #[tokio::test]
     async fn ipc_ping_round_trips_through_frame_protocol() {
@@ -1563,7 +1803,7 @@ mod tests {
                 .expect("task")
             })
             .collect();
-        let selected = select_task_briefs(tasks);
+        let selected = select_task_briefs(tasks, &std::collections::HashMap::new());
         assert_eq!(selected.len(), 11);
         assert_eq!(selected[0].task_id, "task-0");
         assert_eq!(selected[1].task_id, "task-14");

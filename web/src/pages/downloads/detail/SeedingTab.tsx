@@ -2,9 +2,11 @@ import { useState } from 'react'
 import { useT } from '../../../i18n'
 import { SEED_LIMIT_INHERIT, rpc } from '../../../lib/rpc'
 import { Button, FormField, Input, toast } from '../../../ui'
+import { toastRpcError } from '../../../lib/rpcToast'
 import { formatBytes } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import { DetailRow } from './DetailRow'
+import { uploadLimitText, uploadLimitToSend } from './seedUpload'
 
 const STATUS_KEY: Record<number, string> = {
   1: 'seedingStatusSeeding',
@@ -26,6 +28,11 @@ function parseSeedLimit(text: string): number {
   return /^[+-]?\d+$/.test(trimmed) ? Number.parseInt(trimmed, 10) : SEED_LIMIT_INHERIT
 }
 
+/** 任务现值 → 输入框文本：跟随全局（-2）与缺省显示为空，其余原样回显。 */
+function seedLimitText(value: number | undefined): string {
+  return value === undefined || value === SEED_LIMIT_INHERIT ? '' : String(value)
+}
+
 function formatDuration(t: ReturnType<typeof useT>, totalSeconds: number): string {
   const minutes = Math.floor(Math.max(0, totalSeconds) / 60)
   if (minutes < 60) return `${minutes} ${t('timeUnitMinutes')}`
@@ -42,11 +49,12 @@ function SeedField({ label, hint, value, onChange }: { label: string; hint?: str
 
 export function SeedingTab({ view }: { view: DownloadTaskView }) {
   const t = useT()
-  const [ratio, setRatio] = useState('')
-  const [postRatio, setPostRatio] = useState('')
-  const [seedTime, setSeedTime] = useState('')
-  const [inactive, setInactive] = useState('')
-  const [upload, setUpload] = useState('')
+  const [ratio, setRatio] = useState(() => seedLimitText(view.dto?.seedRatioLimitMilli))
+  const [postRatio, setPostRatio] = useState(() => seedLimitText(view.dto?.seedPostRatioLimitMilli))
+  const [seedTime, setSeedTime] = useState(() => seedLimitText(view.dto?.seedTimeLimitMinutes))
+  const [inactive, setInactive] = useState(() => seedLimitText(view.dto?.seedInactiveTimeLimitMinutes))
+  const [initialUpload] = useState(() => uploadLimitText(view.dto?.seedUploadLimitBps))
+  const [upload, setUpload] = useState(initialUpload)
   const [saving, setSaving] = useState(false)
 
   const uploaded = Math.max(0, view.uploadedBytes)
@@ -54,7 +62,6 @@ export function SeedingTab({ view }: { view: DownloadTaskView }) {
   const statusKey = STATUS_KEY[view.seedingStatus] ?? 'seedingStatusNone'
 
   const save = () => {
-    const kbps = Number.parseInt(upload.trim(), 10)
     setSaving(true)
     rpc.daemon.task
       .setSeedLimits({
@@ -63,9 +70,10 @@ export function SeedingTab({ view }: { view: DownloadTaskView }) {
         postRatioLimitMilli: parseSeedLimit(postRatio),
         seedTimeLimitMinutes: parseSeedLimit(seedTime),
         inactiveTimeLimitMinutes: parseSeedLimit(inactive),
-        uploadLimitBps: Number.isFinite(kbps) ? kbps * 1024 : 0,
+        uploadLimitBps: uploadLimitToSend(upload, initialUpload, view.dto?.seedUploadLimitBps),
       })
-      .catch((err: unknown) => toast.error(err, t('localServiceActionFailed')))
+      .then(() => toast.key('btSeedLimitsSaved', 'success'))
+      .catch(toastRpcError)
       .finally(() => setSaving(false))
   }
 

@@ -129,7 +129,7 @@ impl ExtensionsController {
         self.plugins.clone_from(&snapshot.daemon.plugins);
         self.components.clone_from(&snapshot.daemon.components);
         self.apply_config(&snapshot.daemon.config);
-        self.stale = false;
+        self.stale = !snapshot.daemon_connected;
     }
 
     /// 应用事件；组件安装进度 / 结果以信号形式回传给 view 处理。
@@ -307,14 +307,27 @@ impl ExtensionsController {
         )
     }
 
+    /// 重新加载 dev 插件：重读 manifest 与源码并校验；失败保留 dev 登记。
+    pub fn reload_plugin_dev(&self, identity: String) -> PortFuture<serde_json::Value> {
+        self.call(
+            method::DAEMON_PLUGIN_RELOAD_DEV,
+            serde_json::json!({ "identity": identity }),
+        )
+    }
+
     pub fn market_list(&self) -> PortFuture<serde_json::Value> {
         self.call(method::DAEMON_PLUGIN_MARKET_LIST, serde_json::json!({}))
     }
 
-    pub fn market_install(&self, plugin_id: String) -> PortFuture<serde_json::Value> {
+    /// `version` = 用户确认权限时看到的版本；市场最新版本已变化时 daemon 拒绝安装。
+    pub fn market_install(
+        &self,
+        plugin_id: String,
+        version: String,
+    ) -> PortFuture<serde_json::Value> {
         self.call(
             method::DAEMON_PLUGIN_MARKET_INSTALL,
-            serde_json::json!({ "pluginId": plugin_id }),
+            serde_json::json!({ "pluginId": plugin_id, "version": version }),
         )
     }
 

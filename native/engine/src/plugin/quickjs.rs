@@ -13,7 +13,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::{
@@ -60,10 +60,20 @@ pub struct QuickJsScriptRuntime {
     runtime: Option<tokio::runtime::Runtime>,
     /// runtime 的 handle（cheap clone，供 `spawn_handle` 恒可用，与 runtime 生命周期同步）。
     handle: tokio::runtime::Handle,
-    /// resolve/subscription 共用信号量：固定容量 `max(启动时 max_concurrent, workers)`。
+    /// resolve/subscription 共用信号量：容量 `max(max_concurrent, workers)`，随宿主并发上限
+    /// 经 [`ScriptRuntime::set_resolve_capacity`] 同步调整。
     resolve_sema: Arc<Semaphore>,
+    /// `resolve_sema` 当前的目标容量（调整时据此算增减量）。
+    resolve_cap: std::sync::Mutex<usize>,
+    /// 专用 runtime 的 worker 数（resolve 容量下界）。
+    workers: usize,
     /// hook 平面信号量：容量 = workers；`try_acquire` 失败即丢。
     hook_sema: Arc<Semaphore>,
+    /// 外部工具（ffmpeg/yt-dlp）授权插件的钩子平面：钩子可跑到 30 分钟级，不能与
+    /// 短通知共用 `hook_sema`（会把后续钩子挤丢）。容量 = workers；满时有界排队。
+    ext_hook_sema: Arc<Semaphore>,
+    /// `ext_hook_sema` 的排队中数量（防无界堆积）。
+    ext_hook_waiters: Arc<AtomicUsize>,
     /// auth 平面独立信号量（M-2）：与 resolve/subscription 物理隔离，登录轮询
     /// 不会挤占正常下载任务的 resolve permit，反之亦然。
     auth_sema: Arc<Semaphore>,
@@ -97,7 +107,11 @@ impl QuickJsScriptRuntime {
             runtime: Some(runtime),
             handle,
             resolve_sema: Arc::new(Semaphore::new(resolve_cap)),
+            resolve_cap: std::sync::Mutex::new(resolve_cap),
+            workers,
             hook_sema: Arc::new(Semaphore::new(workers.max(1))),
+            ext_hook_sema: Arc::new(Semaphore::new(workers.max(1))),
+            ext_hook_waiters: Arc::new(AtomicUsize::new(0)),
             auth_sema: Arc::new(Semaphore::new(AUTH_CONCURRENCY)),
         })
     }
@@ -173,6 +187,9 @@ impl QuickJsScriptRuntime {
         let ytdlp_permitted = host.ytdlp_permitted;
         let auth_permitted = host.auth_permitted;
         let interrupt_ns_bridge = interrupt_ns.clone();
+        // 脚本墙钟里扣除的排队时间（yt-dlp 并发槽等待）。
+        let wall_pause = Arc::new(super::runtime::WallPause::default());
+        let wall_pause_bridge = wall_pause.clone();
         let exec = ctx.async_with(async move |ctx| -> Result<String, PluginError> {
             inject_bridge(
                 &ctx,
@@ -185,6 +202,7 @@ impl QuickJsScriptRuntime {
                 ytdlp_permitted,
                 auth_permitted,
                 interrupt_ns_bridge,
+                wall_pause_bridge,
             )
             .map_err(|e| PluginError::Runtime(format!("注入 flux 失败: {e}")))?;
 
@@ -217,13 +235,30 @@ impl QuickJsScriptRuntime {
             Ok(out)
         });
 
-        match tokio::time::timeout(budget.timeout, exec).await {
-            Ok(r) => {
+        let started = Instant::now();
+        let mut exec = Box::pin(exec);
+        let outcome = loop {
+            let deadline = started + budget.timeout + wall_pause.total();
+            match tokio::time::timeout_at(deadline.into(), &mut exec).await {
+                Ok(r) => break Some(r),
+                Err(_) => {
+                    // 到点时若期间累计了新的排队等待，截止顺延；否则才是真超时。
+                    // 顺延只在仍有等待进行时发生，且每轮至少睡 20ms，避免空转。
+                    if Instant::now() >= started + budget.timeout + wall_pause.total() {
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+        drop(exec);
+        match outcome {
+            Some(r) => {
                 // 尽力回收 job 队列（不阻塞主流程）。
                 rt.idle().await;
                 r.map_err(reclassify_oom)
             }
-            Err(_) => Err(PluginError::Timeout),
+            None => Err(PluginError::Timeout),
         }
     }
 }
@@ -258,6 +293,35 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         Self::eval_bool(&format!(
             "(function(){{ try {{ return new RegExp({plit}).test({vlit}); }} catch(e) {{ return false; }} }})()"
         ))
+    }
+
+    fn set_resolve_capacity(&self, max_concurrent: usize) {
+        let target = max_concurrent.max(self.workers).max(1);
+        let mut current = self
+            .resolve_cap
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if target > *current {
+            self.resolve_sema.add_permits(target - *current);
+        } else if target < *current {
+            let shrink = *current - target;
+            // 空闲 permit 立即回收；仍被在途 resolve 占用的部分，由后台任务在其归还后
+            // 逐个吞掉，容量最终收敛到目标值而不打断在途任务。
+            let forgotten = self.resolve_sema.forget_permits(shrink);
+            let debt = shrink - forgotten;
+            if debt > 0 {
+                let sema = self.resolve_sema.clone();
+                self.handle.spawn(async move {
+                    for _ in 0..debt {
+                        match sema.clone().acquire_owned().await {
+                            Ok(permit) => permit.forget(),
+                            Err(_) => break,
+                        }
+                    }
+                });
+            }
+        }
+        *current = target;
     }
 
     async fn invoke_resolve(
@@ -405,11 +469,45 @@ impl ScriptRuntime for QuickJsScriptRuntime {
         host: HostContext,
     ) {
         debug_assert_eq!(plugin.entry_fn_hint, PluginEntryKind::Hook);
-        // hook 平面：try_acquire，失败即静默丢弃（不等待、不影响任何计数）。
-        let Ok(permit) = self.hook_sema.clone().try_acquire_owned() else {
-            return;
+        // 短通知平面：try_acquire，失败即丢（带 warn 日志）。外部工具钩子（ffmpeg /
+        // yt-dlp 授权，可运行数十分钟）走独立信号量并有界排队，避免长转码占满
+        // 通用平面把其它钩子丢光，也避免自己被随机丢弃。
+        const MAX_EXT_HOOK_WAITERS: usize = 64;
+        let _permit = if host.ffmpeg_permitted || host.ytdlp_permitted {
+            match self.ext_hook_sema.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    if self.ext_hook_waiters.fetch_add(1, Ordering::AcqRel) >= MAX_EXT_HOOK_WAITERS
+                    {
+                        self.ext_hook_waiters.fetch_sub(1, Ordering::AcqRel);
+                        bridge.log(
+                            &plugin.identity,
+                            PluginLogLevel::Warn,
+                            "外部工具钩子排队已满，本次钩子被丢弃",
+                        );
+                        return;
+                    }
+                    let got = self.ext_hook_sema.clone().acquire_owned().await;
+                    self.ext_hook_waiters.fetch_sub(1, Ordering::AcqRel);
+                    match got {
+                        Ok(p) => p,
+                        Err(_) => return,
+                    }
+                }
+            }
+        } else {
+            match self.hook_sema.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    bridge.log(
+                        &plugin.identity,
+                        PluginLogLevel::Warn,
+                        "钩子并发已满，本次钩子被丢弃",
+                    );
+                    return;
+                }
+            }
         };
-        let _permit = permit;
 
         let arg_json = match serde_json::to_string(&event) {
             Ok(s) => s,
@@ -532,6 +630,7 @@ fn inject_bridge(
     ytdlp_permitted: bool,
     auth_permitted: bool,
     interrupt_ns: Arc<AtomicU64>,
+    wall_pause: Arc<super::runtime::WallPause>,
 ) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
@@ -982,14 +1081,17 @@ fn inject_bridge(
             let b = bridge.clone();
             let pid = plugin_id.to_string();
             let dl = interrupt_ns.clone();
+            let wp = wall_pause.clone();
             let f = Function::new(
                 ctx.clone(),
                 Async(move |opts: String| {
                     let b = b.clone();
                     let pid = pid.clone();
                     let dl = dl.clone();
+                    let wp = wp.clone();
                     async move {
-                        let spec: YtdlpSpec = serde_json::from_str(&opts).unwrap_or_default();
+                        let mut spec: YtdlpSpec = serde_json::from_str(&opts).unwrap_or_default();
+                        spec.wall_pause = Some(wp);
                         // 挂起时长补进中断预算：长时子进程返回后 JS 仍保有 CPU 预算。
                         let started = Instant::now();
                         let out = b.run_ytdlp(&pid, spec).await;
@@ -1450,5 +1552,28 @@ mod tests {
         )
         .await;
         assert_eq!(r.url, "object:function:function:function:function");
+    }
+
+    /// 回归：宿主运行期放大/缩小并发上限，resolve 信号量容量随之同步
+    /// （否则放大后超出启动容量的解析任务只能 3s 后 `Overloaded`）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_capacity_follows_host_concurrency() {
+        let rt = QuickJsScriptRuntime::new(1).expect("runtime");
+        let base = rt.resolve_sema.available_permits();
+        let raised = base + 2;
+        rt.set_resolve_capacity(raised);
+        assert_eq!(rt.resolve_sema.available_permits(), raised);
+
+        // 全部 permit 在途时缩容：无空闲可回收，欠下的部分在归还后被吞掉。
+        let held = rt
+            .resolve_sema
+            .clone()
+            .acquire_many_owned(raised as u32)
+            .await
+            .expect("permits");
+        rt.set_resolve_capacity(base);
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(rt.resolve_sema.available_permits(), base);
     }
 }

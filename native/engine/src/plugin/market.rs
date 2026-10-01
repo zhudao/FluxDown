@@ -51,6 +51,8 @@ pub enum MarketError {
     Yanked(String),
     #[error("所有镜像下载失败")]
     AllMirrorsFailed,
+    #[error("市场最新版本已变化: 确认的是 {expected}，当前为 {actual}")]
+    VersionChanged { expected: String, actual: String },
     #[error(transparent)]
     Plugin(#[from] PluginError),
 }
@@ -122,12 +124,17 @@ const MAX_FXPLUG_BYTES: usize = 10 * 1024 * 1024;
 /// 索引 JSON 体积上限（流式截断防 OOM；真实索引远小于此，被投毒/损坏的源
 /// 可能返回任意大响应，`.text()` 全量缓冲会被撑爆）。
 const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
+/// 包下载最多跟随的重定向跳数。
+const MAX_DOWNLOAD_REDIRECTS: usize = 5;
 
 /// 市场客户端。持有插件管理器（安装）与 Db（高水位持久化）。
 pub struct MarketClient {
     manager: std::sync::Arc<PluginManager>,
     db: Db,
     client: reqwest::Client,
+    /// 包下载专用：重定向逐跳复查 https 与字面量 IP 守卫（初始 URL 的
+    /// `mirror_url_allowed` 只管第一跳）。
+    download_client: reqwest::Client,
     sources: Vec<String>,
 }
 
@@ -146,10 +153,24 @@ impl MarketClient {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap_or_default();
+        let download_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= MAX_DOWNLOAD_REDIRECTS {
+                    return attempt.error("too many redirects");
+                }
+                if !parsed_url_allowed(attempt.url()) {
+                    return attempt.error("redirect target rejected by mirror guard");
+                }
+                attempt.follow()
+            }))
+            .build()
+            .unwrap_or_default();
         Self {
             manager,
             db,
             client,
+            download_client,
             sources,
         }
     }
@@ -279,11 +300,14 @@ impl MarketClient {
 
     async fn download_one(&self, url: &str) -> Result<Vec<u8>, MarketError> {
         let resp = self
-            .client
+            .download_client
             .get(url)
             .send()
             .await
             .map_err(|e| MarketError::Network(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(MarketError::Network(format!("HTTP {}", resp.status())));
+        }
         let mut stream_resp = resp;
         let mut buf = Vec::new();
         loop {
@@ -302,12 +326,21 @@ impl MarketClient {
     }
 
     /// 便捷：按 plugin_id 安装最新版（拉索引 → 找最新 → 安装）。
-    pub async fn install_latest(&self, plugin_id: &str) -> Result<String, MarketError> {
+    ///
+    /// `expected_version` 是调用方（UI 权限确认对话框）展示并确认过的版本：
+    /// 与当前最新可装版本不一致时返回 [`MarketError::VersionChanged`] 且**不安装**，
+    /// 让调用方刷新目录后重新确认权限，避免「确认的是旧版声明，装上的是新版」。
+    pub async fn install_latest(
+        &self,
+        plugin_id: &str,
+        expected_version: Option<&str>,
+    ) -> Result<String, MarketError> {
         let idx = self.fetch_index().await?;
         let entry = self
             .latest_entry(&idx, plugin_id)
             .ok_or_else(|| MarketError::NotFound(plugin_id.to_string()))?
             .clone();
+        check_expected_version(expected_version, &entry.version)?;
         self.install_entry(&entry, false).await
     }
 
@@ -329,6 +362,17 @@ impl MarketClient {
     }
 }
 
+/// 调用方确认过的版本必须与当前最新可装版本一致；未指定（旧客户端）不校验。
+fn check_expected_version(expected: Option<&str>, actual: &str) -> Result<(), MarketError> {
+    match expected {
+        Some(expected) if expected != actual => Err(MarketError::VersionChanged {
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// `sha256(bytes)` 的小写 hex。
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -346,12 +390,17 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// hostname 不做 DNS 级过滤（自托管 LAN 索引经 hostname 仍可用，v1 取舍）；
 /// 完整性由 content_hash 钉住兜底，此守卫只挡最直接的内网探测形态。
 fn mirror_url_allowed(url: &str) -> bool {
-    if !url.starts_with("https://") {
-        return false;
-    }
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
+    parsed_url_allowed(&parsed)
+}
+
+/// 已解析 URL 的守卫（初始镜像与每一跳重定向共用）：https + 字面量 IP 可全局路由。
+fn parsed_url_allowed(parsed: &url::Url) -> bool {
+    if parsed.scheme() != "https" {
+        return false;
+    }
     if let Some(host) = parsed.host_str() {
         let trimmed = host.trim_matches(|c| c == '[' || c == ']');
         if let Ok(ip) = trimmed.parse::<std::net::IpAddr>()
@@ -366,7 +415,23 @@ fn mirror_url_allowed(url: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{MarketEntry, MarketIndex, mirror_url_allowed, sha256_hex};
+    use super::{
+        MarketEntry, MarketError, MarketIndex, check_expected_version, mirror_url_allowed,
+        sha256_hex,
+    };
+
+    /// 确认过的版本与最新不一致必须拒绝；一致或未指定放行。
+    #[test]
+    fn expected_version_pin_rejects_changed_latest() {
+        assert!(check_expected_version(Some("1.2.0"), "1.2.0").is_ok());
+        assert!(check_expected_version(None, "9.9.9").is_ok());
+        let err = check_expected_version(Some("1.2.0"), "1.3.0").expect_err("changed");
+        assert!(matches!(
+            err,
+            MarketError::VersionChanged { ref expected, ref actual }
+                if expected == "1.2.0" && actual == "1.3.0"
+        ));
+    }
 
     #[test]
     fn mirror_whitelist_rejects_http_and_nonroutable_ip() {

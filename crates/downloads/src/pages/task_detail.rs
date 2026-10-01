@@ -27,7 +27,7 @@ use gpui::{
 use gpui_component::{
     Disableable as _, Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    chart::AreaChart,
+    chart::{AreaChart, PieChart},
     h_flex,
     input::{InputState, NumberInput},
     notification::Notification,
@@ -42,17 +42,23 @@ use crate::{
         task_table::{progress_bar_color, progress_track_color, task_status_color},
     },
     controller::{
-        DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult, SeedLimits,
+        DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult,
+        SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits,
     },
-    model::{DownloadTaskView, RowKey, TaskProtocol, TaskState, TaskStore, format_bytes},
+    model::{
+        DownloadTaskView, RowKey, TaskProtocol, TaskState, TaskStore, format_bytes,
+        source_composition::{SourceKind, compose, format_percent},
+    },
     pages::downloads::DownloadHostActions,
     strings::DownloadStrings,
 };
 
 /// 速度曲线保留的采样点数（每秒一次）。
 const SPEED_HISTORY_CAPACITY: usize = 120;
-/// `SeedLimits` 各字段的「跟随全局」哨兵（与 `native/protocol` 一致）。
-const SEED_LIMIT_FOLLOW_GLOBAL: i64 = -2;
+/// 常规页信息列的折行基准宽度：可用宽度容不下「信息列 + 来源构成」时来源换行。
+const GENERAL_INFO_MIN_WIDTH: f32 = 300.;
+/// 常规页「来源构成」区块宽度（环形图 140 + 图例）。
+const SOURCES_SECTION_WIDTH: f32 = 360.;
 /// 键值表标签列宽：详情、做种、高级与任务组概览共用，保证值列左缘对齐。
 const DETAIL_LABEL_WIDTH: f32 = 112.;
 /// 活动日志时间戳列宽（`YYYY-MM-DD HH:MM:SS.mmm` 等宽数字）。
@@ -72,6 +78,7 @@ pub enum DetailMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetailTab {
     General,
+    Speed,
     Seeding,
     Log,
     Advanced,
@@ -109,6 +116,10 @@ pub struct TaskDetailView {
     seed_time_limit: Entity<InputState>,
     seed_inactive_limit: Entity<InputState>,
     seed_upload_limit: Entity<InputState>,
+    /// 做种限制输入框上次预填所用的限制值；`None` = 尚未预填。保存时未改动的输入项按它还原。
+    seed_baseline: Option<SeedLimits>,
+    /// 错误信息复制按钮的反馈代次；非零 = 显示「已复制」勾选态，定时回落时比对代次防连点提前复位。
+    error_copied: u32,
 }
 
 impl EventEmitter<TaskDetailEvent> for TaskDetailView {}
@@ -216,6 +227,8 @@ impl TaskDetailView {
             seed_time_limit,
             seed_inactive_limit,
             seed_upload_limit,
+            seed_baseline: None,
+            error_copied: 0,
         };
         Self::spawn_speed_ticker(cx);
         this
@@ -253,6 +266,8 @@ impl TaskDetailView {
         self.speed_history.clear();
         self.runtime = None;
         self.closed = false;
+        self.error_copied = 0;
+        self.seed_baseline = None;
         self.fetch_activity(cx);
         cx.notify();
     }
@@ -383,7 +398,12 @@ impl TaskDetailView {
             self.runtime = None;
             self.last_error = Some(self.strings.disconnected.clone());
         }
-        self.refresh_from_store(cx);
+        if snapshot.daemon_connected {
+            self.refresh_from_store(cx);
+        } else {
+            // 服务未就绪的空快照不代表任务已删除；等 daemon 已连接的快照再判定。
+            cx.notify();
+        }
         self.fetch_activity(cx);
     }
 
@@ -557,23 +577,48 @@ impl TaskDetailView {
         window.push_notification(Notification::success(self.strings.url_copied.clone()), cx);
     }
 
-    fn save_seed_limits(&mut self, cx: &mut Context<Self>) {
-        let limits = SeedLimits {
-            ratio_limit_milli: parse_seed_limit(&self.seed_ratio.read(cx).value()),
-            post_ratio_limit_milli: parse_seed_limit(&self.seed_post_ratio.read(cx).value()),
-            seed_time_limit_minutes: parse_seed_limit(&self.seed_time_limit.read(cx).value()),
-            inactive_time_limit_minutes: parse_seed_limit(
-                &self.seed_inactive_limit.read(cx).value(),
-            ),
-            upload_limit_bps: self
-                .seed_upload_limit
-                .read(cx)
-                .value()
-                .trim()
-                .parse::<i64>()
-                .map(|kbps| kbps.saturating_mul(1024))
-                .unwrap_or(0),
+    fn copy_error(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
+            return;
         };
+        let message = row.error_message.clone();
+        drop(row);
+        if message.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(message));
+        let generation = self.error_copied.wrapping_add(1).max(1);
+        self.error_copied = generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.error_copied == generation {
+                    this.error_copied = 0;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn save_seed_limits(&mut self, cx: &mut Context<Self>) {
+        let baseline = self
+            .seed_baseline
+            .clone()
+            .unwrap_or_else(SeedLimits::inherit_all);
+        let limits = seed_limits_from_form(
+            [
+                &self.seed_ratio.read(cx).value(),
+                &self.seed_post_ratio.read(cx).value(),
+                &self.seed_time_limit.read(cx).value(),
+                &self.seed_inactive_limit.read(cx).value(),
+                &self.seed_upload_limit.read(cx).value(),
+            ],
+            &baseline,
+        );
         self.run_command(
             DownloadsCommand::SetSeedLimits {
                 task_id: self.task_id.clone(),
@@ -581,6 +626,28 @@ impl TaskDetailView {
             },
             cx,
         );
+    }
+
+    /// 用任务当前的做种限制预填输入框（「跟随全局」显示为空）。限制值与上次预填来源不同
+    /// （首次 / 切换任务 / 别处改动）才重填：无关的进度事件不会覆盖用户正在编辑的内容。
+    fn sync_seed_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(limits) = self.current_dto().map(SeedLimits::from_dto) else {
+            return;
+        };
+        if self.seed_baseline.as_ref() == Some(&limits) {
+            return;
+        }
+        let inputs = [
+            &self.seed_ratio,
+            &self.seed_post_ratio,
+            &self.seed_time_limit,
+            &self.seed_inactive_limit,
+            &self.seed_upload_limit,
+        ];
+        for (input, text) in inputs.into_iter().zip(seed_form_texts(&limits)) {
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+        self.seed_baseline = Some(limits);
     }
 
     fn open_group(&mut self, group_id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -594,8 +661,9 @@ impl TaskDetailView {
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
         let is_bt = self.is_bt();
-        let candidates: [(DetailTab, &'static str); 4] = [
+        let candidates: [(DetailTab, &'static str); 5] = [
             (DetailTab::General, "detailTabGeneral"),
+            (DetailTab::Speed, "detailTabSpeed"),
             (DetailTab::Seeding, "tabSeeding"),
             (DetailTab::Log, "detailTabLog"),
             (DetailTab::Advanced, "detailTabAdvanced"),
@@ -903,9 +971,12 @@ impl TaskDetailView {
                 |this| {
                     this.child(detail_row(
                         self.t(cx, "infoStatus"),
-                        div()
-                            .text_color(task_status_color(&row, cx))
-                            .child(self.strings.task_state_label(&row)),
+                        div().text_color(task_status_color(&row, cx)).child(
+                            self.strings
+                                .queued_label(&row)
+                                .map(SharedString::from)
+                                .unwrap_or_else(|| self.strings.task_state_label(&row)),
+                        ),
                         cx,
                     ))
                     .when(row.size_bytes > 0, |this| {
@@ -980,11 +1051,43 @@ impl TaskDetailView {
             ));
         }
         if !row.error_message.is_empty() {
+            let copied = self.error_copied != 0;
+            let success = active_theme(cx).extended().colors.success;
+            let tooltip = self.t(
+                cx,
+                if copied {
+                    "detailErrorCopied"
+                } else {
+                    "detailCopyError"
+                },
+            );
             list = list.child(detail_row(
                 self.t(cx, "infoError"),
-                div()
-                    .text_color(tokens.colors.destructive)
-                    .child(SharedString::from(row.error_message.clone())),
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_start()
+                    .gap(tokens.spacing.sm)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(tokens.colors.destructive)
+                            .child(SharedString::from(row.error_message.clone())),
+                    )
+                    .child(
+                        Button::new("detail-copy-error")
+                            .ghost()
+                            .control_icon(cx)
+                            .icon(if copied {
+                                FluxIcon::Check
+                            } else {
+                                FluxIcon::Copy
+                            })
+                            .when(copied, |this| this.text_color(success))
+                            .tooltip(tooltip)
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_error(cx))),
+                    ),
                 cx,
             ));
         }
@@ -1002,7 +1105,7 @@ impl TaskDetailView {
                 cx,
             ));
         }
-        list.child(
+        let list = list.child(
             h_flex().gap(tokens.spacing.sm).pt(tokens.spacing.md).child(
                 Button::new("detail-copy-link")
                     .outline()
@@ -1011,8 +1114,338 @@ impl TaskDetailView {
                     .label(self.strings.copy_url.clone())
                     .on_click(cx.listener(|this, _, window, cx| this.copy_link(window, cx))),
             ),
+        );
+        // 响应式：宽度够（横向底部面板 / 宽窗口）时信息列与来源构成并排，
+        // 窄（右侧面板）时来源构成自动换到信息列下方——按实际可用宽度折行，
+        // 与停靠位置无关，独立任务窗口同样适用。
+        h_flex()
+            // wrap-reverse：折行时来源构成排到信息列上方（窄面板先看图表）；
+            // 反向交叉轴下 items_end 即顶端对齐，并排时两列仍顶对齐。
+            .flex_wrap_reverse()
+            .items_end()
+            .gap_x(tokens.spacing.xl)
+            .gap_y(tokens.spacing.lg)
+            .child(
+                list.flex_grow_1()
+                    .flex_shrink_1()
+                    .flex_basis(px(GENERAL_INFO_MIN_WIDTH))
+                    .min_w_0(),
+            )
+            .children(self.render_sources_section(cx))
+            .into_any_element()
+    }
+
+    /// 「速度」页：当前 / 近 2 分钟平均 / 近 2 分钟峰值三块统计 + 1 Hz 面积图 + 明细行。
+    fn render_speed(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
+        let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
+            return div().into_any_element();
+        };
+        let downloading = row.state == TaskState::Downloading;
+        let current = row
+            .speed_bytes_per_second
+            .filter(|_| downloading)
+            .unwrap_or(0);
+        let eta = row
+            .eta_seconds
+            .filter(|_| downloading)
+            .map(|seconds| self.strings.format_eta(seconds));
+        let active_transfers = row.active_transfers().filter(|_| downloading).map(|count| {
+            self.runtime
+                .as_ref()
+                .and_then(|runtime| runtime.parallelism_limit)
+                .map_or_else(|| count.to_string(), |limit| format!("{count} / {limit}"))
+        });
+        let connected_peers = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.connected_peers);
+        drop(row);
+
+        let samples = self.speed_history.len() as u64;
+        let total: u64 = self.speed_history.iter().map(|(_, speed)| *speed).sum();
+        let average = total.checked_div(samples).unwrap_or(0);
+        let peak = self
+            .speed_history
+            .iter()
+            .map(|(_, speed)| *speed)
+            .max()
+            .unwrap_or(0);
+        let chart_points: Vec<(usize, f64)> = self
+            .speed_history
+            .iter()
+            .enumerate()
+            .map(|(index, (_, speed))| (index, *speed as f64))
+            .collect();
+        let has_chart = chart_points.len() > 1 && peak > 0;
+
+        let tile = |label: SharedString, value: u64, color: Hsla| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(tokens.spacing.xs)
+                .p(tokens.spacing.sm)
+                .rounded(tokens.radius.sm)
+                .border_1()
+                .border_color(extended.colors.hairline)
+                .child(
+                    div()
+                        .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
+                        .text_color(tokens.colors.muted_foreground)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(tokens.typography.sm.size)
+                        .line_height(tokens.typography.sm.line_height)
+                        .font_weight(FontWeight::MEDIUM)
+                        .font_features(tabular_numbers())
+                        .text_color(color)
+                        .child(SharedString::from(format!("{}/s", format_bytes(value)))),
+                )
+        };
+
+        v_flex()
+            .gap(tokens.spacing.md)
+            .child(
+                h_flex()
+                    .gap(tokens.spacing.sm)
+                    .child(tile(
+                        self.t(cx, "infoSpeed"),
+                        current,
+                        tokens.colors.primary,
+                    ))
+                    .child(tile(
+                        self.t(cx, "speedAverageRecent"),
+                        average,
+                        tokens.colors.foreground,
+                    ))
+                    .child(tile(
+                        self.t(cx, "speedPeakRecent"),
+                        peak,
+                        tokens.colors.foreground,
+                    )),
+            )
+            .child(if has_chart {
+                div()
+                    .h(px(120.))
+                    .w_full()
+                    .child(
+                        AreaChart::new(chart_points)
+                            .x(|point: &(usize, f64)| SharedString::from(point.0.to_string()))
+                            .y(|point: &(usize, f64)| point.1)
+                            .stroke(tokens.colors.primary)
+                            .linear()
+                            .x_axis(false)
+                            .grid(false),
+                    )
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .h(px(120.))
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
+                    .text_color(tokens.colors.muted_foreground)
+                    .child(self.t(cx, "speedChartEmpty"))
+                    .into_any_element()
+            })
+            .child(
+                v_flex()
+                    .when_some(eta, |this, eta| {
+                        this.child(detail_row(self.t(cx, "infoRemaining"), eta, cx))
+                    })
+                    .when_some(active_transfers, |this, count| {
+                        this.child(detail_row(
+                            self.t(cx, "detailActiveTransfers"),
+                            SharedString::from(count),
+                            cx,
+                        ))
+                    })
+                    .when_some(connected_peers.filter(|_| self.is_bt()), |this, count| {
+                        this.child(detail_row(
+                            self.t(cx, "detailConnectedPeers"),
+                            SharedString::from(count.to_string()),
+                            cx,
+                        ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// 常规页的「来源构成」区块：环形图 + 图例 + 一行摘要；尚无已下载字节时不渲染。
+    fn render_sources_section(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let theme = active_theme(cx);
+        let tokens = theme.tokens().clone();
+        let extended = theme.extended().clone();
+        let row = self.store.get(&RowKey::Local(self.task_id.clone()))?;
+        let protocol = row.protocol;
+        let downloaded = row.downloaded_bytes;
+        drop(row);
+        let bytes = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.source_bytes)
+            .or_else(|| self.current_dto().map(|dto| dto.source_bytes))
+            .unwrap_or_default();
+        let composition = compose(
+            protocol,
+            i64::try_from(downloaded).unwrap_or(i64::MAX),
+            bytes.cdn_bytes,
+            bytes.proxy_bytes,
+            bytes.nic_bytes,
+        );
+        if composition.is_empty() {
+            return None;
+        }
+
+        // 主题没有第四种强调色：多网卡取 `info` 色相 +60°（蓝→紫），明度/饱和度
+        // 沿用主题值，亮暗主题都与源站的主色蓝区分开。
+        let nic_color = Hsla {
+            h: (extended.colors.info.h + 60. / 360.).fract(),
+            ..extended.colors.info
+        };
+        let color_of = |kind: SourceKind| -> Hsla {
+            match kind {
+                SourceKind::Origin | SourceKind::P2p => tokens.colors.primary,
+                SourceKind::Cdn => extended.colors.success,
+                SourceKind::Proxy => extended.colors.warning,
+                SourceKind::Nic => nic_color,
+            }
+        };
+        let arcs: Vec<(Hsla, f32)> = composition
+            .slices
+            .iter()
+            .filter(|slice| slice.bytes > 0)
+            .map(|slice| (color_of(slice.kind), slice.bytes as f32))
+            .collect();
+        // 单切片（100%）不留分隔缝，否则整环出现一道缺口。
+        let pad_angle = if arcs.len() > 1 { 0.02 } else { 0. };
+        let donut = div()
+            .relative()
+            .flex_none()
+            .size(px(140.))
+            .child(
+                PieChart::new(arcs)
+                    .value(|arc: &(Hsla, f32)| arc.1)
+                    .color(|arc: &(Hsla, f32)| arc.0)
+                    .outer_radius(66.)
+                    .inner_radius(46.)
+                    .pad_angle(pad_angle)
+                    .interactive(false),
+            )
+            .child(
+                v_flex()
+                    .absolute()
+                    .inset_0()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .child(self.t(cx, "infoDownloaded")),
+                    )
+                    .child(
+                        div()
+                            .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
+                            .font_weight(FontWeight::MEDIUM)
+                            .font_features(tabular_numbers())
+                            .text_color(tokens.colors.foreground)
+                            .child(SharedString::from(format_bytes(composition.downloaded))),
+                    ),
+            );
+
+        let legend =
+            v_flex()
+                .flex_1()
+                .min_w(px(180.))
+                .children(composition.slices.iter().map(|slice| {
+                    h_flex()
+                        .items_center()
+                        .gap(tokens.spacing.sm)
+                        .py(tokens.spacing.xs)
+                        .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
+                        .font_features(tabular_numbers())
+                        .child(
+                            div()
+                                .flex_none()
+                                .size(px(8.))
+                                .rounded_full()
+                                .bg(color_of(slice.kind)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(tokens.colors.foreground)
+                                .truncate()
+                                .child(self.t(cx, slice.kind.i18n_key())),
+                        )
+                        .child(div().text_color(tokens.colors.foreground).child(
+                            SharedString::from(format_percent(composition.fraction(slice.bytes))),
+                        ))
+                        .child(
+                            div()
+                                .min_w(px(64.))
+                                .text_right()
+                                .text_color(tokens.colors.muted_foreground)
+                                .child(SharedString::from(format_bytes(slice.bytes))),
+                        )
+                }));
+
+        let summary = if composition.p2p {
+            self.t(cx, "sourcesP2pHint")
+        } else if composition.accelerated_bytes > 0 {
+            let percent = format_percent(composition.accelerated_share());
+            SharedString::from(
+                self.translator
+                    .read(cx)
+                    .text_with("sourcesAccelShare", &[("percent", &percent)]),
+            )
+        } else {
+            self.t(cx, "sourcesNoAccel")
+        };
+
+        Some(
+            v_flex()
+                .flex_none()
+                .w(px(SOURCES_SECTION_WIDTH))
+                .max_w_full()
+                .gap(tokens.spacing.sm)
+                .child(
+                    div()
+                        .text_size(extended.caption.size)
+                        .line_height(extended.caption.line_height)
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(extended.colors.text_tertiary)
+                        .child(self.t(cx, "detailSourcesTitle")),
+                )
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(tokens.spacing.md)
+                        .child(donut)
+                        .child(legend),
+                )
+                .child(
+                    div()
+                        .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
+                        .text_color(tokens.colors.muted_foreground)
+                        .child(summary),
+                )
+                .into_any_element(),
         )
-        .into_any_element()
     }
 
     fn render_seeding(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1184,9 +1617,12 @@ impl TaskDetailView {
         if let (Some(oldest), Some(newest)) = (oldest, newest) {
             content = content.child(
                 note(
-                    SharedString::from(format!(
-                        "{}: #{oldest}–#{newest}",
-                        self.t(cx, "detailActivityRetainedRange")
+                    SharedString::from(self.translator.read(cx).text_with(
+                        "detailActivityRetainedRange",
+                        &[
+                            ("oldest", &format!("#{oldest}")),
+                            ("newest", &format!("#{newest}")),
+                        ],
                     )),
                     tokens.colors.muted_foreground,
                 )
@@ -1345,6 +1781,9 @@ impl gpui::Render for TaskDetailView {
                         .child(self.t(cx, "selectTaskHint")),
                 );
         }
+        if self.tab == DetailTab::Seeding {
+            self.sync_seed_inputs(window, cx);
+        }
         v_flex()
             .size_full()
             .min_h_0()
@@ -1373,6 +1812,7 @@ impl gpui::Render for TaskDetailView {
                     .p(tokens.spacing.md)
                     .child(match self.tab {
                         DetailTab::General => self.render_general(cx),
+                        DetailTab::Speed => self.render_speed(cx),
                         DetailTab::Seeding => self.render_seeding(cx),
                         DetailTab::Log => self.render_log(cx),
                         DetailTab::Advanced => self.render_advanced(cx),
@@ -1458,12 +1898,66 @@ fn activity_kind_key(kind: &str) -> &'static str {
     }
 }
 
+/// 输入框文本 → 限制值：空 / 非法 = 跟随全局。
 fn parse_seed_limit(text: &str) -> i64 {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        SEED_LIMIT_FOLLOW_GLOBAL
-    } else {
-        trimmed.parse::<i64>().unwrap_or(SEED_LIMIT_FOLLOW_GLOBAL)
+    text.trim()
+        .parse::<i64>()
+        .unwrap_or(SEED_LIMIT_FOLLOW_GLOBAL)
+}
+
+/// 上传限速输入（KB/s）→ 字节/秒：空 / 非法 = 0（跟随全局）。
+fn parse_seed_upload_limit(text: &str) -> i64 {
+    text.trim()
+        .parse::<i64>()
+        .map(|kbps| kbps.saturating_mul(1024))
+        .unwrap_or(0)
+}
+
+/// 限制值 → 输入框预填文本：「跟随全局」显示为空；上传限速按 KB/s 向上取整显示。
+fn seed_form_texts(limits: &SeedLimits) -> [String; 5] {
+    let limit_text = |value: i64| {
+        if value == SEED_LIMIT_FOLLOW_GLOBAL {
+            String::new()
+        } else {
+            value.to_string()
+        }
+    };
+    [
+        limit_text(limits.ratio_limit_milli),
+        limit_text(limits.post_ratio_limit_milli),
+        limit_text(limits.seed_time_limit_minutes),
+        limit_text(limits.inactive_time_limit_minutes),
+        if limits.upload_limit_bps > 0 {
+            (limits.upload_limit_bps.saturating_add(1023) / 1024).to_string()
+        } else {
+            String::new()
+        },
+    ]
+}
+
+/// 五个输入框（总分享率、做种后分享率、做种时长、不活跃时长、上传限速）→ 保存的限制值。
+/// 文本与预填文本一致的项视为未改动，保持 `baseline` 的原值（含上传限速不足 1 KB/s 的
+/// 零头），不会被重置为跟随全局；用户改过的项按输入解析。
+fn seed_limits_from_form(texts: [&str; 5], baseline: &SeedLimits) -> SeedLimits {
+    let original = seed_form_texts(baseline);
+    let resolve = |index: usize, parse: fn(&str) -> i64, unchanged: i64| {
+        let text = texts[index].trim();
+        if text == original[index] {
+            unchanged
+        } else {
+            parse(text)
+        }
+    };
+    SeedLimits {
+        ratio_limit_milli: resolve(0, parse_seed_limit, baseline.ratio_limit_milli),
+        post_ratio_limit_milli: resolve(1, parse_seed_limit, baseline.post_ratio_limit_milli),
+        seed_time_limit_minutes: resolve(2, parse_seed_limit, baseline.seed_time_limit_minutes),
+        inactive_time_limit_minutes: resolve(
+            3,
+            parse_seed_limit,
+            baseline.inactive_time_limit_minutes,
+        ),
+        upload_limit_bps: resolve(4, parse_seed_upload_limit, baseline.upload_limit_bps),
     }
 }
 
@@ -1500,7 +1994,10 @@ fn format_duration(translator: &Translator, total_seconds: i64) -> SharedString 
 mod tests {
     use chrono::{TimeZone as _, Utc};
 
-    use super::format_activity_timestamp;
+    use super::{
+        SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits, format_activity_timestamp, seed_form_texts,
+        seed_limits_from_form,
+    };
 
     #[test]
     fn activity_uses_source_milliseconds_with_calendar_date() {
@@ -1514,5 +2011,62 @@ mod tests {
         assert!(label.starts_with("2026-06-"));
         assert!(label.ends_with(".123"));
         assert_eq!(format_activity_timestamp(i64::MAX).as_ref(), "—");
+    }
+
+    #[test]
+    fn untouched_seed_fields_keep_the_task_values() {
+        let baseline = SeedLimits {
+            ratio_limit_milli: 1500,
+            post_ratio_limit_milli: -1,
+            seed_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
+            inactive_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
+            upload_limit_bps: 1500,
+        };
+        let texts = seed_form_texts(&baseline);
+        assert_eq!(texts, ["1500", "-1", "", "", "2"].map(String::from));
+        // 用户只填了做种时长：其余项保持原值，上传限速零头不丢。
+        let saved = seed_limits_from_form(
+            [&texts[0], &texts[1], "90", &texts[3], &texts[4]],
+            &baseline,
+        );
+        assert_eq!(
+            saved,
+            SeedLimits {
+                seed_time_limit_minutes: 90,
+                ..baseline.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn edited_or_cleared_seed_fields_follow_the_input() {
+        let baseline = SeedLimits {
+            ratio_limit_milli: 1500,
+            post_ratio_limit_milli: 2000,
+            seed_time_limit_minutes: 60,
+            inactive_time_limit_minutes: 30,
+            upload_limit_bps: 512 * 1024,
+        };
+        let saved = seed_limits_from_form(["", "2500", "60", "", "1024"], &baseline);
+        assert_eq!(
+            saved,
+            SeedLimits {
+                ratio_limit_milli: SEED_LIMIT_FOLLOW_GLOBAL,
+                post_ratio_limit_milli: 2500,
+                seed_time_limit_minutes: 60,
+                inactive_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
+                upload_limit_bps: 1024 * 1024,
+            }
+        );
+        assert_eq!(
+            seed_limits_from_form(["", "", "", "", ""], &baseline).upload_limit_bps,
+            0
+        );
+    }
+
+    #[test]
+    fn form_without_a_loaded_task_defaults_to_following_global() {
+        let saved = seed_limits_from_form(["", "", "", "", ""], &SeedLimits::inherit_all());
+        assert_eq!(saved, SeedLimits::inherit_all());
     }
 }

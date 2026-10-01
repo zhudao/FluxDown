@@ -243,6 +243,9 @@ pub struct PluginManager {
     resolve_budget: ExecutionBudget,
     hook_budget: ExecutionBudget,
     sink: Arc<dyn EventSink>,
+    /// 串行化 `load_all`：扫描 + 整表替换非原子，交错的两次重载会用旧快照
+    /// 覆盖新的启停/熔断状态。
+    load_lock: tokio::sync::Mutex<()>,
 }
 
 impl PluginManager {
@@ -266,6 +269,7 @@ impl PluginManager {
             resolve_budget: DEFAULT_RESOLVE_BUDGET,
             hook_budget: DEFAULT_HOOK_BUDGET,
             sink,
+            load_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -274,8 +278,14 @@ impl PluginManager {
         self.runtime.spawn_handle()
     }
 
+    /// 宿主并发上限变化时同步 resolve 并发容量（见 [`ScriptRuntime::set_resolve_capacity`]）。
+    pub fn set_resolve_capacity(&self, max_concurrent: usize) {
+        self.runtime.set_resolve_capacity(max_concurrent);
+    }
+
     /// 扫描根目录 + `plugin.dev.*` 键，解析并加载全部插件。
     pub async fn load_all(&self) {
+        let _serial = self.load_lock.lock().await;
         let mut loaded: Vec<LoadedPlugin> = Vec::new();
         let mut failed: Vec<FailedPlugin> = Vec::new();
 
@@ -1087,15 +1097,77 @@ impl PluginManager {
         let identity = manifest.identity.clone();
         let abs = std::fs::canonicalize(path)
             .map_err(|e| PluginError::ManifestInvalid(format!("解析路径失败: {e}")))?;
-        self.db
-            .set_config(&format!("plugin.dev.{identity}"), &abs.to_string_lossy())
+        let dev_key = format!("plugin.dev.{identity}");
+        // 失败只回退本次写入的 dev 登记；同 identity 的已安装目录与
+        // `plugin.<id>.*` 设置/KV 不属于这次 dev 安装，绝不能清。
+        let previous = self
+            .db
+            .get_config(&dev_key)
             .await
             .map_err(|e| PluginError::Runtime(e.to_string()))?;
-        if let Err(error) = self.finish_install(&identity).await {
-            let _ = self.purge(&identity).await;
+        self.db
+            .set_config(&dev_key, &abs.to_string_lossy())
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))?;
+        if let Err(error) = self.activate_dev_install(&identity).await {
+            match previous {
+                Some(old) => {
+                    let _ = self.db.set_config(&dev_key, &old).await;
+                }
+                None => {
+                    let _ = self.db.delete_config(&dev_key).await;
+                }
+            }
+            self.load_all().await;
             return Err(error);
         }
         Ok(identity)
+    }
+
+    /// dev 安装的加载 + 校验：dev 副本必须真正加载成功（否则同 identity 的已安装
+    /// 副本会被顶替/保留，而 dev 版未生效却报成功）。
+    async fn activate_dev_install(&self, identity: &str) -> Result<(), PluginError> {
+        self.load_all().await;
+        if let Some(error) = self.dev_load_failure(identity).await {
+            return Err(error);
+        }
+        self.finish_install(identity).await
+    }
+
+    /// 本 identity 的 dev 登记对应的加载失败（忽略被 dev 顶替的已安装副本那条
+    /// identity 重复记录）。
+    async fn dev_load_failure(&self, identity: &str) -> Option<PluginError> {
+        self.failed_plugins
+            .read()
+            .await
+            .iter()
+            .find(|p| p.identity == identity && p.dev_mode)
+            .map(|p| PluginError::LoadFailed(p.error.clone()))
+    }
+
+    /// 重新加载一个 dev 插件：重读 manifest 与全部入口源码并做与安装相同的
+    /// compile / pattern 校验。
+    ///
+    /// dev 插件的 JS 入口每次调用都按最新源码重读，但 manifest（名称 / 版本 /
+    /// 匹配规则 / 设置项 / 入口路径 / 权限）只在 [`Self::load_all`] 时解析，
+    /// 改了它就必须显式重载。与 [`Self::install_dev`] 不同：校验失败**保留**
+    /// dev 登记与启停状态（开发中的半成品不该被清掉），只把错误回报给调用方；
+    /// 之前加载失败的插件修好后经此恢复。
+    pub async fn reload_dev(&self, identity: &str) -> Result<(), PluginError> {
+        let registered = self
+            .db
+            .get_config(&format!("plugin.dev.{identity}"))
+            .await
+            .map_err(|e| PluginError::Runtime(e.to_string()))?
+            .is_some();
+        if !registered {
+            return Err(PluginError::NotDevPlugin(identity.to_string()));
+        }
+        self.load_all().await;
+        if let Some(error) = self.dev_load_failure(identity).await {
+            return Err(error);
+        }
+        self.validate_loaded(identity).await
     }
 
     async fn finish_install_outcome(
@@ -1104,12 +1176,10 @@ impl PluginManager {
     ) -> Result<String, PluginError> {
         let identity = outcome.identity().to_string();
         if let Err(error) = self.finish_install(&identity).await {
-            if outcome.has_backup() {
-                let _ = super::install::rollback_install(&outcome);
-                self.load_all().await;
-            } else {
-                let _ = self.purge(&identity).await;
-            }
+            // 升级失败恢复旧目录；新装失败只删本次新建的目录。设置/KV 与同 identity
+            // 的 dev 登记不是这次安装写的，绝不能清。
+            let _ = super::install::rollback_install(&outcome);
+            self.load_all().await;
             return Err(error);
         }
         if let Err(error) = super::install::commit_install(&outcome) {
@@ -1144,50 +1214,7 @@ impl PluginManager {
         // 任一校验失败由调用方回滚：升级恢复旧目录，新安装清理新目录，
         // 避免残留一个「已装但校验失败」且默认启用的插件。
         self.load_all().await;
-        let validation: Result<(), PluginError> = {
-            let snapshot = self.plugins.read().await.clone();
-            match snapshot.iter().find(|p| p.manifest.identity == identity) {
-                Some(p) => {
-                    let mut r = Ok(());
-                    if let Some(src) = p.resolver_source().await {
-                        r = self.runtime.check_compile(&src);
-                    }
-                    if r.is_ok()
-                        && let Some(src) = p.hooks_source().await
-                    {
-                        r = self.runtime.check_compile(&src);
-                    }
-                    if r.is_ok()
-                        && let Some(src) = p.auth_source().await
-                    {
-                        r = self.runtime.check_compile(&src);
-                    }
-                    if r.is_ok()
-                        && let Some(src) = p.subscription_source().await
-                    {
-                        r = self.runtime.check_compile(&src);
-                    }
-                    if r.is_ok() {
-                        for f in &p.manifest.settings {
-                            if let Some(pat) = &f.pattern
-                                && !self.runtime.regex_valid(pat)
-                            {
-                                r = Err(PluginError::ManifestInvalid(format!(
-                                    "setting '{}': pattern 非法（JS RegExp 编译失败）",
-                                    f.key
-                                )));
-                                break;
-                            }
-                        }
-                    }
-                    r
-                }
-                None => Err(PluginError::ManifestInvalid(
-                    "安装后未能加载插件（校验失败或版本门槛不满足）".to_string(),
-                )),
-            }
-        };
-        validation?;
+        self.validate_loaded(identity).await?;
 
         // enabled 写入规则：
         // - 新装（无 enabled 键）或熔断 → enabled=1, reason=None（升级即解熔断）
@@ -1201,17 +1228,49 @@ impl PluginManager {
         Ok(())
     }
 
+    /// 对当前快照中的插件做 compile / pattern 校验（不改任何状态）。
+    async fn validate_loaded(&self, identity: &str) -> Result<(), PluginError> {
+        let snapshot = self.plugins.read().await.clone();
+        let Some(p) = snapshot.iter().find(|p| p.manifest.identity == identity) else {
+            return Err(PluginError::ManifestInvalid(
+                "安装后未能加载插件（校验失败或版本门槛不满足）".to_string(),
+            ));
+        };
+        for src in [
+            p.resolver_source().await,
+            p.hooks_source().await,
+            p.auth_source().await,
+            p.subscription_source().await,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.runtime.check_compile(&src)?;
+        }
+        for f in &p.manifest.settings {
+            if let Some(pat) = &f.pattern
+                && !self.runtime.regex_valid(pat)
+            {
+                return Err(PluginError::ManifestInvalid(format!(
+                    "setting '{}': pattern 非法（JS RegExp 编译失败）",
+                    f.key
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// 卸载（用户主动）：删目录 + 清 config 键 + 清任务 resolver 绑定 + 清认证凭据。
     ///
     /// 清绑定 = 对受影响任务批量应用「忽略插件、按原始链接重跑」逃生舱；不清则
     /// 留下 orphaned 绑定，resume 走 fail-closed 报错（见 [`Self::resolve`]）。
-    /// 凭据清理只挂在这里（用户主动卸载），不挂在 [`Self::purge`] 本身
-    /// （M-4）：`purge` 也是安装失败的回滚路径（`install_dev`/
-    /// `finish_install_outcome` 失败时复用），回滚不该连带删掉一个已经登录
-    /// 成功、只是这次升级/覆盖安装失败的插件的凭据。
+    /// 凭据清理只挂在这里（用户主动卸载），不挂在 [`Self::purge`] 本身（M-4）。
+    /// 安装失败的回滚不走 purge（只回退本次写入的目录/dev 登记），避免误删同
+    /// identity 已有插件的目录、设置与凭据。
     pub async fn uninstall(&self, identity: &str) -> Result<(), PluginError> {
         let _ = self.db.clear_tasks_resolver(identity).await;
         self.purge(identity).await?;
+        self.bridge.remove_plugin_workspace(identity).await;
         if let Err(e) = crate::auth::remove_plugin(&self.db, identity).await {
             // 只记日志不 `?`：目录/配置键已经清干净，卸载本身已经完成；凭据
             // 清理失败（如旧版整表损坏——已由 auth::read_legacy_table 兜底，
@@ -1221,9 +1280,8 @@ impl PluginManager {
         Ok(())
     }
 
-    /// 删目录 + 清 `plugin.<identity>.` 前缀全部 config 键 + 重载。
-    /// 安装回滚复用（与 [`Self::uninstall`] 的差别：**不**清任务绑定、**不**清
-    /// 认证凭据）。
+    /// 删目录 + 清 `plugin.<identity>.` 前缀全部 config 键 + 重载。仅供
+    /// [`Self::uninstall`] 使用。
     async fn purge(&self, identity: &str) -> Result<(), PluginError> {
         // 删安装目录（dev 不删源，仅删配置键）。
         let failed_plugin = self
@@ -1231,8 +1289,8 @@ impl PluginManager {
             .read()
             .await
             .iter()
-            .find(|plugin| plugin.identity == identity)
-            .map(|plugin| (plugin.dev_mode, plugin.dir.to_path_buf()));
+            .find(|plugin| plugin.identity == identity && !plugin.dev_mode)
+            .map(|plugin| (false, plugin.dir.to_path_buf()));
         let dir = match &failed_plugin {
             Some((true, _)) => None,
             Some((false, dir)) => Some(dir.clone()),
@@ -1353,7 +1411,10 @@ impl PluginManager {
         for (key, value) in entries {
             let field = manifest.settings.iter().find(|f| &f.key == key);
             let Some(field) = field else {
-                return Err(PluginError::InvalidOutput(format!("未知设置项 '{key}'")));
+                return Err(PluginError::InvalidSetting {
+                    key: key.clone(),
+                    message: format!("未知设置项 '{key}'"),
+                });
             };
             self.validate_value(field, value)?;
         }
@@ -1369,7 +1430,12 @@ impl PluginManager {
 
     /// 单设置项校验（类型/required/pattern/min-max/select/toggle）。
     fn validate_value(&self, field: &SettingField, value: &str) -> Result<(), PluginError> {
-        let bad = |m: String| Err(PluginError::InvalidOutput(m));
+        let bad = |m: String| {
+            Err(PluginError::InvalidSetting {
+                key: field.key.clone(),
+                message: m,
+            })
+        };
         match field.ty {
             SettingType::Boolean => {
                 if value != "true" && value != "false" {
@@ -1381,8 +1447,9 @@ impl PluginManager {
                     .parse::<f64>()
                     .ok()
                     .filter(|v| v.is_finite())
-                    .ok_or_else(|| {
-                        PluginError::InvalidOutput(format!("'{}' 不是有效数字", field.key))
+                    .ok_or_else(|| PluginError::InvalidSetting {
+                        key: field.key.clone(),
+                        message: format!("'{}' 不是有效数字", field.key),
                     })?;
                 if let Some(lo) = field.min
                     && v < lo
@@ -1781,6 +1848,7 @@ fn validate_subscription_item(item: SubscriptionOutputItem) -> Result<ParsedItem
         title: item.title,
         link: item.link,
         enclosure_url: item.enclosure_url,
+        enclosure_type: String::new(),
         resolver_item: item.resolver_item,
         enclosure_length: item.enclosure_length,
         pub_date: item.pub_date,

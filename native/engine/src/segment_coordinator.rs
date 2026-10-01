@@ -46,13 +46,15 @@ mod multipath;
 use crate::cdn::NodePool;
 use crate::db::Db;
 use crate::downloader::{
-    DownloadError, ProgressUpdate, SegmentProgressInfo, is_range_not_satisfiable,
+    DownloadError, ProgressUpdate, SegmentProgressInfo, is_disk_full, is_range_not_satisfiable,
     is_server_rejection,
 };
 use crate::events::{EngineEvent, EventSink};
 use crate::logger::{log_info, log_warn};
+use crate::model::SourceBytes;
 use crate::output;
 use crate::speed_limiter::SpeedLimiter;
+use crate::temp_file_guard::TempFileGuard;
 use crate::transfer_activity::{TaskRuntime, TaskSegment, TransferGuard, TransferTracker};
 
 // ---------------------------------------------------------------------------
@@ -1241,8 +1243,54 @@ fn sampled_http_runtime(
                 active: s.active,
             })
             .collect(),
+        // 来源累计由持有节点池的调用方按需回填；这里不做归因。
+        source_bytes: None,
     };
     (snapshot, runtime)
+}
+
+/// 多路径池下本次运行的加速来源累计 + 已落库基数（供 `TaskRuntime.source_bytes`）。
+///
+/// 非多节点池（单直连）返回 `None`：该路径不做来源归因。`peak` 保持本次运行
+/// 累计单调不减——在途租约进度可能因段拆分 / 租约归还的瞬间口径差短暂回落，
+/// 单调化后 UI 与落库增量都不会抖动或重复计数。整池一次加锁，仅随既有周期 tick
+/// 调用，不进入逐块热路径。
+fn sample_run_source_bytes(
+    nodes: &NodePool,
+    segments: &mut BTreeMap<i32, LiveSegment>,
+    seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
+    base: SourceBytes,
+    peak: &mut SourceBytes,
+) -> Option<SourceBytes> {
+    if !nodes.is_multi() {
+        return None;
+    }
+    sync_downloaded_from_shared(segments, seg_states);
+    let run = nodes.source_bytes(&multipath::in_flight(nodes, segments));
+    *peak = peak.max(run);
+    Some(base.saturating_add(*peak))
+}
+
+/// 把本次运行新增的加速来源字节落库（`run` 为单调累计，`flushed` 为已落库部分）。
+/// 仅成功后推进 `flushed`，失败下一 tick 重试同一增量，绝不重复计数。
+async fn flush_source_bytes(
+    db: &Db,
+    task_id: &str,
+    spawn_gen: i64,
+    run: SourceBytes,
+    flushed: &mut SourceBytes,
+) {
+    let delta = run.saturating_sub(*flushed);
+    if delta.is_zero() {
+        return;
+    }
+    match db.add_task_source_bytes(task_id, spawn_gen, delta).await {
+        Ok(()) => *flushed = flushed.max(run),
+        Err(e) => log_info!(
+            "[coordinator] task {} source bytes flush failed (non-fatal): {e:#}",
+            task_id
+        ),
+    }
 }
 
 /// 本次 coordinator generation 中仍在读取 body 的已验证响应数。
@@ -1281,6 +1329,7 @@ struct WorkerSpawnCtx {
     task_id: String,
     url: String,
     dest: PathBuf,
+    temp_file_guard: TempFileGuard,
     planned_total: Arc<AtomicI64>,
     size_is_estimate: bool,
     first_validators: Arc<StdMutex<Option<(String, String)>>>,
@@ -1318,6 +1367,7 @@ impl WorkerSpawnCtx {
             self.task_id.clone(),
             self.url.clone(),
             self.dest.clone(),
+            self.temp_file_guard.clone(),
             self.planned_total.clone(),
             self.size_is_estimate,
             self.first_validators.clone(),
@@ -1407,6 +1457,7 @@ pub async fn run_coordinated_download(
     // important for DASH multi-segment downloads, which reach preallocation
     // before the single-stream downloader's directory preparation.
     output::ensure_parent(dest).await?;
+    let temp_file_guard = TempFileGuard::acquire(dest, task_id).await?;
 
     // 段数钳制：保证每个新建分段至少覆盖 1 字节。build_fresh_segments 用
     // chunk = total_bytes / count；当 count > total_bytes 时 chunk=0，会生成大量
@@ -1683,10 +1734,26 @@ pub async fn run_coordinated_download(
         }
     }
 
+    // 加速来源累计基数：必须在上面的进度复位之后读取（复位同时清零计数）。
+    // `source_flushed` 是本次运行已落库的部分，`source_peak` 是本次运行的单调累计。
+    let source_base = match db.load_task_source_bytes(task_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            log_info!(
+                "[coordinator] task {} load source bytes failed (counters restart from 0): {e:#}",
+                task_id
+            );
+            SourceBytes::default()
+        }
+    };
+    let mut source_peak = SourceBytes::default();
+    let mut source_flushed = SourceBytes::default();
+
     // ----- 2. Pre-allocate file to full size --------------------------------
     // 平台策略（fallocate / SetFileInformationByHandle / set_len 回退）见
     // preallocate_file_len——就地扩容（TrueSizeLarger）复用同一助手延长文件。
-    preallocate_file_len(dest, effective_total_bytes as u64).await?;
+    truncate_stale_tail(dest, effective_total_bytes as u64).await?;
+    preallocate_file_len(dest, effective_total_bytes as u64, &temp_file_guard).await?;
 
     // ----- 3. Shared state for progress reporting ---------------------------
     let total_downloaded = Arc::new(AtomicI64::new(
@@ -1825,6 +1892,8 @@ pub async fn run_coordinated_download(
     // cancelled() 一个字节都下不了 → 任务永久卡死（历史致命 BUG）。用户主动取消时
     // cancel 主令牌，子令牌作为其 child 自动级联取消，workers 照常停止，语义不变。
     let worker_cancel = cancel_token.child_token();
+    // Unwinding or dropping the coordinator must stop detached body readers as well.
+    let _worker_cancel_on_drop = worker_cancel.clone().drop_guard();
 
     // 连接敏感 latch：workers 一旦观察到服务器对 Range 请求返回非 206（瞬时/持续 200），
     // 置位此标志。coordinator 据此停止【主动拆分】（见下方 proactive 定时分支）以降低
@@ -1858,6 +1927,7 @@ pub async fn run_coordinated_download(
         task_id: task_id.to_string(),
         url: url.to_string(),
         dest: dest.to_path_buf(),
+        temp_file_guard: temp_file_guard.clone(),
         planned_total: planned_total.clone(),
         size_is_estimate,
         first_validators: first_validators.clone(),
@@ -1917,7 +1987,7 @@ pub async fn run_coordinated_download(
                 let _ = h.await;
             }
         }
-        let (_, runtime) = sampled_http_runtime(
+        let (_, mut runtime) = sampled_http_runtime(
             task_id,
             if scope.total_override > 0 {
                 scope.total_override
@@ -1928,6 +1998,13 @@ pub async fn run_coordinated_download(
             &seg_states,
             scope,
             &generation_evidence.tracker,
+        );
+        runtime.source_bytes = sample_run_source_bytes(
+            &nodes,
+            &mut segments,
+            &seg_states,
+            source_base,
+            &mut source_peak,
         );
         sink.emit(EngineEvent::TaskRuntimeChanged(runtime));
         return Ok(effective_total_bytes);
@@ -2208,7 +2285,7 @@ pub async fn run_coordinated_download(
                                 // 物理扩容临时文件（逻辑 EOF + 尽量物理分配）。
                                 // 失败（如 ENOSPC）是致命错误：停 workers 上报。
                                 if let Err(e) =
-                                    preallocate_file_len(dest, reported_total as u64).await
+                                    preallocate_file_len(dest, reported_total as u64, &temp_file_guard).await
                                 {
                                     log_info!(
                                         "[coordinator] task {} 就地扩容预分配失败: {}",
@@ -3276,9 +3353,12 @@ pub async fn run_coordinated_download(
                 } else {
                     planned_total.load(Ordering::Relaxed)
                 };
-                let (snapshot, runtime) = sampled_http_runtime(
+                let (snapshot, mut runtime) = sampled_http_runtime(
                     task_id, report_total, worker_cap as u32, &seg_states, scope,
                     &generation_evidence.tracker,
+                );
+                runtime.source_bytes = sample_run_source_bytes(
+                    &nodes, &mut segments, &seg_states, source_base, &mut source_peak,
                 );
                 let _ = progress_tx
                     .send(ProgressUpdate {
@@ -3299,6 +3379,14 @@ pub async fn run_coordinated_download(
             // 抽干 worker 侧 durable 水位，过滤 Completed/未知段后一次事务批量写。
             // 完成写仍由 worker 覆盖 fsync 后立即落库，不经本通道。
             _ = db_flush_interval.tick() => {
+                if sample_run_source_bytes(
+                    &nodes, &mut segments, &seg_states, source_base, &mut source_peak,
+                )
+                .is_some()
+                {
+                    flush_source_bytes(db, task_id, spawn_gen, source_peak, &mut source_flushed)
+                        .await;
+                }
                 let rows = take_durable_progress_rows(&durable_progress, &segments);
                 if !rows.is_empty()
                     && let Err(e) = db
@@ -3323,7 +3411,7 @@ pub async fn run_coordinated_download(
         }
     }
     // Preserve range geometry after the last body reader leaves.
-    let (_, runtime) = sampled_http_runtime(
+    let (_, mut runtime) = sampled_http_runtime(
         task_id,
         if scope.total_override > 0 {
             scope.total_override
@@ -3334,6 +3422,13 @@ pub async fn run_coordinated_download(
         &seg_states,
         scope,
         &generation_evidence.tracker,
+    );
+    runtime.source_bytes = sample_run_source_bytes(
+        &nodes,
+        &mut segments,
+        &seg_states,
+        source_base,
+        &mut source_peak,
     );
     sink.emit(EngineEvent::TaskRuntimeChanged(runtime));
 
@@ -3360,6 +3455,9 @@ pub async fn run_coordinated_download(
             );
         }
     }
+
+    // 加速来源累计的最终增量（worker 已全部退出，在途租约已并入槽位回报）。
+    flush_source_bytes(db, task_id, spawn_gen, source_peak, &mut source_flushed).await;
 
     if let Some(err) = final_error {
         return Err(err);
@@ -3407,13 +3505,20 @@ pub async fn run_coordinated_download(
     } else {
         planned_total.load(Ordering::Relaxed)
     };
-    let (snapshot, runtime) = sampled_http_runtime(
+    let (snapshot, mut runtime) = sampled_http_runtime(
         task_id,
         report_total,
         worker_cap as u32,
         &seg_states,
         scope,
         &generation_evidence.tracker,
+    );
+    runtime.source_bytes = sample_run_source_bytes(
+        &nodes,
+        &mut segments,
+        &seg_states,
+        source_base,
+        &mut source_peak,
     );
     let _ = progress_tx
         .send(ProgressUpdate {
@@ -3445,6 +3550,21 @@ pub async fn run_coordinated_download(
     Ok(effective_total_bytes)
 }
 
+/// 启动时把比目标更长的旧临时文件截短。总大小缩小后分段按新总量重建，
+/// [新总量, 旧总量) 留着上一版本的数据或预分配的零，成品会带陈旧尾部。
+/// 仅用于 worker 启动之前：此时没有并发写；就地扩容只会变大，不走这里。
+async fn truncate_stale_tail(dest: &Path, target_len: u64) -> Result<(), DownloadError> {
+    let file = match OpenOptions::new().write(true).open(dest).await {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if file.metadata().await?.len() > target_len {
+        file.set_len(target_len).await?;
+    }
+    Ok(())
+}
+
 /// 把 `dest` 预分配/扩容到至少 `target_len` 字节（逻辑 EOF + 尽量物理分配）。
 /// 已 `>= target_len` 时为 no-op。两处使用：
 ///   1. 下载启动时的整文件预分配（coordinator 第 2 步）；
@@ -3455,10 +3575,21 @@ pub async fn run_coordinated_download(
 /// 平台策略：
 /// - Linux:   fallocate(2) 分配真实磁盘块（不写零，近乎瞬时），避免
 ///   set_len()/ftruncate 稀疏文件导致的碎片化和延迟 ENOSPC。
-/// - Windows: SetFileInformationByHandle(FileAllocationInfo) 预分配 NTFS 物理簇
-///   （连续优先），提前检测磁盘空间不足；再 SetEndOfFile 设置逻辑大小。
+/// - Windows: 先给文件打 NTFS sparse 标记（[`crate::bt_sparse::mark_sparse`]）再
+///   SetEndOfFile 设置逻辑大小：非 sparse 文件在高偏移首次写入时 NTFS 会按
+///   valid-data-length 语义同步零填充 `[VDL, offset)`，多段 worker 各自从
+///   `k·N/n` 起写会造成数量级的写放大与周期性掉速。代价是磁盘不足不再于预分配
+///   阶段暴露，而是在写入时以 ENOSPC/`ERROR_DISK_FULL` 上报（致命、不重试）。
+///   打标记失败（FAT32/exFAT/网络盘等）才退回 FileAllocationInfo 物理预分配。
 /// - 其它:    回退 set_len()。
-async fn preallocate_file_len(dest: &Path, target_len: u64) -> Result<(), DownloadError> {
+async fn preallocate_file_len(
+    dest: &Path,
+    target_len: u64,
+    temp_file_guard: &TempFileGuard,
+) -> Result<(), DownloadError> {
+    let temp_file_guard = temp_file_guard.clone();
+    #[cfg(target_os = "windows")]
+    let dest_owned = dest.to_path_buf();
     let file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -3473,6 +3604,7 @@ async fn preallocate_file_len(dest: &Path, target_len: u64) -> Result<(), Downlo
     {
         let std_file = file.into_std().await;
         tokio::task::spawn_blocking(move || -> Result<(), DownloadError> {
+            let _temp_file_guard = temp_file_guard;
             use std::os::unix::io::AsRawFd;
             let fd = std_file.as_raw_fd();
             // fallocate(fd, 0, 0, len): 预分配 [0, len) 范围的磁盘块，
@@ -3505,6 +3637,16 @@ async fn preallocate_file_len(dest: &Path, target_len: u64) -> Result<(), Downlo
     {
         let std_file = file.into_std().await;
         tokio::task::spawn_blocking(move || -> Result<(), DownloadError> {
+            let _temp_file_guard = temp_file_guard;
+            // Step 0: sparse 标记必须先于任何 set_len / 写入。失败只记日志，
+            // 退回下方的物理预分配。
+            let sparse = match crate::bt_sparse::mark_sparse(&dest_owned) {
+                Ok(()) => true,
+                Err(e) => {
+                    log_info!("[coordinator] FSCTL_SET_SPARSE 失败，退回物理预分配: {}", e);
+                    false
+                }
+            };
             use std::os::windows::io::AsRawHandle;
             // FILE_ALLOCATION_INFO: 单字段 AllocationSize (LARGE_INTEGER = i64)
             #[repr(C)]
@@ -3512,26 +3654,27 @@ async fn preallocate_file_len(dest: &Path, target_len: u64) -> Result<(), Downlo
                 allocation_size: i64,
             }
             let handle = std_file.as_raw_handle();
-            // Step 1: 预分配 NTFS 物理簇——立即保留磁盘空间（连续簇优先），
-            // 磁盘不足时提前报错（等效 Linux fallocate 的 ENOSPC 检测），
-            // 减少多段随机写时的 NTFS 碎片化。
-            let info = FileAllocInfo {
-                allocation_size: target_len as i64,
-            };
-            let ret = unsafe {
-                windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
-                    handle,
-                    windows_sys::Win32::Storage::FileSystem::FileAllocationInfo,
-                    &info as *const _ as *const core::ffi::c_void,
-                    std::mem::size_of::<FileAllocInfo>() as u32,
-                )
-            };
-            if ret == 0 {
-                // FAT32/exFAT/网络驱动器等不支持时仅记录日志，不中断
-                log_info!(
-                    "[coordinator] SetFileInformationByHandle(FileAllocationInfo) 失败: {}",
-                    std::io::Error::last_os_error()
-                );
+            // Step 1: sparse 不可用时预分配 NTFS 物理簇——立即保留磁盘空间
+            // （连续簇优先），磁盘不足时提前报错，减少多段随机写的碎片化。
+            if !sparse {
+                let info = FileAllocInfo {
+                    allocation_size: target_len as i64,
+                };
+                let ret = unsafe {
+                    windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle(
+                        handle,
+                        windows_sys::Win32::Storage::FileSystem::FileAllocationInfo,
+                        &info as *const _ as *const core::ffi::c_void,
+                        std::mem::size_of::<FileAllocInfo>() as u32,
+                    )
+                };
+                if ret == 0 {
+                    // FAT32/exFAT/网络驱动器等不支持时仅记录日志，不中断
+                    log_info!(
+                        "[coordinator] SetFileInformationByHandle(FileAllocationInfo) 失败: {}",
+                        std::io::Error::last_os_error()
+                    );
+                }
             }
             // Step 2: 设置逻辑 EOF——后续 seek+write 依赖此值
             std_file.set_len(target_len)?;
@@ -3542,7 +3685,13 @@ async fn preallocate_file_len(dest: &Path, target_len: u64) -> Result<(), Downlo
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
-        file.set_len(target_len).await?;
+        let std_file = file.into_std().await;
+        tokio::task::spawn_blocking(move || {
+            let _temp_file_guard = temp_file_guard;
+            std_file.set_len(target_len)
+        })
+        .await
+        .map_err(|e| DownloadError::Other(format!("prealloc task panicked: {e}")))??;
     }
     Ok(())
 }
@@ -4304,6 +4453,7 @@ fn spawn_worker(
     task_id: String,
     url: String,
     dest: PathBuf,
+    temp_file_guard: TempFileGuard,
     planned_total: Arc<AtomicI64>,
     size_is_estimate: bool,
     first_validators: Arc<StdMutex<Option<(String, String)>>>,
@@ -4326,6 +4476,7 @@ fn spawn_worker(
     spawn_gen: i64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let _temp_file_guard = temp_file_guard;
         // Worker loop: keep accepting assignments until the channel closes.
         while let Some(assignment) = assign_rx.recv().await {
             if cancel_token.is_cancelled() {
@@ -4367,6 +4518,7 @@ fn spawn_worker(
                 } else {
                     MAX_RETRIES
                 },
+                !lease.is_attributable(),
                 lease.client(),
                 &seg_cancel,
                 &conn_sensitive,
@@ -4417,7 +4569,6 @@ fn spawn_worker(
                 Err(e) => nodes.report(&lease, 0, seg_started.elapsed(), Err(e)),
             }
             let lease_attributable = lease.is_attributable();
-            let lease_alternate = lease.is_alternate_path();
             let lease_desc = lease.describe();
             drop(lease);
 
@@ -4458,8 +4609,11 @@ fn spawn_worker(
                     // 为任务失败）。备选路径（代理）另把 Range 失效/错位归因到
                     // 路径本身——代理改写响应不能被误学成源站不支持 Range 并触发
                     // 清盘回退。SYS 租约的错误保持原样——语义与单路径完全一致。
+                    // 钉定节点与备选路径同样把 Range 失效/错位归因到节点/路径本身：
+                    // 一个坏边缘节点或改写响应的代理不能被学成源站不支持 Range，
+                    // 更不能触发清盘回退。
                     let attributable = crate::cdn::is_node_attributable(&e)
-                        || (lease_alternate
+                        || (lease_attributable
                             && matches!(
                                 e,
                                 DownloadError::RangeNotSupported(_)
@@ -4470,7 +4624,9 @@ fn spawn_worker(
                     // 接手，而不是整个任务失败。HTTP 状态/校验类错误保持原语义
                     // （源站拒绝学习、清盘回退）。
                     let sys_transport_fallback = !lease_attributable
-                        && crate::auto_proxy::is_route_transport_error(&format!("{e:#}"))
+                        && crate::auto_proxy::is_route_transport_error(
+                            &crate::downloader::download_error_chain_text(&e),
+                        )
                         && nodes.try_sys_transport_fallback();
                     let e = if (lease_attributable && attributable) || sys_transport_fallback {
                         log_info!(
@@ -4509,6 +4665,11 @@ fn spawn_worker(
 // Segment download with retry
 // ---------------------------------------------------------------------------
 
+/// 等待响应头的上限（只覆盖发出请求到收到响应头，不限制 body 速度）。
+const RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+/// 吸收合并后的唯一生命线（重连必被拒）：响应头等待更宽容。
+const RESPONSE_HEADER_TIMEOUT_HOSTILE: Duration = Duration::from_secs(90);
+
 /// HTTP 400 Bad Request 判定。
 ///
 /// 配额型下载端点（fnOS `multiple-download?token=`：一个 token 只允许固定次数
@@ -4539,6 +4700,7 @@ async fn do_segment_with_retry(
     // 段内瞬时错误重试预算：SYS 租约 = MAX_RETRIES，钉定租约 =
     // PINNED_NODE_MAX_RETRIES（快速上抛交给节点池切换）。
     max_retries: u32,
+    sys_lease: bool,
     client: &Client,
     cancel: &CancellationToken,
     conn_sensitive: &AtomicBool,
@@ -4576,6 +4738,7 @@ async fn do_segment_with_retry(
             seg_end,
             open_ended,
             no_range,
+            sys_lease,
             client,
             cancel,
             conn_sensitive,
@@ -4625,6 +4788,16 @@ async fn do_segment_with_retry(
             Err(e @ DownloadError::RangeNotSupported(_))
                 if total_downloaded.load(Ordering::Relaxed) == 0 =>
             {
+                return Err(e);
+            }
+            // 本地磁盘写满：腾出空间前不会自愈，退避重试只会空烧预算。立即作为
+            // 致命错误上抛（任务级自动重试的瞬时错误白名单也不含它）。
+            Err(e) if is_disk_full(&e) => {
+                log_info!(
+                    "[segment-retry] task {} seg {} 本地磁盘空间不足，跳过重试直接上报",
+                    task_id,
+                    seg_idx
+                );
                 return Err(e);
             }
             // BUG-HTTP-416-RETRY-EXHAUST：416 Range Not Satisfiable 是服务器对
@@ -4734,6 +4907,9 @@ async fn do_segment(
     // hint 模式（Range 未经验证）的首连接：不带 Range/If-Range 的 plain GET，
     // 仅在 actual_start == 0 时生效（重试推进起点后自然回到带 Range 路径）。
     no_range: bool,
+    // 当前租约是否 SYS 槽位。钉定节点 / 备选路径上的非 206 与压缩响应是该节点
+    // 自身的问题，不得学习成任务级 conn_sensitive 或 24h 域名单连接缓存。
+    sys_lease: bool,
     client: &Client,
     cancel: &CancellationToken,
     conn_sensitive: &AtomicBool,
@@ -4786,12 +4962,25 @@ async fn do_segment(
     if !plain_first {
         req = req.header("Range", &range);
     }
-    // 等响应头与 cancel 竞速：惩罚型/停滞服务器可能接受 TCP 连接后长时间不回
-    // 响应头（client 只有 connect_timeout，响应头无超时），若不竞速，删除/取消
-    // 任务会被卡在这里直到服务器开口。
+    // 等响应头与 cancel、头超时竞速：惩罚型/停滞服务器可能接受 TCP 连接后长时间
+    // 不回响应头（client 只有 connect_timeout，响应头无超时），不竞速则删除/取消
+    // 被卡住、尾段一条沉默连接拖住整个任务。超时只覆盖等头阶段，不限制 body 速度。
+    let header_timeout = if reconnect_hostile.load(Ordering::Relaxed) {
+        RESPONSE_HEADER_TIMEOUT_HOSTILE
+    } else {
+        RESPONSE_HEADER_TIMEOUT
+    };
     let resp = tokio::select! {
         _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
-        r = req.send() => r?,
+        r = tokio::time::timeout(header_timeout, req.send()) => match r {
+            Ok(r) => r?,
+            Err(_) => {
+                return Err(DownloadError::Other(format!(
+                    "segment {seg_idx} stalled: no response headers received within {}s",
+                    header_timeout.as_secs()
+                )));
+            }
+        },
     };
     let resp = resp.error_for_status()?;
 
@@ -4876,7 +5065,7 @@ async fn do_segment(
             // 代理云盘在连接压力下偶发全量响应。置位后 coordinator 衰减【主动拆分】以降低连接
             // churn，减少后续瞬时 200 的发生（保留 reactive 拆分做尾段抢救）。一次性 latch，
             // 仅首次置位打日志。
-            if !conn_sensitive.swap(true, Ordering::Relaxed) {
+            if sys_lease && !conn_sensitive.swap(true, Ordering::Relaxed) {
                 log_info!(
                     "[coordinator] task {} 检测到连接敏感（服务器对 Range 请求返回 {}），\
                  停止主动拆分以降低连接 churn",
@@ -4886,7 +5075,7 @@ async fn do_segment(
             }
             // 历史或本轮任一成功 Range 都证明该主机具备 Range 能力；偶发 200
             // 不能把整个域名标记成单连接。
-            if total_downloaded.load(Ordering::Relaxed) == 0 {
+            if sys_lease && total_downloaded.load(Ordering::Relaxed) == 0 {
                 record_single_conn_domain_persist(url, db);
             }
             return Err(DownloadError::RangeNotSupported(resp.status().to_string()));
@@ -4974,7 +5163,9 @@ async fn do_segment(
             cr_start,
             Some(actual_start),
         ) {
-            return Err(DownloadError::Other(format!(
+            // VersionChanged 而非 Other：与非 206 路径一致，do_segment_with_retry
+            // 立即短路（不退避重试），并走 Path B 清盘重下新版本。
+            return Err(DownloadError::VersionChanged(format!(
                 "segment {seg_idx}: validator mismatch — probe etag=\"{expected_etag}\" \
                  lm=\"{expected_last_modified}\", segment etag=\"{resp_etag_str}\" \
                  lm=\"{resp_lm_str}\". The file may have changed on the server during download."
@@ -5016,21 +5207,46 @@ async fn do_segment(
         if let Err((base_etag, base_lm)) =
             check_cross_segment_validators(first_validators, resp_etag, resp_lm)
         {
-            log_info!(
-                "[coordinator] task {} seg {} 跨段 validator 漂移（基线 etag=\"{}\" lm=\"{}\"，\
-                 本段 etag=\"{}\" lm=\"{}\"）——文件在下载中被替换，回退重下",
-                task_id,
-                seg_idx,
-                base_etag,
-                base_lm,
-                resp_etag,
-                resp_lm
+            // 与 probe 路径同一判据：仅 Last-Modified 不同、而 Content-Range 总大小
+            // 与起点均一致时是多 edge CDN 的时钟/格式差异，不是版本变化；ETag 双方
+            // 非空且不同仍致命。
+            let etag_mismatch =
+                !base_etag.is_empty() && !resp_etag.is_empty() && base_etag != resp_etag;
+            let lm_mismatch = !base_lm.is_empty() && !resp_lm.is_empty() && base_lm != resp_lm;
+            let fatal = crate::downloader::validator_mismatch_is_fatal(
+                etag_mismatch,
+                lm_mismatch,
+                crate::downloader::parse_content_range_total(resp.headers()),
+                planned_total.load(Ordering::Relaxed),
+                cr_start,
+                Some(actual_start),
             );
-            return Err(DownloadError::VersionChanged(format!(
-                "segment {seg_idx}: validators drifted across segment responses \
-                 (baseline etag=\"{base_etag}\" lm=\"{base_lm}\", \
-                 got etag=\"{resp_etag}\" lm=\"{resp_lm}\")"
-            )));
+            if !fatal {
+                log_warn!(
+                    "[coordinator] task {} seg {} 跨段 Last-Modified 不同（基线=\"{}\" 本段=\"{}\"）\
+                     但 Content-Range 总大小与起点一致，判定为 CDN edge 时钟/格式差异，继续",
+                    task_id,
+                    seg_idx,
+                    base_lm,
+                    resp_lm
+                );
+            } else {
+                log_info!(
+                    "[coordinator] task {} seg {} 跨段 validator 漂移（基线 etag=\"{}\" lm=\"{}\"，\
+                     本段 etag=\"{}\" lm=\"{}\"）——文件在下载中被替换，回退重下",
+                    task_id,
+                    seg_idx,
+                    base_etag,
+                    base_lm,
+                    resp_etag,
+                    resp_lm
+                );
+                return Err(DownloadError::VersionChanged(format!(
+                    "segment {seg_idx}: validators drifted across segment responses \
+                     (baseline etag=\"{base_etag}\" lm=\"{base_lm}\", \
+                     got etag=\"{resp_etag}\" lm=\"{resp_lm}\")"
+                )));
+            }
         }
 
         // hint 模式无 probe 基线：`tasks.orig_etag`/`orig_last_modified` 仍是空串。
@@ -5121,7 +5337,9 @@ async fn do_segment(
     if let Some(enc) = crate::downloader::detect_content_encoding(resp.headers()) {
         // Record the domain so that the retry (or any future task for this
         // host) automatically uses single-stream mode.
-        record_single_conn_domain_persist(url, db);
+        if sys_lease {
+            record_single_conn_domain_persist(url, db);
+        }
         return Err(DownloadError::Other(format!(
             "segment {}: server returned Content-Encoding ({:?}) on a Range response. \
              Compressed byte ranges cannot be assembled into a valid file. \
@@ -5132,7 +5350,9 @@ async fn do_segment(
     // 未知但存在的 Content-Encoding（如 compress）：detect 返回 None 会被当 identity
     // 原样拼接 → 损坏。同样回退单流（BUG-HTTP-UNKNOWN-ENCODING-RAW 的多段对应面）。
     if let Some(unknown) = crate::downloader::unsupported_content_encoding(resp.headers()) {
-        record_single_conn_domain_persist(url, db);
+        if sys_lease {
+            record_single_conn_domain_persist(url, db);
+        }
         return Err(DownloadError::Other(format!(
             "segment {seg_idx}: server returned unsupported Content-Encoding '{unknown}' on a \
              Range response; cannot assemble byte ranges. Please retry in single-stream mode."
@@ -5269,10 +5489,29 @@ async fn do_segment(
                         let write_slice = &bytes[..write_len];
 
                         // --- Speed limiter: write in sub-chunks as tokens allow ---
+                        // 令牌等待与取消竞速：低限速 + 多 worker 时一个 chunk 要等
+                        // 数秒，暂停/删除不能被挡在 select 分支体外。
                         let mut offset = 0usize;
                         while offset < write_len {
                             let remaining = (write_len - offset) as u64;
-                            let allowed = speed_limiter.consume(remaining).await;
+                            let allowed = tokio::select! {
+                                _ = cancel.cancelled() => {
+                                    // 已写入的子块计入进度，与上方取消分支的落库一致。
+                                    let written = offset as i64;
+                                    seg_downloaded += written;
+                                    total_downloaded.fetch_add(written, Ordering::Relaxed);
+                                    file.flush().await?;
+                                    let _ = file.get_ref().sync_data().await;
+                                    update_seg_state(seg_states, seg_idx, seg_downloaded);
+                                    let _ = db
+                                        .update_segment_progress_bounded(
+                                            task_id, seg_idx, seg_downloaded, seg_start, spawn_gen,
+                                        )
+                                        .await;
+                                    return Err(DownloadError::Cancelled);
+                                }
+                                allowed = speed_limiter.consume(remaining) => allowed,
+                            };
                             let end = offset + allowed as usize;
                             file.write_all(&write_slice[offset..end]).await?;
                             offset = end;
@@ -5484,6 +5723,82 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex as StdMutex};
+
+    #[tokio::test]
+    async fn coordinator_rejects_another_writer_before_truncating_stale_tail() {
+        use crate::cdn::NodePool;
+        use crate::downloader::RequestSpec;
+        use crate::events::{EngineEvent, EventSink};
+        use crate::speed_limiter::SpeedLimiter;
+        use crate::temp_file_guard::TempFileGuard;
+        use tokio_util::sync::CancellationToken;
+
+        struct NoopSink;
+        impl EventSink for NoopSink {
+            fn emit(&self, _event: EngineEvent) {}
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("fluxdown_coord_lock_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir).await.unwrap();
+        db.insert_task(
+            "second",
+            "http://127.0.0.1:1/f",
+            "f",
+            "",
+            1,
+            0,
+            "",
+            "",
+            "",
+            0,
+        )
+        .await
+        .unwrap();
+        let dest = dir.join("f.fdownloading");
+        std::fs::write(&dest, b"existing partial data").unwrap();
+        let first = TempFileGuard::acquire(&dest, "first").await.unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1024);
+        let spec = RequestSpec {
+            method: reqwest::Method::GET,
+            cookies: String::new(),
+            referrer: String::new(),
+            extra_headers: std::collections::HashMap::new(),
+            body: None,
+        };
+        let result = super::run_coordinated_download(
+            "second",
+            "http://127.0.0.1:1/f",
+            &dest,
+            4,
+            false,
+            2,
+            NodePool::single(reqwest::Client::new()),
+            &db,
+            &tx,
+            &CancellationToken::new(),
+            &SpeedLimiter::new(0),
+            &spec,
+            &NoopSink,
+            "",
+            "",
+            super::ReportScope::whole_task(),
+            1,
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(DownloadError::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"existing partial data");
+        assert!(db.load_segments("second").await.unwrap().is_empty());
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn make_seg(index: i32, start: i64, end: i64, downloaded: i64, state: SegState) -> LiveSegment {
         LiveSegment {
@@ -6770,6 +7085,134 @@ mod tests {
             count_domain_conn_policies(&format!("v1\nfresh.example\t1\t{now}")),
             0
         );
+    }
+
+    /// 来源累计的采样 / 落库：单直连池不归因；多路径池按在途 + 已回报累计，
+    /// 峰值单调（在途瞬时回落不抖动）；落库只写增量，重复 flush 不重复计数，
+    /// 被夺权的旧 spawn 写不进去。
+    #[tokio::test]
+    async fn source_bytes_sampling_is_monotonic_and_flushes_only_increments() {
+        use super::{flush_source_bytes, sample_run_source_bytes};
+        use crate::auto_proxy::{CandidateSource, RoutePath};
+        use crate::cdn::NodePool;
+        use crate::cdn::node_pool::LeaseRequest;
+        use crate::model::SourceBytes;
+        use tokio_util::sync::CancellationToken;
+
+        let dir = std::env::temp_dir().join(format!("fluxdown_srcb_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db = crate::db::Db::open(&dir).await.expect("open db");
+        db.insert_task(
+            "t",
+            "http://example.com/f",
+            "f",
+            "/tmp",
+            1,
+            0,
+            "",
+            "",
+            "",
+            0,
+        )
+        .await
+        .expect("insert task");
+        db.set_segments_epoch("t", 7).await.expect("set epoch");
+
+        let mut segments = BTreeMap::new();
+        segments.insert(0, make_seg(0, 0, 9_999, 0, SegState::Active));
+        let seg_states = Arc::new(StdMutex::new(build_seg_state_vec(&segments)));
+        let set_progress = |bytes: i64| {
+            seg_states.lock().unwrap()[0].downloaded_bytes = bytes;
+        };
+        let base = SourceBytes {
+            cdn: 1,
+            proxy: 10,
+            nic: 100,
+        };
+        let mut peak = SourceBytes::default();
+
+        // 单直连池：该路径不做来源归因。
+        let single = NodePool::single(reqwest::Client::new());
+        assert_eq!(
+            sample_run_source_bytes(&single, &mut segments, &seg_states, base, &mut peak),
+            None
+        );
+
+        // 多路径池：槽位 1 = 已有先验的代理路径，实测更快 → 租约落在代理上。
+        let manual = RoutePath::Proxy(CandidateSource::ManualFields);
+        let pool = NodePool::single(reqwest::Client::new());
+        pool.add_paths(
+            RoutePath::Direct,
+            None,
+            vec![(manual, reqwest::Client::new(), Some(1e6))],
+        );
+        pool.observe_window(&[(0, 1e3), (1, 1e6)]);
+        let lease = pool.lease_for(LeaseRequest {
+            seg_index: 0,
+            start_downloaded: 0,
+            bytes: i64::MAX,
+            allow_alternates: true,
+            cancel: CancellationToken::new(),
+        });
+        assert_eq!(lease.route(), manual);
+
+        // 在途 800 B 全部走代理；返回值 = 基数 + 本次运行累计。
+        set_progress(800);
+        let live = sample_run_source_bytes(&pool, &mut segments, &seg_states, base, &mut peak);
+        assert_eq!(
+            live,
+            Some(SourceBytes {
+                cdn: 1,
+                proxy: 810,
+                nic: 100
+            })
+        );
+        let mut flushed = SourceBytes::default();
+        flush_source_bytes(&db, "t", 7, peak, &mut flushed).await;
+        assert_eq!(flushed.proxy, 800);
+        assert_eq!(
+            db.load_task_source_bytes("t").await.expect("load").proxy,
+            800
+        );
+
+        // 在途口径瞬时回落：峰值不回退，落库无新增。
+        set_progress(300);
+        sample_run_source_bytes(&pool, &mut segments, &seg_states, base, &mut peak);
+        assert_eq!(peak.proxy, 800);
+        flush_source_bytes(&db, "t", 7, peak, &mut flushed).await;
+        assert_eq!(
+            db.load_task_source_bytes("t").await.expect("load").proxy,
+            800
+        );
+
+        // 租约结束回报 1200 B、在途清零后继续增长：只追加 400 B 增量。
+        pool.record_transfer(&lease, 1_200);
+        drop(lease);
+        sample_run_source_bytes(&pool, &mut segments, &seg_states, base, &mut peak);
+        assert_eq!(peak.proxy, 1_200);
+        flush_source_bytes(&db, "t", 7, peak, &mut flushed).await;
+        flush_source_bytes(&db, "t", 7, peak, &mut flushed).await;
+        assert_eq!(
+            db.load_task_source_bytes("t").await.expect("load"),
+            SourceBytes {
+                cdn: 0,
+                proxy: 1_200,
+                nic: 0
+            },
+            "repeated flush of the same cumulative value must not double count"
+        );
+
+        // 被新 spawn 夺权：旧 coordinator 的落库不生效。
+        db.set_segments_epoch("t", 8).await.expect("set epoch");
+        let mut stale_flushed = SourceBytes::default();
+        flush_source_bytes(&db, "t", 7, peak, &mut stale_flushed).await;
+        assert_eq!(
+            db.load_task_source_bytes("t").await.expect("load").proxy,
+            1_200
+        );
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

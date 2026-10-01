@@ -1,5 +1,5 @@
 //! agent 桌面系统集成：任务文件打开/定位、官方桌面进程唤起、开机自启、
-//! `.torrent` 关联与 URL scheme 注册。
+//! `.torrent` 关联与 URL scheme 注册、系统文件图标提取（见 [`file_icon_png`]）。
 //!
 //! 关联与 URL scheme 的注册目标是官方桌面程序：Windows 指向同级
 //! `fluxdown-desktop.exe`，macOS 指向外层 `FluxDown.app` bundle（见
@@ -14,6 +14,7 @@
 
 mod autostart;
 mod file_association;
+mod file_icon;
 #[cfg(target_os = "macos")]
 mod macos_cf;
 mod protocol_registry;
@@ -22,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use fluxdown_protocol::PlatformIntegrationDto;
+
+pub use file_icon::file_icon_png;
 
 /// 两次「为待确认交互拉起桌面程序」之间的最小间隔：断线重连抖动也不重复拉起。
 pub const PROMPT_LAUNCH_COOLDOWN_MS: i64 = 10_000;
@@ -356,19 +359,22 @@ fn launch_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
 ///
 /// 与 hub `reveal_file.rs` 的 `platform_open_dir` 同一策略：优先直接调 Win32
 /// `ShellExecuteW`（"open" 默认 verb，双击的 API 本体，无 cmd 引号/元字符
-/// 解析风险）；失败才回退 `cmd /c start "" <path>`（start 内部同样走 open
-/// 关联；第一个空引号串是窗口标题，不能省）。
+/// 解析风险）；失败回退 `explorer.exe <path>`——同样按关联打开，且参数经标准 argv 引用
+/// 传递，不经 cmd 解析。只接受绝对路径，避免被 explorer 当成命令行开关。
 #[cfg(windows)]
 fn open_with_shell(path: &Path) -> Result<(), PlatformError> {
-    use std::os::windows::process::CommandExt;
-
     let text = path.to_string_lossy();
     if shell_execute_open(&text) {
         return Ok(());
     }
-    tracing::debug!("ShellExecuteW failed; falling back to cmd /c start");
-    let mut command = std::process::Command::new("cmd.exe");
-    command.raw_arg(format!(r#"/c start "" "{text}""#));
+    if !path.is_absolute() {
+        return Err(PlatformError::Failed(
+            "refusing to open a non-absolute path".to_owned(),
+        ));
+    }
+    tracing::debug!("ShellExecuteW failed; falling back to explorer.exe");
+    let mut command = std::process::Command::new("explorer.exe");
+    command.arg(path);
     set_no_console_window(&mut command);
     command.spawn()?;
     Ok(())
@@ -588,7 +594,7 @@ mod xdg {
 
     use super::PlatformError;
 
-    /// 打包安装的桌面入口（`linux/com.fluxdown.app.desktop`）。
+    /// 打包安装的桌面入口（`packaging/linux/com.fluxdown.app.desktop`）。
     pub const DESKTOP_ENTRY: &str = "com.fluxdown.app.desktop";
 
     /// `xdg-mime query default <mime>` 是否返回 FluxDown 的桌面入口。

@@ -802,6 +802,7 @@ mod tests {
             rss_source_id: String::new(),
             origin_url: String::new(),
             auto_route: String::new(),
+            source_bytes: Default::default(),
             queue_order: 0,
             uploaded_bytes: 0,
             uploaded_at_completion: 0,
@@ -812,6 +813,7 @@ mod tests {
             seed_post_ratio_limit_milli: -2,
             seed_time_limit_minutes: -2,
             seed_inactive_time_limit_minutes: -2,
+            seed_upload_limit_bps: 0,
         }
     }
 

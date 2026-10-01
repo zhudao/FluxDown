@@ -72,8 +72,18 @@ pub(crate) fn platform_label_key(platform: &str) -> Option<&'static str> {
     }
 }
 
-/// ISO-8601 → `YYYY-MM-DD HH:MM`；无法识别时原样返回（空串保持为空）。
+/// ISO-8601 → 本地时区的 `YYYY-MM-DD HH:MM`；无法识别时原样返回（空串保持为空）。
+///
+/// 带 `Z` 或 `±HH:MM` 偏移的时间换算到本机时区（与 Web 一致）；没有时区信息的值
+/// 无从换算，只截断。
 pub(crate) fn format_timestamp(raw: &str) -> String {
+    format_timestamp_in(raw, &chrono::Local)
+}
+
+fn format_timestamp_in<Tz: chrono::TimeZone>(raw: &str, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     let raw = raw.trim();
     let bytes = raw.as_bytes();
     let looks_iso = bytes.len() >= 16
@@ -81,12 +91,17 @@ pub(crate) fn format_timestamp(raw: &str) -> String {
         && bytes[7] == b'-'
         && matches!(bytes[10], b'T' | b' ')
         && bytes[13] == b':';
-    if looks_iso {
-        raw.get(..16)
-            .map_or_else(|| raw.to_owned(), |head| head.replacen('T', " ", 1))
-    } else {
-        raw.to_owned()
+    if !looks_iso {
+        return raw.to_owned();
     }
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return parsed
+            .with_timezone(tz)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+    }
+    raw.get(..16)
+        .map_or_else(|| raw.to_owned(), |head| head.replacen('T', " ", 1))
 }
 
 #[cfg(test)]
@@ -165,11 +180,22 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_are_shortened_only_when_iso() {
-        assert_eq!(format_timestamp("2026-09-29T06:37:48Z"), "2026-09-29 06:37");
-        assert_eq!(format_timestamp("2026-09-29 06:37:48"), "2026-09-29 06:37");
-        assert_eq!(format_timestamp("yesterday"), "yesterday");
-        assert_eq!(format_timestamp(""), "");
+    fn timestamps_convert_to_target_zone_only_when_zoned() {
+        let tz = chrono::FixedOffset::east_opt(8 * 3600).expect("offset");
+        assert_eq!(
+            format_timestamp_in("2026-09-29T06:37:48Z", &tz),
+            "2026-09-29 14:37"
+        );
+        assert_eq!(
+            format_timestamp_in("2026-09-29T23:30:00-05:30", &tz),
+            "2026-09-30 13:00"
+        );
+        assert_eq!(
+            format_timestamp_in("2026-09-29 06:37:48", &tz),
+            "2026-09-29 06:37"
+        );
+        assert_eq!(format_timestamp_in("yesterday", &tz), "yesterday");
+        assert_eq!(format_timestamp_in("", &tz), "");
     }
 
     #[test]

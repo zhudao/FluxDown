@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 
 use crate::port::{PortFuture, SettingsPort};
 
+mod mutation;
+
 /// 本地编辑到写回 RPC 的合并窗口。
 const FLUSH_DEBOUNCE: Duration = Duration::from_millis(250);
 /// daemon 修订冲突时的自动重试上限。
@@ -56,6 +58,17 @@ impl SettingsErrorKind {
     }
 }
 
+/// RPC 错误的本地化说明（agent 端口不透传服务端 message，只按错误码归类）。
+#[must_use]
+pub(crate) fn rpc_error_text(
+    translator: &fluxdown_ui_i18n::Translator,
+    error: &RpcErrorData,
+) -> String {
+    translator
+        .text(SettingsErrorKind::from_rpc(error).i18n_key())
+        .to_owned()
+}
+
 /// 一次设置写回的可展示错误。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsError {
@@ -89,9 +102,14 @@ pub struct SettingsStore {
     /// 已编辑、尚未发送的偏好；`bool` = 是否进入云同步。
     pending_prefs: BTreeMap<String, (Value, bool)>,
     inflight_prefs: BTreeMap<String, (Value, bool)>,
+    /// 编辑前最后一次服务端确认值，写回失败时用于回滚（`None` = 当时不存在）。
+    baseline_daemon: BTreeMap<String, Option<String>>,
+    baseline_prefs: BTreeMap<String, Option<Value>>,
     flush_scheduled: bool,
     flush_inflight: bool,
     conflict_retries: u8,
+    /// 整值键的读-改-写链（见 [`mutation`]）。
+    mutations: mutation::DaemonMutations,
 
     // ── 按需加载的动作结果 ──
     integration: Option<PlatformIntegrationDto>,
@@ -108,6 +126,8 @@ pub struct SettingsStore {
     last_notice: Option<&'static str>,
     /// 页面级临时值（测试结果等），不持久化、不发送。
     transient: BTreeMap<&'static str, Value>,
+    /// 渲染期按需加载的「本轮已尝试」标记，见 [`Self::begin_load`]。
+    load_attempts: BTreeSet<&'static str>,
     /// 网关状态变化 / 快照重建后置位：`transient("gateway_user_token")` 可能已过期，
     /// 下次展示时重新读取；发起读取时清除。
     gateway_token_stale: bool,
@@ -136,9 +156,12 @@ impl SettingsStore {
             inflight_daemon: BTreeMap::new(),
             pending_prefs: BTreeMap::new(),
             inflight_prefs: BTreeMap::new(),
+            baseline_daemon: BTreeMap::new(),
+            baseline_prefs: BTreeMap::new(),
             flush_scheduled: false,
             flush_inflight: false,
             conflict_retries: 0,
+            mutations: mutation::DaemonMutations::default(),
             integration: None,
             diagnostics: None,
             site_auth: Vec::new(),
@@ -150,6 +173,7 @@ impl SettingsStore {
             last_error: None,
             last_notice: None,
             transient: BTreeMap::new(),
+            load_attempts: BTreeSet::new(),
             gateway_token_stale: true,
         }
     }
@@ -173,9 +197,21 @@ impl SettingsStore {
         self.linked_devices = snapshot.linked_devices.len();
         self.daemon_connected = snapshot.daemon_connected;
         self.stale = false;
+        self.load_attempts.clear();
         self.overlay_local_edits();
         self.last_error = None;
         cx.notify();
+    }
+
+    /// 投递日志：增量按 deliveryId 合并；清空只由显式事件表达。
+    fn apply_webhook_event(&mut self, event: &DaemonEvent) {
+        match event {
+            DaemonEvent::WebhooksChanged(delta) => {
+                fluxdown_protocol::merge_webhook_deliveries(&mut self.webhook_deliveries, delta);
+            }
+            DaemonEvent::WebhooksCleared => self.webhook_deliveries.clear(),
+            _ => {}
+        }
     }
 
     pub fn apply_event(&mut self, event: &ServiceEvent, cx: &mut Context<Self>) {
@@ -185,6 +221,7 @@ impl SettingsStore {
         match event {
             AgentEvent::Daemon(DaemonEvent::ConfigChanged(config)) => {
                 self.daemon.clone_from(config);
+                self.refresh_daemon_baselines();
                 self.overlay_local_edits();
             }
             AgentEvent::Daemon(DaemonEvent::QueuesChanged(queues)) => {
@@ -196,9 +233,9 @@ impl SettingsStore {
             AgentEvent::Daemon(DaemonEvent::ComponentsChanged(components)) => {
                 self.components.clone_from(components)
             }
-            AgentEvent::Daemon(DaemonEvent::WebhooksChanged(deliveries)) => {
-                self.webhook_deliveries.clone_from(deliveries)
-            }
+            AgentEvent::Daemon(
+                event @ (DaemonEvent::WebhooksChanged(_) | DaemonEvent::WebhooksCleared),
+            ) => self.apply_webhook_event(event),
             AgentEvent::GatewayChanged(gateway) => {
                 self.gateway.clone_from(gateway);
                 self.gateway_token_stale = true;
@@ -206,6 +243,7 @@ impl SettingsStore {
             AgentEvent::ShellChanged(shell) => self.shell.clone_from(shell),
             AgentEvent::PreferencesChanged(preferences) => {
                 self.preferences.clone_from(preferences);
+                self.refresh_pref_baselines();
                 self.overlay_local_edits();
             }
             AgentEvent::SyncChanged(sync) => self.sync.clone_from(sync),
@@ -222,6 +260,7 @@ impl SettingsStore {
             AgentEvent::LinkedDevicesChanged(devices) => self.linked_devices = devices.len(),
             AgentEvent::DaemonSnapshotReplaced(snapshot) => {
                 self.daemon.clone_from(&snapshot.config);
+                self.refresh_daemon_baselines();
                 self.queues.clone_from(&snapshot.queues);
                 self.plugins.clone_from(&snapshot.plugins);
                 self.components.clone_from(&snapshot.components);
@@ -229,8 +268,14 @@ impl SettingsStore {
                     .clone_from(&snapshot.webhook_deliveries);
                 self.overlay_local_edits();
                 self.daemon_connected = true;
+                self.load_attempts.clear();
             }
-            AgentEvent::DaemonConnectionChanged(connected) => self.daemon_connected = *connected,
+            AgentEvent::DaemonConnectionChanged(connected) => {
+                self.daemon_connected = *connected;
+                if *connected {
+                    self.load_attempts.clear();
+                }
+            }
             _ => return,
         }
         cx.notify();
@@ -242,6 +287,7 @@ impl SettingsStore {
         self.inflight_daemon.clear();
         self.pending_prefs.clear();
         self.inflight_prefs.clear();
+        self.mutations.discard();
         self.last_error = Some(SettingsError {
             kind: SettingsErrorKind::Disconnected,
             detail: SharedString::default(),
@@ -249,8 +295,106 @@ impl SettingsStore {
         cx.notify();
     }
 
+    /// 记录编辑前的服务端值（仅首次；回执 / 回滚 / 新快照前保持不变）。
+    /// `pref_key` 为空串表示不涉及偏好。
+    fn capture_baselines(&mut self, pref_key: &str, daemon_key: Option<&str>) {
+        if !pref_key.is_empty() && !self.baseline_prefs.contains_key(pref_key) {
+            let old = self.preferences.values.get(pref_key).cloned();
+            self.baseline_prefs.insert(pref_key.to_owned(), old);
+        }
+        if let Some(key) = daemon_key
+            && !self.baseline_daemon.contains_key(key)
+        {
+            let old = self.daemon.values.get(key).cloned();
+            self.baseline_daemon.insert(key.to_owned(), old);
+        }
+    }
+
+    /// 新的服务端 daemon 配置到达：基线跟随服务端值。
+    fn refresh_daemon_baselines(&mut self) {
+        for (key, old) in &mut self.baseline_daemon {
+            *old = self.daemon.values.get(key).cloned();
+        }
+    }
+
+    /// 新的服务端偏好到达：基线跟随服务端值。
+    fn refresh_pref_baselines(&mut self) {
+        for (key, old) in &mut self.baseline_prefs {
+            *old = self.preferences.values.get(key).cloned();
+        }
+    }
+
+    /// 写回成功：已回执且无更新编辑的键不再需要基线。
+    fn settle_inflight(&mut self) {
+        let daemon = std::mem::take(&mut self.inflight_daemon);
+        for key in daemon
+            .keys()
+            .filter(|k| !self.pending_daemon.contains_key(*k))
+        {
+            self.baseline_daemon.remove(key);
+        }
+        let prefs = std::mem::take(&mut self.inflight_prefs);
+        for key in prefs
+            .keys()
+            .filter(|k| !self.pending_prefs.contains_key(*k))
+        {
+            self.baseline_prefs.remove(key);
+            if let Some(spec) = setting_spec(key).filter(|s| s.owner == SettingOwner::Daemon) {
+                self.baseline_daemon.remove(spec.storage_key);
+            }
+        }
+    }
+
+    /// 写回失败：把在途键恢复为编辑前的服务端值（已有更新的待发送编辑则保留）。
+    fn rollback_inflight(&mut self) {
+        let daemon = std::mem::take(&mut self.inflight_daemon);
+        for key in daemon.into_keys() {
+            if !self.pending_daemon.contains_key(&key) {
+                Self::restore(
+                    &mut self.daemon.values,
+                    &key,
+                    self.baseline_daemon.remove(&key),
+                );
+            }
+        }
+        let prefs = std::mem::take(&mut self.inflight_prefs);
+        for key in prefs.into_keys() {
+            if self.pending_prefs.contains_key(&key) {
+                continue;
+            }
+            let old = self.baseline_prefs.remove(&key);
+            match old {
+                Some(Some(value)) => {
+                    self.preferences.values.insert(key.clone(), value);
+                }
+                Some(None) => {
+                    self.preferences.values.remove(&key);
+                }
+                None => {}
+            }
+            if let Some(spec) = setting_spec(&key).filter(|s| s.owner == SettingOwner::Daemon) {
+                let old = self.baseline_daemon.remove(spec.storage_key);
+                Self::restore(&mut self.daemon.values, spec.storage_key, old);
+            }
+        }
+        self.conflict_retries = 0;
+    }
+
+    fn restore(values: &mut BTreeMap<String, String>, key: &str, old: Option<Option<String>>) {
+        match old {
+            Some(Some(value)) => {
+                values.insert(key.to_owned(), value);
+            }
+            Some(None) => {
+                values.remove(key);
+            }
+            None => {}
+        }
+    }
+
     /// 服务端快照到达时把尚未回执的本地编辑重新盖上去，避免输入框回跳。
     fn overlay_local_edits(&mut self) {
+        self.capture_mutation_bases();
         for (key, value) in self
             .inflight_daemon
             .iter()
@@ -260,7 +404,14 @@ impl SettingsStore {
         }
         for (key, (value, _)) in self.inflight_prefs.iter().chain(self.pending_prefs.iter()) {
             self.preferences.values.insert(key.clone(), value.clone());
+            // daemon 拥有的键读侧是 daemon 快照，同样要盖回去。
+            if let Some(spec) = setting_spec(key).filter(|s| s.owner == SettingOwner::Daemon)
+                && let Ok(wire) = value_to_daemon_config(spec, value)
+            {
+                self.daemon.values.insert(spec.storage_key.to_owned(), wire);
+            }
         }
+        self.overlay_mutations();
     }
 
     // ───────────────────────── 只读投影 ─────────────────────────
@@ -344,6 +495,15 @@ impl SettingsStore {
     #[must_use]
     pub fn gateway_token_needs_reveal(&self) -> bool {
         self.gateway_token_stale || !self.transient.contains_key("gateway_user_token")
+    }
+    /// 按需加载的「本轮已尝试」闸门：渲染期调用，返回 true 表示本轮首次，调用方随后发起加载。
+    /// 失败后不会在下一次重绘里重发，直到重连 / 新快照 / 重新打开设置窗口重置。
+    pub fn begin_load(&mut self, key: &'static str) -> bool {
+        self.load_attempts.insert(key)
+    }
+    /// 清除指定加载标记，使下次渲染重新加载（如设置窗口重新打开）。
+    pub fn reset_load(&mut self, key: &'static str) {
+        self.load_attempts.remove(key);
     }
     pub fn set_transient(&mut self, key: &'static str, value: Value, cx: &mut Context<Self>) {
         self.transient.insert(key, value);
@@ -435,13 +595,18 @@ impl SettingsStore {
         if self.daemon.values.get(key) == Some(&normalized) {
             return;
         }
+        let spec = fluxdown_protocol::SYNC_SETTING_SPECS
+            .iter()
+            .find(|spec| spec.owner == SettingOwner::Daemon && spec.storage_key == key);
+        if let Some(spec) = spec {
+            self.capture_baselines(spec.key, Some(key));
+        } else {
+            self.capture_baselines("", Some(key));
+        }
         self.daemon
             .values
             .insert(key.to_owned(), normalized.clone());
-        if let Some(spec) = fluxdown_protocol::SYNC_SETTING_SPECS
-            .iter()
-            .find(|spec| spec.owner == SettingOwner::Daemon && spec.storage_key == key)
-        {
+        if let Some(spec) = spec {
             let json = daemon_string_to_json(spec.key, &normalized);
             self.pending_prefs.insert(spec.key.to_owned(), (json, true));
         } else {
@@ -508,6 +673,9 @@ impl SettingsStore {
             if spec.owner == SettingOwner::Daemon {
                 // daemon 键的读侧是 daemon 快照；写侧仍经同步链路。
                 if let Ok(wire) = value_to_daemon_config(spec, &value) {
+                    if self.preferences.values.get(key) != Some(&value) {
+                        self.capture_baselines(key, Some(spec.storage_key));
+                    }
                     self.daemon.values.insert(spec.storage_key.to_owned(), wire);
                 }
             }
@@ -515,6 +683,7 @@ impl SettingsStore {
         if self.preferences.values.get(key) == Some(&value) {
             return;
         }
+        self.capture_baselines(key, None);
         self.preferences
             .values
             .insert(key.to_owned(), value.clone());
@@ -885,8 +1054,7 @@ impl SettingsStore {
                     this.flush_inflight = false;
                     match first_error {
                         None => {
-                            this.inflight_daemon.clear();
-                            this.inflight_prefs.clear();
+                            this.settle_inflight();
                             this.conflict_retries = 0;
                             if this.last_error.as_ref().is_some_and(|error| {
                                 error.kind != SettingsErrorKind::InvalidArgument
@@ -910,8 +1078,7 @@ impl SettingsStore {
                             this.schedule_flush(cx);
                         }
                         Some(error) => {
-                            this.inflight_daemon.clear();
-                            this.inflight_prefs.clear();
+                            this.rollback_inflight();
                             this.conflict_retries = 0;
                             this.last_error = Some(SettingsError {
                                 kind: SettingsErrorKind::from_rpc(&error),
@@ -1010,7 +1177,137 @@ fn daemon_string_to_json(spec_key: &str, wire: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::preference_is_synced;
+    use std::sync::Arc;
+
+    use serde_json::json;
+
+    use super::{SettingsStore, preference_is_synced};
+    use crate::port::{PortFuture, SettingsPort};
+
+    struct NullPort;
+
+    impl SettingsPort for NullPort {
+        fn call(
+            &self,
+            _method: &'static str,
+            _params: serde_json::Value,
+        ) -> PortFuture<serde_json::Value> {
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+    }
+
+    fn delivery(id: &str, ts: i64) -> fluxdown_protocol::WebhookDeliveryDto {
+        fluxdown_protocol::WebhookDeliveryDto {
+            delivery_id: id.to_owned(),
+            timestamp_ms: ts,
+            event: String::new(),
+            endpoint_id: String::new(),
+            endpoint_name: String::new(),
+            url: String::new(),
+            request_headers: String::new(),
+            request_body: String::new(),
+            status_code: 200,
+            response_body: String::new(),
+            latency_ms: 0,
+            attempts: 1,
+            success: true,
+            error: String::new(),
+        }
+    }
+
+    #[test]
+    fn webhook_delta_merges_and_clear_is_explicit() {
+        use fluxdown_protocol::DaemonEvent;
+        let mut store = SettingsStore::new(Arc::new(NullPort));
+        store.apply_webhook_event(&DaemonEvent::WebhooksChanged(vec![
+            delivery("a", 1),
+            delivery("b", 2),
+        ]));
+        store.apply_webhook_event(&DaemonEvent::WebhooksChanged(vec![delivery("c", 3)]));
+        let ids: Vec<&str> = store
+            .webhook_deliveries()
+            .iter()
+            .map(|d| d.delivery_id.as_str())
+            .collect();
+        assert_eq!(ids, ["c", "b", "a"]);
+        store.apply_webhook_event(&DaemonEvent::WebhooksChanged(Vec::new()));
+        assert_eq!(store.webhook_deliveries().len(), 3);
+        store.apply_webhook_event(&DaemonEvent::WebhooksCleared);
+        assert!(store.webhook_deliveries().is_empty());
+    }
+
+    const PREF: &str = "download.max_concurrent_tasks";
+    const WIRE: &str = "max_concurrent_tasks";
+
+    fn store_with_server_value(server: &str) -> SettingsStore {
+        let mut store = SettingsStore::new(Arc::new(NullPort));
+        store
+            .daemon
+            .values
+            .insert(WIRE.to_owned(), server.to_owned());
+        store
+    }
+
+    #[test]
+    fn load_gate_fires_once_until_reset() {
+        let mut store = SettingsStore::new(Arc::new(NullPort));
+        assert!(store.begin_load("connPolicy"));
+        // 失败后重绘不得再次发起。
+        assert!(!store.begin_load("connPolicy"));
+        assert!(store.begin_load("siteAuth"));
+        store.reset_load("connPolicy");
+        assert!(store.begin_load("connPolicy"));
+        assert!(!store.begin_load("siteAuth"));
+    }
+
+    fn wire(store: &SettingsStore) -> Option<&str> {
+        store.daemon.values.get(WIRE).map(String::as_str)
+    }
+
+    #[test]
+    fn pending_daemon_owned_pref_survives_daemon_snapshot_replacement() {
+        let mut store = store_with_server_value("3");
+        store.capture_baselines(PREF, Some(WIRE));
+        store.daemon.values.insert(WIRE.to_owned(), "8".to_owned());
+        store
+            .pending_prefs
+            .insert(PREF.to_owned(), (json!(8), true));
+
+        // 服务端快照（仍是旧值）整体替换 daemon 后重放本地编辑。
+        store.daemon.values.insert(WIRE.to_owned(), "3".to_owned());
+        store.overlay_local_edits();
+        assert_eq!(wire(&store), Some("8"));
+    }
+
+    #[test]
+    fn failed_writeback_restores_server_value() {
+        let mut store = store_with_server_value("3");
+        store.capture_baselines(PREF, Some(WIRE));
+        store.daemon.values.insert(WIRE.to_owned(), "8".to_owned());
+        store
+            .inflight_prefs
+            .insert(PREF.to_owned(), (json!(8), true));
+
+        store.rollback_inflight();
+        assert_eq!(wire(&store), Some("3"));
+        assert!(store.inflight_prefs.is_empty());
+    }
+
+    #[test]
+    fn failed_writeback_keeps_newer_pending_edit() {
+        let mut store = store_with_server_value("3");
+        store.capture_baselines(PREF, Some(WIRE));
+        store.daemon.values.insert(WIRE.to_owned(), "9".to_owned());
+        store
+            .inflight_prefs
+            .insert(PREF.to_owned(), (json!(8), true));
+        store
+            .pending_prefs
+            .insert(PREF.to_owned(), (json!(9), true));
+
+        store.rollback_inflight();
+        assert_eq!(wire(&store), Some("9"));
+    }
 
     #[test]
     fn catalog_keys_sync_and_device_local_keys_do_not() {

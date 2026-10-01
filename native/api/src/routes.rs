@@ -55,7 +55,7 @@ pub const API_SITE_AUTH_SITE: &str = "/api/v1/site-auth/{site}";
 
 /// 插件集合（GET 列表）。
 pub const API_PLUGINS: &str = "/api/v1/plugins";
-/// 安装插件（POST zip bytes，≤10MB）。
+/// 安装插件（POST zip bytes，≤4MB，受全局请求体上限约束）。
 pub const API_PLUGINS_INSTALL: &str = "/api/v1/plugins/install";
 /// 安装 dev 插件（POST {dirPath}）。
 pub const API_PLUGINS_INSTALL_DEV: &str = "/api/v1/plugins/install-dev";
@@ -101,6 +101,9 @@ pub const API_RSS_VALIDATE: &str = "/api/v1/rss/validate";
 
 /// P2P 设备互联：发起配对握手（POST，无 token 鉴权，由一次性配对码守卫）。
 pub const API_LINK_PAIR_HELLO: &str = "/api/v1/link/pair/hello";
+/// P2P 设备互联：揭示发起方在 hello 里承诺过的临时公钥（POST，无 token 鉴权，由
+/// `pair/hello` 建立的会话 id + 公钥承诺守卫）。
+pub const API_LINK_PAIR_REVEAL: &str = "/api/v1/link/pair/reveal";
 /// P2P 设备互联：确认/拒绝配对（POST，无 token 鉴权，由会话 + SAS 守卫）。
 pub const API_LINK_PAIR_CONFIRM: &str = "/api/v1/link/pair/confirm";
 /// P2P 设备互联：已配对设备下发下载任务（POST，链路 HMAC 鉴权，非 token）。

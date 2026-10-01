@@ -66,10 +66,12 @@ import type {
   SystemProxyDto,
   TaskActivityPage,
   TaskActivityQuery,
+  TaskDeleteManyParams,
   TaskDeleteParams,
   TaskChangeUrlParams,
   TaskDto,
   TaskIdParams,
+  TaskIdsParams,
   TaskRenameParams,
   TrackerSubRefreshResponse,
   WebhookDeliveriesResponse,
@@ -77,6 +79,9 @@ import type {
   WebhookSimulateResponse,
   WebhookTestResponse,
 } from '../protocol';
+
+/** 服务端逐源串行拉取镜像（每源 20s），最坏远超默认 30s。 */
+const SLOW_MIRROR_TIMEOUT_MS = 120_000;
 
 const task = {
   list: () => call<TaskDto[]>(METHOD.DAEMON_TASK_LIST),
@@ -96,6 +101,19 @@ const task = {
   rescan: () => call<OkResult>(METHOD.DAEMON_TASK_RESCAN),
   setSeedLimits: (params: SetSeedLimitsParams) =>
     call<OkResult>(METHOD.DAEMON_TASK_SET_SEED_LIMITS, params),
+  /** 批量操作：一次请求、整批只推一次任务快照（逐条调用会撞上 agent 的通道上限）。 */
+  pauseMany: (taskIds: string[]) => {
+    const params: TaskIdsParams = { taskIds };
+    return call<OkResult>(METHOD.DAEMON_TASK_PAUSE_MANY, params);
+  },
+  resumeMany: (taskIds: string[]) => {
+    const params: TaskIdsParams = { taskIds };
+    return call<OkResult>(METHOD.DAEMON_TASK_RESUME_MANY, params);
+  },
+  deleteMany: (taskIds: string[], deleteFiles = false) => {
+    const params: TaskDeleteManyParams = { taskIds, deleteFiles };
+    return call<OkResult>(METHOD.DAEMON_TASK_DELETE_MANY, params);
+  },
 };
 
 const queue = {
@@ -194,12 +212,15 @@ const plugin = {
     call<InstalledPlugin>(METHOD.DAEMON_PLUGIN_INSTALL, params),
   /** 从 daemon 主机上的目录安装开发版插件。 */
   installDev: (params: PluginInstallDevParams) =>
-    call<InstalledPlugin>(METHOD.DAEMON_PLUGIN_INSTALL_DEV, params),
+    call<InstalledPlugin>(METHOD.DAEMON_PLUGIN_INSTALL_DEV, params, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
+  /** 重新加载开发版插件（重读 manifest 与源码并校验；失败保留登记）。 */
+  reloadDev: (params: PluginIdentityParams) =>
+    call<InstalledPlugin>(METHOD.DAEMON_PLUGIN_RELOAD_DEV, params, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
   uninstall: (params: PluginIdentityParams) =>
     call<OkResult>(METHOD.DAEMON_PLUGIN_UNINSTALL, params),
-  marketList: () => call<MarketEntryDto[]>(METHOD.DAEMON_PLUGIN_MARKET_LIST),
+  marketList: () => call<MarketEntryDto[]>(METHOD.DAEMON_PLUGIN_MARKET_LIST, undefined, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
   marketInstall: (params: PluginMarketInstallParams) =>
-    call<InstalledPlugin>(METHOD.DAEMON_PLUGIN_MARKET_INSTALL, params),
+    call<InstalledPlugin>(METHOD.DAEMON_PLUGIN_MARKET_INSTALL, params, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
   /** 忽略插件解析失败并重试（清除任务 resolver 后恢复任务）。 */
   ignoreRetry: (params: TaskIdParams) => call<OkResult>(METHOD.DAEMON_PLUGIN_IGNORE_RETRY, params),
 };
@@ -233,14 +254,14 @@ const webhook = {
 const bt = {
   trackerSubscription: {
     refresh: () =>
-      call<TrackerSubRefreshResponse>(METHOD.DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH),
+      call<TrackerSubRefreshResponse>(METHOD.DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH, undefined, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
   },
 };
 
 const ed2k = {
   serverSubscription: {
     refresh: () =>
-      call<Ed2kServerSubRefreshResponse>(METHOD.DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH),
+      call<Ed2kServerSubRefreshResponse>(METHOD.DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH, undefined, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
   },
 };
 

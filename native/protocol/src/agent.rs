@@ -829,6 +829,27 @@ pub struct CaptureResolveParams {
     pub request: Option<crate::daemon::CreateTaskRequest>,
 }
 
+/// `agent.capture.submitTorrentFile` 参数。
+///
+/// `silent=true`（系统打开 / 关联启动）全选文件直接建任务；`silent=false`（用户主动选择）
+/// 由 daemon 发 BT 文件选择请求。`saveDir` / `queueId` / `startPaused` 缺省维持旧行为
+/// （daemon 默认目录 / 默认队列 / 立即开始），新建下载表单入口携带表单值。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSubmitTorrentFileParams {
+    /// 本机 `.torrent` 路径。
+    pub path: String,
+    #[serde(default)]
+    pub silent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_paused: Option<bool>,
+}
+
 /// 桌面系统集成状态（开机自启、`.torrent` 关联、URL scheme 注册）。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -871,6 +892,36 @@ pub struct PlatformOpenPathParams {
     /// `true` 在文件管理器中定位而非直接打开。
     #[serde(default)]
     pub reveal: bool,
+}
+
+/// 按文件（而非扩展名）取图标的扩展名（小写）：图标内嵌在文件自身里。其余类型的图标只由
+/// 扩展名关联决定，调用方按扩展名缓存即可。`.lnk` / `.url` 故意不在内：它们的图标路径可以
+/// 指向远程共享，按文件解析会向外发起认证。
+pub const FILE_ICON_PER_FILE_EXTENSIONS: &[&str] = &["exe", "ico"];
+
+/// `agent.platform.fileIcon` 参数。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformFileIconParams {
+    /// 不带点的扩展名（大小写不敏感）；空 = 无扩展名的普通文件。
+    #[serde(default)]
+    pub extension: String,
+    /// 本机文件绝对路径。只在扩展名属于 [`FILE_ICON_PER_FILE_EXTENSIONS`] 且文件存在时按文件
+    /// 取图标，否则按扩展名取。
+    #[serde(default)]
+    pub path: Option<String>,
+    /// 目标边长（物理像素），agent 限制在 16..=256。
+    pub size: u32,
+}
+
+/// `agent.platform.fileIcon` 结果。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformFileIconDto {
+    /// `size`×`size` 的 PNG，base64 编码。
+    pub png: String,
 }
 
 /// Doctor 检查项级别。
@@ -1118,7 +1169,7 @@ impl CustomCategoryDto {
 mod capture_dto_tests {
     use serde_json::json;
 
-    use super::{CaptureResolveParams, PendingCaptureDto};
+    use super::{CaptureResolveParams, CaptureSubmitTorrentFileParams, PendingCaptureDto};
 
     #[test]
     fn resolve_params_without_request_field_deserializes() {
@@ -1130,6 +1181,37 @@ mod capture_dto_tests {
         assert_eq!(params.transaction_id, "tx-1");
         assert!(params.accepted);
         assert!(params.request.is_none());
+    }
+
+    #[test]
+    fn torrent_file_params_keep_legacy_shape_and_carry_form_options() {
+        let legacy: CaptureSubmitTorrentFileParams = serde_json::from_value(json!({
+            "path": "/tmp/a.torrent",
+            "silent": true,
+            "association": "torrent",
+        }))
+        .expect("legacy caller without form options");
+        assert!(legacy.silent);
+        assert_eq!(legacy.save_dir, None);
+        assert_eq!(legacy.queue_id, None);
+        assert_eq!(legacy.start_paused, None);
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("serialize"),
+            json!({ "path": "/tmp/a.torrent", "silent": true })
+        );
+
+        let form: CaptureSubmitTorrentFileParams = serde_json::from_value(json!({
+            "path": "/tmp/a.torrent",
+            "silent": false,
+            "saveDir": "/data",
+            "queueId": "q1",
+            "startPaused": true,
+        }))
+        .expect("form caller");
+        assert!(!form.silent);
+        assert_eq!(form.save_dir.as_deref(), Some("/data"));
+        assert_eq!(form.queue_id.as_deref(), Some("q1"));
+        assert_eq!(form.start_paused, Some(true));
     }
 
     #[test]

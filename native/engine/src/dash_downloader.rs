@@ -10,6 +10,10 @@ use crate::downloader::{
     extract_from_url, sanitize_filename,
 };
 use crate::events::EventSink;
+use crate::hls_downloader::{
+    SEGMENT_HEADER_TIMEOUT, SEGMENT_IDLE_TIMEOUT, SMALL_REQUEST_TIMEOUT, extra_headers_for_origin,
+    fetch_small,
+};
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
 use crate::output;
@@ -36,6 +40,7 @@ fn dash_runtime(task_id: &str, state: &ProgressState) -> TaskRuntime {
                 active: s.active,
             })
             .collect(),
+        source_bytes: None,
     }
 }
 
@@ -131,6 +136,12 @@ pub async fn run_dash_download(params: DownloadParams) {
                     &db_error,
                 );
             }
+            // 完成期改名可能让最终文件名偏离起飞时的名字（占名冲突换名），
+            // 以 DB 为准随完成信号上报（空串 = 保持原名）。
+            let final_file_name = match params.db.load_task_by_id(&params.task_id).await {
+                Ok(Some(t)) => t.file_name,
+                _ => String::new(),
+            };
             let _ = params
                 .progress_tx
                 .send(ProgressUpdate {
@@ -139,7 +150,7 @@ pub async fn run_dash_download(params: DownloadParams) {
                     total_bytes: total,
                     status: 3,
                     error_message: String::new(),
-                    file_name: String::new(),
+                    file_name: final_file_name,
                     segment_details: None,
                     ..Default::default()
                 })
@@ -188,8 +199,107 @@ pub async fn run_dash_download(params: DownloadParams) {
 }
 
 /// mux 使用的 ffmpeg 路径：manager 解析注入的组件路径，缺省回退 PATH 名。
-fn effective_ffmpeg(p: &DownloadParams) -> &Path {
+pub(crate) fn effective_ffmpeg(p: &DownloadParams) -> &Path {
     p.ffmpeg_path.as_deref().unwrap_or(Path::new("ffmpeg"))
+}
+
+/// `ffmpeg -version` 能在 5 秒内正常退出即视为可用。
+///
+/// 用于在下载开始前决定是否值得下载独立音轨 / 走 ffmpeg 流复制——可用性在
+/// 收尾阶段才暴露会白白浪费整条音轨的流量。
+pub(crate) async fn ffmpeg_usable(ffmpeg: &Path) -> bool {
+    let mut cmd = tokio::process::Command::new(ffmpeg);
+    crate::proc::no_console_window(&mut cmd);
+    let run = cmd
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .status();
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), run).await,
+        Ok(Ok(status)) if status.success()
+    )
+}
+
+/// ffmpeg 流复制（`-c copy`，不转码）封装 mp4，写到 `output`。
+///
+/// - `audio = Some`：取 `video` 的首个视频流与 `audio` 的首个音频流；
+/// - `audio = None`：取 `video` 的全部视频与音频流（丢弃 TS 里 ffmpeg mp4 muxer
+///   不支持的 data/字幕流）。
+///
+/// 输出格式显式指定为 mp4，`output` 可以使用任意临时扩展名。失败或取消时清理
+/// `output`。`expected_bytes` 为产物预估大小，用于 ENOSPC 预检：mux 期间输入与
+/// 产物并存，峰值 ≈ 2x，空间不足时提前返回 Err，由调用方走各自的降级路径。
+pub(crate) async fn ffmpeg_copy_to_mp4(
+    video: &Path,
+    audio: Option<&Path>,
+    output: &Path,
+    expected_bytes: u64,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    ffmpeg: &Path,
+) -> Result<(), DownloadError> {
+    use tokio::process::Command;
+
+    // ENOSPC 预检:None(网络盘/超时,无法探测)乐观放行——预检是优化,
+    // 安全网是下方既有的 ffmpeg 失败清理路径。
+    if let Some(parent) = output.parent() {
+        let avail = crate::disk_space::available_space_checked(parent.to_path_buf()).await;
+        if let Some(a) = avail
+            && a < expected_bytes.saturating_add(crate::disk_space::PRECHECK_MARGIN)
+        {
+            return Err(DownloadError::Other(format!(
+                "insufficient disk space for mux: need ~{expected_bytes}B + margin, have {a}B"
+            )));
+        }
+    }
+
+    let mut cmd = Command::new(ffmpeg);
+    crate::proc::no_console_window(&mut cmd);
+    cmd.arg("-y").arg("-i").arg(video);
+    if let Some(audio) = audio {
+        cmd.arg("-i").arg(audio);
+        cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
+    } else {
+        cmd.args(["-map", "0:v?", "-map", "0:a?"]);
+    }
+    // `.kill_on_drop(true)` ensures if we're cancelled (select! drops the
+    // future), the child process is killed automatically.
+    let output_fut = cmd
+        .args(["-c", "copy", "-movflags", "+faststart", "-f", "mp4"])
+        .arg(output)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+
+    let result: std::process::Output = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            // The future is dropped here; kill_on_drop ensures the child is killed.
+            let _ = tokio::fs::remove_file(output).await;
+            return Err(DownloadError::Cancelled);
+        }
+        o = output_fut => match o {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(output).await;
+                return Err(DownloadError::Other(format!("failed to run ffmpeg: {e}")));
+            }
+        },
+    };
+
+    if !result.status.success() {
+        let _ = tokio::fs::remove_file(output).await;
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(DownloadError::Other(format!(
+            "ffmpeg exited with {}: {}",
+            result.status,
+            stderr.chars().take(500).collect::<String>()
+        )));
+    }
+    Ok(())
 }
 
 /// Attempt to mux separate audio and video files into a single MP4 using ffmpeg.
@@ -213,75 +323,17 @@ async fn mux_audio_video(
     cancel_token: &tokio_util::sync::CancellationToken,
     ffmpeg: &Path,
 ) -> Result<(), DownloadError> {
-    use tokio::process::Command;
-
     // Build a temporary output path to avoid overwriting the video while muxing
     let muxed_tmp = video_path.with_extension("muxed.mp4");
-
-    // ENOSPC 预检:None(网络盘/超时,无法探测)乐观放行——预检是优化,
-    // 安全网是下方既有的 ffmpeg 失败清理路径。
-    if let Some(parent) = video_path.parent() {
-        let avail = crate::disk_space::available_space_checked(parent.to_path_buf()).await;
-        if let Some(a) = avail
-            && a < expected_bytes.saturating_add(crate::disk_space::PRECHECK_MARGIN)
-        {
-            return Err(DownloadError::Other(format!(
-                "insufficient disk space for mux: need ~{expected_bytes}B + margin, have {a}B"
-            )));
-        }
-    }
-
-    let video_str = video_path.to_string_lossy().to_string();
-    let audio_str = audio_path.to_string_lossy().to_string();
-    let muxed_str = muxed_tmp.to_string_lossy().to_string();
-
-    // Spawn ffmpeg with -c copy (stream copy, no re-encoding).
-    // `.kill_on_drop(true)` ensures if we're cancelled (select! drops the
-    // future), the child process is killed automatically.
-    let mut cmd = Command::new(ffmpeg);
-    crate::proc::no_console_window(&mut cmd);
-    let output_fut = cmd
-        .args([
-            "-y", // overwrite output without asking
-            "-i",
-            &video_str,
-            "-i",
-            &audio_str,
-            "-map",
-            "0:v:0", // select first video stream from first input
-            "-map",
-            "1:a:0", // select first audio stream from second input
-            "-c",
-            "copy", // stream copy, no re-encoding
-            "-movflags",
-            "+faststart", // web-optimized MP4
-            &muxed_str,
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .output();
-
-    let output: std::process::Output = tokio::select! {
-        _ = cancel_token.cancelled() => {
-            // The future is dropped here; kill_on_drop ensures the child is killed.
-            // Clean up the partial muxed temp file.
-            let _ = tokio::fs::remove_file(&muxed_tmp).await;
-            return Err(DownloadError::Cancelled);
-        }
-        o = output_fut => o.map_err(|e| DownloadError::Other(format!("failed to run ffmpeg: {}", e)))?,
-    };
-
-    if !output.status.success() {
-        // Clean up the partial muxed file
-        let _ = tokio::fs::remove_file(&muxed_tmp).await;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(DownloadError::Other(format!(
-            "ffmpeg exited with {}: {}",
-            output.status,
-            stderr.chars().take(500).collect::<String>()
-        )));
-    }
+    ffmpeg_copy_to_mp4(
+        video_path,
+        Some(audio_path),
+        &muxed_tmp,
+        expected_bytes,
+        cancel_token,
+        ffmpeg,
+    )
+    .await?;
 
     // Replace the original video-only file with the muxed version
     if let Err(e) = tokio::fs::rename(&muxed_tmp, video_path).await {
@@ -322,7 +374,30 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
         return run_track_pair_inner(p, audio_url).await;
     }
 
-    let mpd = fetch_and_parse_mpd(&p.client, &p.url, &p.cookies, &p.extra_headers).await?;
+    // 相对 BaseURL/SegmentTemplate 必须以清单的最终 URL(重定向后)为基准解析。
+    let (mpd, mpd_base_url) = fetch_and_parse_mpd(
+        &p.client,
+        &p.url,
+        &p.cookies,
+        &p.referrer,
+        &p.extra_headers,
+        &p.cancel_token,
+    )
+    .await?;
+    // 直播清单只有当前时间窗的段,按 VOD 下载会静默产出几十秒的快照。
+    if mpd
+        .mpdtype
+        .as_deref()
+        .is_some_and(|t| t.eq_ignore_ascii_case("dynamic"))
+    {
+        return Err(DownloadError::Other(
+            "暂不支持直播（type=dynamic）的 DASH 清单".to_string(),
+        ));
+    }
+    if !p.is_resume {
+        // 全新开始:清掉上一轮遗留的续传检查点,避免误续传过期数据。
+        let _ = p.db.delete_config(&dash_resume_key(&p.task_id)).await;
+    }
     // 多 Period DASH 尚未完全支持，仅下载首个 Period；后续 Period 被静默忽略
     // 可能导致内容不完整。这里记录警告，便于用户排查。
     if mpd.periods.len() > 1 {
@@ -371,7 +446,8 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
         .get(repr_index)
         .ok_or_else(|| DownloadError::Other("selected representation missing".to_string()))?;
 
-    let (video_init, video_segments) = build_segment_list(&p.url, &mpd, period, best_video, repr)?;
+    let (video_init, video_segments) =
+        build_segment_list(&mpd_base_url, &mpd, period, best_video, repr)?;
 
     if video_segments.is_empty() {
         return Err(DownloadError::Other(
@@ -432,13 +508,15 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
         geometry: Vec::new(),
     };
 
-    let video_bytes = download_track(
+    let (video_bytes, dest_path) = download_track(
         p,
         &p.url,
         &video_init,
         &video_segments,
         &dest_path,
         &mut progress_state,
+        Some(DashTrack::Video),
+        DashTrack::Video,
     )
     .await?;
 
@@ -462,7 +540,7 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
                 .max_by_key(|r| r.bandwidth.unwrap_or(0))
                 .ok_or_else(|| DownloadError::Other("audio Representation missing".to_string()))?;
             let (audio_init, audio_segments) =
-                build_segment_list(&p.url, &mpd, period, audio, audio_repr)?;
+                build_segment_list(&mpd_base_url, &mpd, period, audio, audio_repr)?;
             if audio_segments.is_empty() {
                 0
             } else {
@@ -474,12 +552,14 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
                     &audio_segments,
                     &audio_path,
                     &mut progress_state,
+                    Some(DashTrack::Audio),
+                    DashTrack::Audio,
                 )
                 .await
                 {
-                    Ok(bytes) => bytes,
+                    Ok((bytes, _)) => bytes,
                     Err(e) => {
-                        // download_track 失败时已清理自身的 .fdownloading 临时文件;
+                        // 音频轨失败/暂停时保留其 .fdownloading 与检查点供续传;
                         // 不要在此删除最终 audio_path——rename 未发生时它尚不存在,
                         // 误删反而可能清掉上一轮遗留的同名文件。
                         return Err(e);
@@ -552,6 +632,7 @@ async fn run_dash_download_inner(p: &DownloadParams) -> Result<i64, DownloadErro
         video_bytes + audio_bytes
     };
     let _ = p.db.update_task_progress(&p.task_id, total).await;
+    let _ = p.db.delete_config(&dash_resume_key(&p.task_id)).await;
     Ok(total)
 }
 
@@ -565,7 +646,7 @@ async fn probe_content_length(p: &DownloadParams, url: &str) -> Option<i64> {
     req = crate::downloader::apply_extra_headers(req, &p.extra_headers);
     let resp = tokio::select! {
         _ = p.cancel_token.cancelled() => return None,
-        r = req.send() => r.ok()?,
+        r = tokio::time::timeout(SMALL_REQUEST_TIMEOUT, req.send()) => r.ok()?.ok()?,
     };
     let header = resp
         .headers()
@@ -591,17 +672,20 @@ async fn download_track_best_effort(
     url: &str,
     single_segs: &[DashSegment],
     dest_path: &Path,
+    role: DashTrack,
     track_len: Option<i64>,
     progress_base: i64,
     pair_total: i64,
     progress_state: &mut ProgressState,
-) -> Result<i64, DownloadError> {
+) -> Result<(i64, PathBuf), DownloadError> {
     if let Some(len) = track_len
         && len > MULTI_SEGMENT_TRACK_THRESHOLD
         && p.spec.is_get_like()
     {
-        match download_track_coordinated(p, url, dest_path, len, progress_base, pair_total).await {
-            Ok(n) => return Ok(n),
+        match download_track_coordinated(p, url, dest_path, role, len, progress_base, pair_total)
+            .await
+        {
+            Ok(done) => return Ok(done),
             // 与 HTTP 路径相同的三类"多段不可行"错误 → 清理多段残留（段行 +
             // 预分配临时文件）后回退单流；其余错误（取消/IO/磁盘满等）原样上抛
             // ——取消时段行与临时文件由 coordinated 路径【保留】以支持真续传。
@@ -646,7 +730,17 @@ async fn download_track_best_effort(
         // 非 GET 的画质切换残留），防止暂停/重启时渲染陈旧分布。
         let _ = p.db.delete_segments(&p.task_id).await;
     }
-    download_track(p, url, &None, single_segs, dest_path, progress_state).await
+    download_track(
+        p,
+        url,
+        &None,
+        single_segs,
+        dest_path,
+        progress_state,
+        None,
+        role,
+    )
+    .await
 }
 
 /// 用 segment_coordinator 多段并发下载一条完整轨道（IDM 式动态分段 + 分布图）。
@@ -667,10 +761,11 @@ async fn download_track_coordinated(
     p: &DownloadParams,
     url: &str,
     dest_path: &Path,
+    role: DashTrack,
     track_len: i64,
     progress_base: i64,
     pair_total: i64,
-) -> Result<i64, DownloadError> {
+) -> Result<(i64, PathBuf), DownloadError> {
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
 
     let seg_count = if p.segment_count > 0 {
@@ -740,14 +835,85 @@ async fn download_track_coordinated(
         Ok(final_total) => {
             // 本轨完成：段行使命结束，清掉（下一轨/完成态不再引用）。
             let _ = p.db.delete_segments(&p.task_id).await;
-            tokio::fs::rename(&temp_path, dest_path).await?;
-            Ok(final_total)
+            let final_path = finalize_track_rename(p, &temp_path, dest_path, role).await?;
+            Ok((final_total, final_path))
         }
         // 取消 = 暂停：保留段行 + 临时文件，resume 经 coordinator
         // resume-from-rows 真续传（ephemeral 直链过期无妨——resume 重新
         // resolve 拿新 URL，字节区间对同一内容仍有效）。
         Err(e) => Err(e),
     }
+}
+
+/// 轨道完成落盘：`temp` → `dest`，返回实际落盘路径。
+///
+/// - 视频轨是对外可见的最终文件：按 [`crate::downloader::claim_final_name`] 的
+///   `create_new` 占名不覆盖同名旧文件；原名被占时 dedup 换名并把新文件名写回 DB
+///   （完成信号随后上报）。`allow_overwrite`（覆盖策略）或 `is_resume`（原名上的
+///   文件是本任务续传遗留）时对原名删除旧文件后重试一次。
+/// - 音频轨是内部 sidecar（`build_audio_path`），归属本任务：替换遗留同名文件。
+async fn finalize_track_rename(
+    p: &DownloadParams,
+    temp: &Path,
+    dest: &Path,
+    role: DashTrack,
+) -> Result<PathBuf, DownloadError> {
+    let rename_failed = |e: std::io::Error| {
+        DownloadError::Other(format!(
+            "failed to rename {} -> {}: {}",
+            temp.display(),
+            dest.display(),
+            e
+        ))
+    };
+    if role == DashTrack::Audio {
+        if tokio::fs::metadata(dest).await.is_ok() {
+            let _ = tokio::fs::remove_file(dest).await;
+        }
+        crate::downloader::claim_rename(temp, dest)
+            .await
+            .map_err(rename_failed)?;
+        return Ok(dest.to_path_buf());
+    }
+
+    let (Some(save_dir), Some(name)) = (dest.parent(), dest.file_name().and_then(|n| n.to_str()))
+    else {
+        return Err(DownloadError::Other(format!(
+            "invalid destination path: {}",
+            dest.display()
+        )));
+    };
+    let avoid: std::collections::HashSet<String> =
+        p.db.list_active_sibling_file_names(&p.save_dir, &p.task_id)
+            .await
+            .map(|names| names.into_iter().map(|n| n.to_lowercase()).collect())
+            .unwrap_or_default();
+    let chosen = crate::downloader::claim_final_name(
+        temp,
+        save_dir,
+        name,
+        p.allow_overwrite || p.is_resume,
+        &avoid,
+    )
+    .await?;
+    if chosen == name {
+        return Ok(dest.to_path_buf());
+    }
+    log_info!(
+        "[dash-download] task {} destination '{}' is taken; finalized as '{}'",
+        p.task_id,
+        name,
+        chosen
+    );
+    if let Err(e) = p.db.set_task_file_name(&p.task_id, &chosen).await {
+        log_info!(
+            "[dash-download] task {} failed to persist renamed file '{}': {}",
+            p.task_id,
+            chosen,
+            e
+        );
+    }
+    Ok(save_dir.join(chosen))
 }
 
 /// 离散音视频轨对下载旁路：`p.url` 为视频轨、`audio_url` 为音频轨，两条均为
@@ -865,7 +1031,7 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
         None => false,
     };
 
-    let video_bytes = if video_done {
+    let (video_bytes, dest_path) = if video_done {
         let v = video_len.unwrap_or(0);
         log_info!(
             "[dash-download] task {} video track already complete ({} bytes) — skipping",
@@ -892,13 +1058,14 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
                 ..Default::default()
             })
             .await;
-        v
+        (v, dest_path)
     } else {
         download_track_best_effort(
             p,
             &p.url,
             &video_seg,
             &dest_path,
+            DashTrack::Video,
             video_len,
             0,
             total_bytes,
@@ -947,12 +1114,14 @@ async fn run_track_pair_inner(p: &DownloadParams, audio_url: &str) -> Result<i64
             audio_url,
             &audio_seg,
             &audio_path,
+            DashTrack::Audio,
             audio_len,
             video_bytes,
             total_bytes,
             &mut progress_state,
         )
         .await?
+        .0
     };
     // 终态校准：任务级总大小 = 两轨实际字节合计。coordinator 的任务级写入已被
     // owns_task_total=false 门控，此处是唯一权威落点——同时兜住「探测失败、
@@ -1049,19 +1218,26 @@ async fn fetch_and_parse_mpd(
     client: &Client,
     url: &str,
     cookies: &str,
+    referrer: &str,
     extra_headers: &std::collections::HashMap<String, String>,
-) -> Result<dash_mpd::MPD, DownloadError> {
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(dash_mpd::MPD, String), DownloadError> {
     let mut req = client.get(url);
     if !cookies.is_empty() {
         req = req.header("Cookie", cookies);
     }
-    // 应用浏览器扩展捕获的额外请求头
+    if crate::downloader::is_valid_referrer(referrer) {
+        req = req.header(reqwest::header::REFERER, referrer);
+    }
+    // 应用浏览器扩展捕获的额外请求头(请求的就是用户提交的清单 URL 本身)
     req = crate::downloader::apply_extra_headers(req, extra_headers);
-    let resp = req.send().await?.error_for_status()?;
-    let bytes = resp.bytes().await?;
+    // 返回重定向后的最终 URL:调用方据此解析相对 BaseURL(RFC 3986 §5.1)。
+    let (final_url, bytes) = fetch_small(req, cancel).await?;
     let xml = String::from_utf8(bytes.to_vec())
         .map_err(|e| DownloadError::Other(format!("MPD utf8 error: {e}")))?;
-    dash_mpd::parse(&xml).map_err(|e| DownloadError::Other(format!("MPD parse error: {e}")))
+    let mpd =
+        dash_mpd::parse(&xml).map_err(|e| DownloadError::Other(format!("MPD parse error: {e}")))?;
+    Ok((mpd, final_url))
 }
 
 fn is_video_adaptation(a: &dash_mpd::AdaptationSet) -> bool {
@@ -1760,6 +1936,149 @@ fn build_from_list(
     Ok((init, media_segments))
 }
 
+/// MPD 路径下载的轨道标识,用于断点检查点。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DashTrack {
+    Video,
+    Audio,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TrackProgress {
+    /// 整轨已下载并改名到最终路径,`bytes` 为轨道字节数。
+    Done { bytes: i64, fingerprint: u64 },
+    /// 前 `idx` 个段(含 init)已完整落盘,累计 `bytes` 字节。
+    Partial {
+        idx: usize,
+        bytes: i64,
+        fingerprint: u64,
+    },
+}
+
+impl TrackProgress {
+    fn encode(&self) -> String {
+        match self {
+            Self::Done { bytes, fingerprint } => format!("done:{bytes}:{fingerprint:x}"),
+            Self::Partial {
+                idx,
+                bytes,
+                fingerprint,
+            } => format!("seg:{idx}:{bytes}:{fingerprint:x}"),
+        }
+    }
+
+    fn decode(s: &str) -> Option<Self> {
+        let mut it = s.split(':');
+        match it.next()? {
+            "done" => Some(Self::Done {
+                bytes: it.next()?.parse().ok()?,
+                fingerprint: u64::from_str_radix(it.next()?, 16).ok()?,
+            }),
+            "seg" => Some(Self::Partial {
+                idx: it.next()?.parse().ok()?,
+                bytes: it.next()?.parse().ok()?,
+                fingerprint: u64::from_str_radix(it.next()?, 16).ok()?,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// MPD 下载的续传检查点:`dash1;v=<进度>;a=<进度>`。一个任务要么是 HLS 要么是
+/// DASH,故复用 `hls_resume_<id>` 这一任务级 config 键,任务删除时由 DB 层一并清理。
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+struct DashCheckpoint {
+    video: Option<TrackProgress>,
+    audio: Option<TrackProgress>,
+}
+
+impl DashCheckpoint {
+    fn encode(&self) -> String {
+        let mut out = String::from("dash1");
+        if let Some(v) = &self.video {
+            out.push_str(";v=");
+            out.push_str(&v.encode());
+        }
+        if let Some(a) = &self.audio {
+            out.push_str(";a=");
+            out.push_str(&a.encode());
+        }
+        out
+    }
+
+    fn parse(s: &str) -> Self {
+        let mut cp = Self::default();
+        let mut parts = s.split(';');
+        if parts.next() != Some("dash1") {
+            return cp;
+        }
+        for part in parts {
+            if let Some(v) = part.strip_prefix("v=") {
+                cp.video = TrackProgress::decode(v);
+            } else if let Some(a) = part.strip_prefix("a=") {
+                cp.audio = TrackProgress::decode(a);
+            }
+        }
+        cp
+    }
+
+    fn get(&self, track: DashTrack) -> Option<&TrackProgress> {
+        match track {
+            DashTrack::Video => self.video.as_ref(),
+            DashTrack::Audio => self.audio.as_ref(),
+        }
+    }
+
+    fn set(&mut self, track: DashTrack, progress: TrackProgress) {
+        match track {
+            DashTrack::Video => self.video = Some(progress),
+            DashTrack::Audio => self.audio = Some(progress),
+        }
+    }
+}
+
+fn dash_resume_key(task_id: &str) -> String {
+    format!("hls_resume_{task_id}")
+}
+
+async fn load_dash_checkpoint(p: &DownloadParams) -> DashCheckpoint {
+    p.db.get_config(&dash_resume_key(&p.task_id))
+        .await
+        .ok()
+        .flatten()
+        .map(|s| DashCheckpoint::parse(&s))
+        .unwrap_or_default()
+}
+
+async fn save_dash_checkpoint(p: &DownloadParams, cp: &DashCheckpoint) {
+    let _ =
+        p.db.set_config(&dash_resume_key(&p.task_id), &cp.encode())
+            .await;
+}
+
+/// 段列表指纹(FNV-1a):续传前比对,清单变了(段数/路径/Range)就不能沿用磁盘前缀。
+/// URL 去掉 query/fragment——签名 token 每次拉取都会变,但段本身没变。
+fn segments_fingerprint(init_seg: &Option<DashSegment>, media_segs: &[DashSegment]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for b in bytes {
+            hash ^= u64::from(*b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for seg in init_seg.iter().chain(media_segs.iter()) {
+        let path = seg.url.split(['?', '#']).next().unwrap_or_default();
+        feed(path.as_bytes());
+        feed(b"\0");
+        feed(seg.range.as_deref().unwrap_or_default().as_bytes());
+        feed(b"\n");
+    }
+    hash
+}
+
+/// `resume_track = Some(_)`(MPD 路径)时按段持久化检查点,暂停/出错后保留
+/// 临时文件供续传;`None`(轨对单流回退)保持出错即清理的旧行为。
+#[allow(clippy::too_many_arguments)]
 async fn download_track(
     p: &DownloadParams,
     reference_url: &str,
@@ -1767,9 +2086,13 @@ async fn download_track(
     media_segs: &[DashSegment],
     dest_path: &Path,
     progress_state: &mut ProgressState,
-) -> Result<i64, DownloadError> {
-    // 薄包装: 计算临时文件路径并在内部任意错误路径(取消/分段失败/flush/
-    // rename)退出后统一 best-effort 异步清理 .fdownloading 临时文件,避免泄漏。
+    resume_track: Option<DashTrack>,
+    role: DashTrack,
+) -> Result<(i64, PathBuf), DownloadError> {
+    // 薄包装: 计算临时文件路径;无检查点的轨道在内部任意错误路径(取消/分段
+    // 失败/flush/rename)退出后统一 best-effort 异步清理 .fdownloading 临时文件,
+    // 避免泄漏。带检查点的轨道保留它:检查点只记录已完整落盘的段,续传时
+    // 会截断到该偏移,丢弃半截数据。
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
     let result = download_track_inner(
         p,
@@ -1779,14 +2102,17 @@ async fn download_track(
         dest_path,
         &temp_path,
         progress_state,
+        resume_track,
+        role,
     )
     .await;
-    if result.is_err() {
+    if result.is_err() && resume_track.is_none() {
         let _ = tokio::fs::remove_file(&temp_path).await;
     }
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_track_inner(
     p: &DownloadParams,
     reference_url: &str,
@@ -1795,11 +2121,74 @@ async fn download_track_inner(
     dest_path: &Path,
     temp_path: &Path,
     progress_state: &mut ProgressState,
-) -> Result<i64, DownloadError> {
+    resume_track: Option<DashTrack>,
+    role: DashTrack,
+) -> Result<(i64, PathBuf), DownloadError> {
     output::ensure_parent(temp_path).await?;
 
-    let mut file = File::create(temp_path).await?;
+    let fingerprint = segments_fingerprint(init_seg, media_segs);
+    let total_segments = init_seg.iter().count() + media_segs.len();
+    let mut checkpoint = DashCheckpoint::default();
+    let mut start_idx = 0usize;
     let mut total_track: i64 = 0;
+    let mut resumed_file: Option<File> = None;
+
+    if let Some(track) = resume_track {
+        checkpoint = load_dash_checkpoint(p).await;
+        match checkpoint.get(track) {
+            Some(TrackProgress::Done {
+                bytes,
+                fingerprint: fp,
+            }) if *fp == fingerprint => {
+                // 整轨已完成并改名:以磁盘实际大小核对后直接跳过,避免暂停在音频
+                // 阶段时重下整条视频轨。
+                let on_disk = tokio::fs::metadata(dest_path)
+                    .await
+                    .ok()
+                    .and_then(|m| i64::try_from(m.len()).ok());
+                if on_disk == Some(*bytes) {
+                    progress_state.downloaded_bytes += *bytes;
+                    return Ok((*bytes, dest_path.to_path_buf()));
+                }
+            }
+            Some(TrackProgress::Partial {
+                idx,
+                bytes,
+                fingerprint: fp,
+            }) if *fp == fingerprint && *idx <= total_segments && *bytes > 0 => {
+                let on_disk = tokio::fs::metadata(temp_path)
+                    .await
+                    .ok()
+                    .and_then(|m| i64::try_from(m.len()).ok())
+                    .unwrap_or(0);
+                // 磁盘不足检查点记录的字节数(上次崩溃丢了缓冲)时无法续传。
+                if on_disk >= *bytes {
+                    let mut f = tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .open(temp_path)
+                        .await?;
+                    f.set_len(*bytes as u64).await?;
+                    f.seek(std::io::SeekFrom::Start(*bytes as u64)).await?;
+                    resumed_file = Some(f);
+                    start_idx = *idx;
+                    total_track = *bytes;
+                    progress_state.downloaded_bytes += *bytes;
+                    log_info!(
+                        "[dash-download] task {} resuming track from segment {} ({} bytes)",
+                        p.task_id,
+                        idx,
+                        bytes
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut file = match resumed_file {
+        Some(f) => f,
+        None => File::create(temp_path).await?,
+    };
 
     let ctx = SegmentDownloadContext {
         client: &p.client,
@@ -1816,7 +2205,7 @@ async fn download_track_inner(
 
     let segment_iter = init_seg.iter().chain(media_segs.iter());
 
-    for (idx, segment) in segment_iter.enumerate() {
+    for (idx, segment) in segment_iter.enumerate().skip(start_idx) {
         if p.cancel_token.is_cancelled() {
             file.flush().await?;
             // 使用单调写入：resume 从 0 开始重下时，不覆盖 DB 中更大的存量进度值，
@@ -1840,6 +2229,8 @@ async fn download_track_inner(
         {
             Ok(b) => b,
             Err(e) => {
+                // 落盘已完成的前缀,使检查点记录的字节数在续传时可信。
+                let _ = file.flush().await;
                 // 使用单调写入，同上原因（BUG-DASH-RESUME-FULL-REDOWNLOAD）。
                 let _ = p
                     .db
@@ -1852,6 +2243,18 @@ async fn download_track_inner(
         // 块内已由 download_segment_streaming 逐 chunk 累加 progress_state，
         // 此处只累计轨道字节数，避免重复计数。
         total_track += seg_bytes;
+
+        if let Some(track) = resume_track {
+            checkpoint.set(
+                track,
+                TrackProgress::Partial {
+                    idx: idx + 1,
+                    bytes: total_track,
+                    fingerprint,
+                },
+            );
+            save_dash_checkpoint(p, &checkpoint).await;
+        }
 
         if progress_state.last_report.elapsed().as_millis() >= 200 {
             let _ = p
@@ -1887,20 +2290,20 @@ async fn download_track_inner(
     file.flush().await?;
     drop(file);
 
-    if tokio::fs::metadata(dest_path).await.is_ok() {
-        let _ = tokio::fs::remove_file(dest_path).await;
+    let final_path = finalize_track_rename(p, temp_path, dest_path, role).await?;
+
+    if let Some(track) = resume_track {
+        checkpoint.set(
+            track,
+            TrackProgress::Done {
+                bytes: total_track,
+                fingerprint,
+            },
+        );
+        save_dash_checkpoint(p, &checkpoint).await;
     }
 
-    tokio::fs::rename(temp_path, dest_path).await.map_err(|e| {
-        DownloadError::Other(format!(
-            "failed to rename {} -> {}: {}",
-            temp_path.display(),
-            dest_path.display(),
-            e
-        ))
-    })?;
-
-    Ok(total_track)
+    Ok((total_track, final_path))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1995,12 +2398,23 @@ async fn download_segment_streaming(
     if crate::downloader::is_valid_referrer(ctx.referrer) {
         req = req.header(reqwest::header::REFERER, ctx.referrer);
     }
-    // 应用浏览器扩展捕获的额外请求头
-    req = crate::downloader::apply_extra_headers(req, ctx.extra_headers);
+    // 应用浏览器扩展捕获的额外请求头;段/BaseURL 指向清单以外的主机时,
+    // Authorization/Cookie 等凭据类头不随请求发出。
+    let headers = extra_headers_for_origin(ctx.reference_url, url, ctx.extra_headers);
+    req = crate::downloader::apply_extra_headers(req, &headers);
 
+    // 等待响应头设上限:挂起的连接按 stalled 报错,复用段重试与 auto-retry。
     let resp = tokio::select! {
         _ = ctx.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
-        r = req.send() => r?.error_for_status()?,
+        r = tokio::time::timeout(SEGMENT_HEADER_TIMEOUT, req.send()) => match r {
+            Ok(r) => r?.error_for_status()?,
+            Err(_) => {
+                return Err(DownloadError::Other(format!(
+                    "DASH segment stalled: no response headers within {:?}",
+                    SEGMENT_HEADER_TIMEOUT
+                )));
+            }
+        },
     };
 
     // Range 请求必须返回 206 Partial Content。若服务器/中间代理忽略 Range 返回
@@ -2062,7 +2476,15 @@ async fn download_segment_streaming(
             let _transfer = progress_state.tracker.start(geometry_index);
             tokio::select! {
                 _ = ctx.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
-                c = stream.next() => c,
+                c = tokio::time::timeout(SEGMENT_IDLE_TIMEOUT, stream.next()) => match c {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return Err(DownloadError::Other(format!(
+                            "DASH segment stalled: no data for {:?}",
+                            SEGMENT_IDLE_TIMEOUT
+                        )));
+                    }
+                },
             }
         };
         let Some(chunk_result) = chunk else {
@@ -2319,5 +2741,76 @@ mod tests {
     fn test_resolve_url_template_unclosed() {
         let out = resolve_url_template("seg-$Number", "v1", 0, Some(7), None);
         assert_eq!(out, "seg-$Number");
+    }
+
+    use super::{DashCheckpoint, DashSegment, DashTrack, TrackProgress, segments_fingerprint};
+
+    fn seg(url: &str, range: Option<&str>) -> DashSegment {
+        DashSegment {
+            url: url.to_string(),
+            range: range.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn dash_checkpoint_roundtrips_both_tracks() {
+        let mut cp = DashCheckpoint::default();
+        cp.set(
+            DashTrack::Video,
+            TrackProgress::Done {
+                bytes: 1234,
+                fingerprint: 0xdead_beef,
+            },
+        );
+        cp.set(
+            DashTrack::Audio,
+            TrackProgress::Partial {
+                idx: 7,
+                bytes: 99,
+                fingerprint: 0x1,
+            },
+        );
+        assert_eq!(DashCheckpoint::parse(&cp.encode()), cp);
+    }
+
+    #[test]
+    fn dash_checkpoint_rejects_foreign_or_garbled_values() {
+        // 旧版 HLS 检查点("idx:bytes:seq")不是 DASH 检查点,绝不能被解读为进度。
+        assert_eq!(DashCheckpoint::parse("5:1024:0"), DashCheckpoint::default());
+        assert_eq!(DashCheckpoint::parse(""), DashCheckpoint::default());
+        let partly = DashCheckpoint::parse("dash1;v=seg:x:1:2;a=done:5:ff");
+        assert_eq!(partly.video, None);
+        assert_eq!(
+            partly.audio,
+            Some(TrackProgress::Done {
+                bytes: 5,
+                fingerprint: 0xff
+            })
+        );
+    }
+
+    #[test]
+    fn segments_fingerprint_ignores_signature_but_tracks_manifest_changes() {
+        let init = Some(seg("https://cdn.example/init.mp4?sig=a", None));
+        let segs = vec![
+            seg("https://cdn.example/s1.m4s?sig=a", None),
+            seg("https://cdn.example/s2.m4s?sig=a", Some("0-99")),
+        ];
+        let base = segments_fingerprint(&init, &segs);
+
+        let rotated_init = Some(seg("https://cdn.example/init.mp4?sig=b", None));
+        let rotated = vec![
+            seg("https://cdn.example/s1.m4s?sig=b", None),
+            seg("https://cdn.example/s2.m4s?sig=b", Some("0-99")),
+        ];
+        assert_eq!(segments_fingerprint(&rotated_init, &rotated), base);
+
+        let mut shorter = segs.clone();
+        shorter.pop();
+        assert_ne!(segments_fingerprint(&init, &shorter), base);
+
+        let mut other_range = segs.clone();
+        other_range[1].range = Some("0-199".to_string());
+        assert_ne!(segments_fingerprint(&init, &other_range), base);
     }
 }

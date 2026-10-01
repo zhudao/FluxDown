@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use axum::extract::{State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -131,7 +131,7 @@ impl GatewayService {
         }
     }
 
-    /// server 模式：`agent.platform.*` 返回 Unsupported，网关令牌须符合访问密钥策略。
+    /// server 模式：桌面平台操作、宿主诊断修复与路径日志导出返回 Unsupported，令牌遵循访问密钥策略。
     #[must_use]
     pub fn with_server_mode(mut self, enabled: bool) -> Self {
         self.server_mode = enabled;
@@ -172,6 +172,9 @@ impl GatewayService {
     async fn dispatch(&self, request: RpcRequest) -> Result<serde_json::Value, RpcErrorData> {
         // 桌面专属集成（打开 / 定位文件、开机自启、文件与协议关联）在 headless 宿主不存在。
         if self.server_mode && request.method.starts_with("agent.platform.") {
+            return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
+        }
+        if self.server_mode && server_mode_denies(&request) {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
         match request.method.as_str() {
@@ -440,6 +443,17 @@ impl GatewayService {
                 .await
                 .map(|()| serde_json::json!({ "ok": true }))
             }
+            method::AGENT_PLATFORM_FILE_ICON => {
+                use base64::Engine as _;
+
+                let params =
+                    parse_params::<fluxdown_protocol::PlatformFileIconParams>(request.params)?;
+                let png =
+                    platform_blocking(move || crate::platform::file_icon_png(&params)).await?;
+                to_value(fluxdown_protocol::PlatformFileIconDto {
+                    png: base64::engine::general_purpose::STANDARD.encode(png),
+                })
+            }
             method::AGENT_PLATFORM_INTEGRATION_GET => {
                 platform_blocking(|| Ok(crate::platform::integration_status()))
                     .await
@@ -561,6 +575,9 @@ impl GatewayService {
             state.gateway.user_token_configured = !state.gateway_user_token.trim().is_empty();
         }
         ensure_forced_auth_token(&mut state, api_was_enabled, mcp_was_enabled);
+        if !self.server_mode {
+            ensure_exposed_auth_token(&mut state);
+        }
         // 本次显式清空 token 且没有同时开启强制鉴权开关（否则上一步已补 token）：
         // 管理 API / MCP 空 token 会拒绝全部请求，随清空一并关闭，保持「开关开 ⇒ 有 token」。
         if token_set_explicitly && state.gateway_user_token.trim().is_empty() {
@@ -777,7 +794,8 @@ impl GatewayService {
         )
     }
 
-    /// 读取本机 `.torrent`，上传 daemon blob 后走捕获路径建任务。
+    /// 读取本机 `.torrent`，上传 daemon blob 后走捕获路径建任务。`silent=false`（用户主动选择）
+    /// 不静默：由 daemon 发 BT 文件选择请求；`saveDir` / `queueId` / `startPaused` 缺省维持旧行为。
     async fn capture_submit_torrent_file(
         &self,
         params: serde_json::Value,
@@ -785,11 +803,11 @@ impl GatewayService {
         if self.open_associations.intercept(&params)? {
             return Ok(ignored_capture());
         }
-        let path = PathBuf::from(required_string(&params, "path")?);
-        let silent = params
-            .get("silent")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        // 缺失 / 空路径先按字段报错，其余参数再整体解析。
+        required_string(&params, "path")?;
+        let params =
+            parse_params::<fluxdown_protocol::agent::CaptureSubmitTorrentFileParams>(Some(params))?;
+        let path = PathBuf::from(&params.path);
         let bytes = read_upload_file(&path).await?;
         let blob_id = blob_value(self.blobs.upload(BlobKind::Torrent, bytes).await)?;
         let file_name = path
@@ -803,7 +821,10 @@ impl GatewayService {
         let request = fluxdown_protocol::DownloadRequest {
             url: format!("torrent-file://{file_name}"),
             filename,
-            save_dir: String::new(),
+            save_dir: params
+                .save_dir
+                .filter(|dir| !dir.trim().is_empty())
+                .unwrap_or_default(),
             referrer: String::new(),
             cookies: String::new(),
             headers: None,
@@ -813,7 +834,12 @@ impl GatewayService {
             body: None,
             audio_url: None,
         };
-        capture_value(self.capture.create_torrent(request, blob_id, silent).await)
+        let options = crate::capture::TorrentCreateOptions {
+            unattended: params.silent,
+            queue_id: params.queue_id.filter(|id| !id.trim().is_empty()),
+            start_paused: params.start_paused.unwrap_or(false),
+        };
+        capture_value(self.capture.create_torrent(request, blob_id, options).await)
     }
 
     /// 读取本机插件包，上传 daemon blob 后转 `daemon.plugin.install`。
@@ -856,7 +882,7 @@ impl GatewayService {
             Err(UpdateError::Http(_) | UpdateError::Status(_)) => {
                 Err(RpcErrorData::new(ApplicationErrorCode::Unavailable, true))
             }
-            Err(UpdateError::Decode(_)) => {
+            Err(UpdateError::Client(_) | UpdateError::Decode(_)) => {
                 Err(RpcErrorData::new(ApplicationErrorCode::Internal, false))
             }
         }
@@ -1101,6 +1127,21 @@ pub(crate) fn ensure_forced_auth_token(
     }
 }
 
+/// 对外暴露面必须有 token：局域网监听或 CORS 放开，且接管 / aria2 兼容端点任一开启时，
+/// 空 token 等于向同网段 / 任意网页匿名开放（这两个端点空 token 不鉴权）。缺 token 时生成
+/// 随机 token，返回是否发生了改动；已有 token 一律保留。server 模式的空密钥表示尚未完成
+/// 首次设置，由兼容 API 自身拒绝，调用方不得对它调用本函数。
+pub(crate) fn ensure_exposed_auth_token(state: &mut crate::state::AgentState) -> bool {
+    let exposed = (state.gateway.lan_enabled || state.gateway.cors_enabled)
+        && (state.gateway.takeover_enabled || state.gateway.jsonrpc_enabled);
+    if exposed && state.gateway_user_token.trim().is_empty() {
+        state.gateway_user_token = generate_user_token();
+        state.gateway.user_token_configured = true;
+        return true;
+    }
+    false
+}
+
 fn remote_value<T: serde::Serialize>(
     result: Result<T, RemoteError>,
 ) -> Result<serde_json::Value, RpcErrorData> {
@@ -1217,9 +1258,12 @@ pub async fn serve(
         Some(server) => app.merge(crate::server_mode::router(server)),
         None => app,
     };
-    axum::serve(listener, app)
-        .with_graceful_shutdown(cancel.cancelled_owned())
-        .await
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(cancel.cancelled_owned())
+    .await
 }
 
 pub async fn load_or_create_bearer(
@@ -1259,14 +1303,13 @@ pub async fn load_or_create_bearer(
 
 async fn rpc_upgrade(
     State(state): State<GatewayState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
     let upgrade = match state.server.as_deref() {
         Some(server) => {
-            if let Err(status) =
-                crate::server_mode::authorize_rpc(&headers, &state.bearer, server.access_key())
-            {
+            if let Err(status) = server.authorize_rpc_from(peer.ip(), &headers, &state.bearer) {
                 return status.into_response();
             }
             // 浏览器经子协议携带密钥：必须回显 `fluxdown.rpc.v1`，否则浏览器会断开握手。
@@ -1420,20 +1463,58 @@ const RESPONSE_QUEUE: usize = 256;
 /// 每个通道待处理请求上限；超出立即以可重试的 `Unavailable` 拒绝，而不是阻塞整个连接。
 const LANE_QUEUE: usize = 128;
 
+/// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联的诊断动作，以及可写任意目标路径的日志导出。
+/// Web 的 Doctor 仍可用其余动作（刷新 tracker / ed2k 服务器等），日志导出走 `/api/web/logs/export`。
+fn server_mode_denies(request: &RpcRequest) -> bool {
+    match request.method.as_str() {
+        method::AGENT_DIAGNOSTICS_EXPORT_LOGS => true,
+        method::AGENT_DIAGNOSTICS_REPAIR => request
+            .params
+            .as_ref()
+            .and_then(|params| params.get("action"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    crate::diagnostics::ACTION_OPEN_LOG_DIR
+                        | crate::diagnostics::ACTION_REGISTER
+                        | crate::diagnostics::ACTION_REREGISTER
+                        | crate::diagnostics::ACTION_USE_THIS_INSTALL
+                )
+            }),
+        _ => false,
+    }
+}
+
 /// 请求通道：同一通道内串行（保持命令顺序），不同通道并发。
 #[derive(Clone, Copy)]
 enum Lane {
     /// FluxCloud / 网络往返（登录、设备、同步、远程任务、账单、更新检查）。
     Cloud,
-    /// 透传给 daemon 的下载命令。
+    /// 透传给 daemon 的下载命令与设置写入，同通道串行以保持命令顺序。
     Daemon,
+    /// 透传给 daemon 的长耗时方法（组件安装、插件市场、连通性测试等，清单见
+    /// `fluxdown_protocol::method::SLOW_DAEMON_METHODS`）：daemon 本就按请求并发处理，
+    /// 这里同样并发下发，不堵住普通 daemon 命令，也不被彼此堵住。
+    DaemonSlow,
     /// 其余本机操作。
     Local,
+    /// 系统文件图标：列表首屏会一次发出一批，单独成道，不拖慢打开文件等本机操作。
+    Icon,
+    /// 局域网配对 / 诊断：含最长约 70s 的对端等待或外部探测，单独成道，不堵住心跳与本机设置操作。
+    Slow,
 }
 
 fn lane_for(method_name: &str) -> Lane {
     if method_name.starts_with("daemon.") {
-        return Lane::Daemon;
+        return if fluxdown_protocol::method::is_slow_daemon_method(method_name) {
+            Lane::DaemonSlow
+        } else {
+            Lane::Daemon
+        };
+    }
+    if method_name == fluxdown_protocol::method::AGENT_PLATFORM_FILE_ICON {
+        return Lane::Icon;
     }
     const CLOUD_PREFIXES: [&str; 9] = [
         "agent.auth.",
@@ -1451,6 +1532,10 @@ fn lane_for(method_name: &str) -> Lane {
         .any(|prefix| method_name.starts_with(prefix))
     {
         Lane::Cloud
+    } else if method_name.starts_with("agent.link.")
+        || method_name.starts_with("agent.diagnostics.")
+    {
+        Lane::Slow
     } else {
         Lane::Local
     }
@@ -1459,8 +1544,14 @@ fn lane_for(method_name: &str) -> Lane {
 struct RequestLanes {
     cloud: tokio::sync::mpsc::Sender<RpcRequest>,
     daemon: tokio::sync::mpsc::Sender<RpcRequest>,
+    daemon_slow: tokio::sync::mpsc::Sender<RpcRequest>,
     local: tokio::sync::mpsc::Sender<RpcRequest>,
+    icon: tokio::sync::mpsc::Sender<RpcRequest>,
+    slow: tokio::sync::mpsc::Sender<RpcRequest>,
 }
+
+/// 单条连接同时在途的 daemon 慢调用上限（daemon 侧每连接上限为 16，留出余量）。
+const DAEMON_SLOW_CONCURRENCY: usize = 8;
 
 impl RequestLanes {
     fn spawn(
@@ -1481,10 +1572,35 @@ impl RequestLanes {
             });
             sender
         };
+        let start_concurrent = || {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel::<RpcRequest>(LANE_QUEUE);
+            let service = Arc::clone(service);
+            let responses = responses.clone();
+            let permits = Arc::new(tokio::sync::Semaphore::new(DAEMON_SLOW_CONCURRENCY));
+            tokio::spawn(async move {
+                while let Some(request) = receiver.recv().await {
+                    let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+                        break;
+                    };
+                    let service = Arc::clone(&service);
+                    let responses = responses.clone();
+                    tokio::spawn(async move {
+                        let response = service.call(request).await;
+                        drop(permit);
+                        // 连接已关闭时响应无处可发，丢弃即可。
+                        let _ = responses.send(response).await;
+                    });
+                }
+            });
+            sender
+        };
         Self {
             cloud: start(),
             daemon: start(),
+            daemon_slow: start_concurrent(),
             local: start(),
+            icon: start(),
+            slow: start(),
         }
     }
 
@@ -1493,7 +1609,10 @@ impl RequestLanes {
         let sender = match lane_for(&request.method) {
             Lane::Cloud => &self.cloud,
             Lane::Daemon => &self.daemon,
+            Lane::DaemonSlow => &self.daemon_slow,
             Lane::Local => &self.local,
+            Lane::Icon => &self.icon,
+            Lane::Slow => &self.slow,
         };
         let id = request.id.clone();
         match sender.try_send(request) {
@@ -1554,7 +1673,10 @@ mod tests {
         AgentSnapshot, ApplicationErrorCode, RequestId, RpcRequest, RpcResponse,
     };
 
-    use super::{GatewayService, GatewayShell, authorized, load_or_create_bearer};
+    use super::{
+        GatewayService, GatewayShell, Lane, authorized, ensure_exposed_auth_token, lane_for,
+        load_or_create_bearer,
+    };
     #[tokio::test]
     async fn service_bearer_is_exact_stable_and_private() {
         let dir = std::env::temp_dir().join(format!(
@@ -1665,10 +1787,10 @@ mod tests {
                 )),
                 notifier: Arc::new(crate::notification::Notifier::new(dir.clone())),
             };
-            let daemon_config = crate::daemon_client::DaemonClientConfig {
-                rpc_url: "ws://127.0.0.1:9/rpc".to_owned(),
-                bearer: String::new(),
-            };
+            let daemon_config = crate::daemon_client::DaemonClientConfig::new(
+                "ws://127.0.0.1:9/rpc",
+                String::new(),
+            );
             let blobs = Arc::new(
                 crate::capture::DaemonBlobClient::new(&daemon_config).expect("blob client"),
             );
@@ -1685,10 +1807,9 @@ mod tests {
                 api_switches.clone(),
                 api_token.clone(),
             ));
-            let update = Arc::new(
-                crate::update::UpdateService::new(env!("CARGO_PKG_VERSION"))
-                    .expect("update service"),
-            );
+            let update = Arc::new(crate::update::UpdateService::new(
+                fluxdown_protocol::APP_VERSION,
+            ));
             let link = crate::link::LinkService::new(crate::link::LinkServiceParts {
                 events: events.clone(),
                 state: state.clone(),
@@ -1903,6 +2024,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exposing_compat_endpoints_to_lan_or_cors_requires_a_token() {
+        let harness = TestGateway::new("gateway_exposed_token").await;
+
+        // 只开局域网、兼容端点全关：不必有 token。
+        let result = harness
+            .patch_gateway(serde_json::json!({
+                "takeoverEnabled": false,
+                "jsonrpcEnabled": false,
+                "lanEnabled": true
+            }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
+        assert!(harness.user_token().await.is_empty());
+
+        // 兼容端点在局域网下开启：补 token 并同步到运行期。
+        let result = harness
+            .patch_gateway(serde_json::json!({ "jsonrpcEnabled": true }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(true));
+        let generated = harness.user_token().await;
+        assert_eq!(generated.len(), 64);
+        assert_eq!(&*harness.api_token.get(), generated);
+        let persisted = harness.store.load().await.expect("reload state");
+        assert_eq!(persisted.gateway_user_token, generated);
+
+        // 暴露面仍在时显式清空 token：重新补一个，不会回到匿名开放。
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "" }))
+            .await;
+        let refilled = harness.user_token().await;
+        assert_eq!(refilled.len(), 64);
+        assert_ne!(refilled, generated);
+
+        // 同一请求关掉暴露面并清空 token：尊重清空。
+        let result = harness
+            .patch_gateway(serde_json::json!({ "lanEnabled": false, "userToken": "" }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
+        assert!(harness.user_token().await.is_empty());
+
+        // CORS 放开同理。
+        let result = harness
+            .patch_gateway(serde_json::json!({ "corsEnabled": true }))
+            .await;
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(true));
+        assert_eq!(harness.user_token().await.len(), 64);
+        harness.finish().await;
+    }
+
+    #[test]
+    fn exposed_token_is_only_generated_for_exposed_compat_endpoints() {
+        let mut state = crate::state::AgentState::default();
+        state.gateway.cors_enabled = true;
+        state.gateway.takeover_enabled = false;
+        state.gateway.jsonrpc_enabled = false;
+        assert!(!ensure_exposed_auth_token(&mut state));
+        state.gateway.takeover_enabled = true;
+        assert!(ensure_exposed_auth_token(&mut state));
+        let token = state.gateway_user_token.clone();
+        assert_eq!(token.len(), 64);
+        assert!(state.gateway.user_token_configured);
+        assert!(!ensure_exposed_auth_token(&mut state));
+        assert_eq!(state.gateway_user_token, token);
+    }
+
+    #[tokio::test]
     async fn file_backed_methods_reject_missing_or_non_regular_paths() {
         let harness = TestGateway::new("file_paths").await;
         for method_name in [
@@ -1962,6 +2149,159 @@ mod tests {
             }
         }
         harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_rejects_host_diagnostics_and_keeps_web_repairs() {
+        let mut harness = TestGateway::new("server_diagnostics").await;
+        harness.service = harness.service.with_server_mode(true);
+        let repair = fluxdown_protocol::method::AGENT_DIAGNOSTICS_REPAIR;
+        let target = harness.dir.join("chosen.zip");
+        tokio::fs::write(&target, b"existing archive")
+            .await
+            .expect("create protected archive");
+        let mut denied_repairs = vec![
+            serde_json::json!({
+                "action": crate::diagnostics::ACTION_OPEN_LOG_DIR,
+                "target": harness.dir.display().to_string(),
+            }),
+            serde_json::json!({ "action": crate::diagnostics::ACTION_REREGISTER }),
+            serde_json::json!({ "action": crate::diagnostics::ACTION_USE_THIS_INSTALL }),
+        ];
+        for association in ["fluxdown", "magnet", "ed2k", "torrent"] {
+            denied_repairs.push(serde_json::json!({
+                "action": crate::diagnostics::ACTION_REGISTER,
+                "target": association,
+            }));
+        }
+        for params in denied_repairs {
+            let response = harness.call(repair, params.clone()).await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("host repair must be rejected: {params}");
+            };
+            assert_eq!(
+                failure.error.data.map(|data| (data.code, data.retryable)),
+                Some((ApplicationErrorCode::Unsupported, false)),
+                "{params}"
+            );
+        }
+        for params in [
+            serde_json::json!({ "targetPath": target.display().to_string() }),
+            serde_json::json!({}),
+        ] {
+            let response = harness
+                .call(
+                    fluxdown_protocol::method::AGENT_DIAGNOSTICS_EXPORT_LOGS,
+                    params,
+                )
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("host log export must be rejected");
+            };
+            assert_eq!(
+                failure.error.data.map(|data| (data.code, data.retryable)),
+                Some((ApplicationErrorCode::Unsupported, false))
+            );
+        }
+        assert_eq!(
+            tokio::fs::read(&target)
+                .await
+                .expect("read protected archive"),
+            b"existing archive"
+        );
+        for action in [
+            crate::diagnostics::ACTION_REFRESH_TRACKERS,
+            crate::diagnostics::ACTION_REFRESH_ED2K_SERVERS,
+        ] {
+            let response = harness
+                .call(repair, serde_json::json!({ "action": action }))
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("disconnected daemon must report unavailable");
+            };
+            assert_eq!(
+                failure.error.data.map(|data| (data.code, data.retryable)),
+                Some((ApplicationErrorCode::Unavailable, true)),
+                "{action}"
+            );
+        }
+        let enabled = harness
+            .call(
+                repair,
+                serde_json::json!({ "action": crate::diagnostics::ACTION_ENABLE_SERVICE }),
+            )
+            .await;
+        assert!(matches!(enabled, RpcResponse::Success(_)), "{enabled:?}");
+        assert!(
+            harness
+                .store
+                .load()
+                .await
+                .expect("reload state")
+                .gateway
+                .api_enabled
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn desktop_diagnostics_rejects_non_directory_open_targets() {
+        let harness = TestGateway::new("desktop_diagnostics").await;
+        let logs = harness.dir.join("logs");
+        let nested = logs.join("nested");
+        tokio::fs::create_dir_all(&nested)
+            .await
+            .expect("create log directories");
+        let file = logs.join("downloaded-program");
+        tokio::fs::write(&file, b"program")
+            .await
+            .expect("create file in logs");
+        for target in [file, nested, std::env::temp_dir(), logs.join("missing")] {
+            let response = harness
+                .call(
+                    fluxdown_protocol::method::AGENT_DIAGNOSTICS_REPAIR,
+                    serde_json::json!({
+                        "action": crate::diagnostics::ACTION_OPEN_LOG_DIR,
+                        "target": target.display().to_string(),
+                    }),
+                )
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!(
+                    "non-log-directory target must be rejected: {}",
+                    target.display()
+                );
+            };
+            assert_eq!(
+                failure.error.data.map(|data| data.code),
+                Some(ApplicationErrorCode::Internal),
+                "{}",
+                target.display()
+            );
+        }
+        harness.finish().await;
+    }
+
+    #[test]
+    fn slow_network_methods_do_not_share_the_local_lane() {
+        assert!(matches!(lane_for("agent.link.pairFinish"), Lane::Slow));
+        assert!(matches!(lane_for("agent.diagnostics.run"), Lane::Slow));
+        assert!(matches!(lane_for("system.ping"), Lane::Local));
+    }
+
+    #[test]
+    fn slow_daemon_methods_leave_the_ordered_daemon_lane() {
+        for name in fluxdown_protocol::method::SLOW_DAEMON_METHODS {
+            assert!(matches!(lane_for(name), Lane::DaemonSlow), "{name}");
+        }
+        for name in [
+            fluxdown_protocol::method::DAEMON_TASK_PAUSE,
+            fluxdown_protocol::method::DAEMON_TASK_RESUME,
+            fluxdown_protocol::method::DAEMON_TASK_CREATE,
+            fluxdown_protocol::method::DAEMON_CONFIG_PATCH,
+        ] {
+            assert!(matches!(lane_for(name), Lane::Daemon), "{name}");
+        }
     }
 
     #[tokio::test]

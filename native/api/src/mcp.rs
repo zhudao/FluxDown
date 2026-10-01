@@ -116,7 +116,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "download_list",
-            "description": "List download tasks with their progress, speed, size and status. Returns `{ tasks, count }`. Call this first to discover task IDs before using any per-task tool.",
+            "description": "List download tasks with their progress, size and status. Returns `{ tasks, count }`. Call this first to discover task IDs before using any per-task tool.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -417,6 +417,7 @@ mod tests {
             rss_source_id: String::new(),
             origin_url: String::new(),
             auto_route: String::new(),
+            source_bytes: Default::default(),
             queue_order: 0,
             uploaded_bytes: 0,
             uploaded_at_completion: 0,
@@ -427,6 +428,7 @@ mod tests {
             seed_post_ratio_limit_milli: -2,
             seed_time_limit_minutes: -2,
             seed_inactive_time_limit_minutes: -2,
+            seed_upload_limit_bps: 0,
         }
     }
 

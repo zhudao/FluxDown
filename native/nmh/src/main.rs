@@ -27,6 +27,14 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+/// Product version: the release pipeline injects the tag version through `FLUXDOWN_APP_VERSION`;
+/// local builds fall back to this crate's version. Same rule as `fluxdown_protocol::APP_VERSION`
+/// (this relay deliberately has no dependency on the protocol crate).
+const APP_VERSION: &str = match option_env!("FLUXDOWN_APP_VERSION") {
+    Some(version) if !version.is_empty() => version,
+    _ => env!("CARGO_PKG_VERSION"),
+};
+
 /// Maximum message size: 1 MB (Chrome NMH limit).
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
@@ -44,22 +52,48 @@ fn is_no_launch_action(action: &str) -> bool {
     NO_LAUNCH_ACTIONS.contains(&action)
 }
 
-/// IPC path for communicating with the FluxDown desktop app.
-/// Windows uses a Named Pipe; Linux/macOS uses a Unix Domain Socket.
-#[cfg(windows)]
-const PIPE_NAME: &str = r"\\.\pipe\fluxdown";
+/// Unix IPC socket: `<data dir>/ipc/fluxdown.sock`, where `ipc` is a per-user 0700 directory
+/// created by the agent. The data dir is under the user's home on purpose: it is reachable
+/// from both the host and Flatpak/Snap sandboxes (unlike `$XDG_RUNTIME_DIR`). The agent
+/// (`native/agent/src/nmh.rs`) derives the same path; keep both in lockstep.
+#[cfg(any(not(windows), test))]
+fn socket_path_under(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    let data_dir = home
+        .join("Library")
+        .join("Application Support")
+        .join("fluxdown");
+    #[cfg(not(target_os = "macos"))]
+    let data_dir = home.join(".local").join("share").join("fluxdown");
+    data_dir.join("ipc").join("fluxdown.sock")
+}
+
+/// Windows Named Pipe for the current account: `\\.\pipe\fluxdown-<account>`. Every byte of
+/// the lower-cased account name outside `[a-z0-9]` is encoded as `_xx` (the underscore is
+/// itself encoded), so distinct accounts never share a pipe. The agent
+/// (`native/agent/src/nmh.rs`) derives the same name; keep both in lockstep.
+#[cfg(any(windows, test))]
+fn pipe_name_for(user: &str) -> Option<String> {
+    if user.is_empty() {
+        return None;
+    }
+    let mut name = String::from(r"\\.\pipe\fluxdown-");
+    for byte in user.to_lowercase().bytes() {
+        if byte.is_ascii_lowercase() || byte.is_ascii_digit() {
+            name.push(char::from(byte));
+        } else {
+            name.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    Some(name)
+}
 
 /// Cold-launch candidates, in priority order, searched next to the NMH
-/// binary. `fluxdown-agent` (GPUI stack, the shipped desktop client) comes
-/// first: an install upgraded from the Flutter client may still hold a stale
-/// Flutter executable, which must never win (it would take `engine.lock` away
-/// from `fluxdownd`). Flutter-only dev builds fall through to it.
+/// binary. Only `fluxdown-agent` (GPUI stack) is launched.
 #[cfg(windows)]
-const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent.exe", "flux_down.exe"];
-#[cfg(target_os = "macos")]
-const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent", "FluxDown", "flux_down"];
-#[cfg(all(not(windows), not(target_os = "macos")))]
-const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent", "flux_down"];
+const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent.exe"];
+#[cfg(not(windows))]
+const APP_EXE_CANDIDATES: &[&str] = &["fluxdown-agent"];
 
 /// Maximum time (ms) to wait for the App to start and create its pipe.
 const APP_LAUNCH_TIMEOUT_MS: u64 = 10_000;
@@ -356,44 +390,10 @@ mod pipe {
     use std::io::{self, Read, Write};
     use std::os::unix::net::UnixStream;
 
-    /// Resolve the Unix socket path that the FluxDown app is listening on.
-    /// Must match the path used in native/hub/src/native_messaging.rs.
-    fn socket_path() -> std::path::PathBuf {
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: ~/Library/Application Support/fluxdown/fluxdown.sock
-            // Must match native/hub/src/native_messaging.rs socket_path().
-            // Use home_dir() (getpwuid fallback) instead of $HOME directly,
-            // because Chrome/Firefox launch NMH via launchd which strips $HOME.
-            if let Some(home) = super::home_dir() {
-                let dir = home
-                    .join("Library")
-                    .join("Application Support")
-                    .join("fluxdown");
-                let _ = std::fs::create_dir_all(&dir);
-                return dir.join("fluxdown.sock");
-            }
-        }
-        // Linux: use ~/.local/share/fluxdown/fluxdown.sock
-        // This path is accessible from both the host (app process) and Flatpak/Snap
-        // sandboxes (which bind-mount ~/.local/share/ into the sandbox), unlike
-        // $XDG_RUNTIME_DIR which gets remapped to a sandbox-private path inside
-        // Flatpak, causing the app and NMH to see different socket paths.
-        // Use super::home_dir() which has a getpwuid fallback in case $HOME is unset.
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(home) = super::home_dir() {
-                let dir = home.join(".local").join("share").join("fluxdown");
-                let _ = std::fs::create_dir_all(&dir);
-                return dir.join("fluxdown.sock");
-            }
-        }
-        // Fallback for any other Unix-like OS
-        if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-            std::path::Path::new(&dir).join("fluxdown.sock")
-        } else {
-            std::path::Path::new("/tmp").join("fluxdown.sock")
-        }
+    /// Resolve the per-user Unix socket path the FluxDown agent listens on. There is no
+    /// shared-directory fallback: without a home directory the endpoint is unavailable.
+    fn socket_path() -> Option<std::path::PathBuf> {
+        super::home_dir().map(|home| super::socket_path_under(&home))
     }
 
     pub struct PipeHandle {
@@ -403,7 +403,7 @@ mod pipe {
     impl PipeHandle {
         /// Connect to the FluxDown Unix socket. Returns None if the app is not running.
         pub fn connect(_ignored: &str) -> Option<Self> {
-            let path = socket_path();
+            let path = socket_path()?;
             let stream = UnixStream::connect(&path).ok()?;
             Some(PipeHandle { stream })
         }
@@ -441,9 +441,7 @@ mod pipe {
 ///
 /// Search order:
 /// 1. Same directory as the NMH binary, following [`APP_EXE_CANDIDATES`]
-///    (production bundle + CMake/Xcode-embedded dev builds)
-/// 2. Flutter build output (development fallback)
-/// 3. Cargo output for `fluxdown-agent` (development fallback)
+/// 2. Cargo output for `fluxdown-agent` (development fallback)
 fn find_app_exe() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
@@ -457,10 +455,6 @@ fn find_app_exe() -> Option<PathBuf> {
         .parent()
         .and_then(|path| path.parent())?;
 
-    if let Some(found) = find_flutter_dev_exe(workspace_root) {
-        return Some(found);
-    }
-
     ["debug", "release"].iter().find_map(|profile| {
         let dir = workspace_root.join("target").join(profile);
         first_existing(&dir, APP_EXE_CANDIDATES)
@@ -472,70 +466,35 @@ fn first_existing(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     names.iter().map(|name| dir.join(name)).find(|p| p.exists())
 }
 
-/// Flutter build output: `build/windows/<arch>/runner/<Profile>/flux_down.exe`.
-#[cfg(windows)]
-fn find_flutter_dev_exe(workspace_root: &Path) -> Option<PathBuf> {
-    ["x64", "arm64"].iter().find_map(|arch| {
-        ["Debug", "Release", "Profile"].iter().find_map(|profile| {
-            let dir = workspace_root
-                .join("build")
-                .join("windows")
-                .join(arch)
-                .join("runner")
-                .join(profile);
-            first_existing(&dir, &["flux_down.exe"])
-        })
-    })
-}
-
-/// Flutter build output:
-/// `build/macos/Build/Products/<Profile>/<App>.app/Contents/MacOS/<App>`.
-/// The bundle/executable name follows `PRODUCT_NAME`, so both spellings are tried.
-#[cfg(target_os = "macos")]
-fn find_flutter_dev_exe(workspace_root: &Path) -> Option<PathBuf> {
-    const BUNDLES: &[&str] = &["FluxDown.app", "flux_down.app"];
-    ["Debug", "Release", "Profile"].iter().find_map(|profile| {
-        let products = workspace_root
-            .join("build")
-            .join("macos")
-            .join("Build")
-            .join("Products")
-            .join(profile);
-        BUNDLES.iter().find_map(|bundle| {
-            let dir = products.join(bundle).join("Contents").join("MacOS");
-            first_existing(&dir, &["FluxDown", "flux_down"])
-        })
-    })
-}
-
-/// Flutter build output: `build/linux/x64/<profile>/bundle/flux_down`.
-#[cfg(all(not(windows), not(target_os = "macos")))]
-fn find_flutter_dev_exe(workspace_root: &Path) -> Option<PathBuf> {
-    ["debug", "release", "profile"].iter().find_map(|profile| {
-        let dir = workspace_root
-            .join("build")
-            .join("linux")
-            .join("x64")
-            .join(profile)
-            .join("bundle");
-        first_existing(&dir, &["flux_down"])
-    })
-}
-
 /// Launch the FluxDown App as a detached process.
 #[cfg(windows)]
 fn launch_app(app_exe: &Path) -> bool {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
+    // Firefox 把 NMH 放进会在 NMH 退出时终止整个 Job 的 Job object；
+    // 不脱离则冷启动的 agent / daemon 会随 NMH 一起被杀。
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+    const ERROR_ACCESS_DENIED: i32 = 5;
 
-    std::process::Command::new(app_exe)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-        .spawn()
-        .is_ok()
+    let spawn = |flags: u32| {
+        std::process::Command::new(app_exe)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    let base = CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
+    match spawn(base | CREATE_BREAKAWAY_FROM_JOB) {
+        Ok(_) => true,
+        // 所在 Job 不允许脱离（Chrome / 企业策略 / 沙箱）：退化为随浏览器生命周期。
+        Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) => {
+            log("launch: job does not allow breakaway; app will follow the browser's job lifetime");
+            spawn(base).is_ok()
+        }
+        Err(_) => false,
+    }
 }
 
 #[cfg(not(windows))]
@@ -549,17 +508,20 @@ fn launch_app(app_exe: &Path) -> bool {
 }
 
 /// Returns the IPC address string for `pipe::PipeHandle::connect()`.
-/// On Windows this is the Named Pipe path; on non-Windows the argument is
-/// ignored and the Unix socket path is resolved inside the `pipe` module.
-fn ipc_address() -> &'static str {
+/// On Windows this is the per-user Named Pipe path (empty when the account name is
+/// unavailable, which makes every connect fail); on non-Windows the argument is ignored
+/// and the Unix socket path is resolved inside the `pipe` module.
+fn ipc_address() -> String {
     #[cfg(windows)]
     {
-        PIPE_NAME
+        std::env::var("USERNAME")
+            .ok()
+            .and_then(|user| pipe_name_for(&user))
+            .unwrap_or_default()
     }
     #[cfg(not(windows))]
     {
-        // Unix socket path is computed from $XDG_RUNTIME_DIR inside pipe::PipeHandle::connect.
-        ""
+        String::new()
     }
 }
 
@@ -570,7 +532,7 @@ fn connect_with_auto_launch(last_launch: &mut Option<Instant>) -> Option<pipe::P
     let addr = ipc_address();
 
     // Fast path: App is already running.
-    if let Some(p) = pipe::PipeHandle::connect(addr) {
+    if let Some(p) = pipe::PipeHandle::connect(&addr) {
         log("ipc connected (fast path)");
         return Some(p);
     }
@@ -605,7 +567,7 @@ fn connect_with_auto_launch(last_launch: &mut Option<Instant>) -> Option<pipe::P
     let deadline = Instant::now() + std::time::Duration::from_millis(APP_LAUNCH_TIMEOUT_MS);
 
     loop {
-        if let Some(p) = pipe::PipeHandle::connect(addr) {
+        if let Some(p) = pipe::PipeHandle::connect(&addr) {
             let elapsed = last_launch.map_or(0, |t| t.elapsed().as_millis() as u64);
             log(&format!("ipc connected after {}ms", elapsed));
             return Some(p);
@@ -639,7 +601,7 @@ fn reconnect_and_resend(
     last_launch: &mut Option<Instant>,
 ) -> Option<pipe::PipeHandle> {
     let mut p = if is_no_launch {
-        pipe::PipeHandle::connect(ipc_address())?
+        pipe::PipeHandle::connect(&ipc_address())?
     } else {
         connect_with_auto_launch(last_launch)?
     };
@@ -694,7 +656,7 @@ fn main() {
     let cli_args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(action) = classify_cli_invocation(&cli_args) {
         match action {
-            CliAction::Version => println!("fluxdown_nmh {}", env!("CARGO_PKG_VERSION")),
+            CliAction::Version => println!("fluxdown_nmh {APP_VERSION}"),
             CliAction::Help => println!(
                 "fluxdown_nmh {} — FluxDown Native Messaging Host\n\
                  \n\
@@ -706,7 +668,7 @@ fn main() {
                  Options:\n\
                  \x20 -h, --help       Show this help and exit\n\
                  \x20 -V, --version    Show version and exit",
-                env!("CARGO_PKG_VERSION")
+                APP_VERSION
             ),
         }
         return;
@@ -728,7 +690,7 @@ fn main() {
         // status/query checks).
         if pipe.is_none() {
             pipe = if is_no_launch {
-                pipe::PipeHandle::connect(ipc_address())
+                pipe::PipeHandle::connect(&ipc_address())
             } else {
                 connect_with_auto_launch(&mut last_launch)
             };
@@ -811,6 +773,50 @@ mod tests {
         }
     }
 
+    /// Must stay in lockstep with `native/agent/src/nmh.rs` (`socket_path_under`): the agent
+    /// and this relay derive the endpoint independently, both tests pin the same literals.
+    #[test]
+    fn unix_socket_lives_in_a_private_per_user_ipc_dir() {
+        #[cfg(target_os = "macos")]
+        let expected = "/Users/alice/Library/Application Support/fluxdown/ipc/fluxdown.sock";
+        #[cfg(not(target_os = "macos"))]
+        let expected = "/home/alice/.local/share/fluxdown/ipc/fluxdown.sock";
+        let home = if cfg!(target_os = "macos") {
+            "/Users/alice"
+        } else {
+            "/home/alice"
+        };
+        assert_eq!(
+            socket_path_under(Path::new(home)),
+            Path::new(expected).to_path_buf()
+        );
+    }
+
+    /// Same literals as `native/agent/src/nmh.rs` (`pipe_name_for`).
+    #[test]
+    fn pipe_name_is_per_user_and_injective() {
+        assert_eq!(
+            pipe_name_for("Alice Smith").as_deref(),
+            Some(r"\\.\pipe\fluxdown-alice_20smith")
+        );
+        assert_eq!(
+            pipe_name_for("a_b"),
+            Some(r"\\.\pipe\fluxdown-a_5fb".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("a b"),
+            Some(r"\\.\pipe\fluxdown-a_20b".to_owned())
+        );
+        assert_eq!(
+            pipe_name_for("张三").as_deref(),
+            Some(r"\\.\pipe\fluxdown-_e5_bc_a0_e4_b8_89")
+        );
+        assert_eq!(pipe_name_for(""), None);
+        assert_ne!(pipe_name_for("alice"), pipe_name_for("bob"));
+        // Windows account names are case-insensitive.
+        assert_eq!(pipe_name_for("ALICE"), pipe_name_for("alice"));
+    }
+
     #[test]
     fn cli_invocation_exits_for_bare_help_and_version() {
         assert_eq!(classify_cli_invocation::<&str>(&[]), Some(CliAction::Help));
@@ -843,38 +849,5 @@ mod tests {
             classify_cli_invocation(&["/path/to/com.fluxdown.nmh.json", "fluxdown@zerx.dev"]),
             None
         );
-    }
-
-    /// An install upgraded from the Flutter client can keep a stale Flutter
-    /// executable next to `fluxdown-agent`; cold launch must pick the agent
-    /// whenever it exists and only fall back to Flutter when it does not.
-    #[test]
-    fn cold_launch_prefers_agent_over_stale_flutter_app() {
-        let dir = std::env::temp_dir().join(format!(
-            "fluxdown-nmh-launch-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let agent = APP_EXE_CANDIDATES[0];
-        let flutter = APP_EXE_CANDIDATES[APP_EXE_CANDIDATES.len() - 1];
-        assert!(agent.starts_with("fluxdown-agent"));
-
-        std::fs::write(dir.join(flutter), b"").expect("flutter stub");
-        assert_eq!(
-            first_existing(&dir, APP_EXE_CANDIDATES),
-            Some(dir.join(flutter))
-        );
-
-        std::fs::write(dir.join(agent), b"").expect("agent stub");
-        assert_eq!(
-            first_existing(&dir, APP_EXE_CANDIDATES),
-            Some(dir.join(agent))
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -814,43 +814,30 @@ fn list_log_files_in(dir: &std::path::Path) -> Vec<LogFileMeta> {
     files
 }
 
-#[cfg(any(feature = "components", feature = "plugins"))]
 static SANITIZE_RULES: std::sync::LazyLock<Vec<(regex::Regex, &'static str)>> =
     std::sync::LazyLock::new(|| {
-        [
-            (r"(?i)([\w+.-]+://)[^:/\s@]+:[^@\s]+@", "$1***@"),
-            (
-                r#"(?i)(https?://[^?\s]{3,})\?[^\s,)\]}>"]{50,}"#,
-                "$1?[QUERY_REDACTED]",
-            ),
-            (r"(?i)(cookie\b[^:\r\n]*:\s*)\S+", "$1[REDACTED]"),
-            (
-                r"(?i)(authorization\b[^:\r\n]*:\s*)(?:\S+\s+)?\S+",
-                "$1[REDACTED]",
-            ),
-            (
-                r"(?i)(proxy[_\s]?(?:password|username)\s*[=:]\s*)\S+",
-                "$1[REDACTED]",
-            ),
-            (r"/home/[^/\s]+/", "/home/***/"),
-            (r"(?i)([A-Z]:\\users\\)[^\\\s]+\\", "$1***\\"),
-        ]
-        .into_iter()
-        .map(|(pattern, replacement)| {
-            let regex = regex::Regex::new(pattern)
-                .unwrap_or_else(|error| panic!("invalid log sanitization regex: {error}"));
-            (regex, replacement)
-        })
-        .collect()
+        fluxdown_logfile::SANITIZE_PATTERNS
+            .iter()
+            .map(|&(pattern, replacement)| {
+                let regex = regex::Regex::new(pattern)
+                    .unwrap_or_else(|error| panic!("invalid log sanitization regex: {error}"));
+                (regex, replacement)
+            })
+            .collect()
     });
 
-#[cfg(any(feature = "components", feature = "plugins"))]
-fn sanitize_log_bytes(data: &[u8]) -> Vec<u8> {
-    let mut content = String::from_utf8_lossy(data).into_owned();
+/// 对日志文本脱敏（URL userinfo、令牌路径/query、Cookie、Authorization、用户目录）。
+pub fn sanitize_log_str(text: &str) -> String {
+    let mut content = text.to_owned();
     for (regex, replacement) in SANITIZE_RULES.iter() {
         content = regex.replace_all(&content, *replacement).into_owned();
     }
-    content.into_bytes()
+    content
+}
+
+/// [`sanitize_log_str`] 的字节版本（非 UTF-8 按 lossy 处理），供导出日志复用。
+pub fn sanitize_log_bytes(data: &[u8]) -> Vec<u8> {
+    sanitize_log_str(&String::from_utf8_lossy(data)).into_bytes()
 }
 
 /// 将日志目录下全部日志文件脱敏后打包为 zip 字节（deflate 压缩），供
@@ -958,6 +945,21 @@ mod tests {
     use std::sync::Arc;
 
     use thiserror::Error;
+
+    use super::sanitize_log_str;
+
+    #[test]
+    fn sanitize_redacts_bot_token_and_secret_query_params() {
+        let s = sanitize_log_str(
+            "error sending request for url (https://api.telegram.org/bot123456:AAE-xyz_1/sendMessage?chat_id=9)",
+        );
+        assert!(!s.contains("AAE-xyz_1"), "{s}");
+        let s = sanitize_log_str("GET https://h/x?a=1&token=abc&apiKey=def&n=2");
+        assert!(!s.contains("abc") && !s.contains("def"), "{s}");
+        assert!(s.contains("a=1") && s.contains("n=2"), "{s}");
+        let s = sanitize_log_str("ftp://user:pass@host/f");
+        assert!(!s.contains("pass"), "{s}");
+    }
 
     use super::{
         AppLogWriterFactory, AppLogger, LoggerInitError, build_env_filter, format_error_chain,

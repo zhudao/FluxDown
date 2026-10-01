@@ -12,6 +12,8 @@ use fluxdown_protocol::{ReleaseNoteDto, UpdateCheckResultDto};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::http_client::{HttpClientError, LazyHttpClient};
+
 const UPDATE_API_BASE: &str = "https://fluxdown.zerx.dev";
 const RELEASE_PAGE_URL: &str = "https://fluxdown.zerx.dev/changelog";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -24,6 +26,8 @@ pub enum UpdateError {
     InvalidChannel(String),
     #[error("update API request failed: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("update HTTP client unavailable: {0}")]
+    Client(#[from] HttpClientError),
     #[error("update API returned status {0}")]
     Status(u16),
     #[error("update API response is invalid: {0}")]
@@ -54,23 +58,26 @@ struct ChangelogRelease {
     body: String,
 }
 
-/// 版本检查服务；持有独立的 HTTP 客户端。
+/// 版本检查服务；持有独立的 HTTP 客户端（首次检查时构建）。
 pub struct UpdateService {
     current_version: String,
-    http: reqwest::Client,
+    http: LazyHttpClient,
 }
 
 impl UpdateService {
-    pub fn new(current_version: &str) -> Result<Self, UpdateError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent(format!("fluxdown-agent/{current_version}"))
-            .build()?;
-        Ok(Self {
+    #[must_use]
+    pub fn new(current_version: &str) -> Self {
+        let user_agent = format!("fluxdown-agent/{current_version}");
+        let http = LazyHttpClient::new(move || {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(REQUEST_TIMEOUT)
+                .user_agent(user_agent.clone())
+        });
+        Self {
             current_version: current_version.to_owned(),
             http,
-        })
+        }
     }
 
     /// 查询渠道最新版本并附带比当前版本新的更新说明。
@@ -97,7 +104,7 @@ impl UpdateService {
 
     async fn fetch_release(&self, channel: &str) -> Result<ReleaseInfo, UpdateError> {
         let url = format!("{UPDATE_API_BASE}/api/release?channel={channel}");
-        let response = self.http.get(&url).send().await?;
+        let response = self.http.get().await?.get(&url).send().await?;
         if !response.status().is_success() {
             return Err(UpdateError::Status(response.status().as_u16()));
         }
@@ -113,7 +120,14 @@ impl UpdateService {
             "{UPDATE_API_BASE}/api/changelog?per_page={CHANGELOG_PER_PAGE}&since=v{}&channel={channel}",
             self.current_version
         );
-        let response = match self.http.get(&url).send().await {
+        let http = match self.http.get().await {
+            Ok(http) => http,
+            Err(error) => {
+                tracing::debug!(error = %error, "changelog client unavailable");
+                return Vec::new();
+            }
+        };
+        let response = match http.get(&url).send().await {
             Ok(response) if response.status().is_success() => response,
             Ok(response) => {
                 tracing::debug!(status = %response.status(), "changelog fetch rejected");
@@ -227,6 +241,27 @@ fn asset_keys() -> &'static [&'static str] {
     &[]
 }
 
+/// 下载地址只接受 https 且主机属于官方分发域：清单被篡改时也不会把用户带到任意 scheme / 主机。
+fn is_trusted_download_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    let under = |domain: &str| {
+        host == domain
+            || host
+                .strip_suffix(domain)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    };
+    under("zerx.dev") || under("github.com") || under("githubusercontent.com")
+}
+
 fn select_download_url(assets: &BTreeMap<String, Value>) -> Option<String> {
     asset_keys().iter().find_map(|key| {
         assets
@@ -235,6 +270,7 @@ fn select_download_url(assets: &BTreeMap<String, Value>) -> Option<String> {
             .and_then(Value::as_str)
             .filter(|url| !url.is_empty())
             .map(absolute_download_url)
+            .filter(|url| is_trusted_download_url(url))
     })
 }
 
@@ -362,12 +398,25 @@ mod tests {
         );
         assets.insert(
             keys[0].to_owned(),
-            json!({ "download_url": "https://cdn.example/first" }),
+            json!({ "download_url": "https://github.com/zerx-lab/FluxDown/releases/first" }),
         );
         assert_eq!(
             select_download_url(&assets).as_deref(),
-            Some("https://cdn.example/first")
+            Some("https://github.com/zerx-lab/FluxDown/releases/first")
         );
+    }
+
+    #[test]
+    fn untrusted_download_urls_are_rejected() {
+        use super::is_trusted_download_url as trusted;
+        assert!(trusted("https://fluxdown.zerx.dev/api/download/x"));
+        assert!(trusted("https://objects.githubusercontent.com/a"));
+        assert!(!trusted("http://fluxdown.zerx.dev/a"));
+        assert!(!trusted("file:///etc/passwd"));
+        assert!(!trusted("https://evilzerx.dev/a"));
+        assert!(!trusted("https://zerx.dev.evil.com/a"));
+        assert!(!trusted("https://user@fluxdown.zerx.dev/a"));
+        assert!(!trusted("\\\\host\\share\\a.exe"));
     }
 
     #[test]

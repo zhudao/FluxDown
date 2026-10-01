@@ -24,6 +24,7 @@ use crate::{
         DownloadFilter, DownloadStatusFilter, RowKey, SidebarSection, SidebarSelection,
         StatusFolderMotion, TaskState,
         file_rescan::{RescanDecision, RescanThrottle},
+        refresh_gate::{RefreshGate, RefreshPlan, RefreshTrigger},
         view_prefs::{DetailPlacement, VIEW_PREFS_KEY, ViewGroupBy, ViewPrefs},
     },
     pages::new_download::{NewDownloadContext, build_new_download_context},
@@ -147,6 +148,10 @@ pub struct DownloadView {
     pub(crate) content_left: Pixels,
     /// 文件跟踪重扫节流（主窗口获焦触发）。
     file_rescan: RescanThrottle,
+    /// 事件驱动刷新的合并闸门（≤30Hz、同批事件一次刷新）。
+    refresh_gate: RefreshGate,
+    /// 上次刷新时存储的行布局计数；与当前不同说明行 ID 可能已指向别的任务。
+    refreshed_structure: u64,
 }
 
 impl DownloadView {
@@ -159,6 +164,7 @@ impl DownloadView {
     ) -> Self {
         let strings = DownloadStrings::from_translator(translator.read(cx));
         let controller = DownloadsController::new(Arc::clone(&port));
+        crate::components::file_icon::install_port(&port, cx);
         let store = Rc::clone(controller.store());
         let focus_handle = cx.focus_handle();
         let table_state = cx.new(|cx| {
@@ -252,6 +258,8 @@ impl DownloadView {
             selection_summary: Cell::new(SelectionSummary::default()),
             content_left: px(0.),
             file_rescan: RescanThrottle::default(),
+            refresh_gate: RefreshGate::default(),
+            refreshed_structure: u64::MAX,
         }
     }
 
@@ -364,9 +372,7 @@ impl DownloadView {
         self.reconcile_sidebar_selection();
         self.last_error = (!snapshot.daemon_connected).then(|| self.strings.disconnected.clone());
         self.load_view_prefs(cx);
-        self.sync_delegate_context(cx);
-        self.refresh_tasks(cx);
-        self.sync_detail_panel(cx);
+        self.refresh_from_store(cx);
     }
 
     pub fn apply_event(&mut self, event: &fluxdown_protocol::ServiceEvent, cx: &mut Context<Self>) {
@@ -397,13 +403,12 @@ impl DownloadView {
                         | fluxdown_protocol::AgentEvent::CloudDevicesChanged(_)
                         | fluxdown_protocol::AgentEvent::LinkedDevicesChanged(_)
                         | fluxdown_protocol::AgentEvent::SessionChanged(_)
+                        | fluxdown_protocol::AgentEvent::PreferencesChanged(_)
                 )
             ) {
                 self.reconcile_sidebar_selection();
             }
-            self.sync_delegate_context(cx);
-            self.refresh_tasks(cx);
-            self.sync_detail_panel(cx);
+            self.schedule_table_refresh(cx);
         } else {
             cx.notify();
         }
@@ -421,6 +426,18 @@ impl DownloadView {
                     .any(|queue| &queue.queue_id == queue_id) =>
             {
                 self.selected_item = SidebarSelection::Download(DownloadFilter::ALL);
+            }
+            SidebarSelection::Download(DownloadFilter {
+                status,
+                category: Some(category),
+            }) if !self.controller.categories().rules().is_empty()
+                && !self
+                    .controller
+                    .categories()
+                    .visible()
+                    .any(|rule| rule.dto.id == *category) =>
+            {
+                self.selected_item = SidebarSelection::Download(DownloadFilter::status(*status));
             }
             SidebarSelection::Device(id)
                 if id != SidebarSelection::LOCAL_DEVICE
@@ -544,6 +561,47 @@ impl DownloadView {
         cx.notify();
     }
 
+    /// 任务 / 上下文变化后立即把存储同步进表格、侧栏与详情面板。
+    fn refresh_from_store(&mut self, cx: &mut Context<Self>) {
+        self.sync_delegate_context(cx);
+        self.refresh_tasks(cx);
+        self.sync_detail_panel(cx);
+        self.refreshed_structure = self.controller.store().structure_generation();
+        self.refresh_gate.flushed(Instant::now());
+    }
+
+    /// 事件使表格数据过期：按 [`RefreshGate`] 合并成一次刷新（同批事件之后、≤30Hz），
+    /// 而不是每条事件都全量重算可见行。
+    fn schedule_table_refresh(&mut self, cx: &mut Context<Self>) {
+        let structural = self.controller.store().structure_generation() != self.refreshed_structure;
+        match self.refresh_gate.mark(structural, Instant::now()) {
+            RefreshPlan::Nothing => {}
+            RefreshPlan::Deferred => {
+                let this = cx.weak_entity();
+                cx.defer(move |cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.run_scheduled_refresh(RefreshTrigger::Deferred, cx);
+                    });
+                });
+            }
+            RefreshPlan::After(delay) => {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(delay).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.run_scheduled_refresh(RefreshTrigger::Timer, cx);
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn run_scheduled_refresh(&mut self, trigger: RefreshTrigger, cx: &mut Context<Self>) {
+        if self.refresh_gate.take(trigger, Instant::now()) {
+            self.refresh_from_store(cx);
+        }
+    }
+
     pub(crate) fn select_sidebar_item(
         &mut self,
         selection: SidebarSelection,
@@ -574,20 +632,6 @@ impl DownloadView {
         cx: &mut Context<Self>,
     ) {
         match event {
-            TableEvent::RightClickedRow(Some(row_ix)) => {
-                // 注意：这里不调用 `set_right_clicked_row(None, ..)`——该方法专为
-                // 「打开表头菜单时抑制同时出现的行菜单」设计（见其文档），若在
-                // 行右键后立即清空，会在 gpui-component 内部 `window.defer` 读取
-                // `right_clicked_row` 构建菜单之前把它清掉，导致右键菜单永远不
-                // 会出现。这里只需要更新选中集合，行高亮 / 菜单锚点交给表格自身
-                // 维护的 `right_clicked_row` 状态。
-                let row_ix = *row_ix;
-                table_state.update(cx, |table, _| {
-                    if let Some(key) = table.delegate().row_key_at(row_ix) {
-                        table.delegate_mut().select_task_for_context_menu(key);
-                    }
-                });
-            }
             TableEvent::ColumnWidthsChanged(widths) => {
                 table_state.update(cx, |table, _| {
                     table.delegate_mut().sync_column_widths(widths);
@@ -615,6 +659,23 @@ impl DownloadView {
         if !self.table_state.read(cx).delegate().prefs().detail_open {
             self.mutate_prefs(|prefs| prefs.detail_open = true, cx);
         }
+    }
+
+    /// 行尾「详情」按钮：像普通单击一样只选中该行（停靠面板跟随单选，先选中才不会被
+    /// 跟随逻辑切回旧选中项），再打开详情面板。
+    pub(crate) fn show_row_detail(
+        &mut self,
+        key: RowKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.table_state.update(cx, |table, cx| {
+            table
+                .delegate_mut()
+                .select_task(key.clone(), gpui::Modifiers::default());
+            cx.notify();
+        });
+        self.open_detail_for(key, window, cx);
     }
 
     /// 双击任务行：已完成且文件仍在下载目录 → 用系统默认程序打开；其余（含文件已被删除
@@ -1121,8 +1182,9 @@ impl DownloadView {
         }
     }
 
-    /// 拖放导入：`.torrent` 直接建任务；`.txt`/`.url`/`.list`（≤1MB）按行提取
-    /// 受支持的链接后打开新建下载窗口预填；其他文件类型提示不支持。
+    /// 拖放导入：`.torrent` 按用户主动打开处理（走 BT 文件选择后建任务）；
+    /// `.txt`/`.url`/`.list`（≤1MB）按行提取
+    /// 受支持的链接后打开新建下载窗口预填（窗口已开则追加进表单）；其他文件类型提示不支持。
     fn on_paths_dropped(
         &mut self,
         paths: &ExternalPaths,
@@ -1138,9 +1200,7 @@ impl DownloadView {
                 .and_then(|ext| ext.to_str())
                 .map(str::to_ascii_lowercase);
             match ext.as_deref() {
-                Some("torrent") => torrent_commands.push(DownloadsCommand::SubmitTorrentFile {
-                    path: path.display().to_string(),
-                }),
+                Some("torrent") => torrent_commands.push(DownloadsCommand::open_torrent_file(path)),
                 Some("txt" | "url" | "list") => match read_drop_text_file(path) {
                     Some(text) => urls.extend(parse_drop_urls(&text)),
                     None => unsupported = true,
@@ -1462,9 +1522,7 @@ impl DownloadView {
                         .and_then(|ext| ext.to_str())
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("torrent"))
                 })
-                .map(|path| DownloadsCommand::SubmitTorrentFile {
-                    path: path.display().to_string(),
-                })
+                .map(|path| DownloadsCommand::open_torrent_file(&path))
                 .collect();
             let _ = this.update(cx, |this, cx| this.execute_commands(commands, cx));
         })
@@ -1576,23 +1634,16 @@ impl DownloadView {
             .last_error
             .clone()
             .map(|error| self.render_error_strip(error, cx));
-        let table = self.render_table(cx);
-        let selection_bar = self.render_selection_bar(cx);
+        // 选择条覆盖在表格容器顶部的表头上，不遮挡任务行。
+        let table = self
+            .render_table(cx)
+            .children(self.render_selection_bar(cx));
         let content = v_flex()
             .size_full()
             .min_w_0()
             .min_h_0()
             .children(error_strip)
-            .child(
-                // 表格区域：浮动选择条相对它底部居中定位。
-                v_flex()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(table)
-                    .children(selection_bar),
-            );
+            .child(v_flex().flex_1().min_w_0().min_h_0().child(table));
 
         let body: gpui::AnyElement = if prefs.detail_open {
             let panel = self.render_detail_panel(cx);
