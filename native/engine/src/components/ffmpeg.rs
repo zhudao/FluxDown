@@ -147,22 +147,9 @@ pub async fn resolve_ffprobe(db: &Db, data_dir: &Path) -> Option<PathBuf> {
 
 /// 运行 `<path> -version` 解析版本串（如 `7.1` / `n7.1-...` 原样 token）。
 pub async fn probe_version(path: &Path) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(path);
-    crate::proc::no_console_window(&mut cmd);
-    let output = cmd
-        .arg("-version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
     // 首行形如 "ffmpeg version 7.1-static ..."，取第三个 token。
-    let first_line = stdout.lines().next()?;
-    let token = first_line.split_whitespace().nth(2)?;
-    Some(token.to_string())
+    let first_line = super::exec_probe(path, "-version", None).await.ok()?;
+    first_line.split_whitespace().nth(2).map(str::to_string)
 }
 
 /// 完整状态探测（设置页用）：解析生效路径 + 版本 + 系统路径展示。
@@ -217,7 +204,11 @@ pub async fn uninstall_ffmpeg(db: &Db, data_dir: &Path) -> Result<(), ComponentE
         Err(e) => return Err(ComponentError::Io(e.to_string())),
     }
     // ffprobe 随 ffmpeg 一并安装，一并清除（best-effort，缺失不报错）。
-    let _ = tokio::fs::remove_file(managed_ffprobe_path(data_dir)).await;
+    if let Err(error) = tokio::fs::remove_file(managed_ffprobe_path(data_dir)).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::logger::report_warning("components", "remove_managed_ffprobe", &error);
+    }
     db.delete_config(CONFIG_FFMPEG_MANAGED_VERSION)
         .await
         .map_err(|e| ComponentError::Db(e.to_string()))?;
@@ -392,13 +383,28 @@ mod install {
         // 先解压到暂存目录并探版，通过后才替换 `bin/ffmpeg[.exe]` 与 `bin/ffprobe[.exe]`：
         // 解压/探版失败不碰原有托管二进制，也不会留下版本错配的 ffprobe。
         let stage_dir = bin_dir.join("ffmpeg.stage.tmp");
-        let _ = tokio::fs::remove_dir_all(&stage_dir).await;
-        tokio::fs::create_dir_all(&stage_dir)
-            .await
-            .map_err(|e| ComponentError::Io(e.to_string()))?;
-        let installed = stage_and_install(&archive_path, &stage_dir, &bin_dir).await;
-        let _ = tokio::fs::remove_file(&archive_path).await;
-        let _ = tokio::fs::remove_dir_all(&stage_dir).await;
+        let installed = async {
+            match tokio::fs::remove_dir_all(&stage_dir).await {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(ComponentError::Io(e.to_string())),
+            }
+            tokio::fs::create_dir_all(&stage_dir)
+                .await
+                .map_err(|e| ComponentError::Io(e.to_string()))?;
+            stage_and_install(&archive_path, &stage_dir, &bin_dir).await
+        }
+        .await;
+        if let Err(error) = tokio::fs::remove_file(&archive_path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("components", "remove_ffmpeg_archive", &error);
+        }
+        if let Err(error) = tokio::fs::remove_dir_all(&stage_dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("components", "remove_ffmpeg_staging", &error);
+        }
         installed?;
 
         let target = managed_ffmpeg_path(data_dir);
@@ -515,13 +521,20 @@ mod install {
             .by_index(idx)
             .map_err(|e| ComponentError::Archive(e.to_string()))?;
         let tmp = target.with_extension("tmp");
-        let mut out = std::fs::File::create(&tmp).map_err(|e| ComponentError::Io(e.to_string()))?;
-        std::io::copy(&mut entry, &mut out).map_err(|e| ComponentError::Io(e.to_string()))?;
-        drop(out);
-        std::fs::rename(&tmp, target).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            ComponentError::Io(e.to_string())
-        })
+        let result = (|| {
+            let mut out =
+                std::fs::File::create(&tmp).map_err(|e| ComponentError::Io(e.to_string()))?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| ComponentError::Io(e.to_string()))?;
+            drop(out);
+            std::fs::rename(&tmp, target).map_err(|e| ComponentError::Io(e.to_string()))
+        })();
+        if result.is_err()
+            && let Err(error) = std::fs::remove_file(&tmp)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("components", "remove_ffmpeg_extract_file", &error);
+        }
+        result
     }
 
     /// Linux：tar.xz 经系统 `tar -xJf` 解压（tar+xz 为发行版基础组件，避免引入
@@ -533,7 +546,11 @@ mod install {
         ffprobe: &str,
     ) -> Result<(), ComponentError> {
         let extract_dir = bin_dir.join("ffmpeg.extract.tmp");
-        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+        match tokio::fs::remove_dir_all(&extract_dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ComponentError::Io(e.to_string())),
+        }
         tokio::fs::create_dir_all(&extract_dir)
             .await
             .map_err(|e| ComponentError::Io(e.to_string()))?;
@@ -545,18 +562,32 @@ mod install {
             .arg("-C")
             .arg(&extract_dir)
             .output()
-            .await
-            .map_err(|e| ComponentError::Archive(format!("failed to run tar: {e}")))?;
-        if !output.status.success() {
-            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-            return Err(ComponentError::Archive(format!(
+            .await;
+        let failure = match &output {
+            Err(error) => Some(ComponentError::Archive(format!(
+                "failed to run tar: {error}"
+            ))),
+            Ok(output) if !output.status.success() => Some(ComponentError::Archive(format!(
                 "tar exited with {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
                     .chars()
                     .take(300)
                     .collect::<String>()
-            )));
+            ))),
+            Ok(_) => None,
+        };
+        if let Some(error) = failure {
+            if let Err(cleanup_error) = tokio::fs::remove_dir_all(&extract_dir).await
+                && cleanup_error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning(
+                    "components",
+                    "remove_failed_ffmpeg_extract",
+                    &cleanup_error,
+                );
+            }
+            return Err(error);
         }
         // 归档内布局：ffmpeg-nX.Y-latest-<plat>-gpl-X.Y/bin/{ffmpeg,ffprobe}
         let result = match find_in_extract(&extract_dir, ffmpeg).await {
@@ -576,7 +607,11 @@ mod install {
                 None => crate::log_info!("[components] ffprobe not in archive, skipped"),
             }
         }
-        let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+        if let Err(error) = tokio::fs::remove_dir_all(&extract_dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::logger::report_warning("components", "remove_ffmpeg_extract_dir", &error);
+        }
         result
     }
 
@@ -720,7 +755,7 @@ mod install {
                     .is_err()
             );
 
-            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 }

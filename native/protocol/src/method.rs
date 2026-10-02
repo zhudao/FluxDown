@@ -106,6 +106,11 @@ pub const DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH: &str = "daemon.bt.trackerSubsc
 pub const DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH: &str = "daemon.ed2k.serverSubscription.refresh";
 pub const DAEMON_DIAGNOSTICS_DESCRIBE: &str = "daemon.diagnostics.describe";
 pub const DAEMON_DIAGNOSTICS_PREPARE_LOG_EXPORT: &str = "daemon.diagnostics.prepareLogExport";
+/// Doctor 动态探测：在 daemon 进程内真实写入各下载目录 / 数据目录并运行外部组件，
+/// 验证下载链路实际拥有的权限（agent 只读配置判断不出 TCC、只读挂载、隔离属性等）。
+pub const DAEMON_DIAGNOSTICS_PROBE: &str = "daemon.diagnostics.probe";
+/// Doctor 修复：补上托管组件（daemon 数据目录内）缺失的执行权限并重新探测，返回 `ComponentProbeDto`。
+pub const DAEMON_DIAGNOSTICS_FIX_COMPONENT: &str = "daemon.diagnostics.fixComponent";
 pub const DAEMON_MIGRATION_LINK_EXPORT: &str = "daemon.migration.linkExport";
 pub const DAEMON_MIGRATION_LINK_ACK: &str = "daemon.migration.linkAck";
 pub const DAEMON_MIGRATION_GATEWAY_EXPORT: &str = "daemon.migration.gatewayExport";
@@ -195,6 +200,10 @@ pub const AGENT_CAPTURE_SUBMIT: &str = "agent.capture.submit";
 pub const AGENT_CAPTURE_SUBMIT_TORRENT_FILE: &str = "agent.capture.submitTorrentFile";
 pub const AGENT_CAPTURE_LIST: &str = "agent.capture.list";
 pub const AGENT_CAPTURE_RESOLVE: &str = "agent.capture.resolve";
+/// 捕获上下文只读清单预解析，返回 `ResolvePreviewResponse`，不消费事务。
+pub const AGENT_CAPTURE_PREVIEW: &str = "agent.capture.preview";
+/// 用捕获上下文与最终清单选择建组，成功后消费事务，返回 `CreateGroupResponse`。
+pub const AGENT_CAPTURE_CREATE_GROUP: &str = "agent.capture.createGroup";
 /// 从本机插件包安装：agent 读文件、上传 daemon blob 后调用 `daemon.plugin.install`。
 pub const AGENT_PLUGIN_INSTALL_FILE: &str = "agent.plugin.installFile";
 pub const AGENT_DIAGNOSTICS_RUN: &str = "agent.diagnostics.run";
@@ -317,6 +326,8 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH,
     DAEMON_DIAGNOSTICS_DESCRIBE,
     DAEMON_DIAGNOSTICS_PREPARE_LOG_EXPORT,
+    DAEMON_DIAGNOSTICS_PROBE,
+    DAEMON_DIAGNOSTICS_FIX_COMPONENT,
     DAEMON_MIGRATION_LINK_EXPORT,
     DAEMON_MIGRATION_LINK_ACK,
     DAEMON_MIGRATION_GATEWAY_EXPORT,
@@ -386,6 +397,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_CAPTURE_SUBMIT_TORRENT_FILE,
     AGENT_CAPTURE_LIST,
     AGENT_CAPTURE_RESOLVE,
+    AGENT_CAPTURE_PREVIEW,
+    AGENT_CAPTURE_CREATE_GROUP,
     AGENT_PLUGIN_INSTALL_FILE,
     AGENT_DIAGNOSTICS_RUN,
     AGENT_DIAGNOSTICS_REPAIR,
@@ -414,6 +427,8 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,
     DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH,
     DAEMON_FS_LIST,
+    DAEMON_DIAGNOSTICS_PROBE,
+    DAEMON_DIAGNOSTICS_FIX_COMPONENT,
 ];
 
 /// 是否属于 [`SLOW_DAEMON_METHODS`]。

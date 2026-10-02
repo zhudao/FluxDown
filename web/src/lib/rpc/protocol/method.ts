@@ -102,6 +102,10 @@ export const METHOD = {
   DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH: 'daemon.ed2k.serverSubscription.refresh',
   DAEMON_DIAGNOSTICS_DESCRIBE: 'daemon.diagnostics.describe',
   DAEMON_DIAGNOSTICS_PREPARE_LOG_EXPORT: 'daemon.diagnostics.prepareLogExport',
+  /** agent Doctor 专用：daemon 内真实写入下载 / 数据目录并运行外部组件。 */
+  DAEMON_DIAGNOSTICS_PROBE: 'daemon.diagnostics.probe',
+  /** agent Doctor 专用：补上托管组件缺失的执行权限并重新探测。 */
+  DAEMON_DIAGNOSTICS_FIX_COMPONENT: 'daemon.diagnostics.fixComponent',
   DAEMON_MIGRATION_LINK_EXPORT: 'daemon.migration.linkExport',
   DAEMON_MIGRATION_LINK_ACK: 'daemon.migration.linkAck',
   DAEMON_MIGRATION_GATEWAY_EXPORT: 'daemon.migration.gatewayExport',
@@ -176,6 +180,8 @@ export const METHOD = {
   AGENT_CAPTURE_SUBMIT_TORRENT_FILE: 'agent.capture.submitTorrentFile',
   AGENT_CAPTURE_LIST: 'agent.capture.list',
   AGENT_CAPTURE_RESOLVE: 'agent.capture.resolve',
+  AGENT_CAPTURE_PREVIEW: 'agent.capture.preview',
+  AGENT_CAPTURE_CREATE_GROUP: 'agent.capture.createGroup',
   AGENT_PLUGIN_INSTALL_FILE: 'agent.plugin.installFile',
   AGENT_DIAGNOSTICS_RUN: 'agent.diagnostics.run',
   AGENT_DIAGNOSTICS_REPAIR: 'agent.diagnostics.repair',

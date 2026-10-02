@@ -422,6 +422,13 @@ impl GatewayService {
             method::AGENT_CAPTURE_RESOLVE => {
                 self.capture_resolve(params_or_empty(request.params)).await
             }
+            method::AGENT_CAPTURE_PREVIEW => {
+                self.capture_preview(params_or_empty(request.params)).await
+            }
+            method::AGENT_CAPTURE_CREATE_GROUP => {
+                self.capture_create_group(params_or_empty(request.params))
+                    .await
+            }
             method::AGENT_PLUGIN_INSTALL_FILE => {
                 self.plugin_install_file(params_or_empty(request.params))
                     .await
@@ -794,6 +801,38 @@ impl GatewayService {
         )
     }
 
+    async fn capture_preview(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let params = serde_json::from_value::<fluxdown_protocol::CapturePreviewParams>(params)
+            .map_err(|error| {
+                tracing::debug!(error = %error, "rejected capture preview params");
+                RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)
+            })?;
+        capture_value(
+            self.capture
+                .preview(&params.transaction_id, params.request)
+                .await,
+        )
+    }
+
+    async fn capture_create_group(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let params = serde_json::from_value::<fluxdown_protocol::CaptureCreateGroupParams>(params)
+            .map_err(|error| {
+                tracing::debug!(error = %error, "rejected capture group params");
+                RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)
+            })?;
+        capture_value(
+            self.capture
+                .create_group(&params.transaction_id, params.request, params.context)
+                .await,
+        )
+    }
+
     /// 读取本机 `.torrent`，上传 daemon blob 后走捕获路径建任务。`silent=false`（用户主动选择）
     /// 不静默：由 daemon 发 BT 文件选择请求；`saveDir` / `queueId` / `startPaused` 缺省维持旧行为。
     async fn capture_submit_torrent_file(
@@ -995,6 +1034,11 @@ fn capture_value<T: serde::Serialize>(
         Err(CaptureError::NotFound) => {
             Err(RpcErrorData::new(ApplicationErrorCode::NotFound, false))
         }
+        Err(CaptureError::Busy) => Err(RpcErrorData::new(ApplicationErrorCode::Conflict, true)),
+        Err(CaptureError::InvalidGroup) => Err(RpcErrorData::new(
+            ApplicationErrorCode::InvalidArgument,
+            false,
+        )),
         Err(CaptureError::Daemon(error)) => Err(error),
         Err(CaptureError::Json(_)) => Err(RpcErrorData::new(
             ApplicationErrorCode::InvalidArgument,
@@ -1007,14 +1051,44 @@ fn capture_value<T: serde::Serialize>(
 }
 
 fn diagnostics_value<T>(result: Result<T, DiagnosticsError>) -> Result<T, RpcErrorData> {
+    use crate::permission::PermissionError;
+    use fluxdown_protocol::ErrorReason;
+
+    if let Err(error) = &result {
+        tracing::warn!(error = %error, "doctor action failed");
+    }
     result.map_err(|error| match error {
         DiagnosticsError::InvalidAction(_) => {
             RpcErrorData::new(ApplicationErrorCode::InvalidArgument, false)
         }
         DiagnosticsError::Platform(error) => platform_error_data(error),
         DiagnosticsError::Daemon(error) => error,
-        DiagnosticsError::State(_) | DiagnosticsError::Io(_) | DiagnosticsError::Export(_) => {
+        DiagnosticsError::State(_)
+        | DiagnosticsError::Io(_)
+        | DiagnosticsError::Export(_)
+        | DiagnosticsError::Notification(_)
+        | DiagnosticsError::Permission(PermissionError::Failed(_) | PermissionError::TimedOut(_)) => {
             RpcErrorData::new(ApplicationErrorCode::Internal, false)
+        }
+        DiagnosticsError::Permission(PermissionError::Cancelled) => {
+            RpcErrorData::new(ApplicationErrorCode::Cancelled, false)
+                .with_reason(ErrorReason::ElevationCancelled)
+        }
+        DiagnosticsError::Permission(PermissionError::ElevationUnavailable(_)) => {
+            RpcErrorData::new(ApplicationErrorCode::Unsupported, false)
+                .with_reason(ErrorReason::ElevationUnavailable)
+        }
+        DiagnosticsError::Permission(PermissionError::RunningElevated) => {
+            RpcErrorData::new(ApplicationErrorCode::Unsupported, false)
+                .with_reason(ErrorReason::RunningElevated)
+        }
+        DiagnosticsError::Permission(PermissionError::NotApplicable(_)) => {
+            RpcErrorData::new(ApplicationErrorCode::Unsupported, false)
+                .with_reason(ErrorReason::RepairNotApplicable)
+        }
+        DiagnosticsError::RepairIncomplete(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Internal, false)
+                .with_reason(ErrorReason::RepairIncomplete)
         }
     })
 }
@@ -1348,10 +1422,12 @@ async fn run_socket(
                 } else {
                     "agent-shutdown"
                 };
-                let _ = socket.send(Message::Close(Some(CloseFrame {
+                if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
                     code: 1001,
                     reason: reason.into(),
-                }))).await;
+                }))).await {
+                    tracing::debug!(%error, "gateway peer closed before shutdown frame");
+                }
                 break;
             }
             incoming = socket.next() => {
@@ -1367,7 +1443,10 @@ async fn run_socket(
                 if !ready && request.method == method::SYSTEM_SHUTDOWN && request.validate().is_ok() {
                     // 握手前也受理：协议版本不兼容的新桌面程序靠它替换旧 agent。
                     let response = RpcResponse::success(request.id, serde_json::json!({ "ok": true }));
-                    let _ = send_response(&mut socket, response).await;
+                    if send_response(&mut socket, response).await.is_err() {
+                        tracing::debug!("gateway shutdown acknowledgement failed; quit not requested");
+                        break;
+                    }
                     service.local.lifecycle.request_quit();
                     continue;
                 }
@@ -1412,7 +1491,9 @@ async fn run_socket(
                         if socket.send(Message::Text(text.into())).await.is_err() { break; }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        let _ = socket.send(Message::Close(Some(CloseFrame { code: 4009, reason: "event-gap".into() }))).await;
+                        if let Err(error) = socket.send(Message::Close(Some(CloseFrame { code: 4009, reason: "event-gap".into() }))).await {
+                            tracing::debug!(%error, "gateway peer closed before event-gap frame");
+                        }
                         break;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -1463,8 +1544,9 @@ const RESPONSE_QUEUE: usize = 256;
 /// 每个通道待处理请求上限；超出立即以可重试的 `Unavailable` 拒绝，而不是阻塞整个连接。
 const LANE_QUEUE: usize = 128;
 
-/// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联的诊断动作，以及可写任意目标路径的日志导出。
-/// Web 的 Doctor 仍可用其余动作（刷新 tracker / ed2k 服务器等），日志导出走 `/api/web/logs/export`。
+/// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联、请求管理员授权、打开系统设置与
+/// 测试通知的诊断动作，以及可写任意目标路径的日志导出。Web 的 Doctor 仍可用其余动作（刷新
+/// tracker / ed2k 服务器、修复托管组件执行权限等），日志导出走 `/api/web/logs/export`。
 fn server_mode_denies(request: &RpcRequest) -> bool {
     match request.method.as_str() {
         method::AGENT_DIAGNOSTICS_EXPORT_LOGS => true,
@@ -1480,6 +1562,10 @@ fn server_mode_denies(request: &RpcRequest) -> bool {
                         | crate::diagnostics::ACTION_REGISTER
                         | crate::diagnostics::ACTION_REREGISTER
                         | crate::diagnostics::ACTION_USE_THIS_INSTALL
+                        | crate::diagnostics::ACTION_FIX_DIR_ACCESS
+                        | crate::diagnostics::ACTION_ENABLE_AUTOSTART
+                        | crate::diagnostics::ACTION_OPEN_SETTINGS
+                        | crate::diagnostics::ACTION_TEST_NOTIFICATION
                 )
             }),
         _ => false,
@@ -1503,6 +1589,8 @@ enum Lane {
     Icon,
     /// 局域网配对 / 诊断：含最长约 70s 的对端等待或外部探测，单独成道，不堵住心跳与本机设置操作。
     Slow,
+    /// Doctor 修复：可能等待用户在系统授权对话框里操作数分钟，单独成道，不堵住配对与重新诊断。
+    Repair,
 }
 
 fn lane_for(method_name: &str) -> Lane {
@@ -1512,6 +1600,12 @@ fn lane_for(method_name: &str) -> Lane {
         } else {
             Lane::Daemon
         };
+    }
+    if method_name == method::AGENT_CAPTURE_PREVIEW {
+        return Lane::DaemonSlow;
+    }
+    if method_name == method::AGENT_CAPTURE_CREATE_GROUP {
+        return Lane::Daemon;
     }
     if method_name == fluxdown_protocol::method::AGENT_PLATFORM_FILE_ICON {
         return Lane::Icon;
@@ -1532,6 +1626,8 @@ fn lane_for(method_name: &str) -> Lane {
         .any(|prefix| method_name.starts_with(prefix))
     {
         Lane::Cloud
+    } else if method_name == fluxdown_protocol::method::AGENT_DIAGNOSTICS_REPAIR {
+        Lane::Repair
     } else if method_name.starts_with("agent.link.")
         || method_name.starts_with("agent.diagnostics.")
     {
@@ -1548,6 +1644,7 @@ struct RequestLanes {
     local: tokio::sync::mpsc::Sender<RpcRequest>,
     icon: tokio::sync::mpsc::Sender<RpcRequest>,
     slow: tokio::sync::mpsc::Sender<RpcRequest>,
+    repair: tokio::sync::mpsc::Sender<RpcRequest>,
 }
 
 /// 单条连接同时在途的 daemon 慢调用上限（daemon 侧每连接上限为 16，留出余量）。
@@ -1587,8 +1684,10 @@ impl RequestLanes {
                     tokio::spawn(async move {
                         let response = service.call(request).await;
                         drop(permit);
-                        // 连接已关闭时响应无处可发，丢弃即可。
-                        let _ = responses.send(response).await;
+                        // 连接关闭会丢弃接收端；正常生命周期，不升级为警告。
+                        if responses.send(response).await.is_err() {
+                            tracing::trace!("gateway connection closed before concurrent response");
+                        }
                     });
                 }
             });
@@ -1601,6 +1700,7 @@ impl RequestLanes {
             local: start(),
             icon: start(),
             slow: start(),
+            repair: start(),
         }
     }
 
@@ -1613,6 +1713,7 @@ impl RequestLanes {
             Lane::Local => &self.local,
             Lane::Icon => &self.icon,
             Lane::Slow => &self.slow,
+            Lane::Repair => &self.repair,
         };
         let id = request.id.clone();
         match sender.try_send(request) {
@@ -1711,7 +1812,9 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
-        let _ = std::fs::remove_dir_all(dir);
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), %error, "bearer test cleanup failed");
+        }
     }
 
     struct TestGateway {
@@ -1866,7 +1969,9 @@ mod tests {
             drop(service);
             drop(state);
             drop(store);
-            let _ = tokio::fs::remove_dir_all(dir).await;
+            if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+                tracing::warn!(path = %dir.display(), %error, "gateway test cleanup failed");
+            }
         }
 
         async fn patch_gateway(&self, params: serde_json::Value) -> serde_json::Value {

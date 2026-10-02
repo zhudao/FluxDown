@@ -29,10 +29,10 @@ use crate::{
     },
     pages::new_download::{NewDownloadContext, build_new_download_context},
     pages::task_detail::TaskDetailView,
-    strings::DownloadStrings,
+    strings::{DownloadStrings, error_text},
     submission::{NewDownloadSubmission, SubmitNotice, run_submission},
 };
-use fluxdown_ui_components::{ControlExt as _, FluxIcon};
+use fluxdown_ui_components::{ControlExt as _, FluxIcon, SidebarChange, SidebarState};
 use fluxdown_ui_i18n::Translator;
 use gpui::{
     App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, FocusHandle, FontWeight,
@@ -119,11 +119,10 @@ pub struct DownloadView {
     pub(crate) section_expanded: HashMap<SidebarSection, bool>,
     pub(crate) section_motion_from: HashMap<SidebarSection, f32>,
     pub(crate) section_motion_started_at: HashMap<SidebarSection, Instant>,
+    pub(crate) sidebar: Entity<SidebarState>,
     pub(crate) table_state: Entity<TableState<DownloadTableDelegate>>,
     pub(crate) host: DownloadHostActions,
     pub(crate) last_error: Option<SharedString>,
-    pub(crate) resizable_state: Entity<ResizableState>,
-    resizable_state_initialized: bool,
     /// 根元素 focus handle：右键菜单 action_context 分派目标，`escape`
     /// 清空搜索框后也交回给它。
     pub(crate) focus_handle: FocusHandle,
@@ -225,6 +224,18 @@ impl DownloadView {
             }
         })
         .detach();
+        let sidebar = cx.new(|cx| SidebarState::new(px(200.), px(176.)..px(300.), cx));
+        cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&sidebar, |this, _, change: &SidebarChange, cx| {
+            this.table_state.update(cx, |table, _| {
+                let prefs = table.delegate_mut().prefs_mut();
+                prefs.sidebar_width = f32::from(change.width);
+                prefs.sidebar_collapsed = change.collapsed;
+            });
+            this.schedule_persist_prefs(cx);
+            cx.notify();
+        })
+        .detach();
 
         Self {
             controller,
@@ -241,11 +252,10 @@ impl DownloadView {
                 .collect(),
             section_motion_from: HashMap::new(),
             section_motion_started_at: HashMap::new(),
+            sidebar,
             table_state,
             host: DownloadHostActions::default(),
             last_error: None,
-            resizable_state: cx.new(|_| ResizableState::default()),
-            resizable_state_initialized: false,
             focus_handle,
             search_input,
             search_placeholder: strings_placeholder,
@@ -261,6 +271,11 @@ impl DownloadView {
             refresh_gate: RefreshGate::default(),
             refreshed_structure: u64::MAX,
         }
+    }
+
+    /// 供 shell 顶栏与页面共享的侧栏状态；布局修改沿用下载页偏好持久化。
+    pub fn sidebar_state(&self) -> Entity<SidebarState> {
+        self.sidebar.clone()
     }
 
     /// 注入宿主入口（新建下载 / 任务窗口 / 队列管理…）。
@@ -579,17 +594,24 @@ impl DownloadView {
             RefreshPlan::Deferred => {
                 let this = cx.weak_entity();
                 cx.defer(move |cx| {
-                    let _ = this.update(cx, |this, cx| {
+                    let Ok(()) = this.update(cx, |this, cx| {
                         this.run_scheduled_refresh(RefreshTrigger::Deferred, cx);
-                    });
+                    }) else {
+                        // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                        return;
+                    };
                 });
             }
             RefreshPlan::After(delay) => {
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(delay).await;
-                    let _ = this.update(cx, |this, cx| {
+
+                    let Ok(()) = this.update(cx, |this, cx| {
                         this.run_scheduled_refresh(RefreshTrigger::Timer, cx);
-                    });
+                    }) else {
+                        // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                        return;
+                    };
                 })
                 .detach();
             }
@@ -720,10 +742,14 @@ impl DownloadView {
             RescanDecision::After(delay) => {
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(delay).await;
-                    let _ = this.update(cx, |this, cx| {
+
+                    let Ok(()) = this.update(cx, |this, cx| {
                         this.file_rescan.trailing_fired(Instant::now());
                         this.send_file_rescan(cx);
-                    });
+                    }) else {
+                        // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                        return;
+                    };
                 })
                 .detach();
             }
@@ -743,7 +769,13 @@ impl DownloadView {
         let future = self.controller.execute(DownloadsCommand::RescanFiles);
         cx.background_executor()
             .spawn(async move {
-                let _ = future.await;
+                if let Err(error) = future.await {
+                    // 后台定时扫描仍会兜底，不覆盖页面现有业务错误。
+                    eprintln!(
+                        "download file rescan request failed: {:?} ({:?})",
+                        error.code, error.reason
+                    );
+                }
             })
             .detach();
     }
@@ -835,7 +867,8 @@ impl DownloadView {
             if marker.get() != generation {
                 return;
             }
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 let value = this.table_state.update(cx, |table, _| {
                     let delegate = table.delegate_mut();
                     let columns = delegate.column_prefs();
@@ -850,11 +883,28 @@ impl DownloadView {
                         key: VIEW_PREFS_KEY,
                         value,
                     });
-                cx.background_spawn(async move {
-                    let _ = future.await;
+                cx.spawn(async move |this, cx| {
+                    if let Err(error) = future.await {
+                        let Ok(()) = this.update(cx, |this, cx| {
+                            if this.prefs_generation.get() == generation {
+                                this.applied_view_prefs = None;
+                            }
+                            this.last_error = Some(SharedString::from(error_text(
+                                this.translator.read(cx),
+                                &error,
+                            )));
+                            cx.notify();
+                        }) else {
+                            // 下载页已关闭，停止回写偏好保存结果。
+                            return;
+                        };
+                    }
                 })
                 .detach();
-            });
+            }) else {
+                // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -892,7 +942,8 @@ impl DownloadView {
             if marker.get() != generation {
                 return;
             }
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 let query = input.read(cx).value().to_string();
                 this.table_state.update(cx, |table, cx| {
                     table.delegate_mut().set_query(&query);
@@ -900,7 +951,10 @@ impl DownloadView {
                         table.refresh(cx);
                     }
                 });
-            });
+            }) else {
+                // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -991,13 +1045,14 @@ impl DownloadView {
                         return false;
                     }
                     let task_id = task_id.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         this.execute_commands(
                             vec![DownloadsCommand::Rename { task_id, file_name }],
                             cx,
                         );
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
         input.update(cx, |state, cx| state.focus(window, cx));
@@ -1029,13 +1084,14 @@ impl DownloadView {
                 ))
                 .on_ok(move |_, _, cx| {
                     let task_id = task_id.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         this.execute_commands(
                             vec![DownloadsCommand::IgnorePluginRetry { task_id }],
                             cx,
                         );
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -1157,7 +1213,8 @@ impl DownloadView {
                 ))
                 .on_ok(move |_, _, cx| {
                     let group_id = group_id.clone();
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         this.execute_commands(
                             vec![DownloadsCommand::GroupDelete {
                                 group_id,
@@ -1165,8 +1222,8 @@ impl DownloadView {
                             }],
                             cx,
                         );
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -1328,11 +1385,12 @@ impl DownloadView {
                     cx,
                 ))
                 .on_ok(move |_, _, cx| {
-                    let _ = this.update(cx, |this, cx| {
+                    // 页面释放后没有提交命令，不能让确认框报告成功。
+                    this.update(cx, |this, cx| {
                         let commands = this.delete_commands(&keys, true);
                         this.execute_commands(commands, cx);
-                    });
-                    true
+                    })
+                    .is_ok()
                 })
         });
     }
@@ -1524,7 +1582,11 @@ impl DownloadView {
                 })
                 .map(|path| DownloadsCommand::open_torrent_file(&path))
                 .collect();
-            let _ = this.update(cx, |this, cx| this.execute_commands(commands, cx));
+
+            let Ok(()) = this.update(cx, |this, cx| this.execute_commands(commands, cx)) else {
+                // 下载页已释放，结束回调，不再提交请求或刷新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -1817,13 +1879,6 @@ impl DownloadView {
 
 impl Render for DownloadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sizes = self.resizable_state.read(cx).sizes().to_vec();
-        let main_panel_measured = sizes.get(1).is_some_and(|size| *size > px(1.));
-        if !self.resizable_state_initialized && main_panel_measured {
-            self.resizable_state
-                .update(cx, |state, cx| state.reset_panel(1, cx));
-            self.resizable_state_initialized = true;
-        }
         // 语言切换后同步搜索框 placeholder（InputState 只在构造时取一次）。
         if self.search_placeholder != self.strings.search_tasks_placeholder {
             self.search_placeholder = self.strings.search_tasks_placeholder.clone();
@@ -1832,7 +1887,6 @@ impl Render for DownloadView {
                 input.set_placeholder(placeholder, window, cx);
             });
         }
-        let sidebar_width = self.table_state.read(cx).delegate().prefs().sidebar_width;
         v_flex()
             .key_context(KEY_CONTEXT)
             .size_full()
@@ -1870,29 +1924,7 @@ impl Render for DownloadView {
                 let tokens = fluxdown_ui_theme::active_theme(cx).tokens();
                 style.bg(tokens.colors.accent.opacity(0.2))
             })
-            .child(
-                div().flex_1().min_h_0().min_w_0().child(
-                    h_resizable("downloads-content")
-                        .with_state(&self.resizable_state)
-                        .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
-                            state.update(cx, |state, cx| state.reset_panel(1, cx));
-                            if let Some(width) = state.read(cx).sizes().first().copied() {
-                                let width = f32::from(width);
-                                if width > 0. {
-                                    this.mutate_prefs(|prefs| prefs.sidebar_width = width, cx);
-                                }
-                            }
-                        }))
-                        .child(
-                            resizable_panel()
-                                .size(px(sidebar_width))
-                                .flex_none()
-                                .size_range(px(176.)..px(300.))
-                                .child(self.render_sidebar(window, cx)),
-                        )
-                        .child(resizable_panel().child(self.render_main(cx))),
-                ),
-            )
+            .child(self.render_sidebar_layout(window, cx))
             .child(self.render_status_bar(cx))
     }
 }

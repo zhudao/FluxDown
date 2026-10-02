@@ -10,7 +10,7 @@ use fluxdown_ui_components::FluxIcon;
 use fluxdown_ui_downloads::PageCommand;
 use fluxdown_ui_downloads::actions as dl;
 use fluxdown_ui_i18n::Translator;
-use fluxdown_ui_settings::{SettingsTarget, search_index};
+use fluxdown_ui_settings::search_index;
 use fluxdown_ui_shell::RouteId;
 use gpui::{Action, App, SharedString, Window};
 use gpui_component::{Icon, WindowExt as _};
@@ -48,7 +48,7 @@ pub fn toggle(cx: &mut App) {
                 handle
             }
         };
-        let _ = host.update(cx, |_, window, cx| {
+        if let Err(error) = host.update(cx, |_, window, cx| {
             if fluxdown_ui_command_palette::is_open(window, cx) {
                 fluxdown_ui_command_palette::close(window, cx);
                 return;
@@ -59,7 +59,9 @@ pub fn toggle(cx: &mut App) {
             let translator = Desktop::global(cx).translator.read(cx).clone();
             let config = build_config(&translator, cx);
             fluxdown_ui_command_palette::open(window, cx, &translator, config);
-        });
+        }) {
+            log::debug!("view or window released before lifecycle update: {error:#}");
+        }
     });
 }
 
@@ -333,7 +335,7 @@ fn settings_items(labels: &Labels, cx: &mut App) -> Vec<PaletteItem> {
                 entry.id,
                 entry.title,
                 move |_, cx| {
-                    reveal_setting(cx, target.clone());
+                    crate::windows::settings::reveal(cx, target.clone());
                 },
             )
             .icon(Icon::new(icon))
@@ -367,9 +369,11 @@ fn run_in_downloads(cx: &mut App, command: PageCommand) {
         else {
             return;
         };
-        let _ = handle.update(cx, |_, window, cx| {
+        if let Err(error) = handle.update(cx, |_, window, cx| {
             downloads.update(cx, |view, cx| view.run_page_command(command, window, cx));
-        });
+        }) {
+            log::debug!("view or window released before lifecycle update: {error:#}");
+        }
     });
 }
 
@@ -387,26 +391,6 @@ fn navigate_now(cx: &mut App, route: RouteId) {
     {
         shell.update(cx, |shell, cx| shell.navigate(route, cx));
     }
-}
-
-/// 打开（或聚焦）设置窗口并定位到设置项。
-fn reveal_setting(cx: &mut App, target: SettingsTarget) {
-    cx.defer(move |cx| {
-        crate::windows::settings::open(cx);
-        let Some(handle) = WindowRegistry::handle(cx, &WindowKey::Settings) else {
-            return;
-        };
-        let Some(view) = Desktop::global(cx)
-            .settings_view
-            .as_ref()
-            .and_then(gpui::WeakEntity::upgrade)
-        else {
-            return;
-        };
-        let _ = handle.update(cx, |_, window, cx| {
-            view.update(cx, |view, cx| view.reveal(&target, window, cx));
-        });
-    });
 }
 
 /// 平台快捷键提示：macOS `⌘N`，其他平台 `Ctrl+N`。

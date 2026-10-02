@@ -46,10 +46,14 @@ fn desc_key(kind: ComponentKind) -> &'static str {
     }
 }
 
-fn path_hint_key(kind: ComponentKind) -> &'static str {
-    match kind {
-        ComponentKind::Ffmpeg => "componentsManualPathHintFfmpeg",
-        ComponentKind::Ytdlp => "componentsManualPathHintYtdlp",
+fn path_hint_key(kind: ComponentKind, platform: &str) -> &'static str {
+    match (kind, platform) {
+        (ComponentKind::Ffmpeg, "windows") => "componentsManualPathHintFfmpeg",
+        (ComponentKind::Ytdlp, "windows") => "componentsManualPathHintYtdlp",
+        (ComponentKind::Ffmpeg, "macos") => "componentsManualPathHintFfmpegMacos",
+        (ComponentKind::Ytdlp, "macos") => "componentsManualPathHintYtdlpMacos",
+        (ComponentKind::Ffmpeg, _) => "componentsManualPathHintFfmpegLinux",
+        (ComponentKind::Ytdlp, _) => "componentsManualPathHintYtdlpLinux",
     }
 }
 
@@ -151,7 +155,7 @@ impl ExtensionsView {
             let placeholder = self
                 .translator
                 .read(cx)
-                .text(path_hint_key(kind))
+                .text(path_hint_key(kind, std::env::consts::OS))
                 .to_owned();
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
@@ -522,11 +526,14 @@ impl ExtensionsView {
                                 PopupMenuItem::new(version.clone())
                                     .checked(checked)
                                     .on_click(move |_, _, cx| {
-                                        let _ = view.update(cx, |this, cx| {
+                                        let Ok(()) = view.update(cx, |this, cx| {
                                             this.components[slot].selected_version =
                                                 Some(version.clone());
                                             cx.notify();
-                                        });
+                                        }) else {
+                                            // 扩展视图已释放，结束回调，不再更新状态。
+                                            return;
+                                        };
                                     }),
                             )
                         });
@@ -621,7 +628,8 @@ impl ExtensionsView {
             let result = future.await.and_then(|value| {
                 serde_json::from_value::<ComponentVersions>(value).map_err(|_| protocol_error())
             });
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 let message = result
                     .as_ref()
                     .err()
@@ -647,7 +655,10 @@ impl ExtensionsView {
                     Err(_) => ui.versions_error = message,
                 }
                 cx.notify();
-            });
+            }) else {
+                // 扩展视图已释放，结束回调，不再更新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -676,14 +687,18 @@ impl ExtensionsView {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = future.await;
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 let ui = &mut this.components[slot];
                 ui.install_pending = false;
                 ui.installing = false;
                 let last_result = ui.last_result.take();
                 this.finish_component_op(kind, false, result, last_result, window, cx);
                 cx.notify();
-            });
+            }) else {
+                // 对话框或窗口已释放，停止回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -717,8 +732,9 @@ impl ExtensionsView {
                     cx,
                 ))
                 .on_ok(move |_, window, cx| {
-                    let _ = view.update(cx, |this, cx| this.uninstall_component(kind, window, cx));
-                    true
+                    // 页面已释放时未提交卸载，不能报告确认成功。
+                    view.update(cx, |this, cx| this.uninstall_component(kind, window, cx))
+                        .is_ok()
                 })
         });
     }
@@ -739,11 +755,15 @@ impl ExtensionsView {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = future.await;
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.components[slot].uninstalling = false;
                 this.finish_component_op(kind, true, result, None, window, cx);
                 cx.notify();
-            });
+            }) else {
+                // 对话框或窗口已释放，停止回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -837,7 +857,8 @@ impl ExtensionsView {
             let result = future.await.and_then(|value| {
                 serde_json::from_value::<DaemonConfigSnapshot>(value).map_err(|_| protocol_error())
             });
-            let _ = this.update_in(cx, |this, window, cx| {
+
+            let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.components[slot].saving_path = false;
                 match result {
                     Ok(config) => {
@@ -850,7 +871,10 @@ impl ExtensionsView {
                     }
                 }
                 cx.notify();
-            });
+            }) else {
+                // 对话框或窗口已释放，停止回写异步结果。
+                return;
+            };
         })
         .detach();
     }
@@ -869,10 +893,14 @@ impl ExtensionsView {
             let Ok(status) = serde_json::from_value::<ComponentStatusDto>(value) else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
+
+            let Ok(()) = this.update(cx, |this, cx| {
                 this.controller.apply_component_status(status);
                 cx.notify();
-            });
+            }) else {
+                // 扩展视图已释放，结束回调，不再更新状态。
+                return;
+            };
         })
         .detach();
     }
@@ -884,7 +912,12 @@ fn protocol_error() -> RpcErrorData {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use std::sync::Arc;
+
+    use fluxdown_protocol::{ComponentKind, PathStyle};
+    use fluxdown_ui_i18n::I18nCatalog;
+
+    use super::{format_bytes, path_hint_key};
 
     #[test]
     fn format_bytes_scales_by_1024() {
@@ -894,5 +927,36 @@ mod tests {
         assert_eq!(format_bytes(1536), "1.5 KB");
         assert_eq!(format_bytes(12 * 1024 * 1024 + 300 * 1024), "12.3 MB");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn manual_path_hints_use_the_target_platform_path_style() {
+        let catalog = Arc::new(I18nCatalog::load_embedded().expect("embedded translations"));
+        for locale in ["en", "zh"] {
+            let translator = catalog.translator(locale);
+            for (platform, style) in [
+                ("windows", PathStyle::Windows),
+                ("macos", PathStyle::Posix),
+                ("linux", PathStyle::Posix),
+            ] {
+                for (kind, executable) in [
+                    (ComponentKind::Ffmpeg, "ffmpeg"),
+                    (ComponentKind::Ytdlp, "yt-dlp"),
+                ] {
+                    let hint = translator.text(path_hint_key(kind, platform));
+                    let path = hint
+                        .split_whitespace()
+                        .find(|part| style.is_absolute(part))
+                        .unwrap_or_else(|| panic!("{locale}/{platform}: {hint}"));
+                    let filename = path.rsplit(['/', '\\']).next().expect("executable name");
+                    if style == PathStyle::Windows {
+                        assert_eq!(filename, format!("{executable}.exe"));
+                    } else {
+                        assert_eq!(filename, executable);
+                        assert!(!path.contains('\\'));
+                    }
+                }
+            }
+        }
     }
 }

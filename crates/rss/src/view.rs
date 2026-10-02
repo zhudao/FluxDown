@@ -6,8 +6,8 @@ use fluxdown_protocol::{
     ServiceEvent, WsServerMsg, method,
 };
 use fluxdown_ui_components::{
-    CheckState, ControlExt as _, FluxIcon, caption_number, check_mark, nav_icon_color,
-    tabular_numbers, toolbar_action_button,
+    CheckState, ControlExt as _, FluxIcon, SidebarPanel, SidebarState, caption_number, check_mark,
+    nav_icon_color, tabular_numbers, toolbar_action_button,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -18,11 +18,10 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::{
-    Disableable as _, Icon, ResizableState, WindowExt as _,
+    Disableable as _, Icon, WindowExt as _,
     button::{Button, ButtonVariants as _},
-    h_flex, h_resizable,
+    h_flex,
     input::{Input, InputEvent, InputState},
-    resizable_panel,
     scroll::ScrollableElement as _,
     tooltip::Tooltip,
     v_flex,
@@ -55,10 +54,8 @@ pub struct RssView {
     last_error: Option<String>,
     feedback: Option<String>,
     load_error: bool,
-    /// 侧栏 | 条目区拆分状态；侧栏宽度由用户拖拽决定。
-    split_state: Entity<ResizableState>,
-    split_state_initialized: bool,
-    sidebar_width: f32,
+    /// 与 shell 顶栏共享，切换页面后仍保留独立宽度与手动收起状态。
+    sidebar: Entity<SidebarState>,
 }
 
 impl RssView {
@@ -79,6 +76,14 @@ impl RssView {
             }
         })
         .detach();
+        let sidebar = cx.new(|cx| {
+            SidebarState::new(
+                px(SOURCE_COLUMN_WIDTH),
+                px(SOURCE_COLUMN_MIN_WIDTH)..px(SOURCE_COLUMN_MAX_WIDTH),
+                cx,
+            )
+        });
+        cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
         Self {
             translator,
             controller: RssController::new(port),
@@ -88,10 +93,13 @@ impl RssView {
             last_error: None,
             feedback: None,
             load_error: false,
-            split_state: cx.new(|_| ResizableState::default()),
-            split_state_initialized: false,
-            sidebar_width: SOURCE_COLUMN_WIDTH,
+            sidebar,
         }
+    }
+
+    /// 供 shell 顶栏与订阅源导航共享的侧栏状态。
+    pub fn sidebar_state(&self) -> Entity<SidebarState> {
+        self.sidebar.clone()
     }
 
     fn t(&self, key: &str, cx: &App) -> SharedString {
@@ -168,7 +176,8 @@ impl RssView {
         self.load_error = false;
         cx.spawn(async move |view, cx| {
             let result = load.future.await;
-            let _ = view.update(cx, |this, cx| {
+
+            let Ok(()) = view.update(cx, |this, cx| {
                 let current = this.controller.selected_source.as_deref() == Some(&load.source_id)
                     && this.controller.revision == load.revision;
                 if current {
@@ -182,7 +191,10 @@ impl RssView {
                     }
                     cx.notify();
                 }
-            });
+            }) else {
+                // 订阅视图已释放，结束回调，不再提交后续操作。
+                return;
+            };
         })
         .detach();
     }
@@ -218,7 +230,8 @@ impl RssView {
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = future.await;
-            let _ = view.update(cx, |this, cx| {
+
+            let Ok(()) = view.update(cx, |this, cx| {
                 if this.controller.action_epoch != epoch
                     || this.controller.selected_source.as_deref() != Some(&id)
                 {
@@ -235,7 +248,10 @@ impl RssView {
                     Ok(_) => this.fetch_items(cx),
                 }
                 cx.notify();
-            });
+            }) else {
+                // 订阅视图已释放，结束回调，不再提交后续操作。
+                return;
+            };
         })
         .detach();
     }
@@ -253,7 +269,8 @@ impl RssView {
         cx.notify();
         cx.spawn(async move |view, cx| {
             let result = future.await;
-            let _ = view.update(cx, |this, cx| {
+
+            let Ok(()) = view.update(cx, |this, cx| {
                 if this.controller.action_epoch != epoch
                     || this.controller.selected_source.as_deref() != Some(&id)
                 {
@@ -266,7 +283,10 @@ impl RssView {
                     this.fetch_items(cx);
                 }
                 cx.notify();
-            });
+            }) else {
+                // 订阅视图已释放，结束回调，不再提交后续操作。
+                return;
+            };
         })
         .detach();
     }
@@ -304,13 +324,18 @@ impl RssView {
                 } else {
                     failed += 1;
                 }
-                let _ = view.update(cx, |this, cx| {
+
+                let Ok(()) = view.update(cx, |this, cx| {
                     this.controller
                         .finish_action(&source_id, &guid, epoch, result.is_ok());
                     cx.notify();
-                });
+                }) else {
+                    // 订阅视图已释放，结束回调，不再提交后续操作。
+                    return;
+                };
             }
-            let _ = view.update(cx, |this, cx| {
+
+            let Ok(()) = view.update(cx, |this, cx| {
                 if this.controller.action_epoch == epoch
                     && this.controller.selected_source.as_deref() == Some(&source_id)
                 {
@@ -331,7 +356,10 @@ impl RssView {
                     }
                 }
                 cx.notify();
-            });
+            }) else {
+                // 订阅视图已释放，结束回调，不再提交后续操作。
+                return;
+            };
         })
         .detach();
     }
@@ -364,26 +392,31 @@ impl RssView {
                     cx,
                 ))
                 .on_ok(move |_, _, cx| {
-                    let _ = view.update(cx, |this, cx| {
+                    // 已释放或不可提交的订阅页不能让确认框报告成功。
+                    view.update(cx, |this, cx| {
                         if this.controller.stale || this.controller.delete_busy {
-                            return;
+                            return false;
                         }
                         this.controller.delete_busy = true;
                         let future = this.controller.delete(source_id.clone());
                         cx.spawn(async move |view, cx| {
                             let result = future.await;
-                            let _ = view.update(cx, |this, cx| {
+                            let Ok(()) = view.update(cx, |this, cx| {
                                 this.controller.delete_busy = false;
                                 if result.is_err() {
                                     this.fail(cx);
                                 }
                                 cx.notify();
-                            });
+                            }) else {
+                                // 订阅页已释放，停止回写删除结果。
+                                return;
+                            };
                         })
                         .detach();
                         cx.notify();
-                    });
-                    true
+                        true
+                    })
+                    .unwrap_or(false)
                 })
         });
     }
@@ -830,6 +863,75 @@ impl RssView {
             )
             .into_any_element()
     }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let theme = active_theme(cx);
+        let spacing = theme.tokens().spacing;
+        let caption = theme.extended().caption;
+        let chrome = theme.extended().colors.chrome;
+        let tertiary = theme.extended().colors.text_tertiary;
+        let stale = self.controller.stale;
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .bg(chrome)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(spacing.xs)
+                    .pl(spacing.lg)
+                    .pr(spacing.sm)
+                    .pt(spacing.md)
+                    .pb(spacing.sm)
+                    .child(
+                        div()
+                            .text_size(caption.size)
+                            .line_height(caption.line_height)
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tertiary)
+                            .child(self.t("rssSubscriptions", cx)),
+                    )
+                    .child(caption_number(
+                        self.controller.sources.len().to_string(),
+                        cx,
+                    ))
+                    .child(div().flex_1())
+                    .child(Self::tool_button(
+                        "rss-add-source",
+                        self.t("rssAddSource", cx),
+                        FluxIcon::Plus,
+                        false,
+                        stale,
+                        |this, window, cx| this.open_editor(None, window, cx),
+                        cx,
+                    )),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .px(spacing.sm)
+                    .pb(spacing.sm)
+                    .gap(spacing.xxs)
+                    .when(self.controller.sources.is_empty(), |list| {
+                        list.child(
+                            meta_text(cx)
+                                .px(spacing.sm)
+                                .py(spacing.lg)
+                                .child(self.t("rssSidebarEmptyHint", cx)),
+                        )
+                    })
+                    .children(
+                        self.controller
+                            .sources
+                            .iter()
+                            .cloned()
+                            .map(|source| self.render_source(source, cx)),
+                    )
+                    .overflow_y_scrollbar(),
+            )
+    }
 }
 
 /// 元信息文字：xs + 三级文字色。
@@ -876,18 +978,6 @@ impl Render for RssView {
                 input.set_placeholder(placeholder, window, cx);
             });
         }
-        // 首次测得条目区宽度后把剩余空间交给条目区，侧栏保持设定宽度。
-        let main_measured = self
-            .split_state
-            .read(cx)
-            .sizes()
-            .get(1)
-            .is_some_and(|size| *size > px(1.));
-        if !self.split_state_initialized && main_measured {
-            self.split_state
-                .update(cx, |state, cx| state.reset_panel(1, cx));
-            self.split_state_initialized = true;
-        }
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
         let extended = theme.extended().clone();
@@ -925,66 +1015,6 @@ impl Render for RssView {
             .filter(|item| item.status == 0 && self.controller.selected.contains(&item.guid))
             .map(|item| item.guid.clone())
             .collect();
-        let side = v_flex()
-            .size_full()
-            .min_h_0()
-            .bg(extended.colors.chrome)
-            .child(
-                h_flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(tokens.spacing.xs)
-                    .pl(tokens.spacing.lg)
-                    .pr(tokens.spacing.sm)
-                    .pt(tokens.spacing.md)
-                    .pb(tokens.spacing.sm)
-                    .child(
-                        div()
-                            .text_size(extended.caption.size)
-                            .line_height(extended.caption.line_height)
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(extended.colors.text_tertiary)
-                            .child(self.t("rssSubscriptions", cx)),
-                    )
-                    .child(caption_number(
-                        self.controller.sources.len().to_string(),
-                        cx,
-                    ))
-                    .child(div().flex_1())
-                    .child(Self::tool_button(
-                        "rss-add-source",
-                        self.t("rssAddSource", cx),
-                        FluxIcon::Plus,
-                        false,
-                        stale,
-                        |this, window, cx| this.open_editor(None, window, cx),
-                        cx,
-                    )),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .px(tokens.spacing.sm)
-                    .pb(tokens.spacing.sm)
-                    .gap(tokens.spacing.xxs)
-                    .when(self.controller.sources.is_empty(), |list| {
-                        list.child(
-                            meta_text(cx)
-                                .px(tokens.spacing.sm)
-                                .py(tokens.spacing.lg)
-                                .child(self.t("rssSidebarEmptyHint", cx)),
-                        )
-                    })
-                    .children(
-                        self.controller
-                            .sources
-                            .clone()
-                            .into_iter()
-                            .map(|source| self.render_source(source, cx)),
-                    )
-                    .overflow_y_scrollbar(),
-            );
         let mut main = v_flex()
             .size_full()
             .min_w_0()
@@ -1384,24 +1414,10 @@ impl Render for RssView {
                     ),
             );
         }
-        h_resizable("rss-content")
-            .with_state(&self.split_state)
-            .on_resize(cx.listener(|this, state: &Entity<ResizableState>, _, cx| {
-                state.update(cx, |state, cx| state.reset_panel(1, cx));
-                if let Some(width) = state.read(cx).sizes().first().copied() {
-                    let width = f32::from(width);
-                    if width > 0. {
-                        this.sidebar_width = width;
-                    }
-                }
-            }))
-            .child(
-                resizable_panel()
-                    .size(px(self.sidebar_width))
-                    .flex_none()
-                    .size_range(px(SOURCE_COLUMN_MIN_WIDTH)..px(SOURCE_COLUMN_MAX_WIDTH))
-                    .child(side),
-            )
-            .child(resizable_panel().child(main))
+        let mut panel = SidebarPanel::new("rss-content", &self.sidebar, main, window, cx);
+        if panel.is_sidebar_visible() {
+            panel = panel.sidebar(self.render_sidebar(cx));
+        }
+        panel
     }
 }

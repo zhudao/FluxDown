@@ -129,7 +129,7 @@ impl DownloadView {
                 let this = this.clone();
                 menu.item(
                     PopupMenuItem::new(hide_label.clone()).on_click(move |_, _window, cx| {
-                        let _ = this.update(cx, |this, cx| {
+                        let Ok(()) = this.update(cx, |this, cx| {
                             let (key, value) =
                                 (section.visibility_pref(), serde_json::Value::Bool(false));
                             // 设备区是否显示只对本机有意义：写设备本地偏好，不同步到其他设备。
@@ -139,7 +139,10 @@ impl DownloadView {
                                 DownloadsCommand::SetLocalPreference { key, value }
                             };
                             this.execute_commands(vec![command], cx);
-                        });
+                        }) else {
+                            // 视图已释放，结束这次回调而不再更新状态。
+                            return;
+                        };
                     }),
                 )
             })
@@ -645,22 +648,30 @@ impl DownloadView {
                 if is_running {
                     PopupMenuItem::new(stop_label.clone()).on_click(move |_, _window, cx| {
                         let queue_id = queue_id.clone();
-                        let _ = this.update(cx, |this, cx| {
+
+                        let Ok(()) = this.update(cx, |this, cx| {
                             this.execute_commands(
                                 vec![DownloadsCommand::QueueStop { queue_id }],
                                 cx,
                             );
-                        });
+                        }) else {
+                            // 视图已释放，结束这次回调而不再更新状态。
+                            return;
+                        };
                     })
                 } else {
                     PopupMenuItem::new(start_label.clone()).on_click(move |_, _window, cx| {
                         let queue_id = queue_id.clone();
-                        let _ = this.update(cx, |this, cx| {
+
+                        let Ok(()) = this.update(cx, |this, cx| {
                             this.execute_commands(
                                 vec![DownloadsCommand::QueueStart { queue_id }],
                                 cx,
                             );
-                        });
+                        }) else {
+                            // 视图已释放，结束这次回调而不再更新状态。
+                            return;
+                        };
                     })
                 }
             });
@@ -702,14 +713,17 @@ impl DownloadView {
                                         cx,
                                     ))
                                     .on_ok(move |_, _, cx| {
-                                        let _ = this.update(cx, |this, cx| {
+                                        let Ok(()) = this.update(cx, |this, cx| {
                                             this.execute_commands(
                                                 vec![DownloadsCommand::QueueDelete {
                                                     queue_id: queue_id.clone(),
                                                 }],
                                                 cx,
                                             );
-                                        });
+                                        }) else {
+                                            // 页面已释放，不能把未提交的删除当成成功。
+                                            return false;
+                                        };
                                         true
                                     })
                             });
@@ -891,6 +905,12 @@ impl DownloadView {
                 .controller
                 .preference_bool(section.visibility_pref(), true),
         }
+    }
+
+    pub(crate) fn has_visible_sidebar_section(&self) -> bool {
+        SidebarSection::ALL
+            .into_iter()
+            .any(|section| self.section_visible(section))
     }
 
     /// 侧栏根：与活动栏同为 `chrome` 底色；与内容区之间的分隔线由页面布局负责。
