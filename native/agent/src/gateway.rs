@@ -1,5 +1,7 @@
 //! agent 官方 UI Gateway：单一 RPC 会话、agent 快照与 daemon 透明转发。
 
+mod restart;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -67,6 +69,8 @@ pub struct GatewayService {
     local: GatewayShell,
     server_mode: bool,
     link: Option<Arc<LinkService>>,
+    gateway_patch_lock: tokio::sync::Mutex<()>,
+    listener_control: restart::GatewayControl,
 }
 
 impl GatewayService {
@@ -128,6 +132,8 @@ impl GatewayService {
             local,
             server_mode: false,
             link: None,
+            gateway_patch_lock: tokio::sync::Mutex::new(()),
+            listener_control: restart::GatewayControl::new(),
         }
     }
 
@@ -315,6 +321,16 @@ impl GatewayService {
                 .await
             }
             method::AGENT_DEVICE_LIST => self.device_list().await,
+            method::AGENT_REMOTE_RECONNECT => {
+                if !self.cloud.is_authenticated().await {
+                    return Err(RpcErrorData::new(
+                        fluxdown_protocol::ApplicationErrorCode::Unauthorized,
+                        false,
+                    ));
+                }
+                self.remote.request_reconnect();
+                Ok(serde_json::json!({"accepted": true}))
+            }
             method::AGENT_DEVICE_RENAME => {
                 self.device_rename(params_or_empty(request.params)).await
             }
@@ -518,30 +534,36 @@ impl GatewayService {
         body: Option<serde_json::Value>,
         persist: bool,
     ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let value = self
             .cloud
+            .at_epoch(epoch)
             .profile_call(method, suffix, body.as_ref())
             .await
             .map_err(cloud_error_data)?;
         if persist {
-            let session = self
-                .cloud
-                .persist_profile(value.clone())
+            self.cloud
+                .persist_profile(epoch, value.clone())
                 .await
                 .map_err(cloud_error_data)?;
-            self.events
-                .publish(fluxdown_protocol::AgentEvent::SessionChanged(Box::new(
-                    Some(session),
-                )));
         }
+        drop(
+            self.cloud
+                .lock_epoch(epoch)
+                .await
+                .map_err(cloud_error_data)?,
+        );
         Ok(value)
     }
 
+    // Keep prepare, link update, persistence, commit and their rollbacks in one serialized
+    // transaction so a partial failure cannot publish a port/token combination that never ran.
     async fn gateway_patch(
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
         let patch = parse_params::<fluxdown_protocol::GatewayPatchParams>(Some(params))?;
+        let _transaction = self.gateway_patch_lock.lock().await;
         // server 模式的密钥同时是首次设置的开关：空值会把服务重新暴露给匿名 setup，
         // 不合规的值会让 Web 登录页拒绝自己。二者都在这里拒绝。
         if self.server_mode
@@ -552,7 +574,36 @@ impl GatewayService {
         {
             return Err(invalid_field("userToken"));
         }
+        let port_change = {
+            let state = self.state.lock().await;
+            // Reject the entire patch before binding or changing token/runtime switches.
+            if let Some(port) = patch.port
+                && (port < 1024 || self.server_mode || !state.gateway.port_editable)
+            {
+                return Err(invalid_field("port"));
+            }
+            patch.port.filter(|port| *port != state.gateway.port)
+        };
+        // The readiness handshake must not hold state: the same router shares its owner.
+        let prepared = match port_change {
+            Some(port) => Some(
+                self.listener_control
+                    .prepare(port)
+                    .await
+                    .map_err(|error| error.rpc_data())?,
+            ),
+            None => None,
+        };
+        if let Some(prepared) = &prepared
+            && let Some(link) = &self.link
+            && let Err(error) = link.update_bound(prepared.bound).await
+        {
+            self.rollback_listener(prepared).await?;
+            return Err(restart::RestartError::Failed(error.to_string()).rpc_data());
+        }
         let mut state = self.state.lock().await;
+        let previous_gateway = state.gateway.clone();
+        let mut previous_user_token = None;
         let api_was_enabled = state.gateway.api_enabled;
         let mcp_was_enabled = state.gateway.mcp_enabled;
         if let Some(value) = patch.takeover_enabled {
@@ -573,13 +624,23 @@ impl GatewayService {
         if let Some(value) = patch.lan_enabled {
             state.gateway.lan_enabled = value;
         }
+        if let Some(port) = patch.port {
+            state.gateway.port = port;
+        }
         let token_set_explicitly = patch.user_token.is_some();
         if patch.regenerate_user_token {
-            state.gateway_user_token = generate_user_token();
+            previous_user_token = Some(std::mem::replace(
+                &mut state.gateway_user_token,
+                generate_user_token(),
+            ));
             state.gateway.user_token_configured = true;
         } else if let Some(token) = patch.user_token {
-            state.gateway_user_token = token;
+            previous_user_token = Some(std::mem::replace(&mut state.gateway_user_token, token));
             state.gateway.user_token_configured = !state.gateway_user_token.trim().is_empty();
+        }
+        // 已配置且本次不改 token 时无需分配回滚副本；空值可能被鉴权规则自动补齐。
+        if previous_user_token.is_none() && state.gateway_user_token.trim().is_empty() {
+            previous_user_token = Some(state.gateway_user_token.clone());
         }
         ensure_forced_auth_token(&mut state, api_was_enabled, mcp_was_enabled);
         if !self.server_mode {
@@ -593,10 +654,70 @@ impl GatewayService {
         }
         let gateway = state.gateway.clone();
         let user_token = state.gateway_user_token.clone();
-        self.store
-            .save(&state)
-            .await
-            .map_err(|error| internal_error("agent state", error))?;
+        let persisted = match &prepared {
+            Some(prepared) => {
+                self.store
+                    .save_gateway_change(
+                        &state,
+                        prepared
+                            .endpoint_dir
+                            .as_deref()
+                            .unwrap_or_else(|| self.store.data_dir()),
+                        prepared.bound,
+                    )
+                    .await
+            }
+            None => self.store.save(&state).await,
+        };
+        if let Err(error) = persisted {
+            // Failed persistence cannot alter runtime switches, the snapshot or the old service.
+            state.gateway = previous_gateway;
+            if let Some(token) = previous_user_token {
+                state.gateway_user_token = token;
+            }
+            drop(state);
+            if let Some(prepared) = &prepared {
+                self.rollback_listener(prepared).await?;
+                return Err(restart::RestartError::Failed(error.to_string()).rpc_data());
+            }
+            if patch.port.is_some() {
+                return Err(restart::RestartError::Failed(error.to_string()).rpc_data());
+            }
+            return Err(internal_error("agent state", error));
+        }
+        if let Some(prepared) = &prepared
+            && let Err(error) = self.listener_control.commit().await
+        {
+            state.gateway = previous_gateway;
+            if let Some(token) = previous_user_token {
+                state.gateway_user_token = token;
+            }
+            let rollback = self
+                .store
+                .save_gateway_change(
+                    &state,
+                    prepared
+                        .endpoint_dir
+                        .as_deref()
+                        .unwrap_or_else(|| self.store.data_dir()),
+                    prepared.previous,
+                )
+                .await;
+            drop(state);
+            if let Err(listener_rollback) = self.rollback_listener(prepared).await {
+                if let Err(rollback) = rollback {
+                    tracing::error!(error = %rollback, "gateway state rollback also failed");
+                }
+                return Err(listener_rollback);
+            }
+            if let Err(rollback) = rollback {
+                return Err(restart::RestartError::Failed(format!(
+                    "{error}; state rollback failed: {rollback}"
+                ))
+                .rpc_data());
+            }
+            return Err(error.rpc_data());
+        }
         drop(state);
         self.api_switches.update(
             gateway.takeover_enabled,
@@ -613,14 +734,42 @@ impl GatewayService {
         serde_json::to_value(gateway).map_err(|error| internal_error("gateway status", error))
     }
 
+    async fn rollback_listener(
+        &self,
+        prepared: &restart::PreparedListener,
+    ) -> Result<(), RpcErrorData> {
+        let listener = self.listener_control.rollback().await;
+        let link = match &self.link {
+            Some(link) => link.update_bound(prepared.previous).await,
+            None => Ok(()),
+        };
+        if let Err(error) = link {
+            if let Err(listener) = listener {
+                tracing::error!(error = %listener, "gateway listener rollback also failed");
+            }
+            return Err(restart::RestartError::Failed(format!(
+                "link endpoint rollback failed: {error}"
+            ))
+            .rpc_data());
+        }
+        listener.map_err(|error| error.rpc_data())
+    }
+
     async fn device_list(&self) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let device_id = self.state.lock().await.device_id.clone();
         let value = self
             .cloud
+            .at_epoch(epoch)
             .devices(&device_id)
             .await
             .map_err(cloud_error_data)?;
         let devices = cloud_devices_from_value(&value)?;
+        let _state = self
+            .cloud
+            .lock_epoch(epoch)
+            .await
+            .map_err(cloud_error_data)?;
         self.events
             .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         Ok(value)
@@ -630,6 +779,7 @@ impl GatewayService {
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let id = required_string(&params, "id")?;
         let name = required_string(&params, "name")?;
         if name.chars().count() > 64 {
@@ -637,15 +787,19 @@ impl GatewayService {
         }
         let value = self
             .cloud
+            .at_epoch(epoch)
             .rename_device(&id, &name)
             .await
             .map_err(cloud_error_data)?;
         let updated = serde_json::from_value::<fluxdown_protocol::CloudDevice>(value.clone())
             .map_err(|error| internal_error("device rename response", error))?;
-        if updated.is_current
-            && let Err(error) = self.cloud.set_device_name(&updated.name).await
-        {
-            tracing::warn!(error = %error, "persisting the renamed local device name failed");
+        let mut state = self
+            .cloud
+            .lock_epoch(epoch)
+            .await
+            .map_err(cloud_error_data)?;
+        if updated.is_current {
+            state.device_name.clone_from(&updated.name);
         }
         let mut devices = agent_snapshot(&self.events)?.cloud_devices;
         if let Some(existing) = devices.iter_mut().find(|device| device.id == updated.id) {
@@ -655,6 +809,11 @@ impl GatewayService {
         }
         self.events
             .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
+        drop(state);
+        self.store
+            .persist(&self.state)
+            .await
+            .map_err(|error| internal_error("persist renamed device", error))?;
         Ok(value)
     }
 
@@ -662,23 +821,35 @@ impl GatewayService {
         &self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcErrorData> {
+        let epoch = self.cloud.request_epoch();
         let id = required_string(&params, "id")?;
-        let mut devices = agent_snapshot(&self.events)?.cloud_devices;
+        let devices = agent_snapshot(&self.events)?.cloud_devices;
         let deleting_current = devices
             .iter()
             .find(|device| device.id == id)
             .is_some_and(|device| device.is_current);
         let value = self
             .cloud
+            .at_epoch(epoch)
             .delete_device(&id)
             .await
             .map_err(cloud_error_data)?;
-        devices.retain(|device| device.id != id);
-        self.events
-            .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         if deleting_current {
             // `clear_session` 自身投影 `SessionChanged(None)`。
-            self.cloud.clear_session().await.map_err(cloud_error_data)?;
+            self.cloud
+                .clear_session_epoch(epoch)
+                .await
+                .map_err(cloud_error_data)?;
+        } else {
+            let _state = self
+                .cloud
+                .lock_epoch(epoch)
+                .await
+                .map_err(cloud_error_data)?;
+            let mut devices = agent_snapshot(&self.events)?.cloud_devices;
+            devices.retain(|device| device.id != id);
+            self.events
+                .publish(fluxdown_protocol::AgentEvent::CloudDevicesChanged(devices));
         }
         Ok(value)
     }
@@ -1308,6 +1479,10 @@ struct GatewayState {
 }
 
 /// 在同一 listener 合并兼容 API 与官方 `/rpc`；server 模式再合并初始化 / 文件面 / SPA。
+#[allow(
+    clippy::too_many_arguments,
+    reason = "gateway composition explicitly carries the private endpoint publication directory"
+)]
 pub async fn serve(
     listener: TcpListener,
     service: Arc<GatewayService>,
@@ -1316,10 +1491,11 @@ pub async fn serve(
     bearer: String,
     cancel: CancellationToken,
     server: Option<Arc<ServerHandle>>,
+    endpoint_dir: Option<PathBuf>,
 ) -> Result<(), std::io::Error> {
     let state = GatewayState {
-        service,
-        bearer: Arc::from(bearer),
+        service: service.clone(),
+        bearer: Arc::from(bearer.as_str()),
         cancel: cancel.clone(),
         server: server.clone(),
     };
@@ -1332,12 +1508,10 @@ pub async fn serve(
         Some(server) => app.merge(crate::server_mode::router(server)),
         None => app,
     };
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(cancel.cancelled_owned())
-    .await
+    service
+        .listener_control
+        .run(listener, app, bearer, cancel, endpoint_dir)
+        .await
 }
 
 pub async fn load_or_create_bearer(
@@ -1355,7 +1529,9 @@ pub async fn load_or_create_bearer(
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let parent = path.parent().unwrap_or(data_dir);
     tokio::fs::create_dir_all(parent).await?;
-    crate::state::set_private_dir_permissions(parent).await?;
+    if override_path.is_none() {
+        crate::state::set_private_dir_permissions(parent).await?;
+    }
     let temp = temporary_path(&path);
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
@@ -1506,10 +1682,22 @@ async fn run_socket(
                     break;
                 }
             }
+            completed = receive_lane_exit(&mut lanes), if lanes.is_some() => {
+                match completed {
+                    Some(Err(error)) => tracing::error!(error = %error, "gateway request lane panicked"),
+                    Some(Ok(())) => tracing::warn!("gateway request lane stopped unexpectedly"),
+                    None => tracing::warn!("gateway request lanes disappeared"),
+                }
+                break;
+            }
         }
     }
     if ui_client {
         service.ui_disconnected().await;
+    }
+    drop(responses);
+    if let Some(lanes) = lanes {
+        lanes.shutdown().await;
     }
 }
 
@@ -1594,6 +1782,9 @@ enum Lane {
 }
 
 fn lane_for(method_name: &str) -> Lane {
+    if method_name == method::AGENT_REMOTE_RECONNECT {
+        return Lane::Local;
+    }
     if method_name.starts_with("daemon.") {
         return if fluxdown_protocol::method::is_slow_daemon_method(method_name) {
             Lane::DaemonSlow
@@ -1645,6 +1836,7 @@ struct RequestLanes {
     icon: tokio::sync::mpsc::Sender<RpcRequest>,
     slow: tokio::sync::mpsc::Sender<RpcRequest>,
     repair: tokio::sync::mpsc::Sender<RpcRequest>,
+    tasks: tokio::task::JoinSet<()>,
 }
 
 /// 单条连接同时在途的 daemon 慢调用上限（daemon 侧每连接上限为 16，留出余量）。
@@ -1655,11 +1847,12 @@ impl RequestLanes {
         service: &Arc<GatewayService>,
         responses: tokio::sync::mpsc::Sender<RpcResponse>,
     ) -> Self {
-        let start = || {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut start = || {
             let (sender, mut receiver) = tokio::sync::mpsc::channel::<RpcRequest>(LANE_QUEUE);
             let service = Arc::clone(service);
             let responses = responses.clone();
-            tokio::spawn(async move {
+            tasks.spawn(async move {
                 while let Some(request) = receiver.recv().await {
                     let response = service.call(request).await;
                     if responses.send(response).await.is_err() {
@@ -1669,38 +1862,71 @@ impl RequestLanes {
             });
             sender
         };
-        let start_concurrent = || {
-            let (sender, mut receiver) = tokio::sync::mpsc::channel::<RpcRequest>(LANE_QUEUE);
-            let service = Arc::clone(service);
-            let responses = responses.clone();
-            let permits = Arc::new(tokio::sync::Semaphore::new(DAEMON_SLOW_CONCURRENCY));
-            tokio::spawn(async move {
-                while let Some(request) = receiver.recv().await {
-                    let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
-                        break;
-                    };
-                    let service = Arc::clone(&service);
-                    let responses = responses.clone();
-                    tokio::spawn(async move {
-                        let response = service.call(request).await;
-                        drop(permit);
-                        // 连接关闭会丢弃接收端；正常生命周期，不升级为警告。
-                        if responses.send(response).await.is_err() {
-                            tracing::trace!("gateway connection closed before concurrent response");
+        let cloud = start();
+        let daemon = start();
+        let local = start();
+        let icon = start();
+        let slow = start();
+        let repair = start();
+        let (daemon_slow, mut receiver) = tokio::sync::mpsc::channel::<RpcRequest>(LANE_QUEUE);
+        let service = Arc::clone(service);
+        tasks.spawn(async move {
+            let mut calls = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    completed = calls.join_next(), if !calls.is_empty() => {
+                        if let Some(Err(error)) = completed {
+                            tracing::error!(error = %error, "concurrent gateway request panicked");
+                            break;
                         }
-                    });
+                    }
+                    request = receiver.recv(), if calls.len() < DAEMON_SLOW_CONCURRENCY => {
+                        let Some(request) = request else { break; };
+                        let service = Arc::clone(&service);
+                        let responses = responses.clone();
+                        calls.spawn(async move {
+                            let response = service.call(request).await;
+                            if responses.send(response).await.is_err() {
+                                tracing::trace!("gateway connection closed before concurrent response");
+                            }
+                        });
+                    }
                 }
-            });
-            sender
-        };
+            }
+            while let Some(completed) = calls.join_next().await {
+                if let Err(error) = completed {
+                    tracing::error!(error = %error, "concurrent gateway request failed during close");
+                }
+            }
+        });
         Self {
-            cloud: start(),
-            daemon: start(),
-            daemon_slow: start_concurrent(),
-            local: start(),
-            icon: start(),
-            slow: start(),
-            repair: start(),
+            cloud,
+            daemon,
+            daemon_slow,
+            local,
+            icon,
+            slow,
+            repair,
+            tasks,
+        }
+    }
+
+    async fn shutdown(self) {
+        let Self {
+            cloud,
+            daemon,
+            daemon_slow,
+            local,
+            icon,
+            slow,
+            repair,
+            mut tasks,
+        } = self;
+        drop((cloud, daemon, daemon_slow, local, icon, slow, repair));
+        while let Some(completed) = tasks.join_next().await {
+            if let Err(error) = completed {
+                tracing::error!(error = %error, "gateway request lane failed during close");
+            }
         }
     }
 
@@ -1729,6 +1955,15 @@ impl RequestLanes {
                 ))
             }
         }
+    }
+}
+
+async fn receive_lane_exit(
+    lanes: &mut Option<RequestLanes>,
+) -> Option<Result<(), tokio::task::JoinError>> {
+    match lanes {
+        Some(lanes) => lanes.tasks.join_next().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1773,6 +2008,8 @@ mod tests {
     use fluxdown_protocol::{
         AgentSnapshot, ApplicationErrorCode, RequestId, RpcRequest, RpcResponse,
     };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     use super::{
         GatewayService, GatewayShell, Lane, authorized, ensure_exposed_auth_token, lane_for,
@@ -1818,15 +2055,185 @@ mod tests {
     }
 
     struct TestGateway {
-        service: GatewayService,
+        service: Arc<GatewayService>,
         state: Arc<tokio::sync::Mutex<crate::state::AgentState>>,
         store: Arc<crate::state::StateStore>,
         api_token: fluxdown_api::auth::TokenCell,
         dir: std::path::PathBuf,
+        endpoint_dir: std::path::PathBuf,
+        bound_ip: std::net::IpAddr,
+        cancel: tokio_util::sync::CancellationToken,
+        server_task: tokio::task::JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    #[tokio::test]
+    async fn independent_connections_discard_profile_and_dispatch_from_previous_account() {
+        use axum::routing::{get, post};
+        use serde_json::json;
+
+        for profile in [true, false] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let delayed = {
+                let started = started.clone();
+                let release = release.clone();
+                move || {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        axum::Json(if profile {
+                            json!({"id": "A", "email": "", "nickname": "", "plan": "free", "status": "active", "createdAt": "", "entitlements": {}})
+                        } else {
+                            json!({"task": {"id": "A-task"}})
+                        })
+                    }
+                }
+            };
+            let app = axum::Router::new()
+                .route("/api/v1/me", get(delayed.clone()))
+                .route("/api/v1/tasks/dispatch", post(delayed))
+                .route("/api/v1/auth/logout", post(|| async { axum::http::StatusCode::NO_CONTENT }))
+                .route("/api/v1/auth/login", post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    let account = body["account"].as_str().expect("account");
+                    axum::Json(json!({
+                        "accessToken": format!("access-{account}"),
+                        "refreshToken": format!("refresh-{account}"),
+                        "expiresIn": 3600,
+                        "user": {"id": account, "email": "", "nickname": "", "plan": "free", "status": "active", "createdAt": ""},
+                        "entitlements": {},
+                        "device": {"id": "row", "deviceId": "device", "name": "", "createdAt": "", "lastSeenAt": ""}
+                    }))
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let address = listener.local_addr().expect("address");
+            let server =
+                tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+            let gateway = TestGateway::new("account_response_epoch").await;
+            gateway
+                .service
+                .cloud
+                .set_endpoint(&format!("http://{address}"))
+                .await
+                .expect("endpoint");
+            gateway
+                .service
+                .auth
+                .login(&json!({"account": "A"}))
+                .await
+                .expect("login A");
+            let response_epoch = gateway.service.cloud.request_epoch();
+            let already_decoded_profile = {
+                let state = gateway.state.lock().await;
+                let session = state
+                    .credentials
+                    .as_ref()
+                    .expect("A credentials")
+                    .session
+                    .as_ref()
+                    .expect("A session");
+                serde_json::to_value(fluxdown_protocol::CloudProfile {
+                    user: session.user.clone(),
+                    entitlements: session.entitlements.clone(),
+                    current_plan: session.current_plan.clone(),
+                    purchase_credit_minor: 0,
+                })
+                .expect("decoded profile fixture")
+            };
+            // Two independent WS connections have independent lanes. Invoke their
+            // shared service concurrently, without an artificial global lane lock.
+            let old_connection = async {
+                if profile {
+                    gateway
+                        .service
+                        .profile_request(reqwest::Method::GET, "", None, true)
+                        .await
+                        .is_err()
+                } else {
+                    gateway
+                        .service
+                        .remote
+                        .dispatch(
+                            serde_json::from_value(json!({
+                                "toDevice": "other", "url": "https://example.test/file"
+                            }))
+                            .expect("dispatch params"),
+                        )
+                        .await
+                        .is_err()
+                }
+            };
+            let new_connection = async {
+                started.notified().await;
+                gateway.service.auth.logout().await.expect("logout A");
+                gateway
+                    .service
+                    .auth
+                    .login(&json!({"account": "B"}))
+                    .await
+                    .expect("login B");
+                release.notify_one();
+            };
+            let (rejected, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(old_connection, new_connection)
+            })
+            .await
+            .expect("independent connections complete");
+            assert!(rejected);
+            // Also exercise the final commit boundary: transport may already
+            // have accepted A's response before B logs in. A transport-only
+            // epoch check cannot protect this separate state-lock acquisition.
+            let stale_error = gateway
+                .service
+                .cloud
+                .persist_profile(response_epoch, already_decoded_profile)
+                .await
+                .expect_err("decoded A profile cannot commit to B");
+            assert_eq!(stale_error.code.as_deref(), Some("session_changed"));
+            let state = gateway.state.lock().await;
+            assert_eq!(
+                state
+                    .credentials
+                    .as_ref()
+                    .expect("B credentials")
+                    .session
+                    .as_ref()
+                    .expect("B session")
+                    .user
+                    .id,
+                "B"
+            );
+            assert!(state.remote_tasks.is_empty());
+            drop(state);
+            let snapshot = super::agent_snapshot(&gateway.service.events).expect("snapshot");
+            assert_eq!(snapshot.session.expect("projected B").user.id, "B");
+            assert!(snapshot.remote_tasks.is_empty());
+            assert!(
+                gateway
+                    .store
+                    .load()
+                    .await
+                    .expect("reload")
+                    .remote_tasks
+                    .is_empty()
+            );
+            server.abort();
+        }
     }
 
     impl TestGateway {
         async fn new(label: &str) -> Self {
+            Self::new_mode(label, false).await
+        }
+
+        async fn new_mode(label: &str, server_mode: bool) -> Self {
+            Self::new_bound(label, server_mode, "127.0.0.1:0").await
+        }
+
+        async fn new_bound(label: &str, server_mode: bool, address: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "fluxdown_agent_{label}_{}_{}",
                 std::process::id(),
@@ -1837,15 +2244,32 @@ mod tests {
                     .await
                     .expect("open agent test store"),
             );
-            let state = Arc::new(tokio::sync::Mutex::new(crate::state::AgentState::default()));
-            let events = crate::event_hub::AgentEventHub::new(AgentSnapshot::default());
+            let listener = tokio::net::TcpListener::bind(address)
+                .await
+                .expect("bind real test gateway");
+            let bound = listener.local_addr().expect("test gateway address");
+            let mut initial = crate::state::AgentState::default();
+            initial.gateway.port = bound.port();
+            initial.gateway.lan_enabled = !bound.ip().is_loopback();
+            store.save(&initial).await.expect("save initial gateway");
+            let endpoint_dir = dir.join("bearer-location");
+            store
+                .save_gateway_endpoint(&endpoint_dir, bound)
+                .await
+                .expect("publish initial endpoint");
+            let events = crate::event_hub::AgentEventHub::new(AgentSnapshot {
+                gateway: initial.gateway.clone(),
+                ..AgentSnapshot::default()
+            });
+            let state = Arc::new(tokio::sync::Mutex::new(initial));
             let daemon = Arc::new(crate::daemon_client::DaemonClient::disconnected());
             let cloud_client = crate::cloud::CloudClient::new(
                 "http://127.0.0.1:9".to_owned(),
                 state.clone(),
                 store.clone(),
             )
-            .expect("build agent test cloud client");
+            .expect("build agent test cloud client")
+            .with_events(events.clone());
             let cloud_api = crate::cloud::CloudApi::new(cloud_client.clone());
             let auth = Arc::new(crate::cloud::CloudAuthService::new(
                 cloud_client,
@@ -1918,33 +2342,70 @@ mod tests {
                 state: state.clone(),
                 store: store.clone(),
                 tasks: Arc::new(crate::link::DaemonTaskCreator::new(daemon.clone())),
-                bound: "127.0.0.1:0".parse().expect("test link address"),
-                server_mode: false,
+                bound,
+                server_mode,
             });
-            let service = GatewayService::new(
-                daemon,
-                events,
-                auth,
-                Arc::new(cloud_api),
-                sync,
-                remote,
-                capture,
-                blobs,
-                diagnostics,
-                update,
-                state.clone(),
-                store.clone(),
-                api_switches,
-                api_token.clone(),
-                local,
+            let api_host = Arc::new(crate::api_host::AgentApiHost::new(
+                daemon.clone(),
+                events.clone(),
+                capture.clone(),
+                blobs.clone(),
+                link.clone(),
+                None,
+            ));
+            let mut api_config = fluxdown_api::server::ApiServerConfig::from_config_map(
+                &std::collections::HashMap::new(),
+                fluxdown_protocol::APP_VERSION,
             )
-            .with_link(link);
+            .with_runtime_switches(api_switches.clone());
+            api_config.token = api_token.clone();
+            api_config.lan_enabled = !bound.ip().is_loopback();
+            api_config.enforce_loopback_host = bound.ip().is_loopback();
+            let service = Arc::new(
+                GatewayService::new(
+                    daemon,
+                    events,
+                    auth,
+                    Arc::new(cloud_api),
+                    sync,
+                    remote,
+                    capture,
+                    blobs,
+                    diagnostics,
+                    update,
+                    state.clone(),
+                    store.clone(),
+                    api_switches,
+                    api_token.clone(),
+                    local,
+                )
+                .with_server_mode(server_mode)
+                .with_link(link),
+            );
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let server_task = tokio::spawn(super::serve(
+                listener,
+                service.clone(),
+                api_host,
+                api_config,
+                "test-official-bearer".to_owned(),
+                cancel.clone(),
+                None,
+                Some(endpoint_dir.clone()),
+            ));
+            super::restart::probe(bound, "test-official-bearer")
+                .await
+                .expect("initial gateway readiness");
             Self {
                 service,
                 state,
                 store,
                 api_token,
                 dir,
+                endpoint_dir,
+                bound_ip: bound.ip(),
+                cancel,
+                server_task,
             }
         }
 
@@ -1965,7 +2426,16 @@ mod tests {
                 store,
                 api_token: _,
                 dir,
+                endpoint_dir: _,
+                bound_ip: _,
+                cancel,
+                server_task,
             } = self;
+            cancel.cancel();
+            server_task
+                .await
+                .expect("gateway owner join")
+                .expect("gateway owner shutdown");
             drop(service);
             drop(state);
             drop(store);
@@ -1987,6 +2457,585 @@ mod tests {
         async fn user_token(&self) -> String {
             self.state.lock().await.gateway_user_token.clone()
         }
+
+        async fn address(&self) -> std::net::SocketAddr {
+            crate::state::gateway_client_address(std::net::SocketAddr::new(
+                self.bound_ip,
+                self.state.lock().await.gateway.port,
+            ))
+        }
+
+        async fn endpoint_bytes(&self) -> Vec<u8> {
+            tokio::fs::read(self.endpoint_dir.join("gateway-endpoint.json"))
+                .await
+                .expect("read published endpoint")
+        }
+
+        async fn assert_live(&self) {
+            let address = self.address().await;
+            super::restart::probe(address, "test-official-bearer")
+                .await
+                .expect("official API stays live");
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("local HTTP client")
+                .get(format!("http://{address}/ping"))
+                .send()
+                .await
+                .expect("live /ping");
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+
+        async fn assert_unchanged(
+            &self,
+            before: &fluxdown_protocol::GatewayStatusDto,
+            endpoint: &[u8],
+            sequence: u64,
+        ) {
+            self.assert_live().await;
+            assert_eq!(&self.state.lock().await.gateway, before);
+            assert_eq!(
+                &self.store.load().await.expect("persisted rollback").gateway,
+                before
+            );
+            assert_eq!(self.endpoint_bytes().await, endpoint);
+            assert_eq!(self.user_token().await, "original-token");
+            assert_eq!(&*self.api_token.get(), "original-token");
+            assert_eq!(self.service.events.snapshot().sequence, sequence);
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_port_switch_preserves_wildcard_and_ipv6_listener_addresses() {
+        for address in ["0.0.0.0:0", "[::1]:0"] {
+            let reservation = match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => listener,
+                Err(error)
+                    if address.starts_with('[')
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+                        ) =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("reserve interface {address}: {error}"),
+            };
+            let port = reservation.local_addr().expect("interface port").port();
+            let harness = TestGateway::new_bound("gateway_interface_rebind", false, address).await;
+            drop(reservation);
+            let previous = harness.address().await;
+            harness
+                .patch_gateway(serde_json::json!({ "port": port }))
+                .await;
+            harness.assert_live().await;
+            assert!(
+                tokio::net::TcpStream::connect(previous).await.is_err(),
+                "old interface listener must close"
+            );
+            let endpoint: serde_json::Value =
+                serde_json::from_slice(&harness.endpoint_bytes().await)
+                    .expect("interface endpoint");
+            assert_eq!(
+                endpoint["rpcUrl"],
+                format!("ws://{}/rpc", harness.address().await)
+            );
+            harness.finish().await;
+        }
+    }
+
+    type TestSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn reserve_port() -> (tokio::net::TcpListener, u16) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve test port");
+        let port = listener.local_addr().expect("reserved address").port();
+        (listener, port)
+    }
+
+    async fn socket_response(socket: &mut TestSocket, id: i64) -> RpcResponse {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let message = socket
+                    .next()
+                    .await
+                    .expect("RPC response frame")
+                    .expect("RPC socket read");
+                let value: serde_json::Value =
+                    serde_json::from_str(message.to_text().expect("RPC text")).expect("RPC JSON");
+                if value.get("method").and_then(serde_json::Value::as_str)
+                    == Some(fluxdown_protocol::method::SERVICE_EVENT)
+                {
+                    continue;
+                }
+                let response: RpcResponse = serde_json::from_value(value).expect("RPC response");
+                let response_id = match &response {
+                    RpcResponse::Success(response) => Some(&response.id),
+                    RpcResponse::Failure(response) => response.id.as_ref(),
+                };
+                assert_eq!(response_id, Some(&RequestId::Integer(id)));
+                return response;
+            }
+        })
+        .await
+        .expect("bounded RPC response")
+    }
+
+    async fn socket_request(
+        socket: &mut TestSocket,
+        id: i64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> RpcResponse {
+        let request = RpcRequest::new(RequestId::Integer(id), method, Some(params));
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::to_string(&request)
+                    .expect("serialize request")
+                    .into(),
+            ))
+            .await
+            .expect("send RPC request");
+        socket_response(socket, id).await
+    }
+
+    #[tokio::test]
+    async fn gateway_port_patch_rebinds_immediately_and_returns_over_the_old_socket() {
+        let harness = TestGateway::new("gateway_port_rebind").await;
+        let previous = harness.address().await;
+        let (reserved, port) = reserve_port().await;
+        drop(reserved);
+        let mut request = format!("ws://{previous}/rpc")
+            .into_client_request()
+            .expect("old RPC URL");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-official-bearer"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("old official socket");
+        let hello = socket_request(
+            &mut socket,
+            1,
+            fluxdown_protocol::method::SYSTEM_HELLO,
+            serde_json::json!({
+                "clientName": "port-regression", "clientVersion": fluxdown_protocol::APP_VERSION,
+                "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                "requestedRole": "agent", "capabilities": []
+            }),
+        )
+        .await;
+        assert!(matches!(hello, RpcResponse::Success(_)));
+        let response = socket_request(
+            &mut socket,
+            2,
+            fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "port": port, "userToken": "new-token" }),
+        )
+        .await;
+        let RpcResponse::Success(success) = response else {
+            panic!("rebind must return over old WS: {response:?}");
+        };
+        assert_eq!(success.result["port"], port);
+        harness.assert_live().await;
+        assert!(
+            tokio::net::TcpStream::connect(previous).await.is_err(),
+            "old acceptor must already be closed"
+        );
+        let persisted = harness.store.load().await.expect("rebound persisted state");
+        assert_eq!(persisted.gateway.port, port);
+        assert_eq!(persisted.gateway_user_token, "new-token");
+        assert_eq!(
+            super::agent_snapshot(&harness.service.events)
+                .expect("published snapshot")
+                .gateway
+                .port,
+            port
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&harness.endpoint_bytes().await)
+                .expect("endpoint JSON")["rpcUrl"],
+            format!("ws://127.0.0.1:{port}/rpc")
+        );
+        let ping = socket_request(
+            &mut socket,
+            3,
+            fluxdown_protocol::method::SYSTEM_PING,
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(matches!(ping, RpcResponse::Success(response) if response.result["ok"] == true));
+        socket.close(None).await.expect("close old official socket");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn invalid_gateway_ports_reject_the_entire_patch() {
+        let harness = TestGateway::new("gateway_port_invalid").await;
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "original-token" }))
+            .await;
+        let before = harness.state.lock().await.gateway.clone();
+        let sequence = harness.service.events.snapshot().sequence;
+        for port in [0, 1023] {
+            let response = harness
+                .call(
+                    fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                    serde_json::json!({
+                        "port": port,
+                        "apiEnabled": true,
+                        "corsEnabled": true,
+                        "userToken": "must-not-apply"
+                    }),
+                )
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("invalid port {port} must reject the whole patch");
+            };
+            let data = failure.error.data.expect("port error data");
+            assert_eq!(data.code, ApplicationErrorCode::InvalidArgument);
+            assert_eq!(data.field.as_deref(), Some("port"));
+            assert_eq!(harness.state.lock().await.gateway, before);
+            assert_eq!(harness.user_token().await, "original-token");
+            assert_eq!(&*harness.api_token.get(), "original-token");
+            assert_eq!(harness.service.events.snapshot().sequence, sequence);
+            let persisted = harness.store.load().await.expect("reload rejected patch");
+            assert_eq!(persisted.gateway, before);
+            assert_eq!(persisted.gateway_user_token, "original-token");
+        }
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn fixed_gateway_ports_reject_the_entire_patch() {
+        for server_mode in [false, true] {
+            let harness = TestGateway::new_mode("gateway_port_fixed", server_mode).await;
+            harness
+                .patch_gateway(serde_json::json!({ "userToken": "original-token1" }))
+                .await;
+            // 环境固定模式依据启动时发布的 port_editable；server 模式还独立防御。
+            harness.state.lock().await.gateway.port_editable = server_mode;
+            let before = harness.state.lock().await.gateway.clone();
+            let sequence = harness.service.events.snapshot().sequence;
+            let response = harness
+                .call(
+                    fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                    serde_json::json!({
+                        "port": 18080,
+                        "jsonrpcEnabled": true,
+                        "userToken": "MustNotApply123"
+                    }),
+                )
+                .await;
+            let RpcResponse::Failure(failure) = response else {
+                panic!("fixed listener must reject a port patch");
+            };
+            let data = failure.error.data.expect("fixed port error data");
+            assert_eq!(data.code, ApplicationErrorCode::InvalidArgument);
+            assert_eq!(data.field.as_deref(), Some("port"));
+            assert_eq!(harness.state.lock().await.gateway, before);
+            assert_eq!(harness.user_token().await, "original-token1");
+            assert_eq!(&*harness.api_token.get(), "original-token1");
+            assert_eq!(harness.service.events.snapshot().sequence, sequence);
+            harness.finish().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_gateway_port_save_rolls_back_without_publishing_success() {
+        let harness = TestGateway::new("gateway_port_save_failure").await;
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "original-token" }))
+            .await;
+        let before = harness.state.lock().await.gateway.clone();
+        let sequence = harness.service.events.snapshot().sequence;
+        let endpoint = harness.endpoint_bytes().await;
+        let (reserved, port) = reserve_port().await;
+        drop(reserved);
+        let path = harness.dir.join("agent-state.json");
+        let backup = harness.dir.join("saved-state.json");
+        tokio::fs::rename(&path, &backup)
+            .await
+            .expect("back up state");
+        tokio::fs::create_dir(&path)
+            .await
+            .expect("block atomic rename");
+        let response = harness
+            .call(
+                fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                serde_json::json!({
+                    "port": port,
+                    "apiEnabled": true,
+                    "userToken": "must-not-apply"
+                }),
+            )
+            .await;
+        let RpcResponse::Failure(failure) = response else {
+            panic!("failed persistence must not return success");
+        };
+        assert_eq!(
+            failure.error.data.expect("save error data").reason,
+            Some(fluxdown_protocol::ErrorReason::GatewayRestartFailed)
+        );
+        assert_eq!(harness.state.lock().await.gateway, before);
+        assert_eq!(harness.user_token().await, "original-token");
+        assert_eq!(&*harness.api_token.get(), "original-token");
+        assert_eq!(harness.service.events.snapshot().sequence, sequence);
+        tokio::fs::remove_dir(&path)
+            .await
+            .expect("unblock state path");
+        tokio::fs::rename(&backup, &path)
+            .await
+            .expect("restore saved state");
+        let persisted = harness.store.load().await.expect("reload original state");
+        assert_eq!(persisted.gateway, before);
+        assert_eq!(persisted.gateway_user_token, "original-token");
+        harness.assert_unchanged(&before, &endpoint, sequence).await;
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "failed replacement must close"
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn occupied_gateway_port_keeps_the_old_authenticated_service_and_token() {
+        let harness = TestGateway::new("gateway_port_occupied").await;
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "original-token" }))
+            .await;
+        let before = harness.state.lock().await.gateway.clone();
+        let endpoint = harness.endpoint_bytes().await;
+        let sequence = harness.service.events.snapshot().sequence;
+        let (occupied, port) = reserve_port().await;
+        let response = harness.call(fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "port": port, "apiEnabled": true, "userToken": "must-not-apply" })).await;
+        let RpcResponse::Failure(failure) = response else {
+            panic!("occupied port must fail");
+        };
+        assert_eq!(
+            failure.error.data.expect("occupied port reason").reason,
+            Some(fluxdown_protocol::ErrorReason::GatewayPortInUse)
+        );
+        harness.assert_unchanged(&before, &endpoint, sequence).await;
+        drop(occupied);
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn rejected_authenticated_readiness_rolls_back_the_replacement() {
+        let harness = TestGateway::new("gateway_probe_failure").await;
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "original-token" }))
+            .await;
+        let before = harness.state.lock().await.gateway.clone();
+        let endpoint = harness.endpoint_bytes().await;
+        let sequence = harness.service.events.snapshot().sequence;
+        let (reserved, port) = reserve_port().await;
+        drop(reserved);
+        harness.service.listener_control.reject_next_readiness();
+        let response = harness.call(fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "port": port, "corsEnabled": true, "userToken": "must-not-apply" })).await;
+        let RpcResponse::Failure(failure) = response else {
+            panic!("failed real authenticated probe must fail patch");
+        };
+        assert_eq!(
+            failure.error.data.expect("readiness reason").reason,
+            Some(fluxdown_protocol::ErrorReason::GatewayRestartFailed)
+        );
+        harness.assert_unchanged(&before, &endpoint, sequence).await;
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "rejected listener must close"
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn endpoint_publication_failure_preserves_the_running_gateway() {
+        let harness = TestGateway::new("gateway_endpoint_failure").await;
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "original-token" }))
+            .await;
+        let before = harness.state.lock().await.gateway.clone();
+        let endpoint = harness.endpoint_bytes().await;
+        let sequence = harness.service.events.snapshot().sequence;
+        let path = harness.endpoint_dir.join("gateway-endpoint.json");
+        let backup = harness.endpoint_dir.join("saved-endpoint.json");
+        tokio::fs::rename(&path, &backup)
+            .await
+            .expect("back up endpoint");
+        tokio::fs::create_dir(&path)
+            .await
+            .expect("block endpoint publication");
+        let (reserved, port) = reserve_port().await;
+        drop(reserved);
+        let response = harness.call(fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "port": port, "apiEnabled": true, "userToken": "must-not-apply" })).await;
+        tokio::fs::remove_dir(&path)
+            .await
+            .expect("unblock endpoint publication");
+        tokio::fs::rename(&backup, &path)
+            .await
+            .expect("restore endpoint");
+        let RpcResponse::Failure(failure) = response else {
+            panic!("endpoint persistence failure must reject patch");
+        };
+        assert_eq!(
+            failure.error.data.expect("endpoint failure reason").reason,
+            Some(fluxdown_protocol::ErrorReason::GatewayRestartFailed)
+        );
+        harness.assert_unchanged(&before, &endpoint, sequence).await;
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "unpublished listener must close"
+        );
+        harness.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn state_write_failure_restores_an_already_published_endpoint() {
+        use std::os::unix::fs::PermissionsExt;
+        let harness = TestGateway::new("gateway_transaction_rollback").await;
+        harness
+            .patch_gateway(serde_json::json!({ "userToken": "original-token" }))
+            .await;
+        let before = harness.state.lock().await.gateway.clone();
+        let endpoint = harness.endpoint_bytes().await;
+        let sequence = harness.service.events.snapshot().sequence;
+        let permissions = tokio::fs::metadata(&harness.dir)
+            .await
+            .expect("state directory mode")
+            .permissions();
+        tokio::fs::set_permissions(&harness.dir, std::fs::Permissions::from_mode(0o500))
+            .await
+            .expect("deny state writes");
+        // A root-run suite cannot induce this ACL failure; do not rely on root respecting chmod.
+        let canary = harness.dir.join("permission-canary");
+        match tokio::fs::write(&canary, b"").await {
+            Ok(()) => {
+                tokio::fs::remove_file(&canary)
+                    .await
+                    .expect("remove root permission canary");
+                tokio::fs::set_permissions(&harness.dir, permissions)
+                    .await
+                    .expect("restore directory mode");
+                harness.finish().await;
+                return;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(error) => {
+                tokio::fs::set_permissions(&harness.dir, permissions)
+                    .await
+                    .expect("restore directory mode");
+                panic!("unexpected write-denial setup error: {error}");
+            }
+        }
+        let (reserved, port) = reserve_port().await;
+        drop(reserved);
+        let response = harness.call(fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+            serde_json::json!({ "port": port, "apiEnabled": true, "userToken": "must-not-apply" })).await;
+        tokio::fs::set_permissions(&harness.dir, permissions)
+            .await
+            .expect("restore state write permissions");
+        let RpcResponse::Failure(failure) = response else {
+            panic!("state persistence failure must reject patch");
+        };
+        assert_eq!(
+            failure.error.data.expect("state failure reason").reason,
+            Some(fluxdown_protocol::ErrorReason::GatewayRestartFailed)
+        );
+        harness.assert_unchanged(&before, &endpoint, sequence).await;
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err(),
+            "rolled-back listener must close"
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_port_and_token_patches_commit_in_order_without_mixing_state() {
+        let harness = TestGateway::new("gateway_patch_serialization").await;
+        let (reserved, port) = reserve_port().await;
+        drop(reserved);
+        let (port_response, token_response) = tokio::join!(
+            harness.call(
+                fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                serde_json::json!({ "port": port, "userToken": "port-token" })
+            ),
+            harness.call(
+                fluxdown_protocol::method::AGENT_GATEWAY_PATCH,
+                serde_json::json!({ "userToken": "final-token" })
+            ),
+        );
+        assert!(matches!(port_response, RpcResponse::Success(_)));
+        assert!(matches!(token_response, RpcResponse::Success(_)));
+        harness.assert_live().await;
+        let state = harness
+            .store
+            .load()
+            .await
+            .expect("serialized final gateway");
+        assert_eq!(state.gateway.port, port);
+        assert_eq!(state.gateway_user_token, "final-token");
+        assert_eq!(&*harness.api_token.get(), "final-token");
+        assert_eq!(
+            super::agent_snapshot(&harness.service.events)
+                .expect("final snapshot")
+                .gateway
+                .port,
+            port
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn remote_reconnect_requires_login_and_only_acknowledges_the_request() {
+        let harness = TestGateway::new("remote_reconnect").await;
+        let method = fluxdown_protocol::method::AGENT_REMOTE_RECONNECT;
+        let response = harness.call(method, serde_json::json!({})).await;
+        assert!(matches!(response, RpcResponse::Failure(_)));
+        harness.state.lock().await.credentials = Some(crate::state::CloudCredentials {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix: i64::MAX,
+            session: None,
+        });
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            harness.call(method, serde_json::json!({})),
+        )
+        .await
+        .expect("immediate acknowledgement");
+        let RpcResponse::Success(success) = response else {
+            panic!("reconnect failed: {response:?}");
+        };
+        assert_eq!(success.result, serde_json::json!({"accepted": true}));
+        let fluxdown_protocol::SnapshotBody::Agent(snapshot) =
+            harness.service.events.snapshot().body
+        else {
+            panic!("agent snapshot");
+        };
+        assert_eq!(
+            snapshot.cloud_connection.state,
+            fluxdown_protocol::CloudConnectionState::Disconnected
+        );
+        harness.finish().await;
     }
 
     #[tokio::test]
@@ -2258,8 +3307,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_mode_rejects_host_diagnostics_and_keeps_web_repairs() {
-        let mut harness = TestGateway::new("server_diagnostics").await;
-        harness.service = harness.service.with_server_mode(true);
+        let harness = TestGateway::new_mode("server_diagnostics", true).await;
         let repair = fluxdown_protocol::method::AGENT_DIAGNOSTICS_REPAIR;
         let target = harness.dir.join("chosen.zip");
         tokio::fs::write(&target, b"existing archive")
@@ -2392,6 +3440,99 @@ mod tests {
         assert!(matches!(lane_for("agent.link.pairFinish"), Lane::Slow));
         assert!(matches!(lane_for("agent.diagnostics.run"), Lane::Slow));
         assert!(matches!(lane_for("system.ping"), Lane::Local));
+        assert!(matches!(lane_for("agent.remote.reconnect"), Lane::Local));
+    }
+
+    #[tokio::test]
+    async fn reconnect_lane_bypasses_an_inflight_cloud_request() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = axum::Router::new().route(
+            "/api/v1/tasks/remote",
+            axum::routing::get({
+                let entered = entered.clone();
+                let release = release.clone();
+                move || {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        axum::Json(serde_json::json!({"tasks":[]}))
+                    }
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let harness = TestGateway::new("reconnect_lane").await;
+        harness
+            .service
+            .cloud
+            .set_endpoint(&format!("http://{address}"))
+            .await
+            .expect("endpoint");
+        harness.state.lock().await.credentials = Some(crate::state::CloudCredentials {
+            access_token: "access".to_owned(),
+            refresh_token: "refresh".to_owned(),
+            expires_at_unix: i64::MAX,
+            session: None,
+        });
+        let service = Arc::new(harness.service);
+        let (responses, mut receiver) = tokio::sync::mpsc::channel(4);
+        let lanes = super::RequestLanes::spawn(&service, responses);
+        assert!(
+            lanes
+                .submit(RpcRequest::new(
+                    RequestId::Integer(1),
+                    "agent.remote.list",
+                    None,
+                ))
+                .is_none()
+        );
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("cloud request blocked");
+        assert!(
+            lanes
+                .submit(RpcRequest::new(
+                    RequestId::Integer(2),
+                    "agent.remote.reconnect",
+                    None,
+                ))
+                .is_none()
+        );
+        let response = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("reconnect is not queued behind cloud")
+            .expect("response");
+        let RpcResponse::Success(response) = response else {
+            panic!("reconnect failed")
+        };
+        assert_eq!(response.id, RequestId::Integer(2));
+        assert_eq!(response.result, serde_json::json!({"accepted":true}));
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("cloud unblocked")
+            .expect("cloud response");
+        drop(lanes);
+        drop(service);
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("stopped mock server")
+                .is_cancelled()
+        );
+        drop(harness.state);
+        drop(harness.store);
+        tokio::fs::remove_dir_all(harness.dir)
+            .await
+            .expect("cleanup");
     }
 
     #[test]
@@ -2411,8 +3552,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_mode_disables_platform_methods_and_guards_the_access_key() {
-        let mut harness = TestGateway::new("server_mode").await;
-        harness.service = harness.service.with_server_mode(true);
+        let harness = TestGateway::new_mode("server_mode", true).await;
 
         for method_name in [
             fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,

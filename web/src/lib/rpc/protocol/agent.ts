@@ -8,6 +8,15 @@ import type { CreateTaskRequest } from './task';
 
 // ── 账号 ──
 
+export type CloudConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
+
+/** 任务 SSE + 在线租约 + 最新设备名册均成功才 connected；独立于配置同步连接。 */
+export interface CloudConnectionDto {
+  state: CloudConnectionState;
+  lastError?: string;
+  lastErrorReason?: ErrorReason;
+}
+
 export type CloudUserStatus = 'active' | 'disabled' | 'pending' | 'unknown';
 
 /** FluxCloud 用户公开资料。 */
@@ -341,8 +350,10 @@ export interface GatewayStatusDto {
   mcpEnabled: boolean;
   corsEnabled: boolean;
   userTokenConfigured: boolean;
-  /** 当前监听端口（只读，默认 17800）。 */
+  /** 当前已验证可用的实际监听端口；修改失败时保持原值。 */
   port: number;
+  /** server 模式或环境固定监听地址时为 false。 */
+  portEditable: boolean;
   /** 是否对局域网开放兼容 API；修改后下次 agent 启动生效。 */
   lanEnabled: boolean;
 }

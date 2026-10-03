@@ -62,7 +62,7 @@ pub(crate) fn session_revoked_key(reason: ErrorReason) -> &'static str {
     }
 }
 
-fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str> {
+pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str> {
     Some(match reason {
         ErrorReason::InvalidCredentials => "accountErrorInvalidCredentials",
         ErrorReason::InvalidVerificationCode => "accountErrorInvalidCode",
@@ -104,7 +104,7 @@ fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str
         ErrorReason::TaskStateConflict => "errReasonTaskStateConflict",
         ErrorReason::TaskDeviceMismatch => "errReasonTaskDeviceMismatch",
         ErrorReason::SaveDirUnavailable => "errReasonSaveDirUnavailable",
-        // 插件市场与 Doctor 修复的原因由各自页面展示；这里退回按 code 的通用文案。
+        // 插件市场、Doctor 与 API 服务切换由各自页面展示；这里退回按 code 的通用文案。
         ErrorReason::MarketUnreachable
         | ErrorReason::MarketIndexInvalid
         | ErrorReason::MarketIndexRollback
@@ -119,6 +119,8 @@ fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&'static str
         | ErrorReason::RunningElevated
         | ErrorReason::RepairIncomplete
         | ErrorReason::RepairNotApplicable
+        | ErrorReason::GatewayPortInUse
+        | ErrorReason::GatewayRestartFailed
         | ErrorReason::Unknown => return None,
     })
 }
