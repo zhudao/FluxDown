@@ -104,7 +104,7 @@ impl Render for TaskDragPreview {
             .pt(self.click_offset.y + px(PREVIEW_CURSOR_GAP))
             .child(
                 h_flex()
-                    .max_w(px(PREVIEW_MAX_WIDTH))
+                    .max_w(theme.text_extent(PREVIEW_MAX_WIDTH))
                     .px(tokens.spacing.md)
                     .py(tokens.spacing.xs)
                     .gap(tokens.spacing.sm)

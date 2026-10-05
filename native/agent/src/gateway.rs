@@ -252,6 +252,17 @@ impl GatewayService {
                     .verify_code(&params_or_empty(request.params))
                     .await,
             ),
+            method::AGENT_AUTH_SEND_PASSWORD_RESET_CODE => cloud_value(
+                self.auth
+                    .send_password_reset_code(&params_or_empty(request.params))
+                    .await,
+            ),
+            method::AGENT_AUTH_RESET_PASSWORD => cloud_value(
+                self.auth
+                    .reset_password(&params_or_empty(request.params))
+                    .await
+                    .map(|()| serde_json::json!({ "ok": true })),
+            ),
             method::AGENT_AUTH_LOGOUT => cloud_value(
                 self.auth
                     .logout()
@@ -278,6 +289,19 @@ impl GatewayService {
                 self.profile_request(
                     Method::POST,
                     "/email",
+                    Some(params_or_empty(request.params)),
+                    true,
+                )
+                .await
+            }
+            method::AGENT_PROFILE_SEND_PASSWORD_CODE => {
+                self.profile_request(Method::POST, "/password/code", None, false)
+                    .await
+            }
+            method::AGENT_PROFILE_CHANGE_PASSWORD => {
+                self.profile_request(
+                    Method::POST,
+                    "/password",
                     Some(params_or_empty(request.params)),
                     true,
                 )

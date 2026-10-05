@@ -63,6 +63,9 @@ pub struct CloudUser {
     #[serde(default)]
     pub origin_id_changed: bool,
     pub membership_ordinal: Option<i64>,
+    /// 账号是否设置了登录密码；旧版云端不下发时为 `None`（视为未知）。
+    #[serde(default)]
+    pub has_password: Option<bool>,
 }
 
 /// 前向兼容的套餐权益集合。未知字段必须原样保留。

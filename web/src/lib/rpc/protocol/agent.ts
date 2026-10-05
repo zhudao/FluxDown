@@ -32,6 +32,8 @@ export interface CloudUser {
   originId: number | null;
   originIdChanged: boolean;
   membershipOrdinal: number | null;
+  /** 是否已设置登录密码；旧版云端不下发时为 `null`（未知）。 */
+  hasPassword: boolean | null;
 }
 
 /** 套餐权益集合：前向兼容，未知键原样保留。 */

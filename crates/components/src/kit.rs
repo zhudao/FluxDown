@@ -52,6 +52,7 @@ impl ControlExt for Button {
             .h(theme.density().control)
             .px(tokens.spacing.sm + tokens.spacing.xxs)
             .text_size(tokens.typography.sm.size)
+            .line_height(tokens.typography.sm.line_height)
     }
 }
 
@@ -62,6 +63,21 @@ impl IconControlExt for Button {
             self.with_size(Size::Medium),
             active_theme(cx).density().control,
         )
+    }
+}
+
+/// 按钮进行中状态。gpui-component 的 `Button::loading` 只把**前置图标**换成转圈；
+/// 纯文字按钮没有图标，`loading(true)` 只会变得不可点击而看不到任何动画。
+/// 一律用 [`BusyExt::busy`]：进行中时补一个前置 spinner。
+pub trait BusyExt: Sized {
+    fn busy(self, busy: bool) -> Self;
+}
+
+impl BusyExt for Button {
+    fn busy(self, busy: bool) -> Self {
+        self.loading(busy).when(busy, |button| {
+            button.icon(gpui_component::spinner::Spinner::new())
+        })
     }
 }
 
@@ -135,6 +151,7 @@ pub fn segmented_tabs(
                 .items_center()
                 .rounded(tab_radius)
                 .text_size(tokens.typography.sm.size)
+                .line_height(tokens.typography.sm.line_height)
                 .cursor_pointer()
                 .map(|this| {
                     if active {
@@ -179,6 +196,7 @@ pub fn check_row(
         .rounded(tokens.radius.md)
         .cursor_pointer()
         .text_size(tokens.typography.sm.size)
+        .line_height(tokens.typography.sm.line_height)
         .text_color(tokens.colors.foreground)
         .border_1()
         .border_color(gpui::transparent_black())

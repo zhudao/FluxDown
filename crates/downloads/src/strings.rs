@@ -625,6 +625,7 @@ pub(crate) fn error_text(
         ErrorReason::CloudUnreachable => Some("accountErrorNetwork"),
         ErrorReason::SessionExpired => Some("errReasonSessionExpired"),
         ErrorReason::DeviceUntrusted => Some("accountSessionRevokedUntrusted"),
+        ErrorReason::PasswordChanged => Some("accountSessionRevokedPasswordChanged"),
         ErrorReason::PeerNotPaired => Some("errReasonPeerNotPaired"),
         ErrorReason::PeerOffline => Some("errReasonPeerOffline"),
         _ => None,

@@ -19,7 +19,7 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{
     Anchor, App, AppContext as _, ClickEvent, Context, Div, Hsla, InteractiveElement as _,
     IntoElement, ParentElement, SharedString, StatefulInteractiveElement as _, Styled, WeakEntity,
-    Window, div, prelude::FluentBuilder as _, px,
+    Window, div, prelude::FluentBuilder as _,
 };
 use gpui_component::{
     Icon, Sizable as _, Size, WindowExt as _,
@@ -179,7 +179,7 @@ fn open_number_prompt(
         let prompt = prompt.clone();
         dialog
             .title(dialog_title(prompt.title.clone(), cx))
-            .w(px(520.))
+            .w(active_theme(cx).text_extent(520.))
             .content({
                 let prompt = prompt.clone();
                 move |content, _, cx| {

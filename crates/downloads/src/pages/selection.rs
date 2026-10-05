@@ -18,8 +18,8 @@ use fluxdown_ui_components::{
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    AnyElement, ClickEvent, Context, Div, Entity, InteractiveElement as _, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled, Window, div,
     prelude::FluentBuilder as _,
 };
 use gpui_component::{
@@ -237,13 +237,24 @@ impl SelectionView {
             )
     }
 
-    fn render_body(&self, cx: &mut Context<Self>) -> Div {
+    fn render_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        // HLS / 画质选择窗口固定尺寸：文字放大后选项可能超出窗口，列表内滚动。
         match &self.state {
-            SelectionState::Hls { options, selected } => self.render_hls(options, *selected, cx),
-            SelectionState::Bt { files, selected } => self.render_bt(files, selected, cx),
-            SelectionState::Variant { options, selected } => {
-                self.render_variant(options, *selected, cx)
+            SelectionState::Hls { options, selected } => div()
+                .id("selection-hls-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.render_hls(options, *selected, cx))
+                .into_any_element(),
+            SelectionState::Bt { files, selected } => {
+                self.render_bt(files, selected, cx).into_any_element()
             }
+            SelectionState::Variant { options, selected } => div()
+                .id("selection-variant-scroll")
+                .size_full()
+                .overflow_y_scroll()
+                .child(self.render_variant(options, *selected, cx))
+                .into_any_element(),
         }
     }
 

@@ -559,13 +559,13 @@ impl ProgressWindowView {
         let tokens = theme.tokens();
         h_flex()
             .gap(tokens.spacing.sm)
-            .h(px(INFO_ROW_HEIGHT))
+            .min_h(px(INFO_ROW_HEIGHT))
             .text_size(tokens.typography.xs.size)
             .line_height(tokens.typography.xs.line_height)
             .child(
                 div()
                     .flex_none()
-                    .w(px(INFO_LABEL_WIDTH))
+                    .w(theme.text_extent(INFO_LABEL_WIDTH))
                     .text_color(theme.extended().colors.text_tertiary)
                     .child(label),
             )
@@ -656,10 +656,11 @@ impl ProgressWindowView {
             .flex_none()
             .gap(tokens.spacing.xxs)
             .px(tokens.spacing.xs)
-            .h(px(24.))
+            .min_h(px(24.))
             .rounded(tokens.radius.md)
             .cursor_pointer()
             .text_size(tokens.typography.xs.size)
+            .line_height(tokens.typography.xs.line_height)
             .text_color(tokens.colors.muted_foreground)
             .hover(move |style| style.bg(extended.colors.row_hover))
             .on_click(cx.listener(|this, _, _, cx| {
@@ -701,14 +702,16 @@ impl ProgressWindowView {
             .unwrap_or_default();
         segments.sort_by_key(|segment| segment.index);
 
+        let index_width = theme.text_extent(PART_INDEX_WIDTH);
+        let total_width = theme.text_extent(72.);
         let columns =
             |index: AnyElement, status: AnyElement, done: AnyElement, total: AnyElement| {
                 h_flex()
                     .gap(tokens.spacing.sm)
-                    .child(div().flex_none().w(px(PART_INDEX_WIDTH)).child(index))
+                    .child(div().flex_none().w(index_width).child(index))
                     .child(div().flex_1().min_w_0().child(status))
                     .child(div().flex_1().min_w_0().child(done))
-                    .child(div().w(px(72.)).flex_none().text_right().child(total))
+                    .child(div().w(total_width).flex_none().text_right().child(total))
             };
         let header_text = |text: SharedString| {
             div()
@@ -741,13 +744,14 @@ impl ProgressWindowView {
                 div()
                     .truncate()
                     .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
                     .font_features(tabular_numbers())
                     .text_color(tokens.colors.muted_foreground)
                     .child(text)
                     .into_any_element()
             };
             div()
-                .h(px(PART_ROW_HEIGHT))
+                .min_h(px(PART_ROW_HEIGHT))
                 .flex()
                 .items_center()
                 .px(tokens.spacing.md)
@@ -756,6 +760,7 @@ impl ProgressWindowView {
                     div()
                         .truncate()
                         .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
                         .text_color(if active {
                             tokens.colors.primary
                         } else {
@@ -830,6 +835,7 @@ impl ProgressWindowView {
                     div()
                         .truncate()
                         .text_size(tokens.typography.xs.size)
+                        .line_height(tokens.typography.xs.line_height)
                         .text_color(tokens.colors.muted_foreground)
                         .child(self.t(cx, "progressWindowShowCompletion")),
                     move |value, _, cx| {

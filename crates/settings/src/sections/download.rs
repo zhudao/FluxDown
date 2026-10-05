@@ -2,7 +2,7 @@
 
 use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, loading_button, tabular_numbers};
 use fluxdown_ui_theme::active_theme;
-use gpui::{App, ParentElement, SharedString, Styled, px};
+use gpui::{App, ParentElement, SharedString, Styled};
 use gpui_component::h_flex;
 
 use super::{SectionContext, rate_limit, user_agent};
@@ -59,7 +59,7 @@ fn save_dir_control(ctx: &SectionContext) -> Control {
             .items_center()
             .child(
                 body_text(cx)
-                    .max_w(px(320.))
+                    .max_w(active_theme(cx).text_extent(320.))
                     .truncate()
                     .text_color(if current.is_empty() {
                         tokens.colors.muted_foreground

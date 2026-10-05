@@ -205,16 +205,13 @@ const TaskRow = memo(function TaskRow(props: RowProps) {
       >
         <div className={cn('pointer-events-none absolute inset-y-0 left-1 right-1 rounded-[var(--fx-components-task-row-radius)]', selected ? 'bg-accent' : 'group-hover/row:bg-row-hover')} />
         <div className="relative flex shrink-0 items-center justify-center" style={{ width: SELECTION_COLUMN_WIDTH }}>
-          <div className={cn(anySelected || selected ? 'hidden' : 'group-hover/row:hidden')}>
+          {anySelected ? (
+            <div className="flex p-1" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()}>
+              <Checkbox checked={selected} onCheckedChange={() => onToggle(view)} aria-label={view.name} />
+            </div>
+          ) : (
             <KindGlyph view={view} />
-          </div>
-          <div
-            className={cn('p-1', anySelected || selected ? 'flex' : 'hidden group-hover/row:flex')}
-            onClick={(event) => event.stopPropagation()}
-            onDoubleClick={(event) => event.stopPropagation()}
-          >
-            <Checkbox checked={selected} onCheckedChange={() => onToggle(view)} aria-label={view.name} />
-          </div>
+          )}
         </div>
         {columns.map((column) => (
           <div
@@ -422,15 +419,16 @@ export function TaskTable() {
             className="group/all flex shrink-0 items-center justify-center"
             style={{ width: SELECTION_COLUMN_WIDTH }}
           >
-            <div className={cn(allChecked || someChecked ? 'flex' : 'invisible group-hover/all:visible')}>
+            {/* 非多选模式（普通单击选中）表头全选框按未选处理；表头选择条只在显式多选模式出现，单项操作走右键菜单。 */}
+            <div className={cn(ctx.multiSelect ? 'flex' : 'invisible group-hover/all:visible')}>
               <Checkbox
-                checked={allChecked ? true : someChecked ? 'indeterminate' : false}
-                onCheckedChange={() => (allChecked ? ctx.clearSelection() : ctx.selectAll())}
+                checked={!ctx.multiSelect ? false : allChecked ? true : someChecked ? 'indeterminate' : false}
+                onCheckedChange={() => (ctx.multiSelect && allChecked ? ctx.clearSelection() : ctx.selectAll())}
                 aria-label={t('selectedCount', { n: visibleKeys.length })}
               />
             </div>
           </div>
-          {ctx.summary.any && !(ctx.detailOpen && ctx.summary.count === 1) ? (
+          {ctx.multiSelect ? (
             <SelectionHeaderBar />
           ) : (
             <>
@@ -515,7 +513,7 @@ export function TaskTable() {
                     columns={columns}
                     density={prefs.density}
                     selected={selected.has(row.key)}
-                    anySelected={selected.size > 0}
+                    anySelected={ctx.multiSelect}
                     queueName={ctx.queueName}
                     onClick={onClick}
                     onDoubleClick={onDoubleClick}

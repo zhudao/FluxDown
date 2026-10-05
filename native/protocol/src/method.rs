@@ -125,6 +125,8 @@ pub const AGENT_AUTH_SEND_CODE: &str = "agent.auth.sendCode";
 pub const AGENT_AUTH_VERIFY_CODE: &str = "agent.auth.verifyCode";
 pub const AGENT_AUTH_LOGOUT: &str = "agent.auth.logout";
 pub const AGENT_AUTH_REFRESH_PROFILE: &str = "agent.auth.refreshProfile";
+pub const AGENT_AUTH_SEND_PASSWORD_RESET_CODE: &str = "agent.auth.sendPasswordResetCode";
+pub const AGENT_AUTH_RESET_PASSWORD: &str = "agent.auth.resetPassword";
 pub const AGENT_PROFILE_SEND_EMAIL_CODE: &str = "agent.profile.sendEmailCode";
 pub const AGENT_PROFILE_SEND_NEW_EMAIL_CODE: &str = "agent.profile.sendNewEmailCode";
 pub const AGENT_PROFILE_CHANGE_EMAIL: &str = "agent.profile.changeEmail";
@@ -132,6 +134,8 @@ pub const AGENT_PROFILE_RANDOM_ORIGIN_ID: &str = "agent.profile.randomOriginId";
 pub const AGENT_PROFILE_CHECK_ORIGIN_ID: &str = "agent.profile.checkOriginId";
 pub const AGENT_PROFILE_CHANGE_ORIGIN_ID: &str = "agent.profile.changeOriginId";
 pub const AGENT_PROFILE_CHANGE_NICKNAME: &str = "agent.profile.changeNickname";
+pub const AGENT_PROFILE_SEND_PASSWORD_CODE: &str = "agent.profile.sendPasswordCode";
+pub const AGENT_PROFILE_CHANGE_PASSWORD: &str = "agent.profile.changePassword";
 
 pub const AGENT_GATEWAY_GET: &str = "agent.gateway.get";
 pub const AGENT_GATEWAY_PATCH: &str = "agent.gateway.patch";
@@ -343,6 +347,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_AUTH_VERIFY_CODE,
     AGENT_AUTH_LOGOUT,
     AGENT_AUTH_REFRESH_PROFILE,
+    AGENT_AUTH_SEND_PASSWORD_RESET_CODE,
+    AGENT_AUTH_RESET_PASSWORD,
     AGENT_PROFILE_SEND_EMAIL_CODE,
     AGENT_PROFILE_SEND_NEW_EMAIL_CODE,
     AGENT_PROFILE_CHANGE_EMAIL,
@@ -350,6 +356,8 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_PROFILE_CHECK_ORIGIN_ID,
     AGENT_PROFILE_CHANGE_ORIGIN_ID,
     AGENT_PROFILE_CHANGE_NICKNAME,
+    AGENT_PROFILE_SEND_PASSWORD_CODE,
+    AGENT_PROFILE_CHANGE_PASSWORD,
     AGENT_GATEWAY_GET,
     AGENT_GATEWAY_PATCH,
     AGENT_GATEWAY_REVEAL_TOKEN,

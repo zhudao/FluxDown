@@ -1,4 +1,4 @@
-//! 外观：语言、明暗模式、主题（内置 + 已导入，含导入 / 导出 / 删除）、强调色、界面缩放。
+//! 外观：语言、明暗模式、主题（内置 + 已导入，含导入 / 导出 / 删除）、强调色、界面缩放、字体与字体大小。
 //!
 //! 控件只写偏好（走 `agent.preferences.patch`），不直接改主题 / 语言：app 观察设置存储的偏好
 //! 视图（含未回执的本地编辑），经 `fluxdown_ui_theme::apply_appearance_preferences` 与语言切换
@@ -7,9 +7,10 @@
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{
     AccentScheme, AppearancePreferences, BuiltinThemeId, COLOR_SCHEME_KEY, CUSTOM_COLOR_KEY,
-    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, LIGHT_THEME_KEY, THEME_MODE_KEY,
-    ThemeMode, ThemePreference, ThemeSelection, UI_SCALE_KEY, UI_SCALE_PERCENTS, active_theme,
-    argb_color, color_argb, foreground_for, normalize_ui_scale_percent,
+    ColorTokens, DARK_THEME_KEY, ExportMode, ExtendedTokens, FONT_SIZE_KEY, FONT_SIZE_RANGE,
+    FONT_SIZES, LIGHT_THEME_KEY, THEME_MODE_KEY, ThemeMode, ThemePreference, ThemeSelection,
+    UI_SCALE_KEY, UI_SCALE_PERCENTS, active_theme, argb_color, color_argb, foreground_for,
+    normalize_ui_scale_percent,
 };
 use gpui::{
     Anchor, App, AppContext as _, Entity, Hsla, InteractiveElement as _, IntoElement as _,
@@ -82,7 +83,8 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
                 "fontFamily",
                 Some("fontFamilyDesktopHint"),
                 super::font_family::field(ctx),
-            )),
+            ))
+            .row(ctx.item("fontSize", Some("fontSizeDesc"), font_size_field(ctx))),
     ])
 }
 
@@ -158,6 +160,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
             let selected = state.appearance().theme(mode).clone();
             let tokens = state.tokens().clone();
             let extended = state.extended().clone();
+            let card_width = state.text_extent(THEME_CARD_WIDTH);
             let group_label = if mode.is_dark() {
                 dark_label.clone()
             } else {
@@ -183,6 +186,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                     disabled,
                     &tokens,
                     &extended,
+                    card_width,
                     move |cx| select_theme(ThemeSelection::Builtin(id), &store, cx),
                     None,
                 )
@@ -210,6 +214,7 @@ fn theme_cards_field(ctx: &SectionContext) -> Control {
                         disabled,
                         &tokens,
                         &extended,
+                        card_width,
                         move |cx| select_theme(selection.clone(), &select_store, cx),
                         Some(CardDelete {
                             label: delete_label.clone(),
@@ -312,6 +317,7 @@ fn theme_card(
     disabled: bool,
     tokens: &fluxdown_ui_theme::SemanticThemeTokens,
     extended: &ExtendedTokens,
+    width: gpui::Pixels,
     on_select: impl Fn(&mut App) + 'static,
     delete: Option<CardDelete>,
 ) -> impl gpui::IntoElement {
@@ -387,7 +393,7 @@ fn theme_card(
 
     div()
         .id(element_id)
-        .w(px(THEME_CARD_WIDTH))
+        .w(width)
         .p(tokens.spacing.sm)
         .rounded(tokens.radius.lg)
         .border_1()
@@ -808,7 +814,7 @@ fn custom_color_picker(
     )
 }
 
-// ───────────────────────── 界面缩放 ─────────────────────────
+// ───────────────────────── 界面缩放 / 字体大小 ─────────────────────────
 
 fn ui_scale_field(ctx: &SectionContext) -> Control {
     let options: Vec<(SharedString, SharedString)> = UI_SCALE_PERCENTS
@@ -834,6 +840,43 @@ fn ui_scale_field(ctx: &SectionContext) -> Control {
             store.update(cx, |store, cx| {
                 store.set_pref(UI_SCALE_KEY, serde_json::Value::from(scale), cx);
             });
+        },
+    )
+}
+
+/// 下拉中「跟随主题」项的值；写入偏好时为 `null`（清除本机字号）。
+const FONT_SIZE_THEME: &str = "theme";
+
+/// 本机正文字号（px）：其余文字与承载文字的行 / 控件高度同比适配，再与界面缩放相乘。
+fn font_size_field(ctx: &SectionContext) -> Control {
+    let mut options = vec![(
+        SharedString::from(FONT_SIZE_THEME),
+        ctx.t("fontSizeFollowTheme"),
+    )];
+    options.extend(FONT_SIZES.iter().map(|size| {
+        (
+            SharedString::from(size.to_string()),
+            SharedString::from(format!("{size} px")),
+        )
+    }));
+    let store = ctx.store();
+    Control::dropdown(
+        options,
+        move |cx: &App| {
+            active_theme(cx)
+                .appearance()
+                .font_size
+                .map_or(SharedString::from(FONT_SIZE_THEME), |size| {
+                    SharedString::from(size.to_string())
+                })
+        },
+        move |value: SharedString, cx: &mut App| {
+            let pref = match value.parse::<u16>() {
+                Ok(size) if FONT_SIZE_RANGE.contains(&size) => serde_json::Value::from(size),
+                Ok(_) => return,
+                Err(_) => serde_json::Value::Null,
+            };
+            store.update(cx, |store, cx| store.set_pref(FONT_SIZE_KEY, pref, cx));
         },
     )
 }

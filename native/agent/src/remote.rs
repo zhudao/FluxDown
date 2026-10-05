@@ -743,7 +743,11 @@ impl RemoteTaskService {
                 if target.is_none_or(|target| target == local) {
                     // 指向本设备（被删除 / 被替换）= 设备不再受信任；未指明设备（管理员撤销全部会话等）
                     // = 会话过期。`revoke_session` 先发 `SessionRevoked` 再投影 `SessionChanged(None)`。
-                    let reason = if target.is_some() {
+                    let password_changed =
+                        event.get("reason").and_then(Value::as_str) == Some("passwordChanged");
+                    let reason = if password_changed {
+                        ErrorReason::PasswordChanged
+                    } else if target.is_some() {
                         ErrorReason::DeviceUntrusted
                     } else {
                         ErrorReason::SessionExpired
@@ -3338,6 +3342,33 @@ mod tests {
             ["revoked:DeviceUntrusted", "session:false"]
         );
         assert!(harness.state.lock().await.credentials.is_none());
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn session_revoked_with_password_changed_reason_notifies_password_changed() {
+        let harness = Harness::new("revoked_password", command_mock).await;
+        let (mut receiver, _) = harness.service.events.subscribe_and_snapshot();
+        harness
+            .service
+            .apply_remote_event(json!({
+                "type": "session.revoked",
+                "deviceId": "someone-else",
+                "reason": "passwordChanged"
+            }))
+            .await
+            .expect("foreign device revoked");
+        assert!(session_events(&mut receiver).is_empty());
+        assert!(harness.state.lock().await.credentials.is_some());
+        harness
+            .service
+            .apply_remote_event(json!({"type": "session.revoked", "reason": "passwordChanged"}))
+            .await
+            .expect("revoke all");
+        assert_eq!(
+            session_events(&mut receiver),
+            ["revoked:PasswordChanged", "session:false"]
+        );
         harness.finish().await;
     }
 

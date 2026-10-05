@@ -120,6 +120,8 @@ export const METHOD = {
   AGENT_AUTH_VERIFY_CODE: 'agent.auth.verifyCode',
   AGENT_AUTH_LOGOUT: 'agent.auth.logout',
   AGENT_AUTH_REFRESH_PROFILE: 'agent.auth.refreshProfile',
+  AGENT_AUTH_SEND_PASSWORD_RESET_CODE: 'agent.auth.sendPasswordResetCode',
+  AGENT_AUTH_RESET_PASSWORD: 'agent.auth.resetPassword',
   AGENT_PROFILE_SEND_EMAIL_CODE: 'agent.profile.sendEmailCode',
   AGENT_PROFILE_SEND_NEW_EMAIL_CODE: 'agent.profile.sendNewEmailCode',
   AGENT_PROFILE_CHANGE_EMAIL: 'agent.profile.changeEmail',
@@ -127,6 +129,8 @@ export const METHOD = {
   AGENT_PROFILE_CHECK_ORIGIN_ID: 'agent.profile.checkOriginId',
   AGENT_PROFILE_CHANGE_ORIGIN_ID: 'agent.profile.changeOriginId',
   AGENT_PROFILE_CHANGE_NICKNAME: 'agent.profile.changeNickname',
+  AGENT_PROFILE_SEND_PASSWORD_CODE: 'agent.profile.sendPasswordCode',
+  AGENT_PROFILE_CHANGE_PASSWORD: 'agent.profile.changePassword',
 
   AGENT_GATEWAY_GET: 'agent.gateway.get',
   AGENT_GATEWAY_PATCH: 'agent.gateway.patch',

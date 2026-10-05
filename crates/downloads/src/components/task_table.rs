@@ -54,8 +54,11 @@ pub(crate) const SELECTION_COLUMN_WIDTH: f32 = 36.;
 const MAX_COLUMN_WIDTH: f32 = 480.;
 /// 文件名列拖宽上限（长文件名需要比其他列更宽的空间）。
 const FILE_NAME_MAX_WIDTH: f32 = 1600.;
-/// 表头高。DataTable 的 `Size` 同时决定表头行高；任务行高由 `render_tr` 按密度覆盖。
-pub(crate) const TABLE_HEADER_HEIGHT: f32 = 28.;
+/// 表头高：取 `density.control`（默认 28），随文字增大；DataTable 的 `Size` 同时决定
+/// 表头行高，任务行高由 `render_tr` 按密度覆盖。
+pub(crate) fn table_header_height(cx: &App) -> Pixels {
+    active_theme(cx).density().control
+}
 /// 表格右侧留白（`render_last_empty_col`），与选择列内含的左侧留白对称（≈ spacing.sm）。
 const TABLE_TRAILING_GUTTER: f32 = 8.;
 /// 表头列分隔线高（常驻的拖宽提示，悬停时由拖宽柄全高高亮接管）。
@@ -74,8 +77,6 @@ const ROW_ACTION_SIZE: f32 = 24.;
 const FILE_ICON_COMFORTABLE_SCALE: f32 = 1.5;
 /// 选中底色左右内缩（inset 样式）。
 const SELECTED_INSET_X: f32 = 4.;
-/// 分组头内容高；行槽位（与任务行等高，uniform_list 要求）多出的部分作上方留白。
-const GROUP_HEADER_HEIGHT: f32 = 28.;
 /// 任务行 group 名：选择列复选框与行操作按钮随行悬停显隐。
 const ROW_GROUP: &str = "download-task-row";
 /// 表头全选格 group 名：悬停该格时显示全选框。
@@ -170,6 +171,18 @@ impl DownloadColumnKind {
             Self::Protocol => 56.,
             Self::Source => 96.,
             Self::Queue => 72.,
+        }
+    }
+
+    /// 文字缩放 `scale` 下列的显示宽：等于默认宽的列（用户没拖过）整体随文字放大，
+    /// 其余保持用户宽度，但不低于放大后的最小宽。`scale` 为 1 时恒等于 `width`
+    /// （不小于 [`Self::min_width`]）。
+    fn display_width(self, width: f32, scale: f32) -> f32 {
+        let min_width = self.min_width() * scale;
+        if (width - self.default_width()).abs() < 0.5 {
+            (width * scale).max(min_width)
+        } else {
+            width.max(min_width)
         }
     }
 
@@ -507,6 +520,9 @@ pub(crate) struct DownloadTableDelegate {
     reorder_timer: Option<Task<()>>,
     selected_tasks: HashSet<RowKey>,
     selection_anchor: Option<RowKey>,
+    /// 显式多选模式：仅 Cmd/Ctrl+点击或全选进入，普通单击 / 清空选择退出；
+    /// 行首复选框只在该模式且有选中项时显示（与 Web `multiSelect` 对齐）。
+    multi_select: bool,
     filter: TableFilter,
     query: String,
     prefs: ViewPrefs,
@@ -520,6 +536,9 @@ pub(crate) struct DownloadTableDelegate {
     viewport_width: f32,
     /// 最近一次交给表格的文件名列宽（`column()` 写入）；与期望值不同才需 refresh。
     applied_file_width: Cell<f32>,
+    /// 最近一次交给表格的文字缩放（界面缩放 × 字号缩放，`column()` 写入）：
+    /// 列的最小宽 / 默认宽按它放大，与当前主题不同即需 refresh 重建列。
+    text_scale: Cell<f32>,
     /// 列配置（宽度 / 可见性 / 顺序 / 排序指示）需要重建表头 `col_groups`。
     /// 纯行数据变化不置位：`TableState::refresh` 会用代理宽度覆盖表格内部
     /// 实时宽度，进度节拍若每次都刷新会把用户正在拖拽的列宽弹回去。
@@ -559,6 +578,7 @@ impl DownloadTableDelegate {
             reorder_timer: None,
             selected_tasks: HashSet::new(),
             selection_anchor: None,
+            multi_select: false,
             filter: TableFilter::Download(DownloadFilter::ALL),
             query: String::new(),
             prefs: ViewPrefs::default(),
@@ -567,6 +587,7 @@ impl DownloadTableDelegate {
             device_names: HashMap::new(),
             viewport_width: 0.,
             applied_file_width: Cell::new(0.),
+            text_scale: Cell::new(1.),
             columns_dirty: false,
             host: None,
             action_context: None,
@@ -667,6 +688,7 @@ impl DownloadTableDelegate {
     /// refresh 把拖拽中的列宽弹回。
     pub(crate) fn sync_column_widths(&mut self, widths: &[Pixels]) -> bool {
         let applied_file_width = self.applied_file_width.get();
+        let text_scale = self.text_scale.get();
         let mut file_name_width = None;
         let mut changed = false;
         let shown = self.columns.iter_mut().filter(|column| column.visible);
@@ -675,13 +697,20 @@ impl DownloadTableDelegate {
             if column.kind == DownloadColumnKind::FileName {
                 if (width - applied_file_width).abs() >= 0.5 {
                     file_name_width = Some(width.clamp(
-                        DownloadColumnKind::FileName.min_width(),
+                        DownloadColumnKind::FileName.min_width() * text_scale,
                         FILE_NAME_MAX_WIDTH,
                     ));
                 }
                 continue;
             }
-            let width = width.clamp(column.kind.min_width(), MAX_COLUMN_WIDTH);
+            // 表格给出的是放大后的显示宽；与显示宽一致说明用户没拖过，不把放大值写成偏好。
+            if (width - column.kind.display_width(column.width, text_scale)).abs() < 0.5 {
+                continue;
+            }
+            let width = width.clamp(
+                column.kind.min_width() * text_scale,
+                MAX_COLUMN_WIDTH * text_scale,
+            );
             if (column.width - width).abs() > f32::EPSILON {
                 column.width = width;
                 changed = true;
@@ -699,7 +728,8 @@ impl DownloadTableDelegate {
     /// `max(min_width, 容器宽 − 选择列 − 其他可见列 − 右侧留白 − 竖滚动条预留)`，
     /// 容器宽未知（≤ 0）时退回列配置宽度。
     fn file_name_width_for(&self, viewport: f32) -> f32 {
-        let min_width = DownloadColumnKind::FileName.min_width();
+        let text_scale = self.text_scale.get();
+        let min_width = DownloadColumnKind::FileName.min_width() * text_scale;
         if let Some(width) = self.prefs.file_name_width {
             return width.clamp(min_width, FILE_NAME_MAX_WIDTH);
         }
@@ -714,7 +744,7 @@ impl DownloadTableDelegate {
             .columns
             .iter()
             .filter(|column| column.visible && column.kind != DownloadColumnKind::FileName)
-            .map(|column| column.width)
+            .map(|column| column.kind.display_width(column.width, text_scale))
             .sum();
         let reserved =
             SELECTION_COLUMN_WIDTH + others + TABLE_TRAILING_GUTTER + f32::from(Scrollbar::width());
@@ -725,6 +755,11 @@ impl DownloadTableDelegate {
         self.columns
             .iter()
             .any(|column| column.visible && column.kind == DownloadColumnKind::FileName)
+    }
+
+    /// 文字缩放（主题的界面缩放 × 字号缩放）与上次交给表格的列不一致，需重建列。
+    fn text_scale_stale(&self, text_scale: f32) -> bool {
+        (self.text_scale.get() - text_scale).abs() > f32::EPSILON
     }
 
     /// prepaint 判定：容器宽变化，或文件名列宽与期望不符（例如刚同步了其他列宽）。
@@ -1187,11 +1222,18 @@ impl DownloadTableDelegate {
         self.selected_tasks.clear();
         self.selected_tasks.extend(self.visible_task_keys());
         self.selection_anchor = None;
+        self.multi_select = true;
     }
 
     pub(crate) fn clear_selection(&mut self) {
         self.selected_tasks.clear();
         self.selection_anchor = None;
+        self.multi_select = false;
+    }
+
+    /// 是否处于显式多选模式（且仍有选中项）：控制行首复选框、表头全选框与表头选择条。
+    pub(crate) fn in_multi_select(&self) -> bool {
+        self.multi_select && !self.selected_tasks.is_empty()
     }
 
     pub(crate) fn select_task(&mut self, key: RowKey, modifiers: Modifiers) {
@@ -1219,9 +1261,11 @@ impl DownloadTableDelegate {
             if !self.selected_tasks.remove(&key) {
                 self.selected_tasks.insert(key.clone());
             }
+            self.multi_select = true;
         } else {
             self.selected_tasks.clear();
             self.selected_tasks.insert(key.clone());
+            self.multi_select = false;
         }
         self.selection_anchor = Some(key);
     }
@@ -1245,6 +1289,7 @@ impl DownloadTableDelegate {
         if !self.selected_tasks.contains(&key) {
             self.selected_tasks.clear();
             self.selected_tasks.insert(key.clone());
+            self.multi_select = false;
         }
         self.selection_anchor = Some(key);
     }
@@ -1430,7 +1475,7 @@ impl DownloadTableDelegate {
         let icon_sizes = theme.extended().icon;
         let key = task.key.clone();
         let selected = self.selected_tasks.contains(&key);
-        let checkbox_pinned = selected || !self.selected_tasks.is_empty();
+        let checkbox_pinned = self.in_multi_select();
         let glyph = (!checkbox_pinned).then(|| {
             if task.metadata_pending {
                 return Spinner::new()
@@ -1480,31 +1525,23 @@ impl DownloadTableDelegate {
                 delegate.selection_anchor = Some(key.clone());
                 cx.notify();
             }));
+        // 复选框只在多选状态（已有选中项，经 Cmd/Ctrl+点击进入）显示；悬浮不再露出。
         div()
             .size_full()
             .relative()
             .when_some(glyph, |this, glyph| {
+                this.child(h_flex().absolute().inset_0().justify_center().child(glyph))
+            })
+            .when(checkbox_pinned, |this| {
                 this.child(
                     h_flex()
                         .absolute()
                         .inset_0()
                         .justify_center()
-                        .group_hover(ROW_GROUP, |style| style.invisible())
-                        .child(glyph),
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(checkbox),
                 )
             })
-            .child(
-                h_flex()
-                    .absolute()
-                    .inset_0()
-                    .justify_center()
-                    .when(!checkbox_pinned, |this| {
-                        this.invisible()
-                            .group_hover(ROW_GROUP, |style| style.visible())
-                    })
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(checkbox),
-            )
             .into_any_element()
     }
 
@@ -1627,16 +1664,19 @@ impl DownloadTableDelegate {
         let tokens = theme.tokens();
         let colors = &tokens.colors;
         let bar_color = progress_bar_color(task.state, cx);
+        let text_scale = f32::from(theme.text_extent(1.));
         let column_width = self
             .columns
             .iter()
             .find(|column| column.kind == DownloadColumnKind::Progress)
-            .map_or(DownloadColumnKind::Progress.min_width(), |column| {
-                column.width
-            });
-        // 条宽 = 列内容宽（扣左右内边距）− 百分比区 − 间距；与下方布局同一组常量。
+            .map_or(
+                DownloadColumnKind::Progress.min_width() * text_scale,
+                |column| column.kind.display_width(column.width, text_scale),
+            );
+        // 百分比区随文字放大；条宽 = 列内容宽（扣左右内边距）− 百分比区 − 间距，与下方布局同一组常量。
+        let label_width = theme.text_extent(PROGRESS_LABEL_WIDTH);
         let bar_width =
-            (column_width - 2. * CELL_PADDING_X - PROGRESS_LABEL_WIDTH - PROGRESS_GAP).max(0.);
+            (column_width - 2. * CELL_PADDING_X - f32::from(label_width) - PROGRESS_GAP).max(0.);
         h_flex()
             .size_full()
             .min_w_0()
@@ -1655,7 +1695,7 @@ impl DownloadTableDelegate {
             .child(
                 div()
                     .flex_none()
-                    .w(px(PROGRESS_LABEL_WIDTH))
+                    .w(label_width)
                     .text_right()
                     .text_size(tokens.typography.xs.size)
                     .line_height(tokens.typography.xs.line_height)
@@ -1814,7 +1854,7 @@ impl DownloadTableDelegate {
             .on_click(on_click)
             .child(
                 h_flex()
-                    .h(px(GROUP_HEADER_HEIGHT))
+                    .h(theme.density().control)
                     .min_w_0()
                     .gap(tokens.spacing.xs)
                     .text_size(tokens.typography.xs.size)
@@ -2145,7 +2185,10 @@ impl TableDelegate for DownloadTableDelegate {
     }
 
     /// 排序指示由 `render_th` 自绘，列不设 `sort`（去掉 DataTable 常驻排序图标）。
-    fn column(&self, col_ix: usize, _cx: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
+        // 列的最小宽 / 默认宽随文字放大；记下本次应用的缩放，主题变化时由 prepaint 触发重建。
+        let text_scale = f32::from(active_theme(cx).text_extent(1.));
+        self.text_scale.set(text_scale);
         if col_ix == 0 {
             // 不设 `fixed_left`：gpui-component 会给固定列画一条 `border` 色竖线，
             // 而文件名列已吸收剩余宽度，常规列集不会出现横向滚动。
@@ -2163,7 +2206,7 @@ impl TableDelegate for DownloadTableDelegate {
             return Column::new("missing", "").resizable(false).movable(false);
         };
         let base = Column::new(column.kind.key(), column.kind.label(&self.strings))
-            .min_width(px(column.kind.min_width()))
+            .min_width(px(column.kind.min_width() * text_scale))
             .paddings(Edges {
                 top: px(0.),
                 right: px(CELL_PADDING_X),
@@ -2176,7 +2219,8 @@ impl TableDelegate for DownloadTableDelegate {
                 .width(px(self.apply_file_name_width()))
                 .max_width(px(FILE_NAME_MAX_WIDTH));
         }
-        base.width(px(column.width)).max_width(px(MAX_COLUMN_WIDTH))
+        base.width(px(column.kind.display_width(column.width, text_scale)))
+            .max_width(px(MAX_COLUMN_WIDTH * text_scale))
     }
 
     fn render_th(
@@ -2191,7 +2235,9 @@ impl TableDelegate for DownloadTableDelegate {
                 .iter()
                 .filter(|key| self.selected_tasks.contains(*key))
                 .count();
+            // 非多选模式（如普通单击选中一行）表头全选框按未选处理，不随单选点亮。
             let state = match selected_count {
+                _ if !self.in_multi_select() => CheckState::Unchecked,
                 0 => CheckState::Unchecked,
                 n if n == keys.len() => CheckState::Checked,
                 _ => CheckState::Indeterminate,
@@ -2783,7 +2829,7 @@ fn meta_cell(text: impl Into<SharedString>, color: Hsla, numeric: bool, cx: &App
         .into_any_element()
 }
 
-/// 下载任务表（主窗口与任务组详情共用）：表头 28、行高按密度、表格底色 surface。
+/// 下载任务表（主窗口与任务组详情共用）：表头高取 `density.control`、行高按密度、表格底色 surface。
 ///
 /// 文件名列吸收剩余宽度：prepaint 测得容器宽后只做比较，确需更新时用
 /// `window.defer` 在帧外写入代理并 `refresh`（不在 prepaint 里同步更新实体），
@@ -2812,7 +2858,7 @@ pub(crate) fn render_download_table(
         .child(
             div().absolute().inset_0().child(
                 DataTable::new(table_state)
-                    .with_size(Size::Size(px(TABLE_HEADER_HEIGHT)))
+                    .with_size(Size::Size(table_header_height(cx)))
                     .stripe(false)
                     .bordered(false)
                     .scrollbar_visible(true, true),
@@ -2820,15 +2866,19 @@ pub(crate) fn render_download_table(
         )
         .on_prepaint(move |bounds, window, cx| {
             let width = f32::from(bounds.size.width);
+            let text_scale = f32::from(active_theme(cx).text_extent(1.));
             let delegate = observed.read(cx).delegate();
             let sync_width = delegate.viewport_needs_sync(width);
+            let rescale = delegate.text_scale_stale(text_scale);
             let arm_timer = delegate.needs_reorder_timer();
-            if !sync_width && !arm_timer {
+            if !sync_width && !rescale && !arm_timer {
                 return;
             }
             window.defer(cx, move |_, cx| {
                 observed.update(cx, |table, cx| {
-                    if sync_width && table.delegate_mut().set_viewport_width(width) {
+                    // 界面缩放 / 字号变化后列的最小宽、默认宽随之变化，重建列。
+                    let resized = sync_width && table.delegate_mut().set_viewport_width(width);
+                    if resized || rescale {
                         table.refresh(cx);
                     }
                     if arm_timer {

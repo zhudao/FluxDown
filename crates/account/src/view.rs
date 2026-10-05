@@ -132,6 +132,12 @@ impl AccountView {
         }
     }
 
+    pub(crate) fn open_password_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.signing_out {
+            crate::dialogs::password::open(&self.host, window, cx);
+        }
+    }
+
     /// 通用「发起命令 → 失败提示」；成功结果由快照/事件驱动的重渲染呈现。
     pub(crate) fn spawn_action(
         &mut self,

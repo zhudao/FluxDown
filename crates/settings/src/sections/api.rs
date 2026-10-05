@@ -7,7 +7,7 @@ use fluxdown_ui_components::{
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     App, AppContext as _, ClipboardItem, Entity, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, px,
+    StatefulInteractiveElement as _, Styled, Window,
 };
 use gpui_component::{
     Icon, WindowExt as _, h_flex,
@@ -215,7 +215,7 @@ fn port_field(ctx: &SectionContext) -> Control {
         });
         Input::new(&slot.read(cx).input)
             .control(cx)
-            .w(px(NUMBER_WIDTH))
+            .w(active_theme(cx).text_extent(NUMBER_WIDTH))
             .disabled(disabled || busy)
     })
 }
@@ -401,7 +401,7 @@ fn token_field(ctx: &SectionContext) -> Control {
             .child(
                 Input::new(&input)
                     .control(cx)
-                    .w(px(INPUT_WIDTH))
+                    .w(active_theme(cx).text_extent(INPUT_WIDTH))
                     .disabled(disabled || busy),
             )
             .child(

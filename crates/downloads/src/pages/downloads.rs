@@ -1827,7 +1827,7 @@ impl DownloadView {
             .child(
                 h_flex()
                     // 面板头：`density.toolbarButton` 的图标按钮上下各留 spacing.xxs。
-                    .h(toolbar_button + tokens.spacing.xs)
+                    .min_h(toolbar_button + tokens.spacing.xs)
                     .flex_none()
                     .items_center()
                     .justify_between()
@@ -1838,6 +1838,7 @@ impl DownloadView {
                     .child(
                         div()
                             .text_size(tokens.typography.sm.size)
+                            .line_height(tokens.typography.sm.line_height)
                             .font_weight(FontWeight::MEDIUM)
                             .child(title),
                     )

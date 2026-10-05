@@ -37,12 +37,25 @@ const SOURCE_COLUMN_WIDTH: f32 = 240.;
 /// 订阅源侧栏可拖拽的宽度范围。
 const SOURCE_COLUMN_MIN_WIDTH: f32 = 176.;
 const SOURCE_COLUMN_MAX_WIDTH: f32 = 400.;
-/// 条目行高（标题 + 元信息 + 可选过滤原因三行）。
+/// 条目行高下限（标题 + 元信息 + 可选过滤原因三行，默认字号下恰好 64）。
 const ITEM_ROW_HEIGHT: Pixels = px(64.);
-/// 条目状态列宽。
-const STATUS_COLUMN_WIDTH: Pixels = px(120.);
-/// 条目搜索框宽度。
-const SEARCH_WIDTH: Pixels = px(200.);
+/// 条目行上下内边距：64 = sm 行高 18 + 2 × xs 行高 16 + 2 × xxs 2 + 2 × 5。
+const ITEM_ROW_PADDING_Y: Pixels = px(5.);
+/// 条目状态列宽（基准 px，按文字缩放）。
+const STATUS_COLUMN_WIDTH: f32 = 120.;
+/// 条目搜索框宽度（基准 px，按文字缩放）。
+const SEARCH_WIDTH: f32 = 200.;
+
+/// 条目行高：三行文字随字号增长，默认字号下等于 `ITEM_ROW_HEIGHT`。
+fn item_row_height(cx: &App) -> Pixels {
+    let theme = active_theme(cx);
+    let tokens = theme.tokens();
+    let text = tokens.typography.sm.line_height
+        + tokens.typography.xs.line_height * 2.
+        + tokens.spacing.xxs * 2.
+        + ITEM_ROW_PADDING_Y * 2.;
+    text.max(ITEM_ROW_HEIGHT)
+}
 
 pub struct RssView {
     translator: Entity<Translator>,
@@ -616,6 +629,8 @@ impl RssView {
     fn render_item(&self, item: RssItemDto, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
+        let status_width = theme.text_extent(STATUS_COLUMN_WIDTH);
+        let row_height = item_row_height(cx);
         let extended = theme.extended().clone();
         let colors = tokens.colors;
         let guid = item.guid.clone();
@@ -662,7 +677,7 @@ impl RssView {
         h_flex()
             .group(group.clone())
             .w_full()
-            .h(ITEM_ROW_HEIGHT)
+            .h(row_height)
             .flex_none()
             .items_center()
             .gap(tokens.spacing.md)
@@ -729,7 +744,7 @@ impl RssView {
             )
             .child(
                 h_flex()
-                    .w(STATUS_COLUMN_WIDTH)
+                    .w(status_width)
                     .flex_none()
                     .justify_end()
                     .child(status_badge(
@@ -982,6 +997,7 @@ impl Render for RssView {
         let tokens = theme.tokens().clone();
         let extended = theme.extended().clone();
         let control_height = theme.density().control;
+        let search_width = theme.text_extent(SEARCH_WIDTH);
         let colors = tokens.colors;
         let xs = tokens.typography.xs;
         let stale = self.controller.stale;
@@ -1189,7 +1205,7 @@ impl Render for RssView {
                             )
                             .child(div().flex_1().min_w(tokens.spacing.sm))
                             .child(
-                                div().w(SEARCH_WIDTH).child(
+                                div().w(search_width).child(
                                     Input::new(&self.search).control(cx).prefix(
                                         Icon::new(FluxIcon::Search)
                                             .size(extended.icon.md)

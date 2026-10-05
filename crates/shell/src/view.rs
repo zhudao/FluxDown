@@ -8,8 +8,8 @@ use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     AnyElement, AnyView, App, Context, Div, Entity, FontWeight, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, img, percentage, px,
+    IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, div, img, percentage, px,
 };
 use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
@@ -160,6 +160,8 @@ pub struct AuxiliaryWindowView {
     /// 窗口是否可由用户调整尺寸；`false` 时 Windows / Linux 自绘只含最小化 + 关闭的标题栏
     /// （系统不会响应最大化，留着只会误导）。macOS 恒用系统交通灯。
     resizable: bool,
+    /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
+    traffic_light_y: Pixels,
 }
 
 impl AuxiliaryWindowView {
@@ -183,6 +185,7 @@ impl AuxiliaryWindowView {
             title_override: None,
             content,
             resizable: true,
+            traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
 
@@ -217,7 +220,7 @@ impl AuxiliaryWindowView {
         let extended = theme.extended().colors;
         let spacing = tokens.spacing;
         let typography = tokens.typography.clone();
-        let height = theme.density().title_bar;
+        let height = crate::title_bar_height(cx);
         let title_row = h_flex()
             .absolute()
             .inset_0()
@@ -263,6 +266,11 @@ impl AuxiliaryWindowView {
 
 impl Render for AuxiliaryWindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::sync_traffic_light(
+            window,
+            crate::title_bar_height(cx),
+            &mut self.traffic_light_y,
+        );
         // 构造时拿不到 Window：语言切换后在渲染期把默认标题同步到 OS 窗口标题。
         if self.title_override.is_none() && self.os_title != self.title {
             window.set_window_title(&self.title);
@@ -302,6 +310,8 @@ pub struct ShellView {
     actions: Vec<ShellAction>,
     /// Windows / Linux 标题栏内的应用菜单；macOS 走原生菜单不渲染。
     menu_bar: Option<Entity<AppMenuBar>>,
+    /// 已应用到 macOS 交通灯的纵向偏移；标题栏随文字放大撑高时重新居中。
+    traffic_light_y: Pixels,
 }
 
 impl ShellView {
@@ -332,6 +342,7 @@ impl ShellView {
             routes,
             actions,
             menu_bar,
+            traffic_light_y: crate::initial_traffic_light_y(),
         }
     }
 
@@ -404,7 +415,7 @@ impl ShellView {
 
         // 显式 `.bg` 覆盖 gpui-component 默认渐变；`.h` 经 refine_style 覆盖默认 34px。
         title_bar
-            .h(theme.density().title_bar)
+            .h(crate::title_bar_height(cx))
             .bg(extended.chrome)
             .border_color(extended.hairline)
             .child(
@@ -605,7 +616,12 @@ impl ShellView {
 }
 
 impl Render for ShellView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::sync_traffic_light(
+            window,
+            crate::title_bar_height(cx),
+            &mut self.traffic_light_y,
+        );
         let colors = active_theme(cx).tokens().colors;
         v_flex()
             .size_full()
