@@ -42,14 +42,27 @@ macro_rules! spec {
     };
 }
 
-/// 与 `lib/src/services/cloud/sync_catalog.dart` 对应的键，外加 GPUI 专属的 `ui.show_activity_*` 与
-/// `custom_categories`（自定义分类，推送时剥离各设备不同的 `saveDir`；Flutter 拉到未知键会忽略），共 55 个。
+/// 自定义主题集合的同步范围键：进同步目录只为「在此设备同步的范围」分组与本机专属开关，
+/// 本身从不承载值；每个主题是独立键 `appearance.custom_themes.<编码 id>`（见 [`custom_theme_key`]），
+/// 值为主题文件原文。逐主题成键让导入 / 删除各自 LWW，并发编辑不会互相覆盖整张列表。
+pub const CUSTOM_THEMES_KEY: &str = "appearance.custom_themes";
+const CUSTOM_THEME_KEY_PREFIX: &str = "appearance.custom_themes.";
+/// 自定义主题 id 的最大字节数（GPUI 主题库的 id 清洗规则同此上限）。
+pub const MAX_CUSTOM_THEME_ID_LEN: usize = 64;
+/// 单个同步值序列化后的字节上限，镜像 FluxCloud `sync::MAX_VALUE_BYTES`：
+/// 超限条目会让整批推送被拒，因此在写入时就拦下。
+pub const MAX_SYNC_VALUE_BYTES: usize = 64 * 1024;
+
+/// 与 `lib/src/services/cloud/sync_catalog.dart` 对应的键，外加 GPUI 专属的 `ui.show_activity_*`、
+/// `custom_categories`（自定义分类，推送时剥离各设备不同的 `saveDir`）与 [`CUSTOM_THEMES_KEY`]
+/// （自定义主题集合；Flutter 拉到未知键会忽略），共 56 个。
 pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("appearance.theme_mode", Preferences),
     spec!("appearance.dark_theme", Preferences),
     spec!("appearance.light_theme", Preferences),
     spec!("appearance.color_scheme", Preferences),
     spec!("appearance.custom_color", Preferences),
+    spec!("appearance.custom_themes", Preferences),
     spec!("general.locale", Preferences),
     spec!("general.update_channel", Preferences),
     spec!("general.auto_check_update", Preferences),
@@ -130,9 +143,63 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("custom_categories", Preferences),
 ];
 
+/// 键的同步目录条目；自定义主题键（`appearance.custom_themes.<id>`）归入 [`CUSTOM_THEMES_KEY`]。
 #[must_use]
 pub fn setting_spec(key: &str) -> Option<&'static SettingSpec> {
+    let key = sync_scope_key(key);
     SYNC_SETTING_SPECS.iter().find(|spec| spec.key == key)
+}
+
+/// 键的同步范围键：自定义主题键归入 [`CUSTOM_THEMES_KEY`]，其余为自身。本机专属按范围键判定。
+#[must_use]
+pub fn sync_scope_key(key: &str) -> &str {
+    if key
+        .strip_prefix(CUSTOM_THEME_KEY_PREFIX)
+        .is_some_and(|encoded| is_segmented(encoded, '.'))
+    {
+        CUSTOM_THEMES_KEY
+    } else {
+        key
+    }
+}
+
+/// 自定义主题 id → 偏好 / 同步键。id 须为规范形式（段 `[a-z0-9_]+` 以单个 `-` 相连，
+/// 不超过 [`MAX_CUSTOM_THEME_ID_LEN`] 字节）；`-` 编码为 `.`，因而可逆且满足云端键名规则
+/// `^[a-z0-9_]+(\.[a-z0-9_]+)*$`。
+#[must_use]
+pub fn custom_theme_key(id: &str) -> Option<String> {
+    is_custom_theme_id(id).then(|| format!("{CUSTOM_THEME_KEY_PREFIX}{}", id.replace('-', ".")))
+}
+
+/// 偏好 / 同步键 → 自定义主题 id；不是主题键时为 `None`。
+#[must_use]
+pub fn custom_theme_id(key: &str) -> Option<String> {
+    let encoded = key.strip_prefix(CUSTOM_THEME_KEY_PREFIX)?;
+    is_segmented(encoded, '.').then(|| encoded.replace('.', "-"))
+}
+
+/// 规范的自定义主题 id（见 [`custom_theme_key`]）。
+#[must_use]
+pub fn is_custom_theme_id(id: &str) -> bool {
+    is_segmented(id, '-')
+}
+
+/// 主题文件原文作为同步值时不超过 [`MAX_SYNC_VALUE_BYTES`]（按 JSON 字符串转义后计）。
+#[must_use]
+pub fn custom_theme_fits_sync(text: &str) -> bool {
+    serde_json::to_vec(text).is_ok_and(|bytes| bytes.len() <= MAX_SYNC_VALUE_BYTES)
+}
+
+/// 非空、不超过 [`MAX_CUSTOM_THEME_ID_LEN`] 字节，由 `separator` 分隔的 `[a-z0-9_]+` 段。
+fn is_segmented(text: &str, separator: char) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_CUSTOM_THEME_ID_LEN
+        && text.split(separator).all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
 }
 
 #[must_use]
@@ -148,9 +215,13 @@ pub fn setting_value_kind(key: &str) -> SettingValueKind {
     }
 }
 
+/// 校验同步目录键的值；自定义主题键以其范围键（`setting_spec(key).key`）校验。
 pub fn validate_value(key: &str, value: &Value) -> Result<(), String> {
     if key == "custom_categories" {
         return validate_custom_categories(value);
+    }
+    if key == CUSTOM_THEMES_KEY {
+        return validate_custom_theme(value);
     }
     if boolean_key(key) {
         return value
@@ -249,6 +320,21 @@ fn validate_custom_categories(value: &Value) -> Result<(), String> {
     }
 }
 
+/// 单个自定义主题的线上形态：主题文件原文（JSON 对象文本），转义后不超过 [`MAX_SYNC_VALUE_BYTES`]。
+fn validate_custom_theme(value: &Value) -> Result<(), String> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| "custom theme must be the theme file text".to_owned())?;
+    if !custom_theme_fits_sync(text) {
+        return Err(format!("custom theme exceeds {MAX_SYNC_VALUE_BYTES} bytes"));
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(Value::Object(_)) => Ok(()),
+        Ok(_) => Err("custom theme must be a JSON object".to_owned()),
+        Err(error) => Err(format!("custom theme is not valid JSON: {error}")),
+    }
+}
+
 fn boolean_key(key: &str) -> bool {
     matches!(
         key,
@@ -324,18 +410,21 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{SYNC_SETTING_SPECS, SettingOwner, setting_spec, validate_value};
+    use super::{
+        CUSTOM_THEMES_KEY, MAX_SYNC_VALUE_BYTES, SYNC_SETTING_SPECS, SettingOwner, custom_theme_id,
+        custom_theme_key, setting_spec, sync_scope_key, validate_value,
+    };
 
     #[test]
     fn catalog_has_exact_unique_flutter_count_and_namespaced_daemon_mapping() {
-        assert_eq!(SYNC_SETTING_SPECS.len(), 55);
+        assert_eq!(SYNC_SETTING_SPECS.len(), 56);
         assert_eq!(
             SYNC_SETTING_SPECS
                 .iter()
                 .map(|spec| spec.key)
                 .collect::<HashSet<_>>()
                 .len(),
-            55
+            56
         );
         let spec = setting_spec("download.max_concurrent_tasks").expect("download spec");
         assert_eq!(spec.owner, SettingOwner::Daemon);
@@ -370,5 +459,58 @@ mod tests {
         assert!(validate_value("custom_categories", &json!(r#"{"id":"a"}"#)).is_err());
         assert!(validate_value("custom_categories", &json!([1, 2])).is_err());
         assert!(validate_value("custom_categories", &json!(true)).is_err());
+    }
+
+    #[test]
+    fn custom_theme_keys_round_trip_and_satisfy_the_cloud_key_grammar() {
+        let key = custom_theme_key("nord-square_2").expect("canonical id");
+        assert_eq!(key, "appearance.custom_themes.nord.square_2");
+        assert_eq!(custom_theme_id(&key).as_deref(), Some("nord-square_2"));
+        assert_eq!(sync_scope_key(&key), CUSTOM_THEMES_KEY);
+        assert_eq!(
+            setting_spec(&key).map(|spec| spec.key),
+            Some(CUSTOM_THEMES_KEY)
+        );
+        let longest = "a".repeat(64);
+        assert!(custom_theme_key(&longest).is_some());
+        // 非规范 id（大写、空段、越长、越界字符）不成键，避免与云端键名规则或文件名冲突。
+        for id in [
+            "",
+            "Nord",
+            "a--b",
+            "-a",
+            "a-",
+            "a.b",
+            "../x",
+            &"a".repeat(65),
+        ] {
+            assert!(custom_theme_key(id).is_none(), "{id:?}");
+        }
+        // 范围键本身与非规范后缀都不是主题键。
+        for key in [
+            CUSTOM_THEMES_KEY,
+            "appearance.custom_themes.",
+            "appearance.custom_themes.a..b",
+            "appearance.custom_themes.A",
+        ] {
+            assert_eq!(custom_theme_id(key), None, "{key}");
+            assert_eq!(sync_scope_key(key), key);
+        }
+    }
+
+    #[test]
+    fn custom_theme_values_are_object_text_within_the_cloud_value_limit() {
+        let key = custom_theme_key("ocean").expect("key");
+        let spec = setting_spec(&key).expect("theme spec");
+        assert_eq!(spec.owner, SettingOwner::Preferences);
+        assert!(validate_value(spec.key, &json!(r#"{"meta":{"id":"ocean"}}"#)).is_ok());
+        assert!(validate_value(spec.key, &json!({"meta": {}})).is_err());
+        assert!(validate_value(spec.key, &json!("[1]")).is_err());
+        assert!(validate_value(spec.key, &json!("{")).is_err());
+        let padded = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_SYNC_VALUE_BYTES));
+        assert!(validate_value(spec.key, &json!(padded)).is_err());
+        // 转义计入上限：引号在线上翻倍成 `\"`。
+        let quotes = format!(r#"{{"pad":"{}"}}"#, "\\\"".repeat(MAX_SYNC_VALUE_BYTES / 3));
+        assert!(validate_value(spec.key, &json!(quotes)).is_err());
     }
 }

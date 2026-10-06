@@ -669,6 +669,7 @@ impl SettingsStore {
     }
 
     /// 写入偏好。云同步目录内的键自动进入同步；其余键为设备本地。
+    /// `Value::Null` 是墓碑：agent 移除该偏好（同步键把删除同步给云端），不做值校验。
     pub fn set_pref(&mut self, key: &str, value: Value, cx: &mut Context<Self>) {
         if self.stale {
             self.set_error(SettingsErrorKind::Disconnected, "", cx);
@@ -676,7 +677,9 @@ impl SettingsStore {
         }
         let synced = preference_is_synced(key);
         if let Some(spec) = setting_spec(key) {
-            if let Err(error) = fluxdown_protocol::validate_value(spec.key, &value) {
+            if !value.is_null()
+                && let Err(error) = fluxdown_protocol::validate_value(spec.key, &value)
+            {
                 self.set_error(SettingsErrorKind::InvalidArgument, error, cx);
                 return;
             }

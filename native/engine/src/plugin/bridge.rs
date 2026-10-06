@@ -73,7 +73,11 @@ const MAX_YTDLP_ARGS: usize = 512;
 /// yt-dlp 单参数字节上限。
 const MAX_YTDLP_ARG_LEN: usize = 8 * 1024;
 /// yt-dlp stdout 回传上限（`-J` 播放列表 JSON 可较大；超限截断）。
-const YTDLP_STDOUT_CAP: usize = 4 * 1024 * 1024;
+/// 4 MiB 对 YouTube 单视频不够：其 `-J` 常超 4 MiB（`automatic_captions` 单字段
+/// 即可 ~4 MiB），截断导致插件 JSON 解析失败（"Unexpected end of JSON input"）。
+/// 本上限本身即可解除已发布插件的该故障；插件另用 `--parse-metadata` 剔除重字段
+/// （需插件重新发布才生效），此处提升到 16 MiB 作为其他站点大输出的兜底。
+const YTDLP_STDOUT_CAP: usize = 16 * 1024 * 1024;
 /// yt-dlp stderr 回传上限（超限截断）。
 const YTDLP_STDERR_CAP: usize = 256 * 1024;
 
@@ -1495,6 +1499,7 @@ fn ytdlp_option_kind(name: &str) -> Option<YtdlpOpt> {
         | "--convert-thumbnails"
         | "--impersonate"
         | "--print"
+        | "--parse-metadata"
         | "--compat-options"
         | "--video-password"
         | "--username"
@@ -1833,6 +1838,12 @@ mod tests {
                 "node",
                 "--cookies",
                 "cookies.txt",
+                "--parse-metadata",
+                "automatic_captions:(?P<automatic_captions>)",
+                "--parse-metadata",
+                "heatmap:(?P<heatmap>)",
+                "--parse-metadata",
+                "subtitles:(?P<subtitles>)",
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             ],
             vec![

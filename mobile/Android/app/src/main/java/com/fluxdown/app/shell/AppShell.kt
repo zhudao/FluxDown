@@ -1,0 +1,409 @@
+package com.fluxdown.app.shell
+
+import android.content.ClipboardManager
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.max
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import com.fluxdown.app.R
+import com.fluxdown.app.actions.LocalTaskActions
+import com.fluxdown.app.actions.TaskActions
+import com.fluxdown.app.feature.devices.DevicesScreen
+import com.fluxdown.app.feature.devices.AddHostSheet
+import com.fluxdown.app.feature.downloads.ActivitySheet
+import com.fluxdown.app.feature.downloads.DownloadsRailContext
+import com.fluxdown.app.feature.downloads.DownloadsRailFooter
+import com.fluxdown.app.feature.downloads.DownloadsScreen
+import com.fluxdown.app.feature.downloads.DownloadsSelectionDock
+import com.fluxdown.app.feature.downloads.HostSwitchSheet
+import com.fluxdown.app.feature.downloads.ProvideDownloadsView
+import com.fluxdown.app.feature.downloads.ViewOptionsSheet
+import com.fluxdown.app.feature.newtask.MoveToQueueSheet
+import com.fluxdown.app.feature.newtask.NewDownloadSheet
+import com.fluxdown.app.feature.rss.RssScreen
+import com.fluxdown.app.feature.search.CommandSearch
+import com.fluxdown.app.feature.selection.SelectionRequestSheet
+import com.fluxdown.app.feature.settings.SettingsPageScreen
+import com.fluxdown.app.feature.settings.SettingsScreen
+import com.fluxdown.app.feature.task.TaskDetailScreen
+import com.fluxdown.app.i18n.str
+import com.fluxdown.app.nav.AppTab
+import com.fluxdown.app.nav.LocalNavigator
+import com.fluxdown.app.nav.Route
+import com.fluxdown.app.nav.SheetRoute
+import com.fluxdown.app.service.DownloadServiceEffect
+import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.fluxui.chrome.FluxDock
+import com.fluxdown.fluxui.chrome.FluxDockBadge
+import com.fluxdown.fluxui.chrome.FluxDockItem
+import com.fluxdown.fluxui.chrome.FluxOrb
+import com.fluxdown.fluxui.chrome.FluxOrbAction
+import com.fluxdown.fluxui.chrome.FluxOrbFanLayer
+import com.fluxdown.fluxui.chrome.FluxRail
+import com.fluxdown.fluxui.chrome.FluxRailNavItem
+import com.fluxdown.fluxui.chrome.FluxOrbState
+import com.fluxdown.fluxui.chrome.rememberFluxOrbState
+import com.fluxdown.fluxui.feedback.FluxEmpty
+import com.fluxdown.fluxui.feedback.FluxGlyph
+import com.fluxdown.fluxui.icons.FluxIcons
+import com.fluxdown.fluxui.material.FluxBackdrop
+import com.fluxdown.fluxui.material.FluxCanvas
+import com.fluxdown.fluxui.material.LocalFluxBackdrop
+import com.fluxdown.fluxui.material.auraActivity
+import com.fluxdown.fluxui.material.fluxBackdropSource
+import com.fluxdown.fluxui.overlay.FluxOverlayHost
+import com.fluxdown.fluxui.overlay.FluxPortalHost
+import com.fluxdown.fluxui.overlay.FluxPortalState
+import com.fluxdown.fluxui.overlay.LocalFluxPortal
+import com.fluxdown.fluxui.overlay.LocalFluxOverlays
+import com.fluxdown.fluxui.overlay.LocalSwipeRevealCoordinator
+import com.fluxdown.fluxui.overlay.rememberFluxOverlayState
+import com.fluxdown.fluxui.overlay.rememberSwipeRevealCoordinator
+import com.fluxdown.fluxui.theme.FluxTheme
+import com.fluxdown.fluxui.theme.FluxWindowClass
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+
+/** 详情栏宽度（§13.2）：medium 344 / expanded 460；Rail 272。 */
+private val DetailPaneMedium = 344.dp
+private val DetailPaneExpanded = 460.dp
+
+/**
+ * 全局舞台（取代 Material Scaffold）：画布 + 氛围光 + 颗粒 + 页面栈 → 坞 / 球（或 Rail）→
+ * Sheet 层 → 命令搜索 → 浮层宿主（菜单 / 对话框 / toast）→ 新建球扇形层。
+ * 玻璃面都在 [fluxBackdropSource] 之后绘制，以采样同一份模糊副本。
+ */
+@Composable
+fun AppShell() {
+    val container = LocalAppContainer.current
+    val nav = LocalNavigator.current
+    val context = LocalContext.current
+    val backdrop = remember { FluxBackdrop() }
+    val overlays = rememberFluxOverlayState()
+    val swipe = rememberSwipeRevealCoordinator()
+    val scope = rememberCoroutineScope()
+    val haptics = FluxTheme.haptics
+    val actions = remember(overlays, haptics) {
+        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics)
+    }
+    // 根节点只读派生量：避免 10 Hz 的主机状态发布让整棵树重组
+    val host = hostState()
+    val failed by remember { derivedStateOf { host.value.tasks.any { it.status == TaskStatus.Failed } } }
+    val selection by remember { derivedStateOf { host.value.selections.firstOrNull() } }
+    val windowClass = FluxTheme.windowClass
+    val orb = rememberFluxOrbState()
+    // 只有首页（下载根页，含 medium / expanded 档右栏详情）透出氛围光；其余页面 / 命令搜索铺实色把它完全遮住，
+    // 此时冻结相位（maxFps = 0），不再为看不见的氛围光逐帧重绘。
+    val top = nav.top
+    val homeVisible = nav.tab == AppTab.Downloads &&
+        (top == null || (top is Route.TaskDetail && windowClass != FluxWindowClass.Compact))
+    val auraFps = if (homeVisible && !nav.searchOpen) FluxTheme.perf.auraMaxFps else 0
+
+    // 氛围光亮度 ∝ 总吞吐（读取在 draw 阶段）
+    var aura by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(container) {
+        container.store.state.map { auraActivity(it.stats.totalDownloadBps) }.distinctUntilChanged().collect { aura = it }
+    }
+
+    // 回到前台：文件跟踪重扫（10s 节流，对齐 RescanThrottle；空闲静默期间不轮询）
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { container.rescanOnForeground() }
+    // 本机有活跃 / 排队任务 → 前台服务（dataSync）；首次下载时请求通知权限
+    DownloadServiceEffect()
+    val portal = remember { FluxPortalState() }
+
+    CompositionLocalProvider(
+        LocalFluxBackdrop provides backdrop,
+        LocalFluxOverlays provides overlays,
+        LocalSwipeRevealCoordinator provides swipe,
+        LocalTaskActions provides actions,
+        LocalFluxPortal provides portal,
+    ) {
+        ProvideDownloadsView {
+            BackHandler(enabled = nav.searchOpen || nav.sheet != null || nav.selecting || nav.stack.isNotEmpty() || nav.tab != AppTab.Downloads) {
+                nav.back()
+            }
+            Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().fluxBackdropSource(backdrop)) {
+                    // 背景源内部不得采样自身（RenderNode 环）：页面内的玻璃面取 null → 平玻璃 / 实色；
+                    // 需要真模糊的页内浮层（读数条等）由页面自建局部背景源，页内 Sheet 经 FluxPortal 传送到浮层层。
+                    CompositionLocalProvider(LocalFluxBackdrop provides null) {
+                        FluxCanvas(activity = { aura }, modifier = Modifier.fillMaxSize(), auraMaxFps = auraFps) {
+                            when (windowClass) {
+                                FluxWindowClass.Expanded -> ExpandedStage()
+                                else -> CompactStage(paned = windowClass == FluxWindowClass.Medium)
+                            }
+                        }
+                    }
+                    StatusScrim()
+                }
+
+                if (windowClass != FluxWindowClass.Expanded) BottomChrome(failed = failed, orb = orb)
+
+                Sheets()
+                FluxPortalHost(portal)
+                SelectionRequestSheet(request = selection)
+                CommandSearch(visible = nav.searchOpen, onDismiss = nav::closeSearch)
+                FluxOverlayHost(overlays)
+                if (windowClass != FluxWindowClass.Expanded) FluxOrbFanLayer(orb)
+            }
+        }
+    }
+}
+
+/** 状态栏渐隐罩：内容之上、系统图标之下（§4.4）。 */
+@Composable
+private fun BoxScope.StatusScrim() {
+    val c = FluxTheme.colors
+    Box(
+        Modifier
+            .align(Alignment.TopCenter)
+            .fillMaxWidth()
+            .windowInsetsTopHeight(WindowInsets.statusBars)
+            .padding(bottom = 0.dp)
+            .background(Brush.verticalGradient(listOf(c.scrimTopFrom, Color.Transparent))),
+    )
+}
+
+/** 页面栈状态：深度用于判定推入 / 返回方向。 */
+private data class PageKey(val depth: Int, val route: Route?)
+
+/** compact / medium：顶层页 + 推入页；medium 档任务详情进右栏（不做推入）。 */
+@Composable
+private fun CompactStage(paned: Boolean) {
+    val nav = LocalNavigator.current
+    val top = nav.top
+    val paneTask = (top as? Route.TaskDetail)?.takeIf { paned && nav.tab == AppTab.Downloads }
+    Row(Modifier.fillMaxSize()) {
+        PageStack(Modifier.weight(1f).fillMaxHeight(), if (paneTask != null) null else top, expanded = false)
+        if (paned && nav.tab == AppTab.Downloads) DetailPane(paneTask?.taskId, DetailPaneMedium)
+    }
+}
+
+/** expanded：Rail 272 | 列表 | 详情 460（PC 三栏心智）。 */
+@Composable
+private fun ExpandedStage() {
+    val nav = LocalNavigator.current
+    val top = nav.top
+    val paneTask = (top as? Route.TaskDetail)?.takeIf { nav.tab == AppTab.Downloads }
+    Row(Modifier.fillMaxSize()) {
+        AppRail()
+        PageStack(Modifier.weight(1f).fillMaxHeight(), if (paneTask != null) null else top, expanded = true)
+        if (nav.tab == AppTab.Downloads) DetailPane(paneTask?.taskId, DetailPaneExpanded)
+    }
+}
+
+/** 推入页：新页自右滑入（fluid 弹簧），下层页缩小 + 淡出；返回反向。Reduce motion → 瞬时。 */
+@Composable
+private fun PageStack(modifier: Modifier, route: Route?, expanded: Boolean) {
+    val nav = LocalNavigator.current
+    val motion = FluxTheme.motion
+    AnimatedContent(
+        targetState = PageKey(if (route == null) 0 else nav.stack.size, route),
+        modifier = modifier,
+        contentKey = { it.route },
+        transitionSpec = {
+            val push = targetState.depth >= initialState.depth
+            val slide = motion.of<IntOffset>(motion.fluid, IntOffset.VisibilityThreshold)
+            val fade = motion.of<Float>(motion.fluid)
+            (slideInHorizontally(slide) { w -> if (push) w else -w / 4 } + fadeIn(fade)) togetherWith
+                (slideOutHorizontally(slide) { w -> if (push) -w / 4 else w } + fadeOut(fade) + scaleOut(fade, targetScale = .94f))
+        },
+        label = "page",
+    ) { key ->
+        val r = key.route
+        // 非首页（其余 Tab 根页与推入页）铺实色画布：不透出氛围光渐变，推入 / 返回过渡中也不与下层页透叠。
+        val home = r == null && nav.tab == AppTab.Downloads
+        Box(if (home) Modifier.fillMaxSize() else Modifier.fillMaxSize().background(FluxTheme.colors.canvas)) {
+            if (r == null) TabRoot(nav.tab, expanded) else RouteContent(r, inPane = false)
+        }
+    }
+}
+
+@Composable
+private fun DetailPane(taskId: String?, width: Dp) {
+    val nav = LocalNavigator.current
+    val c = FluxTheme.colors
+    Box(Modifier.width(width).fillMaxHeight()) {
+        Box(Modifier.fillMaxHeight().width(0.5.dp).background(c.hairline))
+        if (taskId == null) {
+            FluxEmpty(
+                glyph = FluxGlyph.File,
+                title = str(R.string.selectTaskHint),
+                subtitle = str(R.string.mobileSelectTaskHint),
+                modifier = Modifier.align(Alignment.Center),
+            )
+        } else {
+            TaskDetailScreen(taskId = taskId, inPane = true, onClose = { nav.pop() })
+        }
+    }
+}
+
+@Composable
+private fun TabRoot(tab: AppTab, expanded: Boolean) {
+    when (tab) {
+        AppTab.Downloads -> DownloadsScreen(expanded = expanded)
+        AppTab.Rss -> RssScreen()
+        AppTab.Devices -> DevicesScreen()
+        AppTab.Settings -> SettingsScreen()
+    }
+}
+
+@Composable
+private fun RouteContent(route: Route, inPane: Boolean) {
+    val nav = LocalNavigator.current
+    when (route) {
+        is Route.TaskDetail -> TaskDetailScreen(taskId = route.taskId, inPane = inPane, onClose = { nav.pop() })
+        is Route.Settings -> SettingsPageScreen(route.page)
+    }
+}
+
+@Composable
+private fun Sheets() {
+    val nav = LocalNavigator.current
+    val sheet = nav.sheet
+    NewDownloadSheet(route = sheet as? SheetRoute.NewDownload, onDismiss = nav::closeSheet)
+    MoveToQueueSheet(route = sheet as? SheetRoute.MoveToQueue, onDismiss = nav::closeSheet)
+    ViewOptionsSheet(visible = sheet == SheetRoute.ViewOptions, onDismiss = nav::closeSheet)
+    HostSwitchSheet(visible = sheet == SheetRoute.HostSwitch, onDismiss = nav::closeSheet)
+    AddHostSheet(visible = sheet == SheetRoute.AddHost, onDismiss = nav::closeSheet)
+    ActivitySheet(visible = sheet == SheetRoute.Activity, onDismiss = nav::closeSheet)
+}
+
+private val TabOrder = AppTab.entries
+
+@Composable
+private fun dockItems(failed: Boolean): List<FluxDockItem> {
+    val host = hostState()
+    val unread by remember { derivedStateOf { host.value.rssSources.sumOf { it.unreadCount } } }
+    return listOf(
+        FluxDockItem(
+            FluxIcons.ArrowDown, str(R.string.mobileNavDownloads),
+            badge = if (failed) FluxDockBadge.Dot else null,
+            badgeDescription = if (failed) str(R.string.mobileFailedTasksDot) else null,
+        ),
+        FluxDockItem(
+            FluxIcons.Rss, str(R.string.mobileNavRss),
+            badge = if (unread > 0) FluxDockBadge.Count(unread) else null,
+            badgeDescription = if (unread > 0) str(R.string.mobileUnreadCount, "n" to unread) else null,
+        ),
+        FluxDockItem(FluxIcons.Smartphone, str(R.string.mobileNavDevices)),
+        FluxDockItem(FluxIcons.Settings, str(R.string.mobileNavSettings)),
+    )
+}
+
+/** 浮动导航坞 + 新建球（多选时坞变形为选择坞，球变为“退出选择”）。 */
+@Composable
+private fun BoxScope.BottomChrome(failed: Boolean, orb: FluxOrbState) {
+    val nav = LocalNavigator.current
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val navInset = with(density) { WindowInsets.navigationBars.getBottom(this).toDp() }
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val medium = FluxTheme.windowClass == FluxWindowClass.Medium
+    val bottom = max(if (medium) 22.dp else 26.dp, navInset + 12.dp)
+    val pushed = nav.stack.isNotEmpty() && !(medium && nav.top is Route.TaskDetail && nav.tab == AppTab.Downloads)
+    val hidden = imeVisible || pushed || nav.searchOpen
+    val pasteLabel = str(R.string.mobileOrbPaste)
+
+    Box(
+        Modifier
+            .align(Alignment.BottomCenter)
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, bottom = bottom)
+            .height(64.dp),
+    ) {
+        FluxDock(
+            items = dockItems(failed),
+            selected = TabOrder.indexOf(nav.tab),
+            onSelect = { nav.selectTab(TabOrder[it]) },
+            mini = nav.dockMini && !nav.selecting && nav.sheet == null,
+            onExpand = { nav.dockMini = false },
+            hidden = hidden,
+            selectionMode = nav.selecting,
+            contentDescription = str(R.string.mobileMainNav),
+            expandDescription = str(R.string.mobileExpandNav),
+        )
+        DownloadsSelectionDock(Modifier.fillMaxWidth())
+        if (!hidden) {
+            FluxOrb(
+                state = orb,
+                onClick = {
+                    if (nav.selecting) nav.exitSelection() else nav.openSheet(SheetRoute.NewDownload())
+                },
+                actions = listOf(FluxOrbAction(FluxIcons.ClipboardPaste, pasteLabel)),
+                onAction = {
+                    val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
+                    val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                    nav.openSheet(SheetRoute.NewDownload(prefill = text.trim()))
+                },
+                modifier = Modifier.align(Alignment.CenterEnd),
+                selectionMode = nav.selecting,
+                mini = nav.dockMini && !nav.selecting,
+                contentDescription = str(R.string.newDownload),
+                exitDescription = str(R.string.mobileExitSelection),
+            )
+        }
+    }
+}
+
+/** expanded 档：Rail 取代坞与球；下载页二级上下文（状态文件夹 / 分类 / 队列）由下载特性提供。 */
+@Composable
+private fun AppRail() {
+    val nav = LocalNavigator.current
+    val items = listOf(
+        FluxRailNavItem(AppTab.Downloads.name, str(R.string.mobileNavDownloads), FluxIcons.ArrowDown),
+        FluxRailNavItem(AppTab.Rss.name, str(R.string.mobileNavRss), FluxIcons.Rss),
+        FluxRailNavItem(AppTab.Devices.name, str(R.string.mobileNavDevices), FluxIcons.Smartphone),
+        FluxRailNavItem(AppTab.Settings.name, str(R.string.mobileNavSettings), FluxIcons.Settings),
+    )
+    FluxRail(
+        nav = items,
+        selected = nav.tab.name,
+        onSelect = { nav.selectTab(AppTab.valueOf(it)) },
+        newLabel = str(R.string.newDownload),
+        onNew = { nav.openSheet(SheetRoute.NewDownload()) },
+        extra = if (nav.tab == AppTab.Downloads) ({ DownloadsRailContext() }) else null,
+        footer = { DownloadsRailFooter() },
+    )
+}

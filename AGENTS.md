@@ -1,7 +1,7 @@
 # FluxDown — AI 工作契约（核心）
 
 多协议下载管理器（IDM 的免费替代）。官网 <https://fluxdown.zerx.dev>。Rust 发行物版本由 CI 按 `v*` tag 注入 `FLUXDOWN_APP_VERSION`，运行期基准为 `fluxdown_protocol::APP_VERSION`（本地回退 crate 版本）；引擎 UA 的本地回退见 `native/engine/build.rs`。`pubspec.yaml` 管 Flutter 版本并作为引擎本地构建的回退来源，不是 Rust 发行物版本的唯一来源。
-**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：桌面发行物已是 GPUI，移动端仍是 Flutter；PC 客户端主力维护 GPUI（Flutter `lib/` 的 UI 修复与新功能暂停，只保持 wire 兼容，见 `.omp/RULES.md`）。GPUI 包 `fluxdown_ui_app` 已接入 `fluxdown-desktop → fluxdown-agent → fluxdownd → fluxdown_engine` 三进程本机链路。NAS/服务器端 = `fluxdown-agent --server` + `fluxdownd`（托管 React Web SPA，SPA 走 agent `/rpc`）。另有 CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API。Rinf 仅 Flutter App（`hub` crate）使用；`hub` 仅作为移动端（Android/iOS）Flutter 宿主；`native/server` 已冻结（不构建/发布，新实现不得依赖它）。
+**一套 Rust 下载引擎 `fluxdown_engine` + 多宿主 + 多客户端**：桌面发行物已是 GPUI，移动端发行物仍是 Flutter，其原生替代 `mobile/Android`（Jetpack Compose + 自研 Flux Lumen，零 Material）与 `mobile/FluxDown`（iOS，SwiftUI + Liquid Glass）在建，两端都经 UniFFI（`native/mobile`）接同一 Rust 核心；PC 客户端主力维护 GPUI（Flutter `lib/` 的 UI 修复与新功能暂停，只保持 wire 兼容，见 `.omp/RULES.md`）。GPUI 包 `fluxdown_ui_app` 已接入 `fluxdown-desktop → fluxdown-agent → fluxdownd → fluxdown_engine` 三进程本机链路。NAS/服务器端 = `fluxdown-agent --server` + `fluxdownd`（托管 React Web SPA，SPA 走 agent `/rpc`）。另有 CLI、WXT 浏览器扩展、Tampermonkey 用户脚本、JS 插件系统、内置 MCP/REST/aria2 API。Rinf 仅 Flutter App（`hub` crate）使用；`hub` 仅作为移动端（Android/iOS）Flutter 宿主；`native/server` 已冻结（不构建/发布，新实现不得依赖它）。
 
 ---
 
@@ -15,7 +15,7 @@
 | 架构全图、顶层目录树（哪个目录管什么） | `.omp/knowledge/README.md` |
 | 状态码 / DB 表与字段语义、6 种协议、引擎子系统（auto_proxy、RSS、segment_coordinator…）、插件系统、受管组件 | `.omp/knowledge/engine.md` |
 | HTTP API 路由组与鉴权、hub / cli / nmh / updater、headless server（agent `--server`）env 与路由 | `.omp/knowledge/hosts-and-api.md` |
-| Flutter 与 GPUI 前端（主题 token、云同步、widgets 族、移动端、GPUI 迁移层）、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
+| Flutter、GPUI 与原生 Android（`mobile/Android`）/ iOS（`mobile/FluxDown`）前端（主题 token、云同步、widgets 族、移动端、GPUI 迁移层、Flux Lumen 模块、FluxKit 包与主机端口）、扩展、用户脚本、Web SPA、官网 | `.omp/knowledge/clients.md` |
 | 日志系统细节、发布流水线矩阵、设计文档实现状态（已实现 vs 仅设计，含命名歧义澄清） | `.omp/knowledge/ops.md` |
 | **「要加 X 改哪里」全表 —— 动手前先查这张** | `.omp/knowledge/extension-points.md` |
 
@@ -81,6 +81,7 @@ cargo nextest run -p fluxdown_engine <filter>   # 引擎单测（协议/分段/D
 cargo test -p fluxdown_api            # HTTP API（axum/aria2/MCP/OpenAPI 漂移守卫）
 cargo test -p fluxdown_agent          # agent（Gateway / server 模式 / 兼容 API）；server 模式带 SPA：--features web-ui
 cargo test -p fluxdown_cli            # CLI（退出码/尺寸解析 doctest）
+cargo test -p fluxdown_mobile         # 原生移动端核心（会话游标 / 重连 / DTO 映射 / 进程内本机主机端到端）
 flutter test                          # Dart 测试
 PG_TEST_URL=postgres://postgres:pw@localhost/postgres cargo test -p fluxdown_engine -- --ignored pg_smoke
 # 插件相关（feature 门控）：
@@ -97,6 +98,10 @@ cargo run -p fluxdown_cli -- add <url> --local   # B 模式：内嵌引擎独立
 cd web && bun run dev                 # Web SPA localhost:5173（/rpc、/api、/ping、/demo 代理到 :17800 的 agent --server）；bun run build → web/dist
 cd website && npm run dev             # 官网 Astro localhost:4321
 cd fluxDown && npm run dev            # 扩展开发（Chrome）；dev:firefox / build / zip
+cd mobile/Android && ./gradlew :core:testDebugUnitTest :bridge:testDebugUnitTest :app:assembleDebug   # 原生 Android（JAVA_HOME = Android Studio 自带 JBR；:bridge 经 cargo-ndk 编译 fluxdown_mobile）
+mobile/FluxDown/scripts/build-core.sh [--release]   # 原生 iOS：编 fluxdown_mobile 为 xcframework + 生成 Swift 绑定（改 Rust 后必须重跑；产物 gitignore）
+cd mobile/FluxDown/FluxKit && xcodebuild test -scheme FluxKit-Package -destination 'platform=iOS Simulator,name=iPhone 18 Pro'   # iOS 领域层 + 真实 FFI 冒烟
+cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxDown -destination 'generic/platform=iOS Simulator' && python3 scripts/check-i18n.py   # iOS App 构建 + 文案键校验
 
 # ── OpenAPI / 图标 / 发布 ──
 cargo run -p fluxdown_api --example gen_openapi > website-v2/public/openapi.json   # 改 API 后重生成
@@ -134,6 +139,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - `fluxdown_engine_protocol`：引擎模型与 protocol DTO 的无状态、无损转换边界；宿主使用命名函数，API/agent/UI 不依赖它。
 - `fluxdown_daemon`：`fluxdownd` 纯下载核心；独占 engine/下载 DB，拥有任务、队列、组、下载设置、RSS、插件、Webhook 与选择。
 - `fluxdown_agent`：`fluxdown-agent` 官方 UI Gateway 与 FluxCloud owner；拥有 Token、设备身份、同步、远程任务、捕获与兼容 API，只经 protocol RPC 调 daemon。
+- `fluxdown_mobile`（`native/mobile`）：原生移动端（Android / iOS）唯一 Rust 入口，UniFFI 导出 `FluxCore` / `HostSession`；本机主机 = 进程内 `fluxdown_daemon::runtime::run_with` + `fluxdown_agent` 嵌入模式（`start_embedded` / `LocalConnection`，不起 TCP 网关、NMH、自启、子进程），远端主机 = WebSocket `/rpc` + 访问密钥。握手、epoch/sequence 游标、缓冲、重同步、重连退避与 800ms 离线宽限都在这里，Kotlin / Swift 只应用已接受的信号。手写零 unsafe，UniFFI 宏胶水为独立审计边界。
 - `fluxdown_link`（`native/link`）：局域网直连 L1 协议（身份 / 配对 SAS / mDNS / 直连传输 / 地址解析），持久化经 `LinkStorage` trait 注入；agent 为生产宿主，引擎仅保留 `DbLinkStorage` 给 Flutter hub。零引擎、零数据库、零 UI 依赖。
 - `fluxdown_logfile`（`native/logfile`）：desktop 与 agent 共用的诊断日志文件（轮转 + 重复限流 + panic hook），零第三方依赖；`log` / `tracing` 适配留在各宿主。细节见 `.omp/knowledge/ops.md`「日志系统」。
 - **feature 门控**：`plugins`、`components`（默认关；desktop/server 开，mobile/CLI 关）。**关插件时下载主链路零行为变化**（注入 no-op `PluginManager`）。
@@ -142,6 +148,7 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 - `native/hub/src/actors/download_actor.rs` 主 `tokio::select!` 接近但未占满 tokio 的 64 分支上限；不能由此推断新增一条必然编译失败。新增 Dart 信号 / 定时节拍 / 回流通道优先复用既有 `AuxSignal` 合并泵（主循环单条 `aux_rx.recv()`），分支数量以源码为准。
 - rquickjs（`engine/Cargo.toml`）：禁止叠加 `rust-alloc`/`allocator`（会让 `set_memory_limit` 静默失效）；必带 `parallel`（`AsyncRuntime`/`AsyncContext` 的 Send/Sync 依赖它）。
 - `profile.release` **不**设 `panic="abort"`——`download_manager` 靠 `catch_unwind` 恢复 task panic。
+- **iOS 构建依赖 `third_party/librqbit-dualstack-sockets`**（根 `Cargo.toml` `[patch.crates-io]`）：上游 0.7.0 在 iOS 上不编译（Apple 平台只放行 macOS 的按索引绑定）。删除补丁前先确认上游已修，并重跑 `mobile/FluxDown/scripts/build-core.sh`。
 - **headless 的 Web UI 是编译期内嵌的**：`fluxdown_agent` 的 `web-ui` feature 下 `native/agent/build.rs` 把 `FLUXDOWN_EMBED_WEBROOT`（缺省 `web/dist`）整棵目录递归全量 `include_bytes!` 进二进制，只在 `--server` 模式挂为 SPA fallback。改了前端**必须先 `cd web && bun run build` 再重编 agent**才能看到；`FLUXDOWN_WEBROOT` 是可选的磁盘覆盖。构建时目录缺失只 warning + 运行期 503 提示页。Web 构建经 Vite 别名引用仓库根的 `assets/i18n` 与 `website-v2/src/lib/gpui-theme`，打包上下文必须包含这两处。
 
 **运行期不变式**
@@ -177,11 +184,14 @@ git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z   # 触发发布流水�
 | `hub/src/signals/mod.rs` | `rinf gen` → `download_actor` 的 `AuxSignal` 泵 → Dart 侧 `rustSignalStream` 监听 |
 | `native/api` 契约 | 重跑 `gen_openapi` 覆盖 `website-v2/public/openapi.json` |
 | `native/protocol` 的 DTO / 方法 / 事件 / `ErrorReason`（`agent.rs`、`event.rs`、`error.rs`、`method.rs`、`rpc.rs` 版本） | `web/src/lib/rpc/protocol/*.ts` 手写镜像 + `apply.ts`；新增严格事件枚举升协议版本；`settings.rs` 同步目录变化会被 Web `syncGroups.test.ts` 核对 |
-| 任一 UI 文案 | 只补 **en + zh 基线对**：App/GPUI/Web SPA 共用 `assets/i18n/{en,zh}.json`（Flutter 另补 `translations.dart` getter；Web 经 `web/src/i18n` 按同一 camelCase 键查表）；官网主站 `website-v2/src/i18n/messages/<ns>.ts`（`defineMessages({ en, zh })`）；`fluxDown/utils/locales/{en,zh-CN}.ts`。社区语言（`ja` 等）由 Weblate 维护，**不碰**（运行时键级回退英文）。**`assets/i18n` 同时被 `crates/*`（GPUI）与 `web/` 引用**：删键前先 `grep crates/ web/src`，`lib/` 无引用不等于死键 |
+| 任一 UI 文案 | 只补 **en + zh 基线对**：App/GPUI/Web SPA/原生 Android/原生 iOS 共用 `assets/i18n/{en,zh}.json`（Flutter 另补 `translations.dart` getter；Web 经 `web/src/i18n` 按同一 camelCase 键查表；`mobile/Android` 构建期生成 `R.string.<键>`，禁止在 `res/` 手写同名文案；`mobile/FluxDown` 经 FluxKit 符号链接打包同一 JSON、`L("键")` 运行期查表，`scripts/check-i18n.py` 校验漏键）；官网主站 `website-v2/src/i18n/messages/<ns>.ts`（`defineMessages({ en, zh })`）；`fluxDown/utils/locales/{en,zh-CN}.ts`。社区语言（`ja` 等）由 Weblate 维护，**不碰**（运行时键级回退英文）。**`assets/i18n` 同时被 `crates/*`（GPUI）、`web/`、`mobile/Android` 与 `mobile/FluxDown` 引用**：删键前先 `grep crates/ web/src mobile/`，`lib/` 无引用不等于死键 |
 | web 设置项 / 对话框字段归属 | **基准 = GPUI 桌面客户端**：Web 设置分类与字段顺序、对话框分区对齐 `crates/settings` / `crates/downloads`（`web/src/pages/settings/categories.ts` ↔ `crates/settings/src/view.rs::build_pages`）。桌面专属项（托盘、自启、关联、剪贴板、打开文件/所在目录、进度窗口）在 Web 省略，其余不得各自措辞或另立分类 |
 | 「一键分类目录」的目录名推导 | `lib/src/models/custom_category.dart` 的 `sanitizeCategoryDirName` / `categoryDirUnder` ↔ `web/src/lib/category-dir.ts` 同名函数（含分隔符归一）；**且内置分类显示名两端逐字一致**（App/GPUI/Web 共用 `assets/i18n` 的 `categoryVideo/...` 键，勿在 Web 另起译文），否则同一台机器上桌面与 Web 会各建一套目录（`Document` vs `Documents`） |
 | 开机自启语义（`lib/src/services/autostart_service.dart`） | `native/agent/src/platform/autostart.rs`：「已启用」都要尊重系统级禁用（Windows `StartupApproved`、XDG `Hidden` / `X-GNOME-Autostart-enabled`），启动时自动迁移只改启动目标、**绝不**改系统启用状态；细节见 `.omp/knowledge/clients.md`「开机自启」 |
 | 文件跟踪重扫节流（`crates/downloads/src/model/file_rescan.rs::RescanThrottle`） | `web/src/lib/rescanThrottle.ts`（`RescanThrottle`）：逐条对齐 10s 冷却 / 尾沿排队 / 合并 / 尾沿后重计冷却；测试复用同组用例（`rescanThrottle.test.ts`） |
+| `native/protocol/src/agent.rs::CustomCategoryDto::builtin_defaults`（内置分类基线） | `mobile/Android/core/.../model/Category.kt::BUILTIN` + `mobile/FluxDown/FluxKit/Sources/FluxDomain/Model/TaskCategory.swift::builtin`（同序同扩展名；仅作主机未下发分类时的展示基线，匹配规则来源仍是主机快照） |
+| `native/protocol/src/event.rs` 的 reducer（`apply_daemon_event` / `apply_engine_message`） | `mobile/Android/core/.../store/HostStore.kt` + `mobile/FluxDown/FluxKit/Sources/FluxDomain/Store/HostStore.swift`（移动端渲染子集，`HostStoreTest` / `HostStoreTests` 覆盖同一组：删除哨兵 / 旧采样丢弃 / 非活跃清段 / Stale 只读 / 合帧）；游标与重同步在 `native/mobile`，Kotlin / Swift 只应用已接受的事件 |
+| `native/mobile/src/dto.rs`（UniFFI DTO）与 `native/mobile/src/sections.rs`（通用分区 / 通知键） | `mobile/Android/core/.../model/*.kt` + `host/HostSession.kt` 与 `mobile/Android/bridge/.../Mapping.kt`（`:bridge` `MappingTest` 覆盖）；iOS `mobile/FluxDown/FluxKit/Sources/FluxDomain/{Model,Host}/*.swift` 与 `FluxBridge/Mapping.swift`（字段逐一对应；生成绑定只在 `FluxRustBindings` 内部模块，App 不直接引用 `*Dto`）。**通用通道**：`HostSession.call(method, params_json)` 只放行 `daemon.*` / `agent.*`；`HostSnapshotDto.sections` + `HostEventDto::{SectionChanged,Notice}` 承载类型化 DTO 之外的全部 `AgentSnapshot` / `DaemonSnapshot` 字段与一次性通知，键常量 = `sections.rs` 的 `pub const` ↔ iOS `FluxDomain/Protocol/HostSections.swift`；方法名 = `native/protocol/src/method.rs` ↔ iOS `FluxDomain/Protocol/Methods.swift`（一一对应，同 `web/src/lib/rpc/protocol/method.ts`）。新增 / 改名分区或通知同回合改这三处 |
 
 ---
 

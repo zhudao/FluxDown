@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 打开已完成文件（ACTION_VIEW）时授予只读 URI：公共下载目录与应用私有目录 -->
+<paths>
+    <external-path name="external" path="." />
+    <external-files-path name="external_files" path="." />
+    <files-path name="files" path="." />
+</paths>

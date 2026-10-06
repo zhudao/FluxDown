@@ -27,7 +27,6 @@ use crate::launch::{self, LaunchOptions};
 use crate::service_bootstrap::ServiceBootstrap;
 use crate::session::{AgentSession, SessionSignal, attach};
 use crate::settings_port::AgentSettingsPort;
-use crate::theme_library::FsThemeLibrary;
 use crate::windows::WindowRegistry;
 
 /// 事件泵单次批量上限。
@@ -203,12 +202,6 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
-        // 导入主题须在首个偏好快照前注册，`custom:<id>` 偏好才能直接命中；
-        // 库内缺失的 id 由主题 crate 回退到该槽位的内置默认主题。
-        let theme_library = FsThemeLibrary::new(app_data_dir().join("themes"));
-        for failure in fluxdown_ui_settings::install_theme_library(Arc::new(theme_library), cx) {
-            log::warn!("failed to load imported theme: {failure}");
-        }
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
         let session = cx.new(|cx| AgentSession::new(agent_client.clone(), cx));
@@ -260,6 +253,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 会话 → 运行时统计 / 外壳状态折叠进 Desktop。偏好不在此处理：`SettingsStore` 已订阅同一
         // 会话并叠加本地未回执编辑，外观与语言只从它投影（见 `observe_preferences`）。
         observe_preferences(cx);
+        after_first_snapshot(cx, crate::legacy_themes::migrate);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
                 if let Some(body) = crate::session::agent_body(snapshot) {
@@ -546,6 +540,10 @@ fn observe_preferences(cx: &mut App) {
 
 fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
     let translator = Desktop::global(cx).translator.clone();
+    // 导入主题先于外观注册，`custom:<id>` 选择才能直接命中。
+    for failure in fluxdown_ui_settings::sync_theme_library(values, cx) {
+        log::warn!("failed to load imported theme: {failure}");
+    }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
@@ -715,8 +713,8 @@ fn portable_data_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// 桌面数据根目录（导入主题等）。
-fn app_data_dir() -> std::path::PathBuf {
+/// 桌面数据根目录（旧版导入主题文件所在，见 `legacy_themes`）。
+pub(crate) fn app_data_dir() -> std::path::PathBuf {
     DesktopPaths::from_env().data_root
 }
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 窗口底色 = Flux Lumen canvas，避免首帧白闪；外观全部由 Compose 的 FluxTheme 绘制 -->
+    <style name="Theme.FluxDown" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@color/flux_canvas</item>
+        <item name="android:windowSplashScreenBackground">@color/flux_canvas</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

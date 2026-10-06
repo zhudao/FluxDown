@@ -498,6 +498,12 @@ globalThis.resolve = async (ctx) => {
   // 附加参数（高级）：追加到命令末尾（URL 之前）。FluxDown bridge 按白名单校验（仅放行规范长选项全名）。
   var extra = parseExtraArgs(flux.settings.extraArgs);
   for (var ei = 0; ei < extra.length; ei++) args.push(extra[ei]);
+  // 剔除 -J 里的重字段（automatic_captions / heatmap / subtitles）：YouTube 单个
+  // 视频的 -J 常超 4 MiB（automatic_captions 单字段 ~4 MiB），会撞 FluxDown 的
+  // stdout 回传上限导致 JSON 解析失败；这些字段本插件并不消费，剥掉后输出降到 ~200 KB。
+  args.push('--parse-metadata', 'automatic_captions:(?P<automatic_captions>)');
+  args.push('--parse-metadata', 'heatmap:(?P<heatmap>)');
+  args.push('--parse-metadata', 'subtitles:(?P<subtitles>)');
   args.push(ctx.url);
 
   if (verbose) {
@@ -551,6 +557,16 @@ globalThis.resolve = async (ctx) => {
       } catch (e) {}
     }
     throw new Error(friendlyError(ctx.url, r, !!cookiesText));
+  }
+
+  // 截断优先于解析：FluxDown 回传 stdout 有上限（YTDLP_STDOUT_CAP），超限会被
+  // 截成非法 JSON。先据 truncatedStdout 给出可定位的错误，而不是让 JSON.parse
+  // 抛出「Unexpected end of JSON input」这种难以排查的信息。
+  if (r.truncatedStdout) {
+    throw new Error(
+      'yt-dlp 输出超过 FluxDown 回传上限，已被截断（该站点 -J 体积过大；' +
+        '可通过「附加 yt-dlp 参数」加 --parse-metadata 剔除重字段，或减少输出）'
+    );
   }
 
   var info;

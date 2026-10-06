@@ -514,6 +514,14 @@ fn launch_path(path: &Path, reveal: bool) -> Result<(), PlatformError> {
     open_with_shell(path)
 }
 
+/// Android / iOS：由宿主应用（Intent / UIDocumentInteraction）打开文件，agent 进程内不可用。
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn launch_path(_path: &Path, _reveal: bool) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported(
+        "opening files is handled by the host application on this platform",
+    ))
+}
+
 /// 打开任意路径（文件走默认关联程序、目录走默认文件管理器）。
 ///
 /// 优先直接调 Win32

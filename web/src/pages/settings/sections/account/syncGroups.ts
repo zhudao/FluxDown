@@ -20,6 +20,7 @@ export const SYNC_GROUPS: readonly SyncGroup[] = [
       'appearance.light_theme',
       'appearance.color_scheme',
       'appearance.custom_color',
+      'appearance.custom_themes',
     ],
   },
   {

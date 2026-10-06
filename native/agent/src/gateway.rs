@@ -1,6 +1,9 @@
 //! agent 官方 UI Gateway：单一 RPC 会话、agent 快照与 daemon 透明转发。
 
+mod local;
 mod restart;
+
+pub use local::{LocalConnection, LocalEventError};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,8 +16,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, RpcErrorData, RpcErrorObject, RpcNotification,
-    RpcRequest, RpcResponse, ServiceHello, ServiceRole, validate_first_request,
+    ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, ClientHello, EventFrame, RpcErrorData,
+    RpcErrorObject, RpcNotification, RpcRequest, RpcResponse, ServiceHello, ServiceRole,
+    validate_first_request,
 };
 use futures_util::StreamExt;
 use reqwest::Method;
@@ -1655,12 +1659,11 @@ async fn run_socket(
                     match validate_first_request(&request, ServiceRole::Agent) {
                         Ok(hello) => {
                             ready = true;
-                            ui_client = hello.capabilities.iter().any(|capability| capability == method::CAPABILITY_CLIENT_SELECTIONS);
+                            ui_client = declares_selection_ui(&hello);
                             if ui_client { service.ui_connected().await; }
-                            let (receiver, _) = service.events.subscribe_and_snapshot();
+                            let (receiver, session_lanes, response_rx) = service.open_session();
                             events = Some(receiver);
-                            let (response_tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_QUEUE);
-                            lanes = Some(RequestLanes::spawn(&service, response_tx));
+                            lanes = Some(session_lanes);
                             responses = Some(response_rx);
                             let result = match serde_json::to_value(&service.hello) {
                                 Ok(result) => result,
@@ -1755,6 +1758,30 @@ async fn receive_response(
 const RESPONSE_QUEUE: usize = 256;
 /// 每个通道待处理请求上限；超出立即以可重试的 `Unavailable` 拒绝，而不是阻塞整个连接。
 const LANE_QUEUE: usize = 128;
+
+/// 握手声明了 `client.selections` 的是官方 UI：计入 UI 在线数并接收选择请求。
+fn declares_selection_ui(hello: &ClientHello) -> bool {
+    hello
+        .capabilities
+        .iter()
+        .any(|capability| capability == method::CAPABILITY_CLIENT_SELECTIONS)
+}
+
+impl GatewayService {
+    /// 握手通过后的连接装配：事件订阅、请求通道与响应队列（WebSocket 与进程内连接共用）。
+    fn open_session(
+        self: &Arc<Self>,
+    ) -> (
+        tokio::sync::broadcast::Receiver<EventFrame>,
+        RequestLanes,
+        tokio::sync::mpsc::Receiver<RpcResponse>,
+    ) {
+        let (events, _) = self.events.subscribe_and_snapshot();
+        let (response_tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_QUEUE);
+        let lanes = RequestLanes::spawn(self, response_tx);
+        (events, lanes, response_rx)
+    }
+}
 
 /// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联、请求管理员授权、打开系统设置与
 /// 测试通知的诊断动作，以及可写任意目标路径的日志导出。Web 的 Doctor 仍可用其余动作（刷新
