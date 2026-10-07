@@ -261,6 +261,14 @@ const power = {
   disarm: () => call<OkResult>(METHOD.AGENT_POWER_DISARM),
 };
 
+// 桌面集成：在 agent 所在主机上打开 / 定位任务产物。仅当本连接的 hello 带
+// `agent.openTaskFiles` 能力时可用（见 downloads/model/actions.ts）；否则 agent 返回 Unsupported。
+const platform = {
+  openTask: (params: { taskId: string }) => call<OkResult>(METHOD.AGENT_PLATFORM_OPEN_TASK, params),
+  revealTask: (params: { taskId: string }) =>
+    call<OkResult>(METHOD.AGENT_PLATFORM_REVEAL_TASK, params),
+};
+
 export const agent = {
   session,
   auth,
@@ -278,4 +286,5 @@ export const agent = {
   diagnostics,
   update,
   power,
+  platform,
 };

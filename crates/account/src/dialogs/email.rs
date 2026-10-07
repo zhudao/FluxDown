@@ -184,8 +184,7 @@ impl EmailDialog {
     }
 
     fn can_submit(&self, cx: &App) -> bool {
-        if self.busy() || !self.enabled(cx) || !self.old_challenge.is_some_and(|c| !c.is_expired())
-        {
+        if self.busy() || !self.enabled(cx) || self.old_challenge.is_none_or(|c| c.is_expired()) {
             return false;
         }
         if self.sent_email.is_some() {
@@ -228,7 +227,7 @@ impl EmailDialog {
     fn send_new(&mut self, via_submit: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy()
             || !self.enabled(cx)
-            || !self.old_challenge.is_some_and(|c| !c.is_expired())
+            || self.old_challenge.is_none_or(|c| c.is_expired())
             || self.new_challenge.is_some_and(|c| !c.can_resend())
             || self.old_code.read(cx).value().trim().is_empty()
             || email_error(&self.new_email.read(cx).value(), &self.current_email).is_some()

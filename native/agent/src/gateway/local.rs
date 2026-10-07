@@ -59,11 +59,11 @@ impl GatewayService {
         if ui_client {
             self.ui_connected().await;
         }
-        let (events, lanes, responses) = self.open_session();
+        let (events, lanes, responses) = self.open_session(true);
         let waiters = Arc::new(Waiters::default());
         tokio::spawn(route_responses(responses, Arc::clone(&waiters)));
         Ok(LocalConnection {
-            hello: self.hello.clone(),
+            hello: self.session_hello(true),
             service: Arc::clone(self),
             lanes: Some(lanes),
             waiters,
@@ -116,13 +116,29 @@ impl LocalConnection {
             }),
         }
     }
+
+    /// 显式关闭本机会话：等待请求通道结束并通知 UI 断开。
+    pub async fn close(mut self) {
+        let lanes = self.lanes.take();
+        let ui_client = self.ui_client;
+        self.ui_client = false;
+        if ui_client {
+            self.service.ui_disconnected().await;
+        }
+        if let Some(lanes) = lanes {
+            lanes.shutdown().await;
+        }
+    }
 }
 
 impl Drop for LocalConnection {
     fn drop(&mut self) {
         let lanes = self.lanes.take();
-        let service = Arc::clone(&self.service);
         let ui_client = self.ui_client;
+        if lanes.is_none() && !ui_client {
+            return;
+        }
+        let service = Arc::clone(&self.service);
         self.runtime.spawn(async move {
             if ui_client {
                 service.ui_disconnected().await;

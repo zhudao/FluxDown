@@ -155,9 +155,10 @@ impl GatewayService {
         self
     }
 
-    async fn call(&self, request: RpcRequest) -> RpcResponse {
+    /// 构造 RPC 响应，并把「本机来源」判定透传给 [`Self::dispatch_with`]。
+    async fn call_with(&self, allow_local_platform: bool, request: RpcRequest) -> RpcResponse {
         let id = request.id.clone();
-        match self.dispatch(request).await {
+        match self.dispatch_with(request, allow_local_platform).await {
             Ok(value) => RpcResponse::success(id, value),
             Err(data) => {
                 RpcResponse::failure(id, RpcErrorObject::application("agent RPC failed", data))
@@ -180,8 +181,28 @@ impl GatewayService {
     }
 
     async fn dispatch(&self, request: RpcRequest) -> Result<serde_json::Value, RpcErrorData> {
-        // 桌面专属集成（打开 / 定位文件、开机自启、文件与协议关联）在 headless 宿主不存在。
-        if self.server_mode && request.method.starts_with("agent.platform.") {
+        self.dispatch_with(request, false).await
+    }
+
+    /// 与 [`Self::dispatch`] 相同，但可放行连接级的「本机来源」桌面集成调用。
+    ///
+    /// `allow_local_platform` 是建连时对整条连接的一次判定：桌面宿主恒为 `true`；server
+    /// 模式由 `ServerHandle::local_platform_permitted` 决定——TCP 对端、整条转发链与所有
+    /// `Host` / `Origin` / `X-Forwarded-Host` / `Forwarded` authority 都是字面本机，或运维显式
+    /// 设置 `FLUXDOWN_ALLOW_LOCAL_PLATFORM`。即使为 `true`，server 模式也只放行
+    /// [`local_platform_method_allowed`] 中的打开 / 定位任务产物，其余 `agent.platform.*` 仍
+    /// 返回 `Unsupported`。
+    async fn dispatch_with(
+        &self,
+        request: RpcRequest,
+        allow_local_platform: bool,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        // 桌面专属集成（打开 / 定位文件、开机自启、文件与协议关联）在 headless 宿主不存在；
+        // 唯一例外是本机来源连接的「打开 / 定位任务产物」。
+        if self.server_mode
+            && request.method.starts_with("agent.platform.")
+            && !(allow_local_platform && local_platform_method_allowed(&request.method))
+        {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
         if self.server_mode && server_mode_denies(&request) {
@@ -1139,14 +1160,15 @@ impl GatewayService {
                 Some(serde_json::json!({ "taskId": task_id })),
             )
             .await?;
-        let result = if reveal {
-            crate::platform::reveal_task(&task)
-        } else {
-            crate::platform::open_task(&task)
-        };
-        result
-            .map(|()| serde_json::json!({ "ok": true }))
-            .map_err(|error| internal_error("open/reveal task", error))
+        platform_blocking(move || {
+            if reveal {
+                crate::platform::reveal_task(&task)
+            } else {
+                crate::platform::open_task(&task)
+            }
+        })
+        .await
+        .map(|()| serde_json::json!({ "ok": true }))
     }
 
     async fn ui_connected(&self) {
@@ -1344,8 +1366,12 @@ fn platform_error_data(error: PlatformError) -> RpcErrorData {
         PlatformError::Unsupported(_) => {
             RpcErrorData::new(ApplicationErrorCode::Unsupported, false)
         }
-        PlatformError::Io(_) | PlatformError::Failed(_) => {
-            RpcErrorData::new(ApplicationErrorCode::Internal, false)
+        PlatformError::NotFound(path) => {
+            tracing::debug!(path = %path.display(), "platform target is missing");
+            RpcErrorData::new(ApplicationErrorCode::NotFound, false)
+        }
+        error @ (PlatformError::Io(_) | PlatformError::Failed(_)) => {
+            internal_error("platform action", error)
         }
     }
 }
@@ -1400,12 +1426,13 @@ pub(crate) fn ensure_forced_auth_token(
     }
 }
 
-/// 对外暴露面必须有 token：局域网监听或 CORS 放开，且接管 / aria2 兼容端点任一开启时，
-/// 空 token 等于向同网段 / 任意网页匿名开放（这两个端点空 token 不鉴权）。缺 token 时生成
+/// 局域网暴露面必须有 token：局域网监听且接管 / aria2 兼容端点任一开启时，空 token 等于向
+/// 同网段匿名开放（这两个端点空 token 不鉴权）。CORS 放开不在此列：等同 aria2 的
+/// `--rpc-allow-origin-all`，用户可显式选择空 token 开启（提交仍弹确认框）。缺 token 时生成
 /// 随机 token，返回是否发生了改动；已有 token 一律保留。server 模式的空密钥表示尚未完成
 /// 首次设置，由兼容 API 自身拒绝，调用方不得对它调用本函数。
 pub(crate) fn ensure_exposed_auth_token(state: &mut crate::state::AgentState) -> bool {
-    let exposed = (state.gateway.lan_enabled || state.gateway.cors_enabled)
+    let exposed = state.gateway.lan_enabled
         && (state.gateway.takeover_enabled || state.gateway.jsonrpc_enabled);
     if exposed && state.gateway_user_token.trim().is_empty() {
         state.gateway_user_token = generate_user_token();
@@ -1585,23 +1612,30 @@ async fn rpc_upgrade(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let upgrade = match state.server.as_deref() {
+    // 「本机来源」在建连时一次判定，整条连接沿用：桌面宿主本就在本机；server 模式见
+    // `ServerHandle::local_platform_permitted`（字面本机来源或显式 env 放行）。
+    let (upgrade, allow_local_platform) = match state.server.as_deref() {
         Some(server) => {
             if let Err(status) = server.authorize_rpc_from(peer.ip(), &headers, &state.bearer) {
                 return status.into_response();
             }
             // 浏览器经子协议携带密钥：必须回显 `fluxdown.rpc.v1`，否则浏览器会断开握手。
-            upgrade.protocols([crate::server_mode::RPC_SUBPROTOCOL])
+            (
+                upgrade.protocols([crate::server_mode::RPC_SUBPROTOCOL]),
+                server.local_platform_permitted(peer.ip(), &headers),
+            )
         }
         None => {
             if !authorized(&headers, &state.bearer) {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
-            upgrade
+            (upgrade, true)
         }
     };
     upgrade
-        .on_upgrade(move |socket| run_socket(socket, state.service, state.cancel))
+        .on_upgrade(move |socket| {
+            run_socket(socket, state.service, state.cancel, allow_local_platform)
+        })
         .into_response()
 }
 
@@ -1609,6 +1643,7 @@ async fn run_socket(
     mut socket: WebSocket,
     service: Arc<GatewayService>,
     cancel: CancellationToken,
+    allow_local_platform: bool,
 ) {
     let mut ready = false;
     let mut ui_client = false;
@@ -1661,11 +1696,11 @@ async fn run_socket(
                             ready = true;
                             ui_client = declares_selection_ui(&hello);
                             if ui_client { service.ui_connected().await; }
-                            let (receiver, session_lanes, response_rx) = service.open_session();
+                            let (receiver, session_lanes, response_rx) = service.open_session(allow_local_platform);
                             events = Some(receiver);
                             lanes = Some(session_lanes);
                             responses = Some(response_rx);
-                            let result = match serde_json::to_value(&service.hello) {
+                            let result = match serde_json::to_value(service.session_hello(allow_local_platform)) {
                                 Ok(result) => result,
                                 Err(_) => break,
                             };
@@ -1771,6 +1806,7 @@ impl GatewayService {
     /// 握手通过后的连接装配：事件订阅、请求通道与响应队列（WebSocket 与进程内连接共用）。
     fn open_session(
         self: &Arc<Self>,
+        allow_local_platform: bool,
     ) -> (
         tokio::sync::broadcast::Receiver<EventFrame>,
         RequestLanes,
@@ -1778,9 +1814,35 @@ impl GatewayService {
     ) {
         let (events, _) = self.events.subscribe_and_snapshot();
         let (response_tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_QUEUE);
-        let lanes = RequestLanes::spawn(self, response_tx);
+        let lanes = RequestLanes::spawn(self, response_tx, allow_local_platform);
         (events, lanes, response_rx)
     }
+
+    /// 本连接的 `system.hello` 应答：在服务级能力之外，只有可在主机上打开 / 定位任务产物的
+    /// 连接（本机来源且本构建能启动系统打开器）才带 `agent.openTaskFiles`，客户端据此决定
+    /// 是否展示「打开文件 / 在文件夹中显示」。
+    fn session_hello(&self, allow_local_platform: bool) -> ServiceHello {
+        let mut hello = self.hello.clone();
+        if allow_local_platform && crate::platform::LAUNCHES_PATHS {
+            hello
+                .capabilities
+                .push(method::CAPABILITY_AGENT_OPEN_TASK_FILES.to_owned());
+        }
+        hello
+    }
+}
+
+/// 允许「本机来源」在 server 模式下调用的 `agent.platform.*` 子集。
+///
+/// 只放行「与本机文件系统交互、但无系统级副作用」的两个打开动作。**不含**
+/// 自启 / 文件关联 / 协议注册 / `openPath` 之类可写注册表或任意路径的动作——那些仍
+/// 一律拒绝，即使来源是本机。
+fn local_platform_method_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK
+            | fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK
+    )
 }
 
 /// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联、请求管理员授权、打开系统设置与
@@ -1897,6 +1959,7 @@ impl RequestLanes {
     fn spawn(
         service: &Arc<GatewayService>,
         responses: tokio::sync::mpsc::Sender<RpcResponse>,
+        allow_local_platform: bool,
     ) -> Self {
         let mut tasks = tokio::task::JoinSet::new();
         let mut start = || {
@@ -1905,7 +1968,7 @@ impl RequestLanes {
             let responses = responses.clone();
             tasks.spawn(async move {
                 while let Some(request) = receiver.recv().await {
-                    let response = service.call(request).await;
+                    let response = service.call_with(allow_local_platform, request).await;
                     if responses.send(response).await.is_err() {
                         break;
                     }
@@ -1936,7 +1999,7 @@ impl RequestLanes {
                         let service = Arc::clone(&service);
                         let responses = responses.clone();
                         calls.spawn(async move {
-                            let response = service.call(request).await;
+                            let response = service.call_with(allow_local_platform, request).await;
                             if responses.send(response).await.is_err() {
                                 tracing::trace!("gateway connection closed before concurrent response");
                             }
@@ -2462,11 +2525,10 @@ mod tests {
 
         async fn call(&self, method_name: &str, params: serde_json::Value) -> RpcResponse {
             self.service
-                .call(RpcRequest::new(
-                    RequestId::Integer(1),
-                    method_name,
-                    Some(params),
-                ))
+                .call_with(
+                    false,
+                    RpcRequest::new(RequestId::Integer(1), method_name, Some(params)),
+                )
                 .await
         }
 
@@ -3229,7 +3291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exposing_compat_endpoints_to_lan_or_cors_requires_a_token() {
+    async fn exposing_compat_endpoints_to_lan_requires_a_token_but_cors_does_not() {
         let harness = TestGateway::new("gateway_exposed_token").await;
 
         // 只开局域网、兼容端点全关：不必有 token。
@@ -3269,19 +3331,19 @@ mod tests {
         assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
         assert!(harness.user_token().await.is_empty());
 
-        // CORS 放开同理。
+        // CORS 放开不强制 token：允许空 token 开启。
         let result = harness
             .patch_gateway(serde_json::json!({ "corsEnabled": true }))
             .await;
-        assert_eq!(result["userTokenConfigured"], serde_json::json!(true));
-        assert_eq!(harness.user_token().await.len(), 64);
+        assert_eq!(result["userTokenConfigured"], serde_json::json!(false));
+        assert!(harness.user_token().await.is_empty());
         harness.finish().await;
     }
 
     #[test]
     fn exposed_token_is_only_generated_for_exposed_compat_endpoints() {
         let mut state = crate::state::AgentState::default();
-        state.gateway.cors_enabled = true;
+        state.gateway.lan_enabled = true;
         state.gateway.takeover_enabled = false;
         state.gateway.jsonrpc_enabled = false;
         assert!(!ensure_exposed_auth_token(&mut state));
@@ -3338,11 +3400,14 @@ mod tests {
             };
             let response = tokio::time::timeout(
                 Duration::from_secs(2),
-                service.call(RpcRequest::new(
-                    RequestId::Integer(i64::try_from(index).unwrap_or(i64::MAX)),
-                    method_name,
-                    Some(params),
-                )),
+                service.call_with(
+                    false,
+                    RpcRequest::new(
+                        RequestId::Integer(i64::try_from(index).unwrap_or(i64::MAX)),
+                        method_name,
+                        Some(params),
+                    ),
+                ),
             )
             .await
             .unwrap_or_else(|_| panic!("{method_name} dispatch timed out"));
@@ -3534,7 +3599,7 @@ mod tests {
         });
         let service = Arc::new(harness.service);
         let (responses, mut receiver) = tokio::sync::mpsc::channel(4);
-        let lanes = super::RequestLanes::spawn(&service, responses);
+        let lanes = super::RequestLanes::spawn(&service, responses, false);
         assert!(
             lanes
                 .submit(RpcRequest::new(
@@ -3641,6 +3706,121 @@ mod tests {
             .await;
         assert_eq!(accepted["userTokenConfigured"], true);
         assert_eq!(harness.user_token().await, "flux2026abc");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_lanes_gate_task_file_actions_by_connection_origin() {
+        let harness = TestGateway::new_mode("server_mode_local_platform", true).await;
+        let method = |name: &str, id: i64| RpcRequest::new(RequestId::Integer(id), name, None);
+
+        for local in [true, false] {
+            let (responses, mut receiver) = tokio::sync::mpsc::channel(8);
+            let lanes = super::RequestLanes::spawn(&harness.service, responses, local);
+            let requests = [
+                fluxdown_protocol::method::AGENT_PLATFORM_OPEN_TASK,
+                fluxdown_protocol::method::AGENT_PLATFORM_REVEAL_TASK,
+                fluxdown_protocol::method::AGENT_PLATFORM_OPEN_PATH,
+                fluxdown_protocol::method::AGENT_PLATFORM_INTEGRATION_GET,
+                fluxdown_protocol::method::AGENT_PLATFORM_SET_AUTOSTART,
+            ];
+            for (id, name) in (1..).zip(requests) {
+                assert!(lanes.submit(method(name, id)).is_none(), "{name}");
+            }
+            let mut codes = std::collections::HashMap::new();
+            for _ in requests {
+                let response = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                    .await
+                    .expect("platform response")
+                    .expect("lane open");
+                let RpcResponse::Failure(failure) = response else {
+                    panic!("platform call without params must fail: {response:?}");
+                };
+                codes.insert(
+                    failure.id.expect("response id"),
+                    failure.error.data.map(|data| data.code),
+                );
+            }
+            // 本机来源：打开 / 定位任务产物进入参数校验（缺 taskId）；远程来源一律 Unsupported。
+            let task_files = if local {
+                ApplicationErrorCode::InvalidArgument
+            } else {
+                ApplicationErrorCode::Unsupported
+            };
+            for (id, name) in (1..).zip(requests) {
+                let expected = if id <= 2 {
+                    task_files
+                } else {
+                    ApplicationErrorCode::Unsupported
+                };
+                assert_eq!(
+                    codes.get(&RequestId::Integer(id)).copied().flatten(),
+                    Some(expected),
+                    "{name} local={local}"
+                );
+            }
+            lanes.shutdown().await;
+        }
+        assert!(
+            !harness
+                .service
+                .session_hello(false)
+                .capabilities
+                .iter()
+                .any(|capability| capability
+                    == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES),
+            "remote connections must not advertise task file actions"
+        );
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn desktop_hello_advertises_task_file_actions_per_connection() {
+        let harness = TestGateway::new("desktop_task_files_hello").await;
+        let mut request = format!("ws://{}/rpc", harness.address().await)
+            .into_client_request()
+            .expect("RPC URL");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-official-bearer"),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("official socket");
+        let hello = socket_request(
+            &mut socket,
+            1,
+            fluxdown_protocol::method::SYSTEM_HELLO,
+            serde_json::json!({
+                "clientName": "task-files", "clientVersion": fluxdown_protocol::APP_VERSION,
+                "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                "requestedRole": "agent", "capabilities": []
+            }),
+        )
+        .await;
+        let RpcResponse::Success(hello) = hello else {
+            panic!("hello failed: {hello:?}");
+        };
+        let advertised = hello.result["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .any(|capability| {
+                capability == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES
+            });
+        assert_eq!(advertised, crate::platform::LAUNCHES_PATHS);
+        assert!(
+            !harness
+                .service
+                .hello
+                .capabilities
+                .iter()
+                .any(|capability| capability
+                    == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES),
+            "the shared service hello stays connection-independent"
+        );
+        socket.close(None).await.expect("close socket");
         harness.finish().await;
     }
 }

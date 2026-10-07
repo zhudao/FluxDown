@@ -221,7 +221,7 @@ pub(crate) async fn run_with(
     );
     let (api_config, api_switches, api_token) = {
         let mut state = shared_state.lock().await;
-        // 局域网 / CORS 放开且 takeover 或 aria2 开启时，空 token 等于对外匿名开放：启动即补齐。
+        // 局域网监听且 takeover 或 aria2 开启时，空 token 等于对同网段匿名开放：启动即补齐。
         // server 模式的空密钥表示尚未完成首次设置，由兼容 API 自身拒绝，不能自动补。
         if server.is_none() && crate::gateway::ensure_exposed_auth_token(&mut state) {
             store.save(&state).await?;
@@ -415,6 +415,7 @@ pub(crate) async fn run_with(
                 daemon: daemon_config.clone(),
                 webroot: config.webroot.clone(),
                 demo: config.effective_demo_url(bound).is_some(),
+                allow_local_platform: config.allow_local_platform,
             })?))
         }
         None => None,
@@ -569,7 +570,7 @@ async fn await_daemon_ready(readiness: DaemonReadiness) -> AgentResult {
                 ));
             }
         } else {
-            // 迁移可能带入 CORS 放开与接管 / aria2 开关：对外暴露面必须有 token。
+            // 迁移可能带入局域网监听与接管 / aria2 开关：局域网暴露面必须有 token。
             let mut state = state.lock().await;
             if crate::gateway::ensure_exposed_auth_token(&mut state) {
                 store.save(&state).await?;

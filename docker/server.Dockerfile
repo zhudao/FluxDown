@@ -50,6 +50,8 @@ COPY .cargo/ .cargo/
 COPY native/ native/
 COPY crates/ crates/
 COPY scripts/desktop-dev/ scripts/desktop-dev/
+# 根 Cargo.toml 的 [patch.crates-io] 指向 third_party/librqbit-dualstack-sockets。
+COPY third_party/ third_party/
 # notification.rs 在 Linux 上 include_bytes! 应用图标。
 COPY assets/logo/ assets/logo/
 # Web SPA 在编译期由 fluxdown_agent（feature web-ui）按 FLUXDOWN_EMBED_WEBROOT

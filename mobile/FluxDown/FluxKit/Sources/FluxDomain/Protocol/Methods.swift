@@ -236,5 +236,7 @@ public enum HostCapability {
     public static let agentReferrals = "agent.referrals"
     public static let agentDeviceLink = "agent.deviceLink"
     public static let agentExternalCapture = "agent.externalCapture"
+    /// 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。
+    public static let agentOpenTaskFiles = "agent.openTaskFiles"
     public static let clientSelections = "client.selections"
 }

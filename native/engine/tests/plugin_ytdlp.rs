@@ -323,3 +323,73 @@ async fn stdout_cap_boundary() {
         "17 MiB stdout must be flagged truncated"
     );
 }
+
+/// 动态上限：单插件 config `plugin.<id>.ytdlp.stdout_cap` 覆盖默认，且越界夹到区间。
+/// 同一假 yt-dlp 的 5 MiB 输出，在默认上限下不截断，在小上限下必须截断。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdout_cap_honours_per_plugin_config() {
+    use std::io::Write;
+
+    let data_dir = unique_dir("data_cap_cfg");
+    let script = data_dir.join("fake-ytdlp.sh");
+    {
+        let mut f = std::fs::File::create(&script).expect("create fake yt-dlp");
+        f.write_all(
+            b"#!/bin/sh\n\
+              for arg in \"$@\"; do case \"$arg\" in --version) echo 9999.99.99; exit 0;; esac; done\n\
+              printf '{\"pad\":\"'; \n\
+              head -c $((5*1024*1024)) /dev/zero | tr '\\0' 'a'; \n\
+              printf '\"}\n'; \n",
+        )
+        .expect("write script");
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake yt-dlp");
+    }
+
+    let db = Db::open(&data_dir).await.expect("open db");
+    db.set_config(
+        fluxdown_engine::components::CONFIG_YTDLP_PATH,
+        script.to_str().expect("script path utf8"),
+    )
+    .await
+    .expect("seed fake yt-dlp path");
+    let db_handle = db.clone();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let bridge =
+        EngineBridge::new(db, &ProxyConfig::default(), tx, data_dir.clone()).expect("bridge");
+
+    // 默认 16 MiB：5 MiB 输出不截断。
+    let out = bridge
+        .run_ytdlp("cap@yt", spec(&["-J", "https://example.com/x"]))
+        .await
+        .expect("run_ytdlp default cap");
+    assert!(!out.truncated_stdout, "5 MiB under default 16 MiB cap");
+
+    // 单插件覆盖为 1 MiB（下限）：同一 5 MiB 输出必须被截断。
+    db_handle
+        .set_config("plugin.cap@yt.ytdlp.stdout_cap", "1m")
+        .await
+        .expect("seed per-plugin cap");
+    let out2 = bridge
+        .run_ytdlp("cap@yt", spec(&["-J", "https://example.com/x"]))
+        .await
+        .expect("run_ytdlp per-plugin cap");
+    assert!(
+        out2.truncated_stdout,
+        "5 MiB output must be truncated under a 1 MiB per-plugin cap"
+    );
+
+    // 另一插件不受该单插件覆盖影响（仍用默认）。
+    let out3 = bridge
+        .run_ytdlp("other@yt", spec(&["-J", "https://example.com/x"]))
+        .await
+        .expect("run_ytdlp other plugin");
+    assert!(
+        !out3.truncated_stdout,
+        "per-plugin cap must not leak to other plugins"
+    );
+}

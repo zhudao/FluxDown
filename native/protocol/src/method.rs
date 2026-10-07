@@ -241,6 +241,10 @@ pub const CAPABILITY_AGENT_BILLING: &str = "agent.billing";
 pub const CAPABILITY_AGENT_REFERRALS: &str = "agent.referrals";
 pub const CAPABILITY_AGENT_DEVICE_LINK: &str = "agent.deviceLink";
 pub const CAPABILITY_AGENT_EXTERNAL_CAPTURE: &str = "agent.externalCapture";
+/// 本连接可调用 `agent.platform.openTask` / `revealTask`，在 agent 所在主机上打开 / 定位任务
+/// 产物。按连接下发：Windows / macOS / Linux 桌面宿主恒有，嵌入式移动宿主没有；headless
+/// server 只给本机来源（见 agent `server_mode::ServerHandle::local_platform_permitted`）。
+pub const CAPABILITY_AGENT_OPEN_TASK_FILES: &str = "agent.openTaskFiles";
 pub const CAPABILITY_CLIENT_SELECTIONS: &str = "client.selections";
 
 /// 规范ALL_METHODS。
@@ -472,6 +476,7 @@ pub const AGENT_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_REFERRALS,
     CAPABILITY_AGENT_DEVICE_LINK,
     CAPABILITY_AGENT_EXTERNAL_CAPTURE,
+    CAPABILITY_AGENT_OPEN_TASK_FILES,
 ];
 
 /// 规范CLIENT_CAPABILITIES。

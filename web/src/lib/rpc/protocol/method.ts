@@ -221,5 +221,7 @@ export const CAPABILITY_AGENT_BILLING = 'agent.billing';
 export const CAPABILITY_AGENT_REFERRALS = 'agent.referrals';
 export const CAPABILITY_AGENT_DEVICE_LINK = 'agent.deviceLink';
 export const CAPABILITY_AGENT_EXTERNAL_CAPTURE = 'agent.externalCapture';
+/** 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。 */
+export const CAPABILITY_AGENT_OPEN_TASK_FILES = 'agent.openTaskFiles';
 /** 客户端能力：可处理交互选择（HLS/BT/变体），放入握手 capabilities。 */
 export const CAPABILITY_CLIENT_SELECTIONS = 'client.selections';
