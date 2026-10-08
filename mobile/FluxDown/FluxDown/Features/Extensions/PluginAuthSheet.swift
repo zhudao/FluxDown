@@ -149,7 +149,7 @@ struct PluginAuthSheet: View {
 
             if auth.loggedIn {
                 Section {
-                    Label(L("pluginAuthSuccess"), systemImage: "checkmark.circle.fill")
+                    Label(L("pluginAuthSuccess"), systemImage: FluxSymbol.success)
                         .foregroundStyle(Color.fdStatusSeedingText)
                 }
             } else if auth.sessionPending {
@@ -169,7 +169,7 @@ struct PluginAuthSheet: View {
             if let message = auth.message {
                 Section {
                     if auth.status == "error" {
-                        Label(message, systemImage: "exclamationmark.circle.fill")
+                        Label(message, systemImage: FluxSymbol.failure)
                             .foregroundStyle(Color.fdStatusFailedText)
                     } else {
                         Text(message)
@@ -267,19 +267,19 @@ private struct PluginChallengeView: View {
             ExtensionsClipboard.copy(value)
             container.toasts.show(text: L("apiServiceCopied"), tone: .success)
         } label: {
-            Label(L("apiServiceCopy"), systemImage: "doc.on.doc")
+            Label(L("apiServiceCopy"), systemImage: FluxSymbol.copy)
         }
         if let image {
             ShareLink(
                 item: Image(uiImage: image),
                 preview: SharePreview(type.isEmpty ? L("pluginAuthQr") : type, image: Image(uiImage: image))
             ) {
-                Label(L("mobileNotifActionShare"), systemImage: "square.and.arrow.up")
+                Label(L("mobileNotifActionShare"), systemImage: FluxSymbol.share)
             }
         }
         if let url = PluginAuth.safeHTTPURL(value) {
             Link(destination: url) {
-                Label(L("mobilePluginAuthOpenLink"), systemImage: "arrow.up.forward.app")
+                Label(L("mobilePluginAuthOpenLink"), systemImage: FluxSymbol.openFile)
             }
         }
     }

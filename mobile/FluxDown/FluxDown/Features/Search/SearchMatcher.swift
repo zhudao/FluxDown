@@ -79,7 +79,7 @@ enum SearchCommands {
             command("new-rss", "rssAddSource", "dot.radiowaves.up.forward", .newRssSource, keywords: [L("rssSubscriptions")]),
         ]
         if canAddDevice {
-            entries.append(command("add-device", "addDeviceEntry", "laptopcomputer.and.iphone", .addDevice, keywords: [L("mobileNavDevices")]))
+            entries.append(command("add-device", "addDeviceEntry", "laptopcomputer", .addDevice, keywords: [L("mobileNavDevices")]))
         }
         entries.append(command("add-host", "mobileHostAdd", "server.rack", .addHost, keywords: [L("mobileHostSwitchTitle")]))
         if showsThemeToggle {

@@ -158,7 +158,7 @@ struct NetworkPage: View {
         case let .failed(message):
             VStack(alignment: .leading, spacing: 4) {
                 SettingsStatusLine(text: message, tone: .failure)
-                SettingsActionRow(title: L("mobileRetry"), systemImage: "arrow.clockwise") {
+                SettingsActionRow(title: L("mobileRetry"), systemImage: FluxSymbol.retry) {
                     let session = container.session
                     Task { await proxy.detect(using: session) }
                 }

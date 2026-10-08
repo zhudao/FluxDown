@@ -36,7 +36,7 @@ struct AppearancePage: View {
                     LabeledContent {
                         HStack(spacing: 6) {
                             Text(L("languageNativeName"))
-                            Image(systemName: "arrow.up.forward.app").font(.footnote)
+                            Image(systemName: FluxSymbol.openFile).font(.footnote)
                         }
                     } label: {
                         SettingsTileLabel(title: L("language"), symbol: "globe", color: .blue)
@@ -90,12 +90,12 @@ struct AppearancePage: View {
                             .frame(minHeight: 44)
                     }
                     if hexInvalid {
-                        Label(L("mobileHexInvalid"), systemImage: "exclamationmark.circle.fill")
+                        Label(L("mobileHexInvalid"), systemImage: FluxSymbol.failure)
                             .font(.caption)
                             .foregroundStyle(Color.fdStatusFailedText)
                     }
                     if lowContrast {
-                        Label(L("mobileColorLowContrast"), systemImage: "exclamationmark.triangle.fill")
+                        Label(L("mobileColorLowContrast"), systemImage: FluxSymbol.warning)
                             .font(.footnote)
                             .foregroundStyle(Color.fdStatusWarningText)
                     }
@@ -291,7 +291,7 @@ private struct AccentSwatches: View {
             ZStack {
                 Circle().fill(fill).frame(width: dot, height: dot)
                 if selected {
-                    Image(systemName: "checkmark")
+                    Image(systemName: FluxSymbol.done)
                         .font(.system(size: dot * 0.42, weight: .bold))
                         .foregroundStyle(Color.fdOnColor(fill))
                         .transition(.scale.combined(with: .opacity))

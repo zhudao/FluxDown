@@ -18,19 +18,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxTouchTarget
 
 /**
- * 开关（§12.18）：46×28，旋钮 22（按压变宽到 26，`snap`），位移 `liquid`；ON = 强调渐变 + 内光 + 外发光。
+ * 开关（§12.18）：46×28，旋钮 22（按压变宽到 26，`snap`），位移 `liquid`；ON = 强调色纯色轨道 + 定边描边（无渐变、无辉光）。
  * 命中区外扩到 48dp。[onCheckedChange] 为 null 时仅显示（用于整行可点的开关行，语义由行承担）。
  * 切换触感 `tick`。
  */
@@ -44,7 +42,6 @@ fun FluxSwitch(
     val c = FluxTheme.colors
     val motion = FluxTheme.motion
     val haptics = FluxTheme.haptics
-    val density = LocalDensity.current
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val pos = remember { Animatable(if (checked) 1f else 0f) }
@@ -54,9 +51,6 @@ fun FluxSwitch(
 
     val track = remember { RoundedCornerShape(14.dp) }
     val edge = remember(c) { lerp(c.accent, Color.White, 0.3f) }
-    val fillBrush = remember(c, density) {
-        Brush.verticalGradient(listOf(c.accentFillA, c.accentFillB), 0f, with(density) { 28.dp.toPx() })
-    }
     val toggle = if (onCheckedChange != null) {
         Modifier.toggleable(
             value = checked,
@@ -82,14 +76,6 @@ fun FluxSwitch(
                 .size(46.dp, 28.dp)
                 .graphicsLayer { alpha = if (enabled) 1f else 0.4f },
         ) {
-            StateGlow(
-                active = checked,
-                progress = { pos.value },
-                color = c.accentGlow,
-                radius = 8.dp,
-                shape = track,
-                spread = (-4).dp,
-            )
             Canvas(Modifier.fillMaxSize()) {
                 val p = pos.value
                 val pc = p.coerceIn(0f, 1f)
@@ -97,7 +83,7 @@ fun FluxSwitch(
                 val w = size.width
                 val cr = CornerRadius(h / 2f)
                 val hw = 0.5.dp.toPx()
-                // 轨道：OFF 底 + 描边，ON 渐变叠加
+                // 轨道：OFF 底 + 描边，ON 纯色填充叠加
                 drawRoundRect(c.glass4, cornerRadius = cr)
                 drawRoundRect(
                     c.hairlineStrong,
@@ -105,16 +91,7 @@ fun FluxSwitch(
                     style = Stroke(hw), alpha = 1f - pc,
                 )
                 if (pc > 0f) {
-                    drawRoundRect(fillBrush, cornerRadius = cr, alpha = pc)
-                    // 内光：三层由边向内的描边，近似 inset 0 0 10dp accentHi@70%
-                    for (d in INNER_GLOW_DP) {
-                        val sw = d.dp.toPx()
-                        drawRoundRect(
-                            c.accentHi.copy(alpha = 0.3f * pc),
-                            Offset(sw / 2f, sw / 2f), Size(w - sw, h - sw), CornerRadius(h / 2f - sw / 2f),
-                            style = Stroke(sw),
-                        )
-                    }
+                    drawRoundRect(c.accentFill, cornerRadius = cr, alpha = pc)
                     drawRoundRect(
                         edge,
                         Offset(hw / 2f, hw / 2f), Size(w - hw, h - hw), CornerRadius(h / 2f - hw / 2f),
@@ -140,5 +117,3 @@ fun FluxSwitch(
         }
     }
 }
-
-private val INNER_GLOW_DP = floatArrayOf(2f, 5f, 8f)

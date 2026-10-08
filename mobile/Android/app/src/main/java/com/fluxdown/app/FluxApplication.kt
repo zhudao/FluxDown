@@ -144,6 +144,34 @@ class AppContainer(context: Context) {
         }
     }
 
+    /**
+     * 已保存远端主机的访问密钥（解密失败 / 不存在 → null）。供需要直连主机 HTTP 面的功能使用
+     * （插件包上传 `/api/web/blobs/<kind>`、日志导出 `/api/web/logs/export`），同 iOS `HostRepo.accessKey`。
+     */
+    suspend fun remoteAccessKey(hostId: String): String? = hostRepo.accessKey(hostId)
+
+    /**
+     * 当前远端主机的访问密钥已在主机侧更换：原地保存新密钥并用它重开同一主机（旧会话仍持旧密钥，
+     * 重连会鉴权失败）。主机 id 不变。本机主机无访问密钥 → InvalidArgument；重开失败保持原会话并返回失败。
+     */
+    suspend fun updateRemoteAccessKey(accessKey: String): Result<Unit> = switchLock.withLock {
+        val ref = _host.value as? HostRef.Remote
+            ?: return@withLock Result.failure(HostException(HostErrorCode.InvalidArgument, message = "current host is local"))
+        val saved = try {
+            hostRepo.updateAccessKey(ref.id, accessKey.trim())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // Keystore 加密 / DataStore 写入失败：调用方据此提示，不能让异常逃出协程使 App 崩溃。
+            Log.w(TAG, "update access key for ${ref.id} failed: ${e.message}")
+            return@withLock Result.failure(e.asHostException())
+        }
+        if (!saved) {
+            return@withLock Result.failure(HostException(HostErrorCode.NotFound, message = "host not saved"))
+        }
+        openOrFail(ref).map { adopt(ref, it) }
+    }
+
     /** 删除已保存的远端主机；正在使用时先回到本机。本机不可删除。 */
     suspend fun removeHost(id: String) {
         if (id == HostRef.Local.ID) return

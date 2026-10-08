@@ -34,7 +34,7 @@ struct RemoteDirectoryPicker: View {
                                 Task { await load(entry.path) }
                             } label: {
                                 HStack {
-                                    Label(entry.name, systemImage: "folder")
+                                    Label(entry.name, systemImage: FluxSymbol.folder)
                                     Spacer(minLength: 8)
                                     Image(systemName: "chevron.right")
                                         .font(.footnote.weight(.semibold))
@@ -61,7 +61,7 @@ struct RemoteDirectoryPicker: View {
                     if listing.denied {
                         ContentUnavailableView(L("mobileFolderDenied"), systemImage: "lock")
                     } else {
-                        ContentUnavailableView(L("mobileFolderNoSubfolders"), systemImage: "folder")
+                        ContentUnavailableView(L("mobileFolderNoSubfolders"), systemImage: FluxSymbol.folder)
                     }
                 }
             }

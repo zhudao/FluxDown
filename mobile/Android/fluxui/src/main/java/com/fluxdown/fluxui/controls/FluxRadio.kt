@@ -22,7 +22,7 @@ import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxTouchTarget
 
 /**
- * 单选点（§12.35）：22×22，选中 = accentHi 边 + 10dp 内点（scale 0→1，`liquid`）+ 微光；命中区 48dp；触感 `tick`。
+ * 单选点（§12.35）：22×22，选中 = accentHi 边 + 10dp 内点（scale 0→1，`liquid`）；命中区 48dp；触感 `tick`。
  * [onClick] 为 null 时仅显示（用于整行可选的单选行）。分组请给容器加 `Modifier.selectableGroup()`。
  */
 @Composable
@@ -60,9 +60,6 @@ fun FluxRadio(
                 .graphicsLayer { alpha = if (enabled) 1f else 0.4f },
             contentAlignment = Alignment.Center,
         ) {
-            Box(Modifier.size(10.dp).align(Alignment.Center)) {
-                StateGlow(selected, { p.value }, c.accentGlow, 5.dp, CircleShape)
-            }
             Canvas(Modifier.fillMaxSize()) {
                 val pc = p.value.coerceIn(0f, 1f)
                 val sw = 1.5.dp.toPx()

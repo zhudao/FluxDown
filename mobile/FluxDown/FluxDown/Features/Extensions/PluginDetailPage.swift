@@ -40,9 +40,9 @@ struct PluginDetailPage: View {
                         Text(verbatim: "v\(plugin.version)").font(.subheadline.monospacedDigit())
                         if plugin.devMode { StatusBadge(text: L("pluginDevModeBadge"), tone: .accent, systemImage: "hammer") }
                         if plugin.loadFailed {
-                            StatusBadge(text: L("pluginLoadStatusFailed"), tone: .failure, systemImage: "exclamationmark.triangle.fill")
+                            StatusBadge(text: L("pluginLoadStatusFailed"), tone: .failure, systemImage: FluxSymbol.warning)
                         } else {
-                            StatusBadge(text: L("pluginLoadStatusLoaded"), tone: .success, systemImage: "checkmark.circle.fill")
+                            StatusBadge(text: L("pluginLoadStatusLoaded"), tone: .success, systemImage: FluxSymbol.success)
                         }
                         if let yanked, let key = PluginMarket.yankedLabelKey(yanked) {
                             StatusBadge(text: L("pluginInstalledVersionYanked", ["label": L(key)]), tone: .failure, systemImage: "exclamationmark.octagon.fill")
@@ -53,7 +53,7 @@ struct PluginDetailPage: View {
 
             if plugin.disabledReason == "CircuitBreaker" {
                 Section {
-                    Banner(text: L("pluginDisabledCircuitBreaker"), tone: .error, systemImage: "bolt.slash.fill", slim: true)
+                    Banner(text: L("pluginDisabledCircuitBreaker"), tone: .error, systemImage: FluxSymbol.cancelBoost, slim: true)
                         .listRowInsets(EdgeInsets())
                         .listRowBackground(Color.clear)
                     Button(L("pluginAutoDisabledReenable")) { Task { await model.setEnabled(plugin, true) } }
@@ -75,7 +75,7 @@ struct PluginDetailPage: View {
                     Button {
                         copyError(plugin)
                     } label: {
-                        Label(L("pluginLoadErrorCopy"), systemImage: "doc.on.doc")
+                        Label(L("pluginLoadErrorCopy"), systemImage: FluxSymbol.copy)
                     }
                     .disabled(plugin.loadError.isEmpty)
                 }
@@ -101,7 +101,7 @@ struct PluginDetailPage: View {
                 }
                 if !plugin.loadFailed, plugin.authSupported {
                     Button { model.sheet = .auth(plugin.identity) } label: {
-                        Label(L("pluginAuthButton"), systemImage: "person.badge.key")
+                        Label(L("pluginAuthButton"), systemImage: "key")
                     }
                     .disabled(busy)
                 }
@@ -113,12 +113,12 @@ struct PluginDetailPage: View {
                 }
                 if plugin.devMode {
                     Button { Task { await model.reload(plugin) } } label: {
-                        Label(L("pluginReloadTooltip"), systemImage: "arrow.clockwise")
+                        Label(L("pluginReloadTooltip"), systemImage: FluxSymbol.retry)
                     }
                     .disabled(busy)
                 }
                 Button(role: .destructive) { confirmUninstall = true } label: {
-                    Label(L("pluginUninstallTooltip"), systemImage: "trash")
+                    Label(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete)
                 }
                 .disabled(busy)
             }
@@ -218,7 +218,7 @@ struct PluginLoadErrorSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(L("close")) { dismiss() } }
                 ToolbarItem(placement: .primaryAction) {
-                    Button(L("pluginLoadErrorCopy"), systemImage: "doc.on.doc") {
+                    Button(L("pluginLoadErrorCopy"), systemImage: FluxSymbol.copy) {
                         ExtensionsClipboard.copy(plugin.loadError)
                         container.toasts.show(text: L("pluginLoadErrorCopied"), tone: .success)
                     }

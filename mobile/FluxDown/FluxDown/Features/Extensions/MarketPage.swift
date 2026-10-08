@@ -62,7 +62,7 @@ struct MarketPage: View {
         .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: L("marketSearchPlaceholder"))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(L("marketRefreshTooltip"), systemImage: "arrow.clockwise") { Task { await model.loadMarket() } }
+                Button(L("marketRefreshTooltip"), systemImage: FluxSymbol.retry) { Task { await model.loadMarket() } }
                     .disabled(readOnly || model.marketPhase == .loading)
             }
         }
@@ -91,7 +91,7 @@ struct MarketPage: View {
             ContentUnavailableView(L("marketEmpty"), systemImage: "shippingbox")
         default:
             if !latest.isEmpty, filtered.isEmpty {
-                ContentUnavailableView(L("marketSearchNoResult"), systemImage: "magnifyingglass")
+                ContentUnavailableView(L("marketSearchNoResult"), systemImage: FluxSymbol.search)
             }
         }
     }

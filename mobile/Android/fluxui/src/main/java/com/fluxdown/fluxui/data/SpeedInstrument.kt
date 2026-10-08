@@ -3,7 +3,6 @@ package com.fluxdown.fluxui.data
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -32,11 +31,8 @@ import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Shadow
-import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -65,15 +61,14 @@ data class SpeedReading(val value: String, val unit: String)
 data class InstrumentStat(val label: String, val value: String)
 
 /**
- * 速度仪表（英雄卡，品牌签名之一）。Flat 玻璃（lerp(glass2, canvas, .30)）+ 右上角径向 accent 光
- * （α = .26·活跃度 + .04，随 [activity] 弹簧过渡）+ 呼吸点 + display 数字（live 时 accentHi 36% 28dp 文字辉光）+ 波形 + 统计行。
+ * 速度仪表（英雄卡，品牌签名之一）。Flat 玻璃（lerp(glass2, canvas, .30)）+ 呼吸点 + display 数字 + 波形 + 统计行；
+ * 卡面纯色，无背景光。
  *
- * @param live 总下载速度 > 0：点呼吸（2s）、数字辉光；否则点 inkFaint、无辉光。
+ * @param live 总下载速度 > 0：点呼吸（2s）；否则点 inkFaint。
  * @param waveform 在绘制阶段读取的波形数据（见 [Waveform]）。
  * @param stats 统计项，FlowRow 排布（gap 4/14），项间 2dp 圆点分隔。
  * @param pausedAll 右上按钮显示“全部恢复”（播放）而非“全部暂停”（暂停）。
  * @param title 左上标签（如“实时吞吐”，自动大写）。
- * @param activity 0..1，决定背景光强度；缺省 live ? 1 : 0（可传入 速度/参考速度 的平滑值）。
  * @param compact Rail 底部紧凑变体：r24 · padding 14/16/12 · 波形 56 · 数字上距 4。
  * @param contentDescription 整卡朗读文案（“实时吞吐 {值}，上传 {值}，活跃 {n} 个任务，剩余空间 {值}”）；缺省拼接 title / speed / stats。
  *
@@ -94,24 +89,16 @@ fun SpeedInstrument(
     resumeAllLabel: String,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
-    activity: Float = if (live) 1f else 0f,
     contentDescription: String? = null,
 ) {
     val colors = FluxTheme.colors
     val type = FluxTheme.type
     val shapes = FluxTheme.shapes
-    val motion = FluxTheme.motion
     val haptics = FluxTheme.haptics
-    val density = LocalDensity.current
     val shape = if (compact) shapes.card else shapes.sheet
     val pad = if (compact) 16.dp else 20.dp
 
-    val act = animateFloatAsState(activity.coerceIn(0f, 1f), motion.of(motion.soft), label = "instrActivity")
-
-    val displayStyle = remember(type, colors, live, density) {
-        val base = type.display.copy(color = colors.ink)
-        if (live) base.copy(shadow = Shadow(colors.accentHi.copy(alpha = 0.36f), Offset.Zero, with(density) { 28.dp.toPx() })) else base
-    }
+    val displayStyle = remember(type, colors) { type.display.copy(color = colors.ink) }
     val unitStyle = remember(type, colors) {
         type.weight(type.sized(type.bodyM, 20f, FluxScaleGroup.Kl), 500).copy(color = colors.inkMuted, letterSpacing = (-0.01).em)
     }
@@ -134,23 +121,6 @@ fun SpeedInstrument(
             .fluxPressable(onClick = onClick, scale = 0.985f, role = Role.Button)
             .fluxGlass(FluxGlass.G2, shape, kind = FluxGlassKind.Flat, canvasMix = 0.30f)
             .clip(shape)
-            .drawWithCache {
-                // radial-gradient(70% 90% at 80% -10%, accent α, transparent 70%)
-                val rx = size.width * 0.7f
-                val ry = size.height * 0.9f
-                val cx = size.width * 0.8f
-                val cy = -size.height * 0.1f
-                val brush = Brush.radialGradient(
-                    0f to colors.accent, 0.7f to Color.Transparent, 1f to Color.Transparent,
-                    center = Offset.Zero, radius = rx,
-                )
-                onDrawBehind {
-                    val a = 0.26f * act.value.coerceIn(0f, 1f) + 0.04f
-                    translate(cx, cy) {
-                        scale(1f, ry / rx, Offset.Zero) { drawCircle(brush, rx, Offset.Zero, alpha = a) }
-                    }
-                }
-            }
             .semantics { this.contentDescription = cd }
             .padding(start = pad, end = pad, top = if (compact) 14.dp else 20.dp, bottom = if (compact) 12.dp else 16.dp),
     ) {

@@ -130,7 +130,7 @@ private struct GeneralLinkHandlingRows: View {
                 SettingsStatusLine(
                     text: L(isDeclared ? "mobileGeneralLinkDeclared" : "mobileGeneralLinkNotDeclared"),
                     tone: isDeclared ? .success : .warning,
-                    systemImage: isDeclared ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    systemImage: isDeclared ? FluxSymbol.success : FluxSymbol.warning
                 )
             } label: {
                 Text(kind.label).font(.fluxMono)

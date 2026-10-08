@@ -100,6 +100,7 @@ public enum SettingsCatalog {
         daemon("default_queue_id", .text, ""),
         daemon("domain_conn_caps", .readOnly, ""),
         // BT
+        daemon("bt_enabled", .bool, "true"),
         daemon("bt_enable_dht", .bool, "true"),
         daemon("bt_enable_upnp", .bool, "true"),
         daemon("bt_port_start", .integer(min: 1, max: 65_535), "6881"),
@@ -205,7 +206,7 @@ public enum SettingsCatalog {
     /// 自定义主题集合的范围键：只承载分组 / 本机专属开关，从不承载值（逐主题键 `appearance.custom_themes.<id>`）。
     public static let customThemesScopeKey = "appearance.custom_themes"
 
-    /// daemon 存储键 → 云同步键（`SYNC_SETTING_SPECS` 中 owner = Daemon，28 项）。
+    /// daemon 存储键 → 云同步键（`SYNC_SETTING_SPECS` 中 owner = Daemon，29 项）。
     public static let daemonSyncNames: [String: String] = [
         "max_concurrent_tasks": "download.max_concurrent_tasks",
         "default_segments": "download.default_segments",
@@ -218,6 +219,7 @@ public enum SettingsCatalog {
         "auto_resume_on_start": "download.auto_resume_on_start",
         "use_server_time": "download.use_server_time",
         "global_user_agent": "download.global_user_agent",
+        "bt_enabled": "bt.enabled",
         "bt_enable_dht": "bt.enable_dht",
         "bt_enable_upnp": "bt.enable_upnp",
         "bt_custom_trackers": "bt.custom_trackers",

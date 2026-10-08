@@ -2344,10 +2344,27 @@ mod tests {
         }
 
         async fn new_mode(label: &str, server_mode: bool) -> Self {
-            Self::new_bound(label, server_mode, "127.0.0.1:0").await
+            Self::new_server_mode(label, server_mode, false).await
+        }
+
+        async fn new_server_mode(
+            label: &str,
+            server_mode: bool,
+            allow_local_platform: bool,
+        ) -> Self {
+            Self::new_bound_opts(label, server_mode, allow_local_platform, "127.0.0.1:0").await
         }
 
         async fn new_bound(label: &str, server_mode: bool, address: &str) -> Self {
+            Self::new_bound_opts(label, server_mode, false, address).await
+        }
+
+        async fn new_bound_opts(
+            label: &str,
+            server_mode: bool,
+            allow_local_platform: bool,
+            address: &str,
+        ) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "fluxdown_agent_{label}_{}_{}",
                 std::process::id(),
@@ -2441,7 +2458,7 @@ mod tests {
             let api_token = fluxdown_api::auth::TokenCell::new("");
             let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
                 daemon.clone(),
-                daemon_config,
+                daemon_config.clone(),
                 events.clone(),
                 state.clone(),
                 store.clone(),
@@ -2478,14 +2495,14 @@ mod tests {
             let service = Arc::new(
                 GatewayService::new(
                     daemon,
-                    events,
+                    events.clone(),
                     auth,
                     Arc::new(cloud_api),
                     sync,
                     remote,
                     capture,
-                    blobs,
-                    diagnostics,
+                    blobs.clone(),
+                    diagnostics.clone(),
                     update,
                     state.clone(),
                     store.clone(),
@@ -2497,6 +2514,27 @@ mod tests {
                 .with_link(link),
             );
             let cancel = tokio_util::sync::CancellationToken::new();
+            let server_handle = if server_mode {
+                let (_ready_tx, ready_rx) = tokio::sync::watch::channel(true);
+                Some(Arc::new(
+                    crate::server_mode::ServerHandle::new(crate::server_mode::ServerHandleParts {
+                        token: api_token.clone(),
+                        state: state.clone(),
+                        store: store.clone(),
+                        events: events.clone(),
+                        ready: ready_rx,
+                        blobs: blobs.clone(),
+                        diagnostics: diagnostics.clone(),
+                        daemon: daemon_config,
+                        webroot: None,
+                        demo: false,
+                        allow_local_platform,
+                    })
+                    .expect("server handle"),
+                ))
+            } else {
+                None
+            };
             let server_task = tokio::spawn(super::serve(
                 listener,
                 service.clone(),
@@ -2504,7 +2542,7 @@ mod tests {
                 api_config,
                 "test-official-bearer".to_owned(),
                 cancel.clone(),
-                None,
+                server_handle,
                 Some(endpoint_dir.clone()),
             ));
             super::restart::probe(bound, "test-official-bearer")
@@ -3819,6 +3857,115 @@ mod tests {
                 .any(|capability| capability
                     == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES),
             "the shared service hello stays connection-independent"
+        );
+        socket.close(None).await.expect("close socket");
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_hello_advertises_task_file_actions_by_request_host() {
+        let harness = TestGateway::new_mode("server_task_files_host", true).await;
+        let addr = harness.address().await;
+
+        for (host_hdr, expect_local) in [("example.com", false), ("localhost", true)] {
+            let mut request = format!("ws://{addr}/rpc")
+                .into_client_request()
+                .expect("RPC URL");
+            request.headers_mut().insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer test-official-bearer"),
+            );
+            request
+                .headers_mut()
+                .insert(header::HOST, HeaderValue::from_static(host_hdr));
+            let (mut socket, _) = tokio_tungstenite::connect_async(request)
+                .await
+                .expect("socket connect");
+            let hello = socket_request(
+                &mut socket,
+                1,
+                fluxdown_protocol::method::SYSTEM_HELLO,
+                serde_json::json!({
+                    "clientName": "server-host-test",
+                    "clientVersion": fluxdown_protocol::APP_VERSION,
+                    "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                    "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                    "requestedRole": "agent",
+                    "capabilities": []
+                }),
+            )
+            .await;
+            let RpcResponse::Success(hello) = hello else {
+                panic!("hello failed for {host_hdr}: {hello:?}");
+            };
+            let advertised = hello.result["capabilities"]
+                .as_array()
+                .expect("capabilities array")
+                .iter()
+                .any(|capability| {
+                    capability == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES
+                });
+            // 在 LAUNCHES_PATHS 为 false 的平台（如移动端/无桌面 runner），系统不支持打开外部路径，
+            // 故能力恒不下发；仅当支持路径打开且属于本机 Host 时才宣告。
+            let expected = expect_local && crate::platform::LAUNCHES_PATHS;
+            assert_eq!(
+                advertised, expected,
+                "host {host_hdr} must have open task capability={expected}"
+            );
+            socket.close(None).await.expect("close socket");
+        }
+
+        harness.finish().await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_hello_advertises_task_file_actions_when_flag_enabled() {
+        let harness = TestGateway::new_server_mode("server_task_files_flag", true, true).await;
+        let addr = harness.address().await;
+
+        let mut request = format!("ws://{addr}/rpc")
+            .into_client_request()
+            .expect("RPC URL");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-official-bearer"),
+        );
+        request
+            .headers_mut()
+            .insert(header::HOST, HeaderValue::from_static("example.com"));
+        let (mut socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("socket connect");
+        let hello = socket_request(
+            &mut socket,
+            1,
+            fluxdown_protocol::method::SYSTEM_HELLO,
+            serde_json::json!({
+                "clientName": "server-flag-test",
+                "clientVersion": fluxdown_protocol::APP_VERSION,
+                "minProtocolVersion": fluxdown_protocol::MIN_PROTOCOL_VERSION,
+                "maxProtocolVersion": fluxdown_protocol::PROTOCOL_VERSION,
+                "requestedRole": "agent",
+                "capabilities": []
+            }),
+        )
+        .await;
+        let RpcResponse::Success(hello) = hello else {
+            panic!("hello failed: {hello:?}");
+        };
+        let advertised = hello.result["capabilities"]
+            .as_array()
+            .expect("capabilities array")
+            .iter()
+            .any(|capability| {
+                capability == fluxdown_protocol::method::CAPABILITY_AGENT_OPEN_TASK_FILES
+            });
+        // 当显式开启 allow_local_platform 时，即使 Host 是公网域名，只要平台支持 LAUNCHES_PATHS，
+        // 也会宣告 CAPABILITY_AGENT_OPEN_TASK_FILES。
+        let expected = crate::platform::LAUNCHES_PATHS;
+        assert_eq!(
+            advertised, expected,
+            "when allow_local_platform is enabled, public host must have open task capability={expected}"
         );
         socket.close(None).await.expect("close socket");
         harness.finish().await;

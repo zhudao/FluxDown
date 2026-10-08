@@ -41,7 +41,8 @@ private fun StatusFolder.icon() = when (this) {
 
 /**
  * expanded 档 Rail 的下载上下文：状态文件夹（带计数）· 选中文件夹下嵌套的分类子项 · 队列区（运行点 + 任务数）。
- * 选择直接更新共享视图状态。
+ * 选择直接更新共享视图状态。各部分的显隐由云同步偏好 `ui.show_sidebar_status|queues|category` 决定；
+ * 状态区被隐藏时分类子项改为独立分区。
  */
 @Composable
 fun DownloadsRailContext() {
@@ -49,41 +50,32 @@ fun DownloadsRailContext() {
     val haptics = FluxTheme.haptics
     val facets = view.facets
     val filter = view.filter
+    val visibility = view.filterVisibility
 
-    FluxRailHeader(text = stringResource(R.string.sidebarStatus))
-    for (f in StatusFolder.entries) {
-        val selected = filter.folder == f
-        val count = facets.count(f)
-        FluxRailItem(
-            label = f.label(),
-            onClick = {
-                haptics.tick()
-                view.setFolder(f)
-            },
-            icon = f.icon(),
-            selected = selected,
-            count = count,
-            hot = f == StatusFolder.Failed && count > 0,
-        )
-        if (selected) {
-            for (pill in facets.categories) {
-                val cat = pill.category
-                val catSelected = filter.categoryId == cat.id
-                FluxRailItem(
-                    label = cat.label(),
-                    onClick = {
-                        haptics.tick()
-                        view.setCategory(if (catSelected) null else cat.id)
-                    },
-                    selected = catSelected,
-                    count = pill.count,
-                    sub = true,
-                )
-            }
+    if (visibility.status) {
+        FluxRailHeader(text = stringResource(R.string.sidebarStatus))
+        for (f in StatusFolder.entries) {
+            val selected = filter.folder == f
+            val count = facets.count(f)
+            FluxRailItem(
+                label = f.label(),
+                onClick = {
+                    haptics.tick()
+                    view.setFolder(f)
+                },
+                icon = f.icon(),
+                selected = selected,
+                count = count,
+                hot = f == StatusFolder.Failed && count > 0,
+            )
+            if (selected && visibility.categories) RailCategoryItems(view, nested = true)
         }
+    } else if (visibility.categories && facets.categories.isNotEmpty()) {
+        FluxRailHeader(text = stringResource(R.string.sidebarCategory))
+        RailCategoryItems(view, nested = false)
     }
 
-    if (facets.queues.isNotEmpty()) {
+    if (visibility.queues && facets.queues.isNotEmpty()) {
         FluxRailHeader(text = stringResource(R.string.sidebarQueues))
         for (qf in facets.queues) {
             FluxRailItem(
@@ -97,6 +89,27 @@ fun DownloadsRailContext() {
                 dot = qf.queue.isRunning,
             )
         }
+    }
+}
+
+/** Rail 里的分类项：[nested] = 嵌套在选中的状态文件夹下（缩进子项）。 */
+@Composable
+private fun RailCategoryItems(view: DownloadsView, nested: Boolean) {
+    val haptics = FluxTheme.haptics
+    val filter = view.filter
+    for (pill in view.facets.categories) {
+        val cat = pill.category
+        val catSelected = filter.categoryId == cat.id
+        FluxRailItem(
+            label = cat.label(),
+            onClick = {
+                haptics.tick()
+                view.setCategory(if (catSelected) null else cat.id)
+            },
+            selected = catSelected,
+            count = pill.count,
+            sub = nested,
+        )
     }
 }
 

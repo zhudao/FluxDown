@@ -12,26 +12,31 @@ struct DownloadsViewMenu: View {
     @Environment(ToastCenter.self) private var toasts
     let onClearFinished: () -> Void
 
+    /// 「更多」菜单（系统「文件」「邮件」同款）：首项「选择」，其后视图选项与批量动作。
     var body: some View {
         Menu {
-            groupMenu
-            sortMenu
-            densityMenu
-            fieldsMenu
-            Section(L("mobileViewTasks")) {
-                Button(L("mobileViewSelectTasks"), systemImage: "checklist") { model.beginSelecting() }
-                Button(L("pauseAll"), systemImage: "pause.fill") { actions.pauseAll() }
-                Button(L("resumeAll"), systemImage: "play.fill") { actions.resumeAll() }
-                Button(L("mobileViewClearFinished"), systemImage: "checkmark.circle", action: onClearFinished)
+            Section {
+                Button(L("mobileViewSelectTasks"), systemImage: FluxSymbol.select) { model.beginSelecting() }
+                    .disabled(model.list.visibleIds.isEmpty)
             }
             Section {
-                Button(L("manageQueueAction"), systemImage: "list.number") { container.router.sheet = .queues }
+                groupMenu
+                sortMenu
+                densityMenu
+                fieldsMenu
+            }
+            Section(L("mobileViewTasks")) {
+                Button(L("pauseAll"), systemImage: FluxSymbol.pause) { actions.pauseAll() }
+                Button(L("resumeAll"), systemImage: FluxSymbol.resume) { actions.resumeAll() }
+                Button(L("mobileViewClearFinished"), systemImage: "checkmark.circle", action: onClearFinished)
+                Button(L("manageQueueAction"), systemImage: FluxSymbol.queue) { container.router.sheet = .queues }
             }
             Section {
                 Button(L("viewResetDefault"), systemImage: "arrow.counterclockwise", action: reset)
+                    .disabled(!isCustomized)
             }
         } label: {
-            Label(L("viewMenuLabel"), systemImage: "slider.horizontal.3")
+            Label(L("viewMenuLabel"), systemImage: FluxSymbol.more)
         }
         .accessibilityValue(isCustomized ? L("mobileViewCustomized") : "")
     }

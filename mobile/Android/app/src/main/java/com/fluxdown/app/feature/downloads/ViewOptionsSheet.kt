@@ -126,8 +126,8 @@ private fun ColumnScope.ViewOptionsBody(onDismiss: () -> Unit) {
     val filter = view.filter
     val queues = view.facets.queues
 
-    // 范围：队列（仅有多个队列时）
-    if (queues.size > 1) {
+    // 范围：队列（仅有多个队列、且 `ui.show_sidebar_queues` 开启时）
+    if (queues.size > 1 && view.filterVisibility.queues) {
         GlassSection(title = stringResource(R.string.mobileViewScope)) {
             custom(padded = true) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

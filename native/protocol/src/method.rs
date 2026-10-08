@@ -466,7 +466,11 @@ pub const DAEMON_CAPABILITIES: &[&str] = &[
     CAPABILITY_DAEMON_FILES,
 ];
 
-/// 规范AGENT_CAPABILITIES。
+/// 规范 `AGENT_CAPABILITIES`。
+///
+/// 声明 agent 可能下发能力的规范全集（用于字面量断言与能力全景索引）。
+/// 注意：[`CAPABILITY_AGENT_OPEN_TASK_FILES`] 属于连接级条件能力，仅向本机来源或显式授权连接下发，
+/// 服务级基线 hello 并不无条件包含它。
 pub const AGENT_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_GATEWAY,
     CAPABILITY_AGENT_AUTH,

@@ -53,7 +53,7 @@ private struct CloudDeviceDetail: View {
         .onChange(of: gone, initial: true) { _, isGone in
             guard isGone, !leaving else { return }
             leaving = true
-            container.toasts.show(text: L("mobileDeviceGone"), tone: .info, systemImage: "iphone.slash")
+            container.toasts.show(text: L("mobileDeviceGone"), tone: .info, systemImage: "minus.circle")
             dismiss()
         }
         .cloudDeviceDialogs(renaming: $renaming, deleting: $deleting) { _ in
@@ -104,13 +104,13 @@ private struct CloudDeviceDetail: View {
                 Button {
                     renaming = record
                 } label: {
-                    Label(L("accountDeviceRenameTitle"), systemImage: "pencil")
+                    Label(L("accountDeviceRenameTitle"), systemImage: FluxSymbol.edit)
                 }
                 .disabled(readOnly)
                 Button(role: .destructive) {
                     deleting = record
                 } label: {
-                    Label(L("accountDeviceDeleteAction"), systemImage: "trash")
+                    Label(L("accountDeviceDeleteAction"), systemImage: FluxSymbol.delete)
                 }
                 .disabled(readOnly)
             } footer: {
@@ -200,7 +200,7 @@ private struct LinkDeviceDetail: View {
         .onChange(of: gone, initial: true) { _, isGone in
             guard isGone, !leaving else { return }
             leaving = true
-            container.toasts.show(text: L("mobileDeviceGone"), tone: .info, systemImage: "iphone.slash")
+            container.toasts.show(text: L("mobileDeviceGone"), tone: .info, systemImage: "minus.circle")
             dismiss()
         }
     }
@@ -240,7 +240,7 @@ private struct LinkDeviceDetail: View {
                     confirmingUnpair = true
                 } label: {
                     HStack {
-                        Label(L("linkedDeviceRemove"), systemImage: "link.badge.minus")
+                        Label(L("linkedDeviceRemove"), systemImage: "minus.circle")
                         if unpairing {
                             Spacer()
                             ProgressView()

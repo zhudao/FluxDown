@@ -55,7 +55,7 @@ struct AccountCloudFeatures: View {
 
     private func syncRow(sync: SyncStatusDto, loggedIn: Bool, readOnly: Bool) -> some View {
         let phase = SyncRules.phase(sync)
-        let status = loggedIn ? statusLine(sync: sync, phase: phase) : StatusLine(symbol: "icloud.slash", tone: .neutral, text: L("cloudSyncLoginRequired"))
+        let status = loggedIn ? statusLine(sync: sync, phase: phase) : StatusLine(symbol: FluxSymbol.cloud, tone: .neutral, text: L("cloudSyncLoginRequired"))
         let binding = Binding(
             get: { optimistic.value(Self.syncKey, actual: sync.enabled) },
             set: { setSync($0) }
@@ -175,7 +175,7 @@ struct AccountCloudFeatures: View {
             ?? (connection?.lastError != nil ? L("accountErrorNetwork") : nil)
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Image(systemName: presenceKnown ? "checkmark.icloud.fill" : "icloud.slash")
+                Image(systemName: presenceKnown ? FluxSymbol.success : FluxSymbol.cloud)
                     .foregroundStyle(presenceKnown ? Color.fdStatusSeedingText : Color.secondary)
                     .accessibilityHidden(true)
                 Text(L(labelKey)).font(.subheadline)
@@ -282,22 +282,22 @@ struct AccountCloudFeatures: View {
         let reason = L(SyncRules.reasonKey(sync))
         switch phase {
         case .off:
-            return StatusLine(symbol: "icloud.slash", tone: .neutral, text: L("cloudSyncDesc"))
+            return StatusLine(symbol: FluxSymbol.cloud, tone: .neutral, text: L("cloudSyncDesc"))
         case .halted:
             return StatusLine(symbol: "pause.circle.fill", tone: .warning, text: L("cloudSyncStatusHalted", ["reason": reason]))
         case .error:
-            return StatusLine(symbol: "exclamationmark.icloud.fill", tone: .failure, text: L("cloudSyncStatusError", ["reason": reason]))
+            return StatusLine(symbol: FluxSymbol.failure, tone: .failure, text: L("cloudSyncStatusError", ["reason": reason]))
         case .connecting:
-            return StatusLine(symbol: "icloud", tone: .neutral, text: L("cloudSyncStatusConnecting"))
+            return StatusLine(symbol: FluxSymbol.cloud, tone: .neutral, text: L("cloudSyncStatusConnecting"))
         case .syncing:
-            return StatusLine(symbol: "arrow.triangle.2.circlepath.icloud", tone: .accent, text: L("cloudSyncStatusSyncing"))
+            return StatusLine(symbol: FluxSymbol.syncing, tone: .accent, text: L("cloudSyncStatusSyncing"))
         case .synced:
             guard let at = sync.lastSyncedAtUnixMs else {
-                return StatusLine(symbol: "checkmark.icloud.fill", tone: .success, text: L("cloudSyncStatusSynced"))
+                return StatusLine(symbol: FluxSymbol.success, tone: .success, text: L("cloudSyncStatusSynced"))
             }
             let ago = SyncRules.ago(syncedAtMs: at, nowMs: AccountText.nowMs())
             return StatusLine(
-                symbol: "checkmark.icloud.fill",
+                symbol: FluxSymbol.success,
                 tone: .success,
                 text: L("cloudSyncStatusSyncedAt", ["time": AccountText.syncAgo(ago)])
             )

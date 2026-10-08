@@ -4,20 +4,21 @@ import SwiftUI
 public nonisolated enum FileKind: Sendable, Hashable, CaseIterable {
     case video, audio, document, image, program, archive, ebook, diskImage, application, torrent, other
 
-    /// SF Symbol：行内类别图标（§6.4），磁盘镜像 / 应用 / 种子取 PC `TaskKind` 备用图标（§6.2）。
+    /// SF Symbol：行内类别图标（§6.4）。只用当前名称、不用受限符号（`video` 仅指 FaceTime，故视频用 `film`）；
+    /// 种子与 BT 设置 / 协议同用 `FluxSymbol.bitTorrent`。
     public var symbolName: String {
         switch self {
         case .video: "film"
         case .audio: "music.note"
-        case .document: "doc.text"
+        case .document: "text.document"
         case .image: "photo"
-        case .program: "cpu"
-        case .archive: "archivebox"
-        case .ebook: "books.vertical"
+        case .program: "shippingbox"
+        case .archive: "zipper.page"
+        case .ebook: "book.closed"
         case .diskImage: "opticaldisc"
-        case .application: "macwindow"
-        case .torrent: "link"
-        case .other: "doc"
+        case .application: "app"
+        case .torrent: FluxSymbol.bitTorrent
+        case .other: "document"
         }
     }
 
@@ -85,23 +86,36 @@ public nonisolated enum KindBadge: Sendable, Hashable, CaseIterable {
     }
 }
 
-/// 任务图标方块（§3.C）：连续圆角（边长 × 0.28）squircle + 类别色渐变 + 内高光，白色 SF Symbol。
+/// 任务图标方块（§3.C）：连续圆角（边长 × 0.28）squircle，类别色淡底 + 类别色 SF Symbol（扁平：无渐变 / 高光 / 投影）。
+///
+/// 列表里几十行同时出现，饱和实心色块会把注意力从文件名抢走；淡底只保留「类别」这一层信息。
+/// 增强对比度下淡底加深、符号加粗。
 ///
 /// - `size` 为 Large 档基准边长（舒适 44 / 紧凑 32 / 详情英雄 72），随 Dynamic Type 缩放，上限 `max(size, 72)`。
 /// - `dimmed`：文件已缺失（去饱和 + 降不透明度）。
+/// - `backdrop`：角标镂空圈的底色，须与所在行 / 卡片底色一致。
 /// - 纯装饰，对 VoiceOver 隐藏（状态由相邻文字承载）。
 public struct KindIcon: View {
     public let kind: FileKind
     public let dimmed: Bool
     public let badge: KindBadge
+    public let backdrop: Color
 
     private let baseSize: CGFloat
     @ScaledMetric private var scaledSize: CGFloat
+    @Environment(\.colorSchemeContrast) private var contrast
 
-    public init(kind: FileKind, size: CGFloat = 44, dimmed: Bool = false, badge: KindBadge = .none) {
+    public init(
+        kind: FileKind,
+        size: CGFloat = 44,
+        dimmed: Bool = false,
+        badge: KindBadge = .none,
+        backdrop: Color = Color(uiColor: .secondarySystemGroupedBackground)
+    ) {
         self.kind = kind
         self.dimmed = dimmed
         self.badge = badge
+        self.backdrop = backdrop
         baseSize = size
         _scaledSize = ScaledMetric(wrappedValue: size, relativeTo: .body)
     }
@@ -109,30 +123,17 @@ public struct KindIcon: View {
     private var side: CGFloat { min(scaledSize, max(baseSize, 72)) }
 
     public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: side * 0.28, style: .continuous)
         let tint = kind.tint
-        ZStack {
-            shape.fill(
-                LinearGradient(
-                    colors: [tint.mix(with: .white, by: 0.18), tint],
-                    startPoint: UnitPoint(x: 0.33, y: 0),
-                    endPoint: UnitPoint(x: 0.67, y: 1)
-                )
-            )
-            shape.strokeBorder(
-                LinearGradient(colors: [.white.opacity(0.45), .white.opacity(0)], startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.45)),
-                lineWidth: 0.5
-            )
-            Image(systemName: kind.symbolName)
-                .font(.system(size: side * 0.48, weight: .medium))
-                .foregroundStyle(.white)
-        }
-        .frame(width: side, height: side)
-        .shadow(color: .black.opacity(0.12), radius: 1, y: 1)
-        .saturation(dimmed ? 0.3 : 1)
-        .opacity(dimmed ? 0.7 : 1)
-        .overlay(alignment: .bottomTrailing) { badgeView }
-        .accessibilityHidden(true)
+        let increased = contrast == .increased
+        Image(systemName: kind.symbolName)
+            .font(.system(size: side * 0.46, weight: increased ? .semibold : .regular))
+            .foregroundStyle(tint)
+            .frame(width: side, height: side)
+            .background(tint.opacity(increased ? 0.26 : 0.15), in: .rect(cornerRadius: side * 0.28, style: .continuous))
+            .saturation(dimmed ? 0 : 1)
+            .opacity(dimmed ? 0.6 : 1)
+            .overlay(alignment: .bottomTrailing) { badgeView }
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder private var badgeView: some View {
@@ -142,7 +143,7 @@ public struct KindIcon: View {
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(.white, badge.color)
                 .font(.system(size: diameter, weight: .bold))
-                .background(Color(uiColor: .secondarySystemGroupedBackground), in: .circle)
+                .background(backdrop, in: .circle.inset(by: -1.5))
                 .offset(x: diameter * 0.22, y: diameter * 0.22)
         }
     }

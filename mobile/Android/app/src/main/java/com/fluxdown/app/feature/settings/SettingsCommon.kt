@@ -19,9 +19,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -60,6 +62,7 @@ internal val SectionGap = 20.dp
 /**
  * 推入式设置页骨架：内容 [LazyColumn] 从状态栏 + 页头之下起排并可滚到页头之下，
  * [FluxPageHead]（返回 → [onBack]）悬浮其上，滚动后背后渐隐。底部留白 `pageClearance`。
+ * 设置搜索的定位请求（[SettingsFocus.pendingItemKey]）在这里消费：滚动到 key 相同的项（[flowItem] / `item(key)`）。
  */
 @Composable
 internal fun SettingsPageFrame(
@@ -73,6 +76,23 @@ internal fun SettingsPageFrame(
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val scrolled by remember(state) { derivedStateOf { state.canScrollBackward } }
+    val keys = remember { ArrayList<Any?>() }
+    val focus = LocalSettingsFocus.current
+
+    LaunchedEffect(focus.pendingItemKey) {
+        val target = focus.pendingItemKey ?: return@LaunchedEffect
+        // 内容可能随配置加载才出现：逐帧查找，最多约 0.5s。
+        repeat(FOCUS_LOOKUP_FRAMES) {
+            withFrameNanos { }
+            val index = keys.indexOf(target)
+            if (index >= 0) {
+                state.animateScrollToItem(index)
+                focus.pendingItemKey = null
+                return@LaunchedEffect
+            }
+        }
+        focus.pendingItemKey = null
+    }
 
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Box(Modifier.widthIn(max = PageMaxWidth).fillMaxWidth().fillMaxHeight()) {
@@ -86,8 +106,10 @@ internal fun SettingsPageFrame(
                     bottom = navBottom + FluxTheme.space.pageClearance,
                 ),
                 verticalArrangement = Arrangement.spacedBy(SectionGap),
-                content = content,
-            )
+            ) {
+                keys.clear()
+                KeyRecordingScope(this, keys).content()
+            }
             FluxPageHead(
                 title = title,
                 modifier = Modifier.padding(top = statusTop),
@@ -96,6 +118,29 @@ internal fun SettingsPageFrame(
                 backDescription = str(R.string.back),
             )
         }
+    }
+}
+
+private const val FOCUS_LOOKUP_FRAMES = 30
+
+/** 记录各项 key 的顺序（定位用）；`items` 无 key 时按 null 占位，保持索引对齐。 */
+private class KeyRecordingScope(
+    private val delegate: LazyListScope,
+    private val keys: MutableList<Any?>,
+) : LazyListScope by delegate {
+    override fun item(key: Any?, contentType: Any?, content: @Composable LazyItemScope.() -> Unit) {
+        keys += key
+        delegate.item(key, contentType, content)
+    }
+
+    override fun items(
+        count: Int,
+        key: ((index: Int) -> Any)?,
+        contentType: (index: Int) -> Any?,
+        itemContent: @Composable LazyItemScope.(index: Int) -> Unit,
+    ) {
+        for (i in 0 until count) keys += key?.invoke(i)
+        delegate.items(count, key, contentType, itemContent)
     }
 }
 

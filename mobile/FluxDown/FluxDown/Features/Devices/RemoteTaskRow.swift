@@ -38,13 +38,13 @@ struct RemoteTaskRow: View {
                     detailLine
                 }
                 if let error = errorText {
-                    Label(error, systemImage: "exclamationmark.circle.fill")
+                    Label(error, systemImage: FluxSymbol.failure)
                         .font(.caption)
                         .foregroundStyle(Color.fdStatusFailedText)
                         .lineLimit(3)
                 }
                 if offlineBlocksPrimary {
-                    Label(L("errReasonTargetDeviceOffline"), systemImage: "wifi.slash")
+                    Label(L("errReasonTargetDeviceOffline"), systemImage: FluxSymbol.offline)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -57,7 +57,7 @@ struct RemoteTaskRow: View {
         .padding(.vertical, 2)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if allows(.delete) {
-                Button(L("delete"), systemImage: "trash", role: .destructive) { confirmingDelete = true }
+                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmingDelete = true }
             }
             if allows(.cancel) {
                 Button(L("cancel"), systemImage: "xmark.circle") { issue(.cancel, false) }
@@ -66,7 +66,7 @@ struct RemoteTaskRow: View {
         }
         .contextMenu {
             if let action = RemoteTaskRules.primaryAction(for: task), allows(action) {
-                Button(L(action == .pause ? "pause" : "resume"), systemImage: action == .pause ? "pause.fill" : "play.fill") {
+                Button(L(action == .pause ? "pause" : "resume"), systemImage: action == .pause ? FluxSymbol.pause : FluxSymbol.resume) {
                     issue(action, false)
                 }
             }
@@ -74,13 +74,13 @@ struct RemoteTaskRow: View {
                 Button(L("cancel"), systemImage: "xmark.circle") { issue(.cancel, false) }
             }
             if !task.url.isEmpty {
-                Button(L("mobileSwipeCopyLink"), systemImage: "link") {
+                Button(L("mobileSwipeCopyLink"), systemImage: FluxSymbol.link) {
                     UIPasteboard.general.string = task.url
                     container.toasts.show(text: L("urlCopied"), tone: .success)
                 }
             }
             if allows(.delete) {
-                Button(L("delete"), systemImage: "trash", role: .destructive) { confirmingDelete = true }
+                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmingDelete = true }
             }
         }
         .confirmationDialog(L("deleteTask"), isPresented: $confirmingDelete, titleVisibility: .visible) {
@@ -185,7 +185,7 @@ struct RemoteTaskRow: View {
             Button {
                 issue(action, false)
             } label: {
-                Image(systemName: action == .pause ? "pause.fill" : "play.fill")
+                Image(systemName: action == .pause ? FluxSymbol.pause : FluxSymbol.resume)
                     .font(.body)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())

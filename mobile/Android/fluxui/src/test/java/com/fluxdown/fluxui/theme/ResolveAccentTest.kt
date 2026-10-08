@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 强调色护栏：标签对渐变两端、accentHi 对 canvas 都 ≥ 4.5:1；
+ * 强调色护栏：标签对纯色填充 accentFill、accentHi 对 canvas 都 ≥ 4.5:1；
  * 浅色模式为达标而压暗时不得把强调色洗灰，否则主按钮会显得“不活跃”。
  */
 class ResolveAccentTest {
@@ -17,8 +17,7 @@ class ResolveAccentTest {
             for (seed in seeds) {
                 val c = FluxColors.of(dark, seed)
                 val label = "seed=$seed dark=$dark"
-                assertTrue("$label onAccent/fillA", contrast(c.onAccent, c.accentFillA) >= 4.5f)
-                assertTrue("$label onAccent/fillB", contrast(c.onAccent, c.accentFillB) >= 4.5f)
+                assertTrue("$label onAccent/fill", contrast(c.onAccent, c.accentFill) >= 4.5f)
                 if (!dark) assertTrue("$label accentHi/canvas", contrast(c.accentHi, c.canvas) >= 4.5f)
             }
         }
@@ -35,7 +34,7 @@ class ResolveAccentTest {
             val c = FluxColors.of(false, seed)
             val c0 = seed.oklabChroma()
             val l0 = seed.oklabLightness()
-            for ((name, slot) in listOf("fillB" to c.accentFillB, "hi" to c.accentHi)) {
+            for ((name, slot) in listOf("fill" to c.accentFill, "hi" to c.accentHi)) {
                 val mixBaseline = c0 * slot.oklabLightness() / l0
                 assertTrue(
                     "seed=$seed $name chroma ${slot.oklabChroma()} below black-mix baseline $mixBaseline",
@@ -45,7 +44,7 @@ class ResolveAccentTest {
         }
         val blue = FluxColors.of(false, FluxAccent.presetColor("blue"))
         val blueC = FluxAccent.presetColor("blue").oklabChroma()
-        for (slot in listOf(blue.accentFillA, blue.accentFillB, blue.accentHi)) {
+        for (slot in listOf(blue.accentFill, blue.accentHi)) {
             assertTrue("brand blue washed out: ${slot.oklabChroma()} vs $blueC", slot.oklabChroma() >= blueC * 0.95f)
         }
     }

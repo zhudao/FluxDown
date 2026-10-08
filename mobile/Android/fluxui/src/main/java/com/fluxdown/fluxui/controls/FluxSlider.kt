@@ -27,7 +27,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -199,21 +198,16 @@ fun FluxSlider(
                     drawRect(c.hairlineStrong, Offset(x, ty), Size(tw, th))
                 }
             }
-            // 填充（accent → accentHi）+ 光晕
+            // 填充（纯色 accent）
             if (tx > 0f) {
-                drawSoftGlow(Offset(0f, trackTop), Size(tx, trackH), trackH / 2f, c.accentGlow, 6.dp.toPx())
                 clipRect(right = tx) {
-                    drawRoundRect(
-                        Brush.horizontalGradient(listOf(c.accent, c.accentHi), 0f, size.width),
-                        Offset(0f, trackTop), Size(size.width, trackH), trackR,
-                    )
+                    drawRoundRect(c.accent, Offset(0f, trackTop), Size(size.width, trackH), trackR)
                 }
             }
             // 拇指
             val tr = 11.dp.toPx()
             if (e > 0.001f) {
                 drawCircle(c.accentLo.copy(alpha = c.accentLo.alpha * e), tr + 6.dp.toPx() * e, Offset(tx, cy))
-                drawSoftGlowCircle(Offset(tx, cy), tr + 6.dp.toPx(), c.accentGlow.copy(alpha = c.accentGlow.alpha * e), 9.dp.toPx())
             }
             drawCircle(Color.Black.copy(alpha = 0.16f), tr + 0.75.dp.toPx(), Offset(tx, cy + 0.5.dp.toPx()))
             drawCircle(Color.Black.copy(alpha = 0.3f), tr, Offset(tx, cy + 1.dp.toPx()))
@@ -247,15 +241,4 @@ fun FluxSlider(
             FluxText(format(value), style = bubbleStyle, color = c.ink, maxLines = 1)
         }
     }
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSoftGlowCircle(
-    center: Offset,
-    radius: Float,
-    color: Color,
-    spread: Float,
-    layers: Int = 4,
-) {
-    val a = color.copy(alpha = color.alpha * 0.22f)
-    for (i in layers downTo 1) drawCircle(a, radius + spread * i / layers, center)
 }

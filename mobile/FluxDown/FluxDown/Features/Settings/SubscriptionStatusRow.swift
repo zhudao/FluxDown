@@ -33,7 +33,7 @@ struct SubscriptionStatusRow: View {
             .accessibilityElement(children: .combine)
             SettingsActionRow(
                 title: L(kind.updateNowKey), runningTitle: L(kind.updatingKey),
-                systemImage: "arrow.triangle.2.circlepath", isRunning: phase == .refreshing, action: refresh
+                systemImage: FluxSymbol.syncing, isRunning: phase == .refreshing, action: refresh
             )
         }
         .settingsRow(kind.rowID)

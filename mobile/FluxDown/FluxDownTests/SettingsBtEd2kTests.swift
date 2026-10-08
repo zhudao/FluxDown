@@ -60,8 +60,21 @@ struct SettingsBtEd2kTests {
         #expect(BtSettingsRow.allCases.allSatisfy { !$0.isVisible(in: unloaded) })
         #expect(Ed2kSettingsRow.allCases.allSatisfy { !$0.isVisible(in: unloaded) })
         let loaded = form(["bt_enable_dht": "true"])
-        #expect(BtSettingsRow.visible(in: .general, loaded).count == 5)
+        #expect(BtSettingsRow.visible(in: .general, loaded).count == 6)
         #expect(Ed2kSettingsRow.visible(in: .servers, loaded).count == 4)
+    }
+
+    @Test func btDisabledHidesEverythingButTheToggle() {
+        let off = form(["bt_enabled": "false", "bt_seed_enabled": "true"])
+        #expect(BtSettingsRow.visible(in: .general, off) == [.enabled])
+        #expect(BtSettingsRow.visible(in: .tracker, off).isEmpty)
+        #expect(BtSettingsRow.visible(in: .seeding, off).isEmpty)
+        #expect(BtSettingsRow.availableTabs(in: off) == [.general])
+        #expect(BtSettingsRow.readout(off) == nil)
+        let on = form(["bt_enabled": "true"])
+        #expect(BtSettingsRow.availableTabs(in: on) == BtSettingsTab.allCases)
+        #expect(BtSettingsRow.visible(in: .general, on).first == .enabled)
+        #expect(form(["bt_enable_dht": "true"]).bool("bt_enabled"))
     }
 
     @Test func rowKeysResolveInTheCatalogAndIdsAreUnique() {

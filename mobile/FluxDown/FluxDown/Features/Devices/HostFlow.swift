@@ -24,17 +24,17 @@ enum HostFlow {
         container.toasts.show(
             text: L("mobileHostSwitching", ["name": name]),
             tone: .info,
-            systemImage: "server.rack"
+            systemImage: FluxSymbol.switchHost
         )
         switch await container.switchHost(ref) {
         case .success:
-            container.toasts.show(text: L("mobileHostSwitched", ["name": name]), tone: .success, systemImage: "checkmark")
+            container.toasts.show(text: L("mobileHostSwitched", ["name": name]), tone: .success, systemImage: FluxSymbol.done)
             return true
         case let .failure(error):
             container.toasts.show(
                 text: L("mobileHostSwitchFailed", ["name": name, "reason": errorText(error)]),
                 tone: .error,
-                systemImage: "wifi.slash"
+                systemImage: FluxSymbol.offline
             )
             return false
         }
@@ -45,7 +45,7 @@ enum HostFlow {
         guard case let .remote(id, name, _) = ref else { return }
         switch await container.removeHost(id: id) {
         case .success:
-            container.toasts.show(text: L("mobileHostRemoved", ["name": name]), tone: .info, systemImage: "trash")
+            container.toasts.show(text: L("mobileHostRemoved", ["name": name]), tone: .info, systemImage: FluxSymbol.delete)
         case let .failure(error):
             container.toasts.show(text: ErrorText.describe(error), tone: .error, systemImage: "exclamationmark.circle")
         }
@@ -69,8 +69,8 @@ extension HostRef {
         }
     }
 
-    /// 本机 `iphone` / 远端 `externaldrive.connected.to.line.below`。
+    /// 本机 = 当前设备图形（iPhone / iPad）；远端 = `FluxSymbol.remoteHost`。全 App 的主机图标都走这里。
     var symbolName: String {
-        isLocal ? "iphone" : "externaldrive.connected.to.line.below"
+        isLocal ? FluxSymbol.thisDevice : FluxSymbol.remoteHost
     }
 }

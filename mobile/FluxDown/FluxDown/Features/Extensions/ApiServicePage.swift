@@ -293,7 +293,7 @@ private struct ApiServiceContent: View {
                     }
                     .tint(Color.fdToggleOn)
                     if feature == .cors, model.pending[.cors] ?? status.corsEnabled {
-                        Label(L("apiServiceCorsAllowAllHelp"), systemImage: "exclamationmark.triangle.fill")
+                        Label(L("apiServiceCorsAllowAllHelp"), systemImage: FluxSymbol.warning)
                             .font(.footnote)
                             .foregroundStyle(Color.fdStatusWarningText)
                     }
@@ -352,14 +352,14 @@ private struct AddressRow: View {
                         copied = false
                     }
                 } label: {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    Image(systemName: copied ? FluxSymbol.done : FluxSymbol.copy)
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(.rect)
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel(copied ? L("apiServiceCopied") : L("apiServiceCopy"))
                 ShareLink(item: url) {
-                    Image(systemName: "square.and.arrow.up")
+                    Image(systemName: FluxSymbol.share)
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(.rect)
                 }
@@ -449,7 +449,7 @@ private struct TokenSection: View {
                     .onAppear { draft = revealed }
                     .onChange(of: revealed) { _, new in draft = new }
                 if let issue {
-                    Label(issue, systemImage: "exclamationmark.circle.fill")
+                    Label(issue, systemImage: FluxSymbol.failure)
                         .font(.footnote)
                         .foregroundStyle(Color.fdStatusFailedText)
                 }
@@ -486,13 +486,13 @@ private struct TokenSection: View {
             Button {
                 Task { await copy() }
             } label: {
-                Label(copied ? L("apiServiceCopied") : L("apiServiceCopy"), systemImage: copied ? "checkmark" : "doc.on.doc")
+                Label(copied ? L("apiServiceCopied") : L("apiServiceCopy"), systemImage: copied ? FluxSymbol.done : FluxSymbol.copy)
             }
             .disabled(busy || (revealed == nil && !configured))
             Button {
                 confirmRegenerate = true
             } label: {
-                Label(L("apiServiceTokenGenerate"), systemImage: "arrow.triangle.2.circlepath")
+                Label(L("apiServiceTokenGenerate"), systemImage: FluxSymbol.syncing)
             }
             .disabled(readOnly || busy)
         } header: {

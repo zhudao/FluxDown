@@ -87,6 +87,8 @@ import com.fluxdown.fluxui.feedback.FluxEmpty
 import com.fluxdown.fluxui.feedback.FluxGlyph
 import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
+import com.fluxdown.fluxui.controls.ButtonVariant
+import com.fluxdown.fluxui.controls.FluxButton
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxFlowIn
@@ -126,7 +128,7 @@ private const val CLOCK_TICK_MS = 30_000L
 
 /**
  * R1 订阅源页（Dock 目的地）：汇总（未读 / 订阅 / 失败）+ 订阅列表。
- * 条目列表（R2）与编辑器（R3）依赖的接口不在 [HostSession] 端口内，本页不提供对应入口。
+ * 新建 / 编辑 / 删除订阅走 [RssEditorSheet]（R3）：右下角新建球、页头「+」、空态按钮与行菜单「编辑」。
  */
 @Composable
 fun RssScreen() {
@@ -178,6 +180,11 @@ fun RssScreen() {
                     )
                 },
                 actions = {
+                    FluxGlassIconButton(
+                        icon = FluxIcons.Plus,
+                        contentDescription = str(R.string.rssAddSource),
+                        onClick = { nav.openSheet(SheetRoute.RssEditor()) },
+                    )
                     if (sources.isNotEmpty()) {
                         FluxGlassIconButton(
                             icon = FluxIcons.RefreshCw,
@@ -208,6 +215,13 @@ fun RssScreen() {
                         glyph = FluxGlyph.Rss,
                         title = str(R.string.mobileRssEmptyTitle),
                         subtitle = str(R.string.mobileRssEmptyHint),
+                        action = {
+                            FluxButton(
+                                str(R.string.rssAddSource),
+                                onClick = { nav.openSheet(SheetRoute.RssEditor()) },
+                                variant = ButtonVariant.Primary,
+                            )
+                        },
                     )
                 }
             }
@@ -228,6 +242,7 @@ fun RssScreen() {
                     last = index == sources.lastIndex,
                     onRefresh = { controller.refresh(source) },
                     onToggle = { controller.toggle(source) },
+                    onEdit = { nav.openSheet(SheetRoute.RssEditor(sourceId = source.sourceId)) },
                     modifier = Modifier.fluxFlowIn(index + 3, gate, source.sourceId),
                 )
             }
@@ -267,6 +282,7 @@ private fun FeedRow(
     last: Boolean,
     onRefresh: () -> Unit,
     onToggle: () -> Unit,
+    onEdit: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val c = FluxTheme.colors
@@ -307,6 +323,11 @@ private fun FeedRow(
         .joinToString(", ")
 
     val menuItems = listOf(
+        FluxMenuItem.Action(
+            label = str(R.string.menuEdit),
+            onClick = onEdit,
+            icon = FluxIcons.SquarePen,
+        ),
         FluxMenuItem.Action(
             label = str(R.string.rssRefreshNow),
             onClick = onRefresh,

@@ -37,6 +37,8 @@ pub mod meta_prober;
 pub mod model;
 /// 多网卡聚合下载：网卡枚举、链路规划与出口绑定。
 pub mod multi_nic;
+/// 下载文件名命名管线：Content-Disposition 解码、URL / 类型证据、sanitize、魔数嗅探。
+pub mod naming;
 pub(crate) mod output;
 /// 多路径分段调度的纯判据（稳态速率采样、竞争集、均衡拆分、完成时间抢占）。
 pub(crate) mod path_scheduler;

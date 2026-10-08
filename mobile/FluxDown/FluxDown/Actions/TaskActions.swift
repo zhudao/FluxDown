@@ -46,7 +46,7 @@ final class TaskActions {
     @discardableResult
     func guardWritable() -> Bool {
         guard store.state.isReadOnly else { return true }
-        toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: "wifi.slash")
+        toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: FluxSymbol.offline)
         return false
     }
 
@@ -71,7 +71,7 @@ final class TaskActions {
 
     func pause(_ ids: [String]) {
         run(onSuccess: { [toasts] in
-            if ids.count > 1 { toasts.show(text: L("mobileToastPausedN", ["n": ids.count]), tone: .info, systemImage: "pause.fill") }
+            if ids.count > 1 { toasts.show(text: L("mobileToastPausedN", ["n": ids.count]), tone: .info, systemImage: FluxSymbol.pause) }
         }) { session throws(HostError) in
             if ids.count == 1 { try await session.pause(ids[0]) } else { try await session.pauseMany(ids) }
         }
@@ -79,20 +79,20 @@ final class TaskActions {
 
     func resume(_ ids: [String]) {
         run(onSuccess: { [toasts] in
-            if ids.count > 1 { toasts.show(text: L("mobileToastResumedN", ["n": ids.count]), tone: .info, systemImage: "play.fill") }
+            if ids.count > 1 { toasts.show(text: L("mobileToastResumedN", ["n": ids.count]), tone: .info, systemImage: FluxSymbol.resume) }
         }) { session throws(HostError) in
             if ids.count == 1 { try await session.resume(ids[0]) } else { try await session.resumeMany(ids) }
         }
     }
 
     func pauseAll() {
-        run(onSuccess: { [toasts] in toasts.show(text: L("mobilePausedAllToast"), tone: .info, systemImage: "pause.fill") }) { session throws(HostError) in
+        run(onSuccess: { [toasts] in toasts.show(text: L("mobilePausedAllToast"), tone: .info, systemImage: FluxSymbol.pause) }) { session throws(HostError) in
             try await session.pauseAll()
         }
     }
 
     func resumeAll() {
-        run(onSuccess: { [toasts] in toasts.show(text: L("mobileResumedAllToast"), tone: .info, systemImage: "play.fill") }) { session throws(HostError) in
+        run(onSuccess: { [toasts] in toasts.show(text: L("mobileResumedAllToast"), tone: .info, systemImage: FluxSymbol.resume) }) { session throws(HostError) in
             try await session.resumeAll()
         }
     }
@@ -100,7 +100,7 @@ final class TaskActions {
     /// 优先下载（Boost）：主机侧切换；`boosted` = 当前是否已是优先任务。
     func boost(_ task: DownloadTask, boosted: Bool) {
         run(onSuccess: { [toasts] in
-            toasts.show(text: L(boosted ? "mobileBoostOff" : "mobileBoostOn"), tone: .info, systemImage: "bolt.fill")
+            toasts.show(text: L(boosted ? "mobileBoostOff" : "mobileBoostOn"), tone: .info, systemImage: FluxSymbol.boost)
         }) { session throws(HostError) in
             try await session.boost(task.taskId)
         }
@@ -113,7 +113,7 @@ final class TaskActions {
 
     func moveToQueueNow(_ ids: [String], queueId: String, queueName: String) {
         run(onSuccess: { [toasts] in
-            toasts.show(text: L("mobileMovedToQueueNamed", ["name": queueName]), tone: .success, systemImage: "checkmark")
+            toasts.show(text: L("mobileMovedToQueueNamed", ["name": queueName]), tone: .success, systemImage: FluxSymbol.done)
         }) { session throws(HostError) in
             for id in ids { try await session.moveToQueue(id, queueId: queueId) }
         }
@@ -131,7 +131,7 @@ final class TaskActions {
             let text = ids.count > 1
                 ? L("mobileToastDeletedN", ["n": ids.count])
                 : L(withFiles ? "mobileTaskFileDeleted" : "mobileTaskDeleted")
-            toasts.show(text: text, tone: .success, systemImage: "trash")
+            toasts.show(text: text, tone: .success, systemImage: FluxSymbol.delete)
             onDone?()
         }) { session throws(HostError) in
             if ids.count == 1 {
@@ -159,7 +159,7 @@ final class TaskActions {
     /// 删除任务与已有文件后按原参数重建（GPUI `DownloadsCommand::Redownload` 同语义）。
     func redownload(_ task: DownloadTask) {
         run(onSuccess: { [toasts] in
-            toasts.show(text: L("mobileDownloadStarted"), tone: .success, systemImage: "arrow.clockwise")
+            toasts.show(text: L("mobileDownloadStarted"), tone: .success, systemImage: FluxSymbol.retry)
         }) { session throws(HostError) in
             try await session.delete(task.taskId, deleteFiles: true)
             _ = try await session.createTask(CreateTaskRequest(
@@ -181,7 +181,7 @@ final class TaskActions {
     func submitRename(_ task: DownloadTask, to name: String) {
         let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, value != task.fileName else { return }
-        run(onSuccess: { [toasts] in toasts.show(text: L("renameTaskSuccess"), tone: .success, systemImage: "pencil") }) { session throws(HostError) in
+        run(onSuccess: { [toasts] in toasts.show(text: L("renameTaskSuccess"), tone: .success, systemImage: FluxSymbol.edit) }) { session throws(HostError) in
             try await session.rename(task.taskId, fileName: value)
         }
     }
@@ -194,7 +194,7 @@ final class TaskActions {
     func submitChangeUrl(_ task: DownloadTask, to url: String) {
         let value = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty, value != task.shareUrl else { return }
-        run(onSuccess: { [toasts] in toasts.show(text: L("mobileChangeUrlDone"), tone: .success, systemImage: "link") }) { session throws(HostError) in
+        run(onSuccess: { [toasts] in toasts.show(text: L("mobileChangeUrlDone"), tone: .success, systemImage: FluxSymbol.link) }) { session throws(HostError) in
             try await session.changeUrl(task.taskId, url: value)
         }
     }
@@ -203,7 +203,7 @@ final class TaskActions {
 
     func copyLink(_ task: DownloadTask) {
         UIPasteboard.general.string = task.shareUrl
-        toasts.show(text: L("urlCopied"), tone: .success, systemImage: "doc.on.doc")
+        toasts.show(text: L("urlCopied"), tone: .success, systemImage: FluxSymbol.copy)
     }
 
     /// 本机已完成且文件仍在。远端主机的文件不在本机，不提供打开。

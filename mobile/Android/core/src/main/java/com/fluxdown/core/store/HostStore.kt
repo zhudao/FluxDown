@@ -20,8 +20,12 @@ import com.fluxdown.core.model.TaskRuntime
 import com.fluxdown.core.model.TaskStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -66,6 +70,13 @@ data class HostState(
     val isReadOnly: Boolean get() = connection != Connection.Live
 
     fun task(id: String): Task? = tasks.firstOrNull { it.taskId == id }
+
+    /** 新建任务的默认队列：配置 `default_queue_id`（仍存在时）→ 主队列 → 首个队列；无队列为空串（= daemon 默认）。 */
+    fun defaultQueueId(): String =
+        config["default_queue_id"]?.takeIf { id -> queues.any { it.queueId == id } }
+            ?: queues.firstOrNull { it.queueId == Queue.MAIN }?.queueId
+            ?: queues.firstOrNull()?.queueId
+            ?: ""
 }
 
 /**
@@ -85,6 +96,17 @@ class HostStore(
 ) {
     private val _state = MutableStateFlow(HostState())
     val state: StateFlow<HostState> = _state.asStateFlow()
+
+    private val _notices = MutableSharedFlow<HostEvent.Notice>(
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /**
+     * 一次性通知（不进快照、不触发发布）：插件登录 / 组件安装进度、会话吊销等由页面按需订阅。
+     * 无订阅者时直接丢弃（通知不是状态，错过即无意义）；订阅者跟不上时丢弃最旧的，不阻塞信号泵。
+     */
+    val notices: SharedFlow<HostEvent.Notice> = _notices.asSharedFlow()
 
     private var w = Working()
     private var publishJob: Job? = null
@@ -208,8 +230,8 @@ class HostStore(
                 w.sections = w.sections + (e.name to e.json)
                 return true
             }
-            // Android 目前没有一次性通知的消费方；不进 state，也不触发发布。
-            is HostEvent.Notice -> Unit
+            // 一次性通知：不进 state，也不触发发布。
+            is HostEvent.Notice -> _notices.tryEmit(e)
         }
         return false
     }

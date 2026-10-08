@@ -87,16 +87,11 @@ struct VerificationCodeRows: View {
             let now = context.date
             let remaining = clock?.remaining(at: now) ?? 0
             let cooldown = clock?.cooldown(at: now) ?? 0
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) {
-                    expiry(remaining)
-                    Spacer(minLength: 8)
-                    sendButton(cooldown: cooldown)
-                }
-                VStack(alignment: .leading, spacing: 8) {
-                    expiry(remaining)
-                    sendButton(cooldown: cooldown)
-                }
+            // 倒计时文字每秒变化：固定左右排，避免在两种版式间来回跳。
+            LeadingTrailingRow {
+                expiry(remaining)
+            } trailing: {
+                sendButton(cooldown: cooldown)
             }
         }
     }
@@ -170,7 +165,7 @@ struct AccountErrorLabel: View {
     let text: String
 
     var body: some View {
-        Label(text, systemImage: "exclamationmark.circle.fill")
+        Label(text, systemImage: FluxSymbol.failure)
             .font(.footnote)
             .foregroundStyle(Color.fdStatusFailedText)
             .fixedSize(horizontal: false, vertical: true)

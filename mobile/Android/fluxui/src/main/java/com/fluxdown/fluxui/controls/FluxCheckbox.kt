@@ -75,7 +75,6 @@ fun FluxCheckbox(
                 .size(24.dp)
                 .graphicsLayer { alpha = if (enabled) 1f else 0.4f },
         ) {
-            StateGlow(on, { p.value }, c.accentGlow, 7.dp, shape, spread = (-2).dp)
             Box(
                 Modifier
                     .fillMaxSize()

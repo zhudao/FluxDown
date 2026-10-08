@@ -39,7 +39,7 @@ object FluxGrain {
 /**
  * 胶片颗粒叠层（§6.5）：不透明度 / 混合取自 `colors.grainAlpha / grainBlend`（深 3.5 % SoftLight 白噪点，浅 5 % Multiply 黑噪点）。
  * 在本节点范围内、**子内容之后**铺满绘制；用法：对一个空 `Box(Modifier.fillMaxSize().fluxGrain())` 作叠层，
- * 置于氛围光之上、内容之下（见 [FluxCanvas]）。瓦片一个纹素 = 1dp（对齐 CSS `background-size:180px`）。
+ * 置于画布之上、内容之下（见 [FluxCanvas]）。瓦片一个纹素 = 1dp（对齐 CSS `background-size:180px`）。
  */
 @Composable
 fun Modifier.fluxGrain(): Modifier {

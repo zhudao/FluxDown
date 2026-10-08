@@ -31,10 +31,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -63,7 +61,6 @@ import com.fluxdown.fluxui.material.FluxBlur
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -290,16 +287,15 @@ private fun DockBody(
     }
 }
 
-/** 液态指示器：`glass4 → glass3` 竖向渐变 + 发丝线 + 顶沿高光 + `0 0 22dp -4dp accentMid`。 */
+/** 液态指示器：`glass4` 纯色底 + 顶沿高光描边 + 发丝线（无渐变、无辉光）。 */
 @Composable
 private fun DockIndicator() {
     val c = FluxTheme.colors
     val shape = RoundedCornerShape(26.dp)
     Box(
         Modifier
-            .fluxGlow(c.accentMid, 11.dp, shape, spread = (-4).dp)
             .drawWithCache {
-                val fill = Brush.verticalGradient(listOf(c.glass4, c.glass3))
+                val fill = c.glass4
                 val hl = Brush.verticalGradient(0f to c.highlight, 0.18f to Color.Transparent)
                 val outline = shape.createOutline(size, layoutDirection, this)
                 val hw = 0.5.dp.toPx()
@@ -324,14 +320,9 @@ private fun DockItemView(
     onClick: () -> Unit,
 ) {
     val c = FluxTheme.colors
-    val density = LocalDensity.current
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val description = item.badgeDescription?.let { "${item.label}，$it" } ?: item.label
-    val glowEffect = remember(density) {
-        val r = with(density) { 3.dp.toPx() }
-        BlurEffect(r, r, TileMode.Decal)
-    }
     Box(
         Modifier
             .clip(RoundedCornerShape(26.dp))
@@ -353,14 +344,6 @@ private fun DockItemView(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(Modifier.size(22.dp)) {
-                FluxIcon(
-                    item.icon, null,
-                    Modifier.graphicsLayer {
-                        alpha = sel.value.coerceIn(0f, 1f)
-                        renderEffect = glowEffect
-                    },
-                    tint = c.accentGlow,
-                )
                 FluxIcon(
                     item.icon, null,
                     Modifier.graphicsLayer { alpha = 1f - sel.value.coerceIn(0f, 1f) },

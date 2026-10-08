@@ -44,7 +44,7 @@ struct AccountPage: View {
             if state.info != nil, !state.has(HostCapability.agentAuth) {
                 ContentUnavailableView(
                     L("settingsCatAccount"),
-                    systemImage: "icloud.slash",
+                    systemImage: FluxSymbol.cloud,
                     description: Text(L("settingsUnsupportedOnPlatform"))
                 )
                 .background(Color(uiColor: .systemGroupedBackground))
@@ -56,7 +56,7 @@ struct AccountPage: View {
                     if refreshing {
                         ProgressView()
                     } else {
-                        Button(L("accountCloudRefresh"), systemImage: "arrow.clockwise", action: refresh)
+                        Button(L("accountCloudRefresh"), systemImage: FluxSymbol.retry, action: refresh)
                             .disabled(readOnly)
                     }
                 }
@@ -125,7 +125,7 @@ struct AccountPage: View {
             .disabled(readOnly)
 
             Section {
-                featureRow(symbol: "arrow.triangle.2.circlepath.icloud", title: L("accountFeatureConfigSync"), detail: L("accountFeatureConfigSyncDesc"))
+                featureRow(symbol: FluxSymbol.syncing, title: L("accountFeatureConfigSync"), detail: L("accountFeatureConfigSyncDesc"))
                 featureRow(symbol: "network", title: L("accountFeatureMultiDevice"), detail: L("accountFeatureMultiDeviceDesc"))
             }
         }
@@ -155,7 +155,7 @@ struct AccountPage: View {
             Button {
                 sheet = .nickname(current: user.nickname)
             } label: {
-                disclosureLabel(L("accountNicknameEditTitle"), symbol: "pencil")
+                disclosureLabel(L("accountNicknameEditTitle"), symbol: FluxSymbol.edit)
             }
             .disabled(readOnly)
             if AccountRules.canEditOriginId(session) {
@@ -182,7 +182,7 @@ struct AccountPage: View {
                 .background(Color.accentColor.opacity(0.12), in: .circle)
                 .overlay {
                     if AccountRules.avatarInitial(user) == nil {
-                        Image(systemName: "icloud.fill").font(.system(size: side * 0.4)).foregroundStyle(.tint)
+                        Image(systemName: "person.fill").font(.system(size: side * 0.4)).foregroundStyle(.tint)
                     }
                 }
                 .accessibilityHidden(true)
@@ -230,7 +230,7 @@ struct AccountPage: View {
                 HStack(spacing: 4) {
                     Text(verbatim: "#\(originId)")
                         .font(.system(.footnote, design: .monospaced).weight(.medium))
-                    Image(systemName: "doc.on.doc").imageScale(.small)
+                    Image(systemName: FluxSymbol.copy).imageScale(.small)
                 }
                 .foregroundStyle(.tint)
                 .padding(.horizontal, 10)

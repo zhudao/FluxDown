@@ -58,7 +58,7 @@ nonisolated enum TaskDetailVisual: Sendable, Hashable {
         switch self {
         case .downloading: "arrow.down.circle"
         case .queued, .pending: "clock"
-        case .preparing, .verifying: "arrow.triangle.2.circlepath"
+        case .preparing, .verifying: "arrow.trianglehead.2.clockwise.rotate.90"
         case .paused: "pause.circle"
         case .failed: "exclamationmark.circle"
         case .seeding: "arrow.up.circle"

@@ -32,11 +32,8 @@ struct BtDurationRow: View {
             layout {
                 TextField(title, text: $draft, prompt: Text(off))
                     .keyboardType(.decimalPad)
-                    .multilineTextAlignment(.trailing)
-                    .monospacedDigit()
                     .focused($focused)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 72, maxWidth: typeSize.isAccessibilitySize ? CGFloat.infinity : 128, minHeight: 44)
+                    .settingsValueField(width: nil)
                     .onChange(of: draft) { _, new in
                         let clean = SettingsRateLimit.sanitize(new)
                         if clean != new { draft = clean }
@@ -48,7 +45,7 @@ struct BtDurationRow: View {
                     .labelsHidden()
             }
             if let failure = editor.failures[unitKey] {
-                Label(failure, systemImage: "exclamationmark.circle.fill")
+                Label(failure, systemImage: FluxSymbol.failure)
                     .font(.caption)
                     .foregroundStyle(Color.fdStatusFailedText)
             }

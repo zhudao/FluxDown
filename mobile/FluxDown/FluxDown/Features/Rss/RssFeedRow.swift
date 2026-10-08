@@ -93,7 +93,7 @@ struct RssStatusLine: View {
             let status = RssFormat.status(of: source, refreshing: refreshing, now: context.date)
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 if failed, !refreshing {
-                    Image(systemName: "exclamationmark.triangle.fill")
+                    Image(systemName: FluxSymbol.warning)
                         .font(.footnote)
                         .foregroundStyle(Color.fdStatusFailedText)
                         .accessibilityHidden(true)

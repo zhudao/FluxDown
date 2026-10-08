@@ -29,7 +29,6 @@ import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 
@@ -37,7 +36,7 @@ import com.fluxdown.fluxui.theme.FluxTheme
 enum class FluxBannerKind { Info, Warn, Error, Success }
 
 /**
- * 横幅（§12.29，Flat glass2 + 发丝线）：左侧 2dp 语气色条 + 10dp 辉光；Warn / Error 底按 7% / 8% 混入语气色。
+ * 横幅（§12.29，Flat glass2 + 发丝线）：左侧 2dp 语气色条；Warn / Error 底按 7% / 8% 混入语气色。
  * Error 的 liveRegion 为 Assertive，其余 Polite。
  *
  * @param text 正文（sm / 1.5）
@@ -90,13 +89,12 @@ fun FluxBanner(
             .drawBehind { if (tint.alpha > 0f) drawRect(tint) }
             .semantics(mergeDescendants = true) { liveRegion = region },
     ) {
-        // 左条：上下内缩 14，2dp 语气色 + 0 0 10dp 光晕
+        // 左条：上下内缩 14，2dp 语气色
         Box(Modifier.matchParentSize().padding(vertical = 14.dp)) {
             Box(
                 Modifier
                     .width(2.dp)
                     .fillMaxHeight()
-                    .fluxGlow(tone.copy(alpha = 0.8f), 5.dp, RoundedCornerShape(1.dp))
                     .background(tone, RoundedCornerShape(1.dp)),
             )
         }

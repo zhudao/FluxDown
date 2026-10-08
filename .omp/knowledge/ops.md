@@ -65,6 +65,18 @@
 
 **GPUI 调试包**（`.github/workflows/gpui-debug-package.yml`，仅 `workflow_dispatch`，不发 Release）：输入 `ref` / `platform`（windows·linux·macos·all）/ `arch`（x64·arm64·all）/ `build_mode`，产出 `fluxdown-desktop` + `fluxdown-agent` + `fluxdownd` 同目录压缩包（Windows zip 带 MSVC CRT 与 `.pdb`，Unix tar.gz 保留可执行位）。始终走 `--release`：`gpui_windows` 在 `debug_assertions` 下运行期按构建机绝对路径读 `shaders.hlsl`，debug 包换机即失效；`fast` 模式只经 `CARGO_PROFILE_RELEASE_*` 关 LTO、保留行号符号。同理 macOS 主机无法交叉出 Windows release 包（着色器 `fxc` 预编译只在 Windows 主机的 build.rs 执行）。
 
+## 仓库维护自动化（ZerxLabBot）
+
+**不在本仓库里**：运行在服务器 `root@8.211.176.172:/root/zerx-lab/openhands`（OpenHands agent-canvas 容器 + automation 服务，agent = `omp acp`），GitHub 身份 = 协作者账号 `ZerxLabBot`（write 权限）。仓库 webhook `openhands.zerx.dev/api/automation/v1/events/…/fluxdown-github` 订阅 issues / issue_comment / pull_request / release / workflow_run / push。
+
+- **代码坐标**：`fd-bundle/`（`main.py` 路由、`gate.py` 确定性编排、`classify.py` 改动分级、`prlogic.py` 合并门、`fdctl.py` agent 工具、`state.py` 共享状态 `~/.openhands/fd-state.db`、`issue_index.py` FTS 索引、`notify.py` 台账与邮件、`*.md` 各任务 prompt）；`fd-deploy.py sync|set|smoke|list` 部署（注册表 `fd-automations.json`）；`bin/` 是挂进容器的 `gh` / `git` 包装与 pre-push 钩子（禁推 main / stable / tag，禁合并 / 发布 / 触发 workflow）。改完先 `fd-deploy.py smoke <KEY> <payload.json>`（演练，会话进 `dry-` 命名空间）再 `sync`。
+- **任务**：issue 分诊（实时 + 每日巡检，含查重、问答 48h 自动关闭、修复候选、PR 关联、维护者指令，不发邮件）；PR 审查（新开 / 转可审查才审，`@ZerxLabBot review` 手动复审，限流）；gate 每 10 分钟 + CI / push 事件（独立复核派发、自动增量复审、冲突处理、否决窗口到期合并、合并后 main CI 守护、stable 一致性守卫）；bug 修复（维护者 `@ZerxLabBot /fix` 或打 `bot:fix`，草稿 PR + CI 回调迭代）；CI / Release 失败排查（偶发重跑一次、bot 合并引入的失败自动 revert）；发版回访、周报、长期未更新 PR、依赖 / 生成物 / 清理（每周）、发版准备与演练（每周）。
+- **自动合并门**：主审四维（正确性 / 性能 / 完整性 / 回归）全过 → 另一模型独立复核 → `classify.py` 判定 `auto`（非 UI、非敏感路径、CI 覆盖得到、非测试改动外部 ≤400 / bot ≤150 行）→ CI 必需 job 全绿 + `mergeable_state=clean` → 否决窗口（低风险 30 分钟，其余 2 小时；00:00–08:30 UTC+8 不合并）→ 每轮只合并一个，`merge` 方式。维护者 `@ZerxLabBot /hold` 或加 `no-automerge` 暂缓，`/unhold` 恢复，`/fixup <要求>` 让 bot 直接改 PR 分支。
+- **模型分工**（只用 sonnet-5-5 与 opus-5-5，`omp-home/agent/config.yml` 以 `enabledModels` 白名单排除 fable / mythos）：会话的模型与思考档位由 OpenHands agent profile 决定，`dispatch.py` 的 `TASK_PROFILE` 映射任务——`omp`（sonnet-5-5 + `auto`，judge 按每条消息判断难度，最高 xhigh）跑分诊、CI 排查、周报、维护者直修与各维护任务；`omp-review`（`omp acp --config overlays/review.yml`，sonnet-5-5:high）跑 PR 主审；`omp-opus`（`overlays/opus.yml`，opus-5-5:high）跑独立复核（与主审异构）、bug 修复、冲突处理。会话内角色：`default`/`task` 跟随 profile，`smol`/`tiny`/`commit` sonnet:low（scout、sonic），`slow`/`plan`/`advisor` opus（reviewer 子代理走 `@slow`，固定 high），`judge` sonnet；两模型在 `retry.fallbackChains` 互为回退（应对网关偶发 503）。
+- **存储与本地执行边界**：agent 只在会话目录 `/tmp/fd-work/<随机>` 里工作（blobless 克隆，结束 `rm -rf`），不在服务器构建 / 测试 / 安装依赖，构建与测试一律交给 CI；工具链里的 `cargo` 经 `toolchains/guard/cargo` 包装，只放行 `update` / `metadata` / openapi 生成器，且 `CARGO_TARGET_DIR` 必须在会话目录内。`janitor.py` 由 gate 每小时触发：回收 12 小时未动的会话目录（修复分支结束或 7 天未动的 `fix-*`）、3 天前的自动化运行目录、cargo 解压源码与超 1.5GB 的下载缓存、30 天未更新的 OpenHands 会话，每周 `omp gc --apply`；空闲低于 15GB 每天发信，低于 6GB 先就地回收、仍不足则拒绝派发新会话。
+- **omp 每日自动更新**：宿主机 systemd 定时器 `fd-omp-update.timer`（每天 05:10 UTC+8，落在不合并时段）执行 `bin/omp-auto-update.sh`：`omp update --check` → 备份 → `omp update` → 核对宿主机与容器版本 → 容器内 sonnet / opus 各一次真实请求冒烟 → 失败回滚到备份 → 只保留当前版本的 natives（每版约 365MB，宿主机与容器各一份）；只有升级或失败才发信，日志 `data/fd-omp-update.log`。容器经目录挂载 `/root/.local/bin → /opt/omp-host` + `bin/omp-shim` 使用宿主机同一份二进制（`omp update` 以替换文件方式升级，单文件挂载会一直指向旧 inode），新会话立即用新版本，无需重启容器。
+- **跨系统同步点**：改 `.github/workflows/ci.yml` 的 paths-filter 分组或 job 名，要同步服务器 `classify.py` 的 `CI_GROUPS` / `CI_JOBS`（否则合并门会误判 CI 覆盖）；新增 GPUI crate / 页面目录时同步 `classify.py` 的 UI / 纯逻辑路径表。
+
 ---
 
 ## 设计文档实现状态（`docs/`）

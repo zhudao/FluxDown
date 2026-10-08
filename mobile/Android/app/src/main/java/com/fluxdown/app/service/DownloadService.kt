@@ -17,7 +17,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.fluxdown.app.AppContainer
 import com.fluxdown.app.FluxApplication
-import com.fluxdown.app.MainActivity
+import com.fluxdown.app.HomeActivity
 import com.fluxdown.app.R
 import com.fluxdown.app.i18n.str
 import com.fluxdown.core.format.Format
@@ -65,6 +65,8 @@ class DownloadService : Service() {
         // startForegroundService 之后必须在数秒内 startForeground：先用当前量发出，再进入观察
         val container = (application as FluxApplication).container
         show(container.localActivity.value)
+        // 完成 / 失败通知的观察在应用作用域内：下载期间即使 Activity 已被划掉也不中断
+        DownloadNotifier.attach(container, applicationContext)
         if (watcher?.isActive != true) {
             watcher = scope.launch { watch(container) }
         }
@@ -136,7 +138,7 @@ private fun buildNotification(context: Context, a: LocalActivity): android.app.N
     val open = PendingIntent.getActivity(
         context,
         0,
-        Intent(context, MainActivity::class.java).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        Intent(context, HomeActivity::class.java).setAction(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )

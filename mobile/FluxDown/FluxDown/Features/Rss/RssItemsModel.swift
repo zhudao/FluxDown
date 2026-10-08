@@ -195,7 +195,7 @@ final class RssItemsModel {
                     HostMethod.daemonRssItemAction,
                     params: RssItemActionParams(sourceId: sourceId, action: .readAll)
                 )
-                container.toasts.show(text: L("mobileRssMarkedReadToast"), tone: .success, systemImage: "checkmark")
+                container.toasts.show(text: L("mobileRssMarkedReadToast"), tone: .success, systemImage: FluxSymbol.done)
                 reload()
             } catch {
                 feedback = Feedback(text: ErrorText.describe(error), tone: .error, systemImage: "exclamationmark.circle")
@@ -205,6 +205,6 @@ final class RssItemsModel {
 
     func copyLink(_ item: RssItemDto) {
         UIPasteboard.general.string = item.effectiveLink
-        container.toasts.show(text: L("mobileRssCopied"), tone: .success, systemImage: "doc.on.doc")
+        container.toasts.show(text: L("mobileRssCopied"), tone: .success, systemImage: FluxSymbol.copy)
     }
 }

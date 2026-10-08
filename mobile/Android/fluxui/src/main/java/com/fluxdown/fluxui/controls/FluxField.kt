@@ -16,7 +16,6 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,7 +34,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -53,7 +51,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxPressIndicationFactory
 import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxText
@@ -62,7 +59,7 @@ import com.fluxdown.fluxui.theme.fluxPressable
 
 /**
  * 字段外框（FluxField / FluxSelect 共用）：标签行（micro +6% + 计数）→ 框（min 52 · r16 · glass2 + hairline + 高光）→ 提示行。
- * 聚焦：底 → glass3、边框 accent@80%、1dp 外环 accent@70%、22dp 辉光（键盘焦点另加 §10.6 实色环）；错误：coral 边框 + 外环。
+ * 聚焦：底 → glass3、边框 accent@80%、1dp 外环 accent@70%（键盘焦点另加 §10.6 实色环）；错误：coral 边框 + 外环。
  * [boxModifier] 作用于框本身（可点击 / 点按聚焦），位于背景绘制之前，所以按压缩放会连背景一起缩放。
  */
 @Composable
@@ -85,7 +82,6 @@ internal fun FieldFrame(
     var focused by remember { mutableStateOf(false) }
     val focusAnim = animateFloatAsState(if (focused && enabled) 1f else 0f, motion.of(motion.fluid), label = "field-focus")
     val hasError = error != null
-    val glowOn by remember { derivedStateOf { focusAnim.value > 0.01f } }
 
     Column(modifier.alpha(if (enabled) 1f else 0.5f)) {
         if (label != null || count != null) {
@@ -115,14 +111,6 @@ internal fun FieldFrame(
                 .fluxFocusRing(shape)
                 .onFocusChanged { focused = it.hasFocus },
         ) {
-            if (glowOn && !hasError) {
-                Box(
-                    Modifier
-                        .matchParentSize()
-                        .graphicsLayer { alpha = focusAnim.value }
-                        .fluxGlow(c.accentGlow, 11.dp, shape, spread = (-4).dp),
-                )
-            }
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -172,7 +160,7 @@ internal fun FieldFrame(
 }
 
 /**
- * 输入框（§12.21）：基于 `BasicTextField`，聚焦 accent 环 + 辉光，光标 `accentHi`，占位符 `inkFaint`。
+ * 输入框（§12.21）：基于 `BasicTextField`，聚焦 accent 环，光标 `accentHi`，占位符 `inkFaint`。
  * 标签 / 输入 / 提示都可换行，输入框只设 `min 52dp`。[mono] = 等宽 13.5（URL / 路径 / 哈希）。
  * [error] 非空时进入错误态并替换提示；[warning] 为琥珀色非阻断提示（如“已调整为 n”）。
  * [rows] = 多行时的最少行数（最多 8 行后内部滚动）。[trailing] 建议放 [FluxFieldAction]。
@@ -303,6 +291,7 @@ fun FluxPasswordField(
     keyboardOptions: KeyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     enabled: Boolean = true,
+    onFocusChange: ((Boolean) -> Unit)? = null,
 ) {
     var visible by rememberSaveable { mutableStateOf(false) }
     FluxField(
@@ -318,6 +307,7 @@ fun FluxPasswordField(
         keyboardActions = keyboardActions,
         visualTransformation = if (visible) VisualTransformation.None else PasswordVisualTransformation(),
         enabled = enabled,
+        onFocusChange = onFocusChange,
         trailing = {
             FluxFieldAction(
                 icon = if (visible) FluxIcons.EyeOff else FluxIcons.Eye,
@@ -352,6 +342,7 @@ fun FluxNumberField(
     var adjusted by remember { mutableStateOf<Long?>(null) }
     val valueNow = rememberUpdatedState(value)
     val allowNegative = range.first < 0
+    val focusSeen = remember { BooleanArray(1) }
 
     fun commit() {
         val parsed = draft.toLongOrNull()
@@ -382,8 +373,21 @@ fun FluxNumberField(
         warning = adjusted?.let(adjustedHint),
         mono = mono,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-        keyboardActions = KeyboardActions(onDone = { commit(); focusManager.clearFocus() }),
+        keyboardActions = KeyboardActions(onDone = {
+            focusSeen[0] = false
+            commit()
+            focusManager.clearFocus()
+        }),
         enabled = enabled,
-        onFocusChange = { focused -> if (!focused) commit() },
+        // 挂载时 Compose 会先回调一次 isFocused = false：只在真正获得过焦点后的失焦才提交，
+        // 否则仅仅显示一个越界的主机值就会被钳位并写回（用户什么都没改）。
+        onFocusChange = { focused ->
+            if (focused) {
+                focusSeen[0] = true
+            } else if (focusSeen[0]) {
+                focusSeen[0] = false
+                commit()
+            }
+        },
     )
 }

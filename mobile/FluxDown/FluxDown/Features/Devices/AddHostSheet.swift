@@ -59,7 +59,7 @@ struct AddHostSheet: View {
                         .onSubmit { focus = .key }
                         .onChange(of: address) { failure = nil }
                     if cleartext {
-                        Banner(text: L("mobileHostCleartext"), tone: .warning, systemImage: "exclamationmark.triangle.fill", slim: true)
+                        Banner(text: L("mobileHostCleartext"), tone: .warning, systemImage: FluxSymbol.warning, slim: true)
                             .listRowBackground(Color.clear)
                             .listRowInsets(EdgeInsets())
                     }
@@ -109,7 +109,7 @@ struct AddHostSheet: View {
 
                 if let failure {
                     Section {
-                        Banner(text: failure, tone: .error, systemImage: "exclamationmark.circle.fill", slim: true)
+                        Banner(text: failure, tone: .error, systemImage: FluxSymbol.failure, slim: true)
                             .listRowBackground(Color.clear)
                             .listRowInsets(EdgeInsets())
                     }
@@ -213,7 +213,7 @@ private struct FieldFooter: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(hint)
             if let error {
-                Label(error, systemImage: "exclamationmark.circle.fill")
+                Label(error, systemImage: FluxSymbol.failure)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
         }

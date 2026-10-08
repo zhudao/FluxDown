@@ -55,20 +55,15 @@ private struct WebhookContent: View {
         }
         .overlay {
             if blank {
-                ContentUnavailableView {
-                    Label(L("webhookEmptyTitle"), systemImage: "bolt.horizontal")
-                } description: {
-                    Text(L("webhookEmptyDesc"))
-                } actions: {
-                    Button(L("webhookAddEndpoint")) { editing = .new }
-                        .buttonStyle(.borderedProminent)
+                EmptyStateView(L("webhookEmptyTitle"), message: L("webhookEmptyDesc"), systemImage: FluxSymbol.webhook) {
+                    Button(L("webhookAddEndpoint"), systemImage: FluxSymbol.add) { editing = .new }
                         .disabled(readOnly)
                 }
             }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(L("webhookAddEndpoint"), systemImage: "plus") { editing = .new }
+                Button(L("webhookAddEndpoint"), systemImage: FluxSymbol.add) { editing = .new }
                     .disabled(readOnly)
             }
         }
@@ -166,7 +161,7 @@ private struct WebhookContent: View {
             Button(role: .destructive) {
                 Task { await model.clearDeliveries() }
             } label: {
-                Label(L("webhookLogClear"), systemImage: "trash")
+                Label(L("webhookLogClear"), systemImage: FluxSymbol.delete)
             }
             .disabled(readOnly || log.isEmpty || model.clearing)
         } header: {
@@ -237,7 +232,7 @@ private struct WebhookEndpointRow: View {
                         .truncationMode(.middle)
                     health
                     if let report {
-                        Label(report.text, systemImage: report.success ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                        Label(report.text, systemImage: report.success ? FluxSymbol.success : "xmark.octagon.fill")
                             .font(.footnote)
                             .foregroundStyle(report.success ? Color.fdStatusSeedingText : Color.fdStatusFailedText)
                     }
@@ -250,7 +245,7 @@ private struct WebhookEndpointRow: View {
             if testing { ProgressView() }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(L("webhookRowDelete"), systemImage: "trash", role: .destructive, action: onDelete)
+            Button(L("webhookRowDelete"), systemImage: FluxSymbol.delete, role: .destructive, action: onDelete)
                 .disabled(readOnly)
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
@@ -259,14 +254,14 @@ private struct WebhookEndpointRow: View {
                 .disabled(readOnly || testBusy)
         }
         .contextMenu {
-            Button(L("webhookRowEdit"), systemImage: "pencil", action: onEdit).disabled(readOnly)
+            Button(L("webhookRowEdit"), systemImage: FluxSymbol.edit, action: onEdit).disabled(readOnly)
             Button(L("webhookRowTest"), systemImage: "paperplane", action: onTest).disabled(readOnly || testBusy)
-            Button(L("copyUrl"), systemImage: "doc.on.doc") {
+            Button(L("copyUrl"), systemImage: FluxSymbol.copy) {
                 ExtensionsClipboard.copy(endpoint.url)
                 container.toasts.show(text: L("webhookCopied"), tone: .success)
             }
             Divider()
-            Button(L("webhookRowDelete"), systemImage: "trash", role: .destructive, action: onDelete).disabled(readOnly)
+            Button(L("webhookRowDelete"), systemImage: FluxSymbol.delete, role: .destructive, action: onDelete).disabled(readOnly)
         }
         .accessibilityElement(children: .contain)
     }
@@ -279,13 +274,13 @@ private struct WebhookEndpointRow: View {
                 .foregroundStyle(.secondary)
         } else if let latest {
             if latest.success {
-                Label(L("webhookHealthOk", ["time": ExtensionsFormat.latency(latest.latencyMs)]), systemImage: "checkmark.circle.fill")
+                Label(L("webhookHealthOk", ["time": ExtensionsFormat.latency(latest.latencyMs)]), systemImage: FluxSymbol.success)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusSeedingText)
             } else {
                 Label(
                     L("webhookHealthFail", ["detail": latest.error.isEmpty ? ExtensionsFormat.httpStatus(latest.statusCode) : latest.error]),
-                    systemImage: "exclamationmark.triangle.fill"
+                    systemImage: FluxSymbol.warning
                 )
                 .font(.footnote)
                 .foregroundStyle(Color.fdStatusFailedText)

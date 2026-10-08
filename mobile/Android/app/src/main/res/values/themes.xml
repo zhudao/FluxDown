@@ -9,4 +9,11 @@
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
     </style>
+
+    <!-- 外部下载唤起（ExternalDownloadActivity）：透明窗口，弹窗下方透出来源应用；深浅色沿用父主题的夜间变体 -->
+    <style name="Theme.FluxDown.External">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:colorBackgroundCacheHint">@null</item>
+    </style>
 </resources>

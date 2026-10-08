@@ -34,7 +34,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -79,7 +78,7 @@ data class FluxRailNavItem(
  * 自带状态栏 / 导航栏 inset 内边距；除 footer 外的内容整体可纵向滚动。
  * a11y：容器为遍历组；顶层项 `Role.Tab`（选中态），子项 `Role.Button`。
  *
- * @param brandMark 品牌徽标槽；默认画 28dp 渐变圆角方块 + 品牌名首字母。
+ * @param brandMark 品牌徽标槽；默认画 28dp 纯色圆角方块 + 品牌名首字母。
  */
 @Composable
 fun FluxRail(
@@ -150,9 +149,8 @@ private fun DefaultBrandMark(name: String) {
     Box(
         Modifier
             .size(28.dp)
-            .fluxGlow(c.accentGlow, 8.dp, shape, spread = (-2).dp)
             .clip(shape)
-            .background(Brush.linearGradient(listOf(c.accentFillA, c.accentFillB), Offset.Zero, Offset(28f * 3f, 28f * 3f))),
+            .background(c.accentFill),
         contentAlignment = Alignment.Center,
     ) {
         FluxText(name.take(1).uppercase(), style = style, color = c.onAccent, maxLines = 1, softWrap = false)

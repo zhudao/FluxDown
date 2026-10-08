@@ -107,7 +107,7 @@ private struct DevicesContent: View {
                 if !cloudCap, !linkCap {
                     // 不在列表行里放 ContentUnavailableView（行内被压成固定行高）：用普通 Label 行。
                     Section {
-                        Label(L("mobileDevicesEmptyTitle"), systemImage: "laptopcomputer.and.iphone")
+                        Label(L("mobileDevicesEmptyTitle"), systemImage: "laptopcomputer")
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .center)
                     }
@@ -118,7 +118,8 @@ private struct DevicesContent: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .navigationTitle(L("mobileNavDevices"))
+            .readableContentWidth()
+            .rootNavigationTitle(L("mobileNavDevices"))
             .navigationDestination(for: DevicesRoute.self) { route in
                 switch route {
                 case .allDevices: AllDevicesScreen()
@@ -134,17 +135,17 @@ private struct DevicesContent: View {
                 ToolbarSpacer(.fixed, placement: .primaryAction)
                 ToolbarItem(placement: .primaryAction) {
                     Menu {
-                        Button(L("mobileHostAdd"), systemImage: "server.rack") {
+                        Button(L("mobileHostAdd"), systemImage: FluxSymbol.remoteHost) {
                             container.router.sheet = .addHost
                         }
                         if cloudCap || linkCap {
-                            Button(L("addDeviceEntry"), systemImage: "laptopcomputer.and.iphone") {
+                            Button(L("addDeviceEntry"), systemImage: FluxSymbol.devices) {
                                 presentAddDevice()
                             }
                             .disabled(readOnly)
                         }
                     } label: {
-                        Label(L("mobileDevicesAddMenu"), systemImage: "plus")
+                        Label(L("mobileDevicesAddMenu"), systemImage: FluxSymbol.add)
                     }
                 }
             }
@@ -244,15 +245,15 @@ private struct DevicesContent: View {
         if case let .remote(_, _, endpoint) = ref {
             row
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(L("mobileHostRemoveConfirm"), systemImage: "trash", role: .destructive) { pendingRemoval = ref }
+                    Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
                 }
                 .contextMenu {
                     Button(L("mobileDevicesSwitchHost"), systemImage: "arrow.left.arrow.right") { switchTo(ref) }
-                    Button(L("webCopy"), systemImage: "doc.on.doc") {
+                    Button(L("webCopy"), systemImage: FluxSymbol.copy) {
                         UIPasteboard.general.string = endpoint
                         container.toasts.show(text: L("webCopied"), tone: .success)
                     }
-                    Button(L("mobileHostRemoveConfirm"), systemImage: "trash", role: .destructive) { pendingRemoval = ref }
+                    Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
                 }
         } else {
             row
@@ -328,16 +329,10 @@ private struct DevicesContent: View {
         }()
         let retryTitle = L(presenceKnown ? "accountDevicesRetry" : "cloudConnectionRetry")
         return VStack(alignment: .leading, spacing: 6) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) {
-                    presenceLabel(labelKey: labelKey, dot: dot, known: presenceKnown)
-                    Spacer(minLength: 8)
-                    retryControl(title: retryTitle, presenceKnown: presenceKnown, readOnly: readOnly, reconnectable: reconnectable)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    presenceLabel(labelKey: labelKey, dot: dot, known: presenceKnown)
-                    retryControl(title: retryTitle, presenceKnown: presenceKnown, readOnly: readOnly, reconnectable: reconnectable)
-                }
+            LeadingTrailingRow(spacing: 10) {
+                presenceLabel(labelKey: labelKey, dot: dot, known: presenceKnown)
+            } trailing: {
+                retryControl(title: retryTitle, presenceKnown: presenceKnown, readOnly: readOnly, reconnectable: reconnectable)
             }
             if !presenceKnown {
                 Text(L("cloudConnectionStatusHint"))
@@ -346,7 +341,7 @@ private struct DevicesContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let errorKey {
-                Label(L(errorKey), systemImage: "exclamationmark.circle.fill")
+                Label(L(errorKey), systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -393,14 +388,14 @@ private struct DevicesContent: View {
         case .loaded:
             if records.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(L("accountDevicesEmpty"), systemImage: "laptopcomputer.and.iphone")
+                    Label(L("accountDevicesEmpty"), systemImage: "laptopcomputer")
                         .foregroundStyle(.secondary)
                     reloadButton
                 }
             }
         case let .failed(error):
             VStack(alignment: .leading, spacing: 8) {
-                Label(L("accountDevicesLoadFailed"), systemImage: "exclamationmark.triangle.fill")
+                Label(L("accountDevicesLoadFailed"), systemImage: FluxSymbol.warning)
                     .foregroundStyle(Color.fdStatusFailedText)
                 Text(AccountText.error(error))
                     .font(.footnote)
@@ -419,7 +414,7 @@ private struct DevicesContent: View {
                 }
             }
         } label: {
-            Label(L("accountDevicesRetry"), systemImage: "arrow.clockwise")
+            Label(L("accountDevicesRetry"), systemImage: FluxSymbol.retry)
         }
         .buttonStyle(.borderless)
     }
@@ -441,21 +436,21 @@ private struct DevicesContent: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     if !readOnly {
-                        Button(L("linkedDeviceRemove"), systemImage: "link.badge.minus", role: .destructive) {
+                        Button(L("linkedDeviceRemove"), systemImage: "minus.circle", role: .destructive) {
                             pendingUnpair = device
                         }
                     }
                 }
                 .contextMenu {
                     if !readOnly {
-                        Button(L("linkedDeviceRemove"), systemImage: "link.badge.minus", role: .destructive) {
+                        Button(L("linkedDeviceRemove"), systemImage: "minus.circle", role: .destructive) {
                             pendingUnpair = device
                         }
                     }
                 }
             }
             if case let .failed(error) = model.linkPhase {
-                Label(AccountText.error(error, context: .pairing), systemImage: "exclamationmark.circle.fill")
+                Label(AccountText.error(error, context: .pairing), systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -473,7 +468,7 @@ private struct DevicesContent: View {
                             }
                         }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        Image(systemName: FluxSymbol.retry)
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(Rectangle())
                     }
@@ -484,7 +479,7 @@ private struct DevicesContent: View {
                 Button {
                     presentAddDevice()
                 } label: {
-                    Image(systemName: "plus")
+                    Image(systemName: FluxSymbol.add)
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
@@ -711,7 +706,7 @@ private struct HostRow: View {
                 ProgressView()
             } else if isCurrent {
                 Circle().fill(style.dot).frame(width: 8, height: 8).accessibilityHidden(true)
-                Image(systemName: "checkmark")
+                Image(systemName: FluxSymbol.done)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.tint)
                     .accessibilityHidden(true)

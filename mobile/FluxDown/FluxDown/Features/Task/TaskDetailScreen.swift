@@ -120,6 +120,7 @@ private struct TaskDetailPage: View {
             }
         }
         .listStyle(.insetGrouped)
+        .readableContentWidth()
         .fluxAnimation(.smooth, value: currentPage)
         .safeAreaBar(edge: .top) { pagePicker }
         .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -179,7 +180,7 @@ private struct TaskDetailPage: View {
     private func ignorePluginRetry() {
         let id = task.taskId
         actions.run(onSuccess: { [toasts = container.toasts] in
-            toasts.show(text: L("taskIgnorePluginRetryDone"), tone: .success, systemImage: "checkmark")
+            toasts.show(text: L("taskIgnorePluginRetryDone"), tone: .success, systemImage: FluxSymbol.done)
         }) { session throws(HostError) in
             try await session.callVoid(HostMethod.daemonPluginIgnoreRetry, params: TaskIdParams(taskId: id))
         }
@@ -209,7 +210,7 @@ private struct TaskDetailPage: View {
     @ToolbarContentBuilder private var toolbarContent: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
             ShareLink(item: task.shareUrl) {
-                Label(L("mobileShareLink"), systemImage: "square.and.arrow.up")
+                Label(L("mobileShareLink"), systemImage: FluxSymbol.share)
             }
             Menu {
                 if isPluginFailure {
@@ -222,7 +223,7 @@ private struct TaskDetailPage: View {
                 }
                 TaskMenuItems(task: task, boosted: model.boosted)
             } label: {
-                Label(L("moreActions"), systemImage: "ellipsis.circle")
+                Label(L("moreActions"), systemImage: FluxSymbol.more)
             }
         }
         if let secondary = secondaryAction {
@@ -260,25 +261,25 @@ private struct TaskDetailPage: View {
         switch model.visual {
         case .downloading, .queued, .pending, .preparing, .verifying:
             guard task.status != .unknown else { return nil }
-            return BarAction(title: L("pause"), systemImage: "pause.fill") {
+            return BarAction(title: L("pause"), systemImage: FluxSymbol.pause) {
                 FluxHaptic.light.play()
                 actions.pause([id])
             }
         case .paused:
-            return BarAction(title: L("resume"), systemImage: "play.fill") {
+            return BarAction(title: L("resume"), systemImage: FluxSymbol.resume) {
                 FluxHaptic.light.play()
                 actions.resume([id])
             }
         case .failed:
-            return BarAction(title: L("mobileRetry"), systemImage: "arrow.clockwise") {
+            return BarAction(title: L("mobileRetry"), systemImage: FluxSymbol.retry) {
                 FluxHaptic.light.play()
                 actions.resume([id])
             }
         case .completed, .seeding:
             guard actions.hasLocalFile(task) else { return nil }
-            return BarAction(title: L("openFile"), systemImage: "arrow.up.right.square") { actions.open(task) }
+            return BarAction(title: L("openFile"), systemImage: FluxSymbol.openFile) { actions.open(task) }
         case .missing:
-            return BarAction(title: L("redownloadTask"), systemImage: "arrow.clockwise") { actions.confirmRedownload(task) }
+            return BarAction(title: L("redownloadTask"), systemImage: FluxSymbol.retry) { actions.confirmRedownload(task) }
         }
     }
 
@@ -289,17 +290,17 @@ private struct TaskDetailPage: View {
             let boosted = model.boosted
             return BarAction(
                 title: L(boosted ? "cancelBoost" : "boostDownload"),
-                systemImage: boosted ? "bolt.fill" : "bolt",
+                systemImage: boosted ? FluxSymbol.boost : "bolt",
                 isOn: boosted
             ) {
                 (boosted ? FluxHaptic.light : FluxHaptic.success).play()
                 actions.boost(task, boosted: boosted)
             }
         case .failed, .missing:
-            return BarAction(title: L("copyUrl"), systemImage: "doc.on.doc") { actions.copyLink(task) }
+            return BarAction(title: L("copyUrl"), systemImage: FluxSymbol.copy) { actions.copyLink(task) }
         case .completed, .seeding:
             guard actions.hasLocalFile(task) else { return nil }
-            return BarAction(title: L("mobileShowInFiles"), systemImage: "folder") { actions.showInFiles(task) }
+            return BarAction(title: L("mobileShowInFiles"), systemImage: FluxSymbol.folder) { actions.showInFiles(task) }
         }
     }
 }
@@ -385,7 +386,7 @@ private struct TaskDetailHero: View {
             .lineLimit(1)
             .truncationMode(.middle)
         if model.boosted {
-            StatusBadge(text: L("detailBoostActive"), tone: .warning, systemImage: "bolt.fill")
+            StatusBadge(text: L("detailBoostActive"), tone: .warning, systemImage: FluxSymbol.boost)
         }
     }
 

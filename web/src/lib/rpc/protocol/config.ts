@@ -186,6 +186,7 @@ export const DAEMON_CONFIG_FIELDS: readonly DaemonConfigField[] = [
   text('default_queue_id'),
   readOnly('domain_conn_caps'),
   // BT
+  bool('bt_enabled', 'true'),
   bool('bt_enable_dht', 'true'),
   bool('bt_enable_upnp', 'true'),
   int('bt_port_start', '6881', 1, 65_535),

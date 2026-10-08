@@ -216,7 +216,7 @@ private struct GroupDetailPage: View {
             monospaced: true,
             copyable: !group.sourceUrl.isEmpty,
             copyLabel: L("webCopy"),
-            onCopy: { toasts.show(text: L("urlCopied"), tone: .success, systemImage: "doc.on.doc") }
+            onCopy: { toasts.show(text: L("urlCopied"), tone: .success, systemImage: FluxSymbol.copy) }
         )
         KeyValueRow(
             key: L("groupDetailSaveDir"),
@@ -224,7 +224,7 @@ private struct GroupDetailPage: View {
             monospaced: true,
             copyable: !group.saveDir.isEmpty,
             copyLabel: L("webCopy"),
-            onCopy: { toasts.show(text: L("mobilePathCopied"), tone: .success, systemImage: "doc.on.doc") }
+            onCopy: { toasts.show(text: L("mobilePathCopied"), tone: .success, systemImage: FluxSymbol.copy) }
         )
         if group.createdAt > 0 {
             KeyValueRow(key: L("groupDetailCreatedAt"), value: TaskDetailFormat.dateTime(group.createdAt), monospaced: true)
@@ -261,25 +261,25 @@ private struct GroupDetailPage: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
-                Button(L("groupPauseAll"), systemImage: "pause.fill") { commands.pauseAll(group.groupId) }
+                Button(L("groupPauseAll"), systemImage: FluxSymbol.pause) { commands.pauseAll(group.groupId) }
                     .disabled(!summary.canPauseAll || model.isReadOnly)
-                Button(L("groupResumeAll"), systemImage: "play.fill") { commands.resumeAll(group.groupId) }
+                Button(L("groupResumeAll"), systemImage: FluxSymbol.resume) { commands.resumeAll(group.groupId) }
                     .disabled(!summary.canResumeAll || model.isReadOnly)
                 if summary.canRetryFailed {
-                    Button(L("groupRetryFailed"), systemImage: "arrow.clockwise") { commands.retryFailed(summary.failedIds) }
+                    Button(L("groupRetryFailed"), systemImage: FluxSymbol.retry) { commands.retryFailed(summary.failedIds) }
                         .disabled(model.isReadOnly)
                 }
                 if canShowInFiles || !group.sourceUrl.isEmpty {
                     Divider()
                     if canShowInFiles {
-                        Button(L("mobileShowInFiles"), systemImage: "folder") { commands.showInFiles(group) }
+                        Button(L("mobileShowInFiles"), systemImage: FluxSymbol.folder) { commands.showInFiles(group) }
                     }
                     if !group.sourceUrl.isEmpty {
-                        Button(L("groupCopySourceLink"), systemImage: "doc.on.doc") { commands.copySourceLink(group) }
+                        Button(L("groupCopySourceLink"), systemImage: FluxSymbol.copy) { commands.copySourceLink(group) }
                     }
                 }
                 Divider()
-                Button(L("groupDelete"), systemImage: "trash", role: .destructive) {
+                Button(L("groupDelete"), systemImage: FluxSymbol.delete, role: .destructive) {
                     pendingDelete = GroupDeleteRequest(groupId: group.groupId, name: title, withFiles: false)
                 }
                 .disabled(model.isReadOnly)
@@ -288,18 +288,18 @@ private struct GroupDetailPage: View {
                 }
                 .disabled(model.isReadOnly)
             } label: {
-                Label(L("moreActions"), systemImage: "ellipsis.circle")
+                Label(L("moreActions"), systemImage: FluxSymbol.more)
             }
         }
         ToolbarItem(placement: .bottomBar) {
-            Button(L("groupPauseAll"), systemImage: "pause.fill") {
+            Button(L("groupPauseAll"), systemImage: FluxSymbol.pause) {
                 FluxHaptic.light.play()
                 commands.pauseAll(group.groupId)
             }
             .disabled(!summary.canPauseAll || model.isReadOnly)
         }
         ToolbarItem(placement: .bottomBar) {
-            Button(L("groupRetryFailed"), systemImage: "arrow.clockwise") {
+            Button(L("groupRetryFailed"), systemImage: FluxSymbol.retry) {
                 FluxHaptic.light.play()
                 commands.retryFailed(summary.failedIds)
             }
@@ -307,7 +307,7 @@ private struct GroupDetailPage: View {
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
         ToolbarItem(placement: .bottomBar) {
-            Button(L("groupResumeAll"), systemImage: "play.fill") {
+            Button(L("groupResumeAll"), systemImage: FluxSymbol.resume) {
                 FluxHaptic.light.play()
                 commands.resumeAll(group.groupId)
             }
@@ -379,7 +379,7 @@ private struct GroupOverviewCard: View {
     @ViewBuilder
     private var badges: some View {
         if summary.completed > 0 {
-            StatusBadge(text: L("groupDoneCount", ["n": summary.completed]), tone: .success, systemImage: "checkmark.circle.fill")
+            StatusBadge(text: L("groupDoneCount", ["n": summary.completed]), tone: .success, systemImage: FluxSymbol.success)
         }
         if summary.downloading > 0 {
             StatusBadge(text: L("groupDownloadingCount", ["n": summary.downloading]), tone: .accent, systemImage: "arrow.down.circle.fill")
@@ -391,7 +391,7 @@ private struct GroupOverviewCard: View {
             StatusBadge(text: L("groupPausedCount", ["n": summary.paused]), tone: .warning, systemImage: "pause.circle.fill")
         }
         if summary.failed > 0 {
-            StatusBadge(text: L("groupFailedCount", ["n": summary.failed]), tone: .failure, systemImage: "exclamationmark.triangle.fill")
+            StatusBadge(text: L("groupFailedCount", ["n": summary.failed]), tone: .failure, systemImage: FluxSymbol.warning)
         }
     }
 }

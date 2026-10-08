@@ -107,7 +107,7 @@ private final class SelectionResolver {
         let toasts = container.toasts
         if userInitiated, container.store.state.isReadOnly {
             FluxHaptic.error.play()
-            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: "wifi.slash")
+            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: FluxSymbol.offline)
             return
         }
         let id = request.requestId
@@ -278,7 +278,7 @@ private struct BtSelectionView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(L("cancel"), systemImage: "xmark") {
+                    Button(L("cancel"), systemImage: FluxSymbol.close) {
                         if dirty { showDiscard = true } else { resolver.cancel(request, onSuccess: close) }
                     }
                 }
@@ -358,7 +358,7 @@ private struct BtSelectionView: View {
                 } label: {
                     HStack(spacing: 10) {
                         checkbox(state)
-                        Image(systemName: "folder").foregroundStyle(.secondary)
+                        Image(systemName: FluxSymbol.folder).foregroundStyle(.secondary)
                         Text(folder.name).lineLimit(1).truncationMode(.middle)
                         Spacer(minLength: 8)
                         Text(Format.bytes(folder.size).description)
@@ -467,7 +467,7 @@ private struct HlsSelectionView: View {
                                     Text(L("mobileQualityBest")).font(.footnote).foregroundStyle(.secondary)
                                 }
                                 if option.index == selected {
-                                    Image(systemName: "checkmark").foregroundStyle(.tint).fontWeight(.semibold)
+                                    Image(systemName: FluxSymbol.done).foregroundStyle(.tint).fontWeight(.semibold)
                                 }
                             }
                             .contentShape(Rectangle())
@@ -563,7 +563,7 @@ private struct VariantSelectionView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 if option.index == selected {
-                                    Image(systemName: "checkmark").foregroundStyle(.tint).fontWeight(.semibold)
+                                    Image(systemName: FluxSymbol.done).foregroundStyle(.tint).fontWeight(.semibold)
                                 }
                             }
                             .contentShape(Rectangle())
@@ -578,7 +578,7 @@ private struct VariantSelectionView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(L("cancel"), systemImage: "xmark") { resolver.cancel(request, onSuccess: close) }
+                    Button(L("cancel"), systemImage: FluxSymbol.close) { resolver.cancel(request, onSuccess: close) }
                 }
             }
             .toolbar {

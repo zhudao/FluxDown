@@ -130,10 +130,10 @@ extension View {
     ) -> some View {
         swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if enabled {
-                Button(L("accountDeviceDeleteAction"), systemImage: "trash", role: .destructive) {
+                Button(L("accountDeviceDeleteAction"), systemImage: FluxSymbol.delete, role: .destructive) {
                     deleting.wrappedValue = record
                 }
-                Button(L("renameTask"), systemImage: "pencil") {
+                Button(L("renameTask"), systemImage: FluxSymbol.edit) {
                     renaming.wrappedValue = record
                 }
                 .tint(.accentColor)
@@ -141,8 +141,8 @@ extension View {
         }
         .contextMenu {
             if enabled {
-                Button(L("accountDeviceRenameTitle"), systemImage: "pencil") { renaming.wrappedValue = record }
-                Button(L("accountDeviceDeleteAction"), systemImage: "trash", role: .destructive) {
+                Button(L("accountDeviceRenameTitle"), systemImage: FluxSymbol.edit) { renaming.wrappedValue = record }
+                Button(L("accountDeviceDeleteAction"), systemImage: FluxSymbol.delete, role: .destructive) {
                     deleting.wrappedValue = record
                 }
             }

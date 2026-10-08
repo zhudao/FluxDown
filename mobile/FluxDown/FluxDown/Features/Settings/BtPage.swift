@@ -15,15 +15,17 @@ struct BtPage: View {
 
     var body: some View {
         let form = editor.form
+        let btOn = !form.isLoaded || BtSettingsRow.isEnabled(in: form)
+        let shownTab = btOn ? tab : .general
         let readOnly = store.state.isReadOnly
         SettingsPage(title: L("settingsCatBt"), showsReadOnlyBanner: true, showsSyncLegend: true) {
-            BtSettingsTabPicker(title: L("settingsCatBt"), selection: $tab) { L($0.titleKey) }
+            if btOn { BtSettingsTabPicker(title: L("settingsCatBt"), selection: $tab) { L($0.titleKey) } }
             if !form.isLoaded {
                 Section {
                     ProgressView().frame(maxWidth: .infinity, minHeight: 44)
                 }
             } else {
-                switch tab {
+                switch shownTab {
                 case .general: generalSections(form, readOnly: readOnly)
                 case .tracker: trackerSections(form, readOnly: readOnly)
                 case .seeding: seedingSections(form, readOnly: readOnly)
@@ -55,6 +57,7 @@ struct BtPage: View {
         let start = form.int(BtSettingsRow.portStart.configKey, default: 6881)
         let end = form.int(BtSettingsRow.portEnd.configKey, default: 6891)
         Section {
+            if BtSettingsRow.enabled.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.enabled.item) }
             if BtSettingsRow.dht.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.dht.item) }
             if BtSettingsRow.upnp.isVisible(in: form) { ConfigToggleRow(item: BtSettingsRow.upnp.item) }
             if BtSettingsRow.portStart.isVisible(in: form) {
@@ -210,7 +213,7 @@ private struct BtMseModePage: View {
                             SettingsText(title: L(mode.titleKey), detail: L(mode.detailKey))
                             Spacer(minLength: 8)
                             if mode == current {
-                                Image(systemName: "checkmark").fontWeight(.semibold).foregroundStyle(.tint)
+                                Image(systemName: FluxSymbol.done).fontWeight(.semibold).foregroundStyle(.tint)
                             }
                         }
                         .frame(minHeight: 44)

@@ -129,7 +129,7 @@ final class ManifestSelectModel {
         let toasts = container.toasts
         if container.store.state.isReadOnly {
             FluxHaptic.error.play()
-            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: "wifi.slash")
+            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: FluxSymbol.offline)
             return false
         }
         if !container.isLocalHost, !isValidSaveDir(base.saveDir) {
@@ -248,7 +248,7 @@ struct ManifestSelectView: View {
                     .autocorrectionDisabled()
                     .disabled(model.submitting)
                 if !isValidSaveDir(model.base.saveDir) {
-                    Label(L("mobileSaveDirInvalid"), systemImage: "exclamationmark.circle.fill")
+                    Label(L("mobileSaveDirInvalid"), systemImage: FluxSymbol.failure)
                         .font(.footnote)
                         .foregroundStyle(Color.fdStatusFailedText)
                 }
@@ -355,7 +355,7 @@ struct ManifestSelectView: View {
                 model.selection.toggle(item.id)
             } label: {
                 HStack(spacing: 12) {
-                    Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    Image(systemName: on ? FluxSymbol.success : "circle")
                         .font(.title3)
                         .foregroundStyle(on ? AnyShapeStyle(TintShapeStyle()) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
                         .accessibilityHidden(true)
@@ -455,7 +455,7 @@ struct ManifestSelectView: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "ellipsis")
+                    Image(systemName: FluxSymbol.more)
                 }
                 .disabled(!canSubmit)
                 .accessibilityLabel(L("moreActions"))

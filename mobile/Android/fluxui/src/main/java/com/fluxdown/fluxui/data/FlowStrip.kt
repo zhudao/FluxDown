@@ -2,7 +2,6 @@ package com.fluxdown.fluxui.data
 
 import android.view.accessibility.AccessibilityManager
 import androidx.compose.animation.core.CubicBezierEasing
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.animateFloat
@@ -23,15 +22,12 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
-import androidx.compose.ui.graphics.drawscope.clipRect
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -57,7 +53,7 @@ data class FlowSegmentUi(val fraction: Float, val filled: Float, val active: Boo
     }
 }
 
-/** 流带状态（§2.6 / §12.9）。Queued 与 Pending 同为虚线轨道，Preparing 为往返光斑。 */
+/** 流带状态（§2.6 / §12.9）。Queued 与 Pending 同为虚线轨道，Preparing 为纯色短段往返滑动。 */
 enum class FlowStripState { Downloading, Paused, Failed, Completed, Seeding, Queued, Pending, Preparing, Missing }
 
 /** 流带高度档：xs 2 / 默认 4 / lg 8（详情页英雄）。 */
@@ -84,8 +80,7 @@ internal fun rememberDecorativeMotion(): Boolean {
  * 流带：按真实字节区间着色的分段条。
  *
  * - 各段按 [FlowSegmentUi.fraction] 等比分宽，段间 1dp 缝；[segments] 为空时画一条空轨道。
- * - 活跃段：accent→accentHi 渐变 + 白光束（1.7s 线性，第 i 段相位 −140ms×i）+ 14dp 前缘软光；
- *   [FlowStripHeight.Lg] 额外在条外侧泛一层柔光。
+ * - 活跃段：accent 纯色（无渐变、无光束、无辉光）；其余段按状态着 done / paused / fail / seed 纯色。
  * - 单 Canvas 绘制；动画值只在绘制阶段读取，不触发重组。
  * - 无障碍：以整体进度的 `progressBarRangeInfo` 暴露，不逐段朗读；[semanticsLabel] 可选作 stateDescription（如“已下载 42%”）。
  */
@@ -99,11 +94,8 @@ fun FlowStrip(
 ) {
     val colors = FluxTheme.colors
     val decor = rememberDecorativeMotion()
-    val hasActive = state == FlowStripState.Downloading && segments.any { it.active }
     val phase: State<Float>? = when {
         !decor -> null
-        hasActive -> rememberInfiniteTransition(label = "flowBeam")
-            .animateFloat(0f, 1f, infiniteRepeatable(tween(1700, easing = LinearEasing), RepeatMode.Restart), label = "beam")
         state == FlowStripState.Preparing -> rememberInfiniteTransition(label = "flowPrep")
             .animateFloat(0f, 1f, infiniteRepeatable(tween(1400, easing = PrepEasing), RepeatMode.Restart), label = "prep")
         else -> null
@@ -111,7 +103,6 @@ fun FlowStrip(
     val segState = rememberUpdatedState(segments)
     val stateState = rememberUpdatedState(state)
     val progress = remember(segments, state) { overallProgress(segments, state) }
-    val halo = height >= 6.dp
 
     Spacer(
         modifier
@@ -135,24 +126,8 @@ fun FlowStrip(
                     donePaused = colors.flowDone.copy(alpha = colors.flowDone.alpha * 0.62f),
                     fail = colors.flowFail,
                     seed = colors.mint.copy(alpha = 0.82f),
-                    activeBrush = Brush.horizontalGradient(listOf(colors.accent.copy(alpha = 0.8f), colors.accentHi), 0f, 1f),
-                    beamBrush = Brush.horizontalGradient(
-                        listOf(Color.Transparent, Color.White.copy(alpha = 0.7f), Color.Transparent), 0f, 1f,
-                    ),
-                    leadBrush = Brush.horizontalGradient(listOf(colors.accent.copy(alpha = 0.45f), Color.Transparent), 0f, 1f),
-                    prepBrush = Brush.horizontalGradient(
-                        listOf(Color.Transparent, colors.accentHi.copy(alpha = 0.8f), Color.Transparent), 0f, 1f,
-                    ),
-                    leadW = 14.dp.toPx(),
-                    haloPad = if (halo) 6.dp.toPx() else 0f,
-                    haloBrush = if (halo) {
-                        val pad = 6.dp.toPx()
-                        val g = colors.accentGlow.copy(alpha = 0.32f)
-                        Brush.verticalGradient(
-                            0f to Color.Transparent, 0.5f to g, 1f to Color.Transparent,
-                            startY = -pad, endY = h + pad,
-                        )
-                    } else null,
+                    active = colors.accent,
+                    prep = colors.accentHi.copy(alpha = 0.8f),
                 )
                 onDrawBehind { drawFlow(c, segState.value, stateState.value, phase?.value) }
             },
@@ -170,13 +145,8 @@ private class FlowCache(
     val donePaused: Color,
     val fail: Color,
     val seed: Color,
-    val activeBrush: Brush,
-    val beamBrush: Brush,
-    val leadBrush: Brush,
-    val prepBrush: Brush,
-    val leadW: Float,
-    val haloPad: Float,
-    val haloBrush: Brush?,
+    val active: Color,
+    val prep: Color,
 )
 
 private fun overallProgress(segments: List<FlowSegmentUi>, state: FlowStripState): Float {
@@ -189,14 +159,6 @@ private fun overallProgress(segments: List<FlowSegmentUi>, state: FlowStripState
         done += s.fraction * s.filled.coerceIn(0f, 1f)
     }
     return if (total <= 0f) 0f else (done / total).coerceIn(0f, 1f)
-}
-
-/** 单位空间（0..1 宽）渐变经平移 + 缩放铺到 [x, x+w]，避免每帧新建 Brush。 */
-private fun DrawScope.drawUnit(brush: Brush, x: Float, w: Float, h: Float, alpha: Float = 1f) {
-    withTransform({
-        translate(x, 0f)
-        scale(w, 1f, Offset.Zero)
-    }) { drawRect(brush, size = Size(1f, h), alpha = alpha) }
 }
 
 private fun DrawScope.drawFlow(c: FlowCache, segs: List<FlowSegmentUi>, st: FlowStripState, phase: Float?) {
@@ -217,22 +179,6 @@ private fun DrawScope.drawFlow(c: FlowCache, segs: List<FlowSegmentUi>, st: Flow
     if (total <= 0f) total = 1f
     val usable = (c.w - c.gap * (n - 1)).coerceAtLeast(0f)
 
-    // 外侧柔光（仅 Lg）：不参与圆角裁剪
-    if (downloading && c.haloBrush != null) {
-        var hx = 0f
-        for (i in 0 until n) {
-            val s = segs[i]
-            val sw = max(1f, usable * s.fraction / total)
-            if (s.active) {
-                val fw = sw * s.filled.coerceIn(0f, 1f)
-                if (fw > 0f) {
-                    drawRect(c.haloBrush, Offset(hx, -c.haloPad), Size(fw, h + 2 * c.haloPad))
-                }
-            }
-            hx += sw + c.gap
-        }
-    }
-
     clipPath(c.clip) {
         if (n == 0) {
             drawTrack(c, 0f, c.w, queued)
@@ -246,27 +192,14 @@ private fun DrawScope.drawFlow(c: FlowCache, segs: List<FlowSegmentUi>, st: Flow
                 val fw = sw * f
                 val active = downloading && s.active
                 if (fw > 0f) {
-                    if (active) {
-                        drawUnit(c.activeBrush, x, fw, h)
-                        if (phase != null) {
-                            var p = phase + i * (140f / 1700f)
-                            p -= kotlin.math.floor(p)
-                            val dx = -1.2f + 2.4f * p
-                            clipRect(x, 0f, x + fw, h) { drawUnit(c.beamBrush, x + dx * fw, fw, h) }
-                        }
-                    } else {
-                        drawRect(doneColor, Offset(x, 0f), Size(fw, h))
-                    }
-                }
-                if (active && f < 1f) {
-                    clipRect(x + fw, 0f, x + sw, h) { drawUnit(c.leadBrush, x + fw, c.leadW, h, alpha = 0.6f) }
+                    drawRect(if (active) c.active else doneColor, Offset(x, 0f), Size(fw, h))
                 }
                 x += sw + c.gap
             }
         }
         if (st == FlowStripState.Preparing && phase != null) {
             val bw = c.w * 0.4f
-            drawUnit(c.prepBrush, -bw + phase * c.w * 1.44f, bw, h)
+            drawRect(c.prep, Offset(-bw + phase * c.w * 1.44f, 0f), Size(bw, h))
         }
     }
 }

@@ -34,7 +34,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.input.pointer.positionChange
@@ -285,24 +284,22 @@ fun SwipeReveal(
 
 /** [accent] = 强调色实心面（[fluxAccentSurface]，忽略 [bg] / [border]）。 */
 @Immutable
-private class SwipeToneStyle(val bg: Brush, val solid: Color, val border: Color, val fg: Color, val accent: Boolean = false)
+private class SwipeToneStyle(val bg: Color, val border: Color, val fg: Color, val accent: Boolean = false)
 
 @Composable
 private fun rememberSwipeTones(): Map<FluxSwipeTone, SwipeToneStyle> {
     val c = FluxTheme.colors
     return remember(c) {
         mapOf(
-            FluxSwipeTone.Neutral to SwipeToneStyle(Brush.verticalGradient(listOf(c.glass3, c.glass3)), c.glass3, c.hairlineStrong, c.ink),
-            FluxSwipeTone.Accent to SwipeToneStyle(
-                Brush.verticalGradient(listOf(c.accentFillA, c.accentFillB)), c.accent, Color.Transparent, c.onAccent, accent = true,
-            ),
+            FluxSwipeTone.Neutral to SwipeToneStyle(c.glass3, c.hairlineStrong, c.ink),
+            FluxSwipeTone.Accent to SwipeToneStyle(c.accentFill, Color.Transparent, c.onAccent, accent = true),
             FluxSwipeTone.Danger to SwipeToneStyle(
-                Brush.verticalGradient(listOf(c.coral.copy(alpha = 0.22f).compositeOver(c.glass2), c.coral.copy(alpha = 0.22f).compositeOver(c.glass2))),
-                c.coral, c.coral.copy(alpha = 0.40f), c.coralText,
+                c.coral.copy(alpha = 0.22f).compositeOver(c.glass2),
+                c.coral.copy(alpha = 0.40f), c.coralText,
             ),
             FluxSwipeTone.Warn to SwipeToneStyle(
-                Brush.verticalGradient(listOf(c.amber.copy(alpha = 0.20f).compositeOver(c.glass2), c.amber.copy(alpha = 0.20f).compositeOver(c.glass2))),
-                c.amber, c.amber.copy(alpha = 0.36f), c.amberText,
+                c.amber.copy(alpha = 0.20f).compositeOver(c.glass2),
+                c.amber.copy(alpha = 0.36f), c.amberText,
             ),
         )
     }

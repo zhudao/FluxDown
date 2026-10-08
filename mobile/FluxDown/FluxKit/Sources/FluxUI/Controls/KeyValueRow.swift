@@ -48,7 +48,7 @@ public struct KeyValueRow: View {
         .frame(minHeight: 44)
         .contextMenu {
             if copyable {
-                Button(copyLabel, systemImage: "doc.on.doc", action: copy)
+                Button(copyLabel, systemImage: FluxSymbol.copy, action: copy)
             }
         }
         .sensoryFeedback(FluxHaptic.success.sensoryFeedback, trigger: copyCount)

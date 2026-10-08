@@ -100,7 +100,7 @@ struct QueueIssueText: View {
         Label {
             Text(text)
         } icon: {
-            Image(systemName: "exclamationmark.circle.fill")
+            Image(systemName: FluxSymbol.failure)
         }
         .font(.footnote)
         .foregroundStyle(Color.fdStatusFailedText)

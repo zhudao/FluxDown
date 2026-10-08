@@ -165,7 +165,7 @@ extension RssFormat {
         case .ignored: return RssItemChip(titleKey: "rssStatusIgnored", systemImage: "eye.slash", tone: .neutral)
         case .filtered: return RssItemChip(titleKey: "rssStatusFiltered", systemImage: "line.3.horizontal.decrease", tone: .neutral)
         case .duplicateEpisode: return RssItemChip(titleKey: "rssStatusDuplicate", systemImage: "square.on.square", tone: .neutral)
-        case .seeded: return RssItemChip(titleKey: "rssStatusHistory", systemImage: "clock.arrow.circlepath", tone: .neutral)
+        case .seeded: return RssItemChip(titleKey: "rssStatusHistory", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90", tone: .neutral)
         case .new, .unknown: return RssItemChip(titleKey: "rssStatusNew", systemImage: "circle.fill", tone: .accent)
         }
     }

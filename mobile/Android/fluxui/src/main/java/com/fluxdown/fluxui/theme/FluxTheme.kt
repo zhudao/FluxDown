@@ -59,11 +59,9 @@ val LocalFluxShapes = staticCompositionLocalOf { FluxShapes() }
 val LocalFluxSpace = staticCompositionLocalOf { FluxSpace() }
 val LocalFluxMotion = staticCompositionLocalOf { FluxMotion(reduce = false) }
 val LocalFluxHaptics = staticCompositionLocalOf<FluxHaptics> { error("FluxTheme missing") }
-val LocalFluxPerf = staticCompositionLocalOf { FluxPerf(FluxGlassMode.Blur, auraMaxFps = 30) }
+val LocalFluxPerf = staticCompositionLocalOf { FluxPerf(FluxGlassMode.Blur) }
 val LocalFluxWindowClass = staticCompositionLocalOf { FluxWindowClass.Compact }
 val LocalFluxGlassMode = compositionLocalOf { FluxGlassMode.Blur }
-/** 氛围光增益 = appearance.aura_intensity / 60 × 明暗增益；0 = 关闭。 */
-val LocalAuraGain = compositionLocalOf { 1f }
 /** 自有内容色（不是 Material 的 LocalContentColor）。 */
 val LocalFluxContentColor = compositionLocalOf { Color.Unspecified }
 val LocalFluxTextStyle = compositionLocalOf { TextStyle.Default }
@@ -91,7 +89,6 @@ object FluxTheme {
 fun FluxTheme(
     dark: Boolean = isSystemInDarkTheme(),
     accent: FluxAccent = FluxAccent.Preset("blue"),
-    auraIntensity: Int = 60,
     imported: ImportedPalette? = null,
     reduceMotion: Boolean = rememberSystemReduceMotion(),
     content: @Composable () -> Unit,
@@ -121,7 +118,6 @@ fun FluxTheme(
     val space = remember(windowClass) {
         FluxSpace(screenMargin = if (windowClass == FluxWindowClass.Compact) 16.dp else 20.dp)
     }
-    val auraGain = (auraIntensity.coerceIn(0, 100) / 60f) * colors.auraModeGain
     val density = LocalDensity.current
 
     if (!view.isInEditMode) {
@@ -145,7 +141,6 @@ fun FluxTheme(
         LocalFluxPerf provides perf,
         LocalFluxWindowClass provides windowClass,
         LocalFluxGlassMode provides perf.glassMode,
-        LocalAuraGain provides auraGain,
         LocalDensity provides Density(density.density, fontScale = 1f),
         LocalIndication provides FluxPressIndication,
         LocalFluxContentColor provides colors.ink,
@@ -175,7 +170,7 @@ fun rememberSystemReduceMotion(): Boolean {
     }
 }
 
-/** 省电 / 过热（≥ SEVERE）/ 低内存 → 玻璃降级实色、氛围光降帧（§5.6）。 */
+/** 省电 / 过热（≥ SEVERE）/ 低内存 → 玻璃降级实色（§5.6）。 */
 @Composable
 fun rememberFluxPerf(ctx: Context): FluxPerf {
     val pm = remember(ctx) { ctx.getSystemService(PowerManager::class.java) }
@@ -199,6 +194,6 @@ fun rememberFluxPerf(ctx: Context): FluxPerf {
     }
     val degraded = powerSave || thermal >= PowerManager.THERMAL_STATUS_SEVERE || am?.isLowRamDevice == true
     return remember(degraded) {
-        if (degraded) FluxPerf(FluxGlassMode.Solid, auraMaxFps = 0) else FluxPerf(FluxGlassMode.Blur, auraMaxFps = 30)
+        if (degraded) FluxPerf(FluxGlassMode.Solid) else FluxPerf(FluxGlassMode.Blur)
     }
 }

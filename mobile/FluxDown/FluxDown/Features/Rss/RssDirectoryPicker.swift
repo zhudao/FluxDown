@@ -24,7 +24,7 @@ struct RssDirectoryPicker: View {
         List {
             if let failure {
                 Section {
-                    Label(failure, systemImage: "exclamationmark.triangle.fill")
+                    Label(failure, systemImage: FluxSymbol.warning)
                         .font(.footnote)
                         .foregroundStyle(Color.fdStatusFailedText)
                     Button(L("mobileRetry")) { load(listing?.path ?? initialPath) }
@@ -51,7 +51,7 @@ struct RssDirectoryPicker: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     } else if listing.dirs.isEmpty {
-                        Label(L("webFsEmpty"), systemImage: "folder")
+                        Label(L("webFsEmpty"), systemImage: FluxSymbol.folder)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -60,7 +60,7 @@ struct RssDirectoryPicker: View {
                             load(dir.path)
                         } label: {
                             HStack {
-                                Label(dir.name, systemImage: "folder")
+                                Label(dir.name, systemImage: FluxSymbol.folder)
                                 Spacer(minLength: 8)
                                 Image(systemName: "chevron.right")
                                     .font(.footnote.weight(.semibold))
@@ -84,7 +84,7 @@ struct RssDirectoryPicker: View {
         .toolbar {
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItem(placement: .bottomBar) {
-                Button(L("mobileRssUseFolder"), systemImage: "checkmark") {
+                Button(L("mobileRssUseFolder"), systemImage: FluxSymbol.done) {
                     guard let listing else { return }
                     onSelect(listing.path)
                     dismiss()

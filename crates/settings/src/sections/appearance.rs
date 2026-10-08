@@ -75,7 +75,8 @@ pub(crate) fn page(ctx: &SectionContext, _cx: &mut App) -> SettingsPage {
                     color_scheme_field(ctx),
                 )
                 .vertical(),
-            ),
+            )
+            .row(super::icon_pack::item(ctx)),
         SettingsSection::new()
             .title(ctx.t("settingsGroupInterface"))
             .row(ctx.item("uiScale", Some("uiScaleDesc"), ui_scale_field(ctx)))

@@ -94,8 +94,9 @@ pub use rpc::{
     validate_first_request,
 };
 pub use settings::{
-    CUSTOM_THEMES_KEY, MAX_CUSTOM_THEME_ID_LEN, MAX_SYNC_VALUE_BYTES, SYNC_SETTING_SPECS,
-    SettingOwner, SettingSpec, SettingValueKind, custom_theme_fits_sync, custom_theme_id,
-    custom_theme_key, daemon_config_to_value, is_custom_theme_id, setting_spec, setting_value_kind,
-    sync_scope_key, validate_value, value_to_daemon_config,
+    CUSTOM_THEMES_KEY, FILE_ICON_PACK_KEY, MAX_CUSTOM_THEME_ID_LEN, MAX_SYNC_VALUE_BYTES,
+    SYNC_SETTING_SPECS, SettingOwner, SettingSpec, SettingValueKind, custom_theme_fits_sync,
+    custom_theme_id, custom_theme_key, daemon_config_to_value, is_custom_theme_id,
+    is_icon_pack_ref, setting_spec, setting_value_kind, sync_scope_key, validate_value,
+    value_to_daemon_config,
 };

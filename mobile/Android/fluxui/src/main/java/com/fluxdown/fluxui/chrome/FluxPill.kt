@@ -17,8 +17,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
@@ -29,7 +27,6 @@ import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.fluxdown.fluxui.icons.FluxIcon
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
@@ -38,7 +35,7 @@ import com.fluxdown.fluxui.theme.fluxPressable
  * 描边胶囊（01 §12.12）：分类 / 过滤 / 范围徽章。
  *
  * 尺寸：高 34（[small] 28）、水平内边距 14（11）、全圆；默认描边 `hairlineStrong` .5dp、字 `inkMuted`；
- * [selected] = `ink` 字 + accentLo 底 + accent 55% 描边 + `0 0 16 -6 accentGlow` 辉光；[solid] = `glass2` 底、无描边。
+ * [selected] = `accentHi` 字 + accentLo 纯色底 + 1dp accent 60% 描边（扁平，无辉光）；[solid] = `glass2` 底、无描边。
  * 内容顺序：[icon]（范围徽章前缀）· [dot]（6dp 分类色点）· 文字 · [count]（mono，inkFaint）· [trailingIcon]（如 ✕）。
  * 无文字、无计数的纯图标胶囊（如分类行尾的“＋”）为 34dp 方形，需提供 [contentDescription]。
  *
@@ -72,7 +69,7 @@ fun FluxPill(
         if (small) type.weight(type.micro, 500).copy(letterSpacing = 0.02.em) else type.weight(type.sm, 500)
     }
     val countStyle = remember(type) { type.weight(type.monoS, 500, mono = true) }
-    val textColor = lerp(c.inkMuted, c.ink, t)
+    val textColor = lerp(c.inkMuted, c.accentHi, t)
     val iconSize = if (small) 12.dp else 14.dp
 
     Box(
@@ -85,17 +82,6 @@ fun FluxPill(
             },
         contentAlignment = Alignment.Center,
     ) {
-        if (!solid) {
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .graphicsLayer {
-                        alpha = t
-                        compositingStrategy = CompositingStrategy.ModulateAlpha
-                    }
-                    .fluxGlow(c.accentGlow, 8.dp, shape, spread = (-6).dp),
-            )
-        }
         Row(
             Modifier
                 .height(h)
@@ -106,7 +92,7 @@ fun FluxPill(
                     } else {
                         Modifier
                             .background(lerp(Color.Transparent, c.accentLo, t), shape)
-                            .border(0.5.dp, lerp(c.hairlineStrong, c.accent.copy(alpha = 0.55f), t), shape)
+                            .border((0.5f + 0.5f * t).dp, lerp(c.hairlineStrong, c.accent.copy(alpha = 0.6f), t), shape)
                     },
                 )
                 .then(if (iconOnly) Modifier else Modifier.padding(horizontal = if (small) 11.dp else 14.dp)),

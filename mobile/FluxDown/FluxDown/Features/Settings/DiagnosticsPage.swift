@@ -47,13 +47,13 @@ struct DiagnosticsPage: View {
             .disabled(model.isBusy && !model.isRunning)
             .settingsRow("diagnostics.run")
             if model.hasRun {
-                SettingsActionRow(title: L("doctorCopyReport"), systemImage: "doc.on.doc") {
+                SettingsActionRow(title: L("doctorCopyReport"), systemImage: FluxSymbol.copy) {
                     UIPasteboard.general.string = model.reportText(container: container)
                     container.toasts.show(text: L("doctorCopied"), tone: .success)
                 }
                 .settingsRow("diagnostics.copy")
                 ShareLink(item: model.reportText(container: container)) {
-                    Label(L("mobileDiagShareReport"), systemImage: "square.and.arrow.up")
+                    Label(L("mobileDiagShareReport"), systemImage: FluxSymbol.share)
                         .frame(minHeight: 44, alignment: .leading)
                 }
                 .settingsRow("diagnostics.share")
@@ -151,7 +151,7 @@ struct DiagnosticsPage: View {
                 Text(L("mobileDiagHostNotRun")).foregroundStyle(.secondary)
             }
             if !live {
-                SettingsStatusLine(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash")
+                SettingsStatusLine(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline)
             }
         } header: {
             Text(L("mobileDiagSectionHost", ["name": container.host.displayName]))
@@ -228,16 +228,10 @@ private struct DiagnosticsCheckRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    titleBlock
-                    Spacer(minLength: 8)
-                    DiagnosticsLevelBadge(level: level)
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    titleBlock
-                    DiagnosticsLevelBadge(level: level)
-                }
+            LeadingTrailingRow(alignment: .firstTextBaseline, spacing: 8) {
+                titleBlock
+            } trailing: {
+                DiagnosticsLevelBadge(level: level)
             }
             if !detail.isEmpty {
                 Text(detail)

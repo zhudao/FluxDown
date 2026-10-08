@@ -36,14 +36,16 @@ struct DownloadsListScreen: View {
     var body: some View {
         taskList
             .navigationTitle(model.isSelecting ? L("selectedCount", ["n": model.selection.count]) : L("mobileNavDownloads"))
-            .navigationSubtitle(model.isSelecting ? "" : subtitle)
-            .navigationBarTitleDisplayMode(model.isSelecting ? .inline : .large)
+            .navigationSubtitle(model.isSelecting ? "" : hostTitleSubtitle(container.host, status: linkStatus))
+            // 大字标题与工具栏同处一行（不再单独占一行大标题区）；多选时退回普通内联标题。
+            .toolbarTitleDisplayMode(model.isSelecting ? .inline : .inlineLarge)
             .toolbarTitleMenu {
                 if !model.isSelecting { hostMenu }
             }
+            // 搜索框默认收起，下拉列表时出现（同「邮件」「备忘录」）；placement 必须恒定，动态切换会在输入中丢焦点。
             .searchable(
                 text: $searchText,
-                placement: .navigationBarDrawer(displayMode: .always),
+                placement: .navigationBarDrawer(displayMode: .automatic),
                 prompt: L("searchTasksPlaceholder")
             )
             .toolbar { toolbarContent }
@@ -263,12 +265,12 @@ struct DownloadsListScreen: View {
         let commands = GroupCommands(actions: actions, toasts: toasts)
         Button(L("detail"), systemImage: "info.circle") { onOpenGroup(groupId) }
         Divider()
-        Button(L("groupPauseAll"), systemImage: "pause.fill") { commands.pauseAll(groupId) }
+        Button(L("groupPauseAll"), systemImage: FluxSymbol.pause) { commands.pauseAll(groupId) }
             .disabled(readOnly)
-        Button(L("groupResumeAll"), systemImage: "play.fill") { commands.resumeAll(groupId) }
+        Button(L("groupResumeAll"), systemImage: FluxSymbol.resume) { commands.resumeAll(groupId) }
             .disabled(readOnly)
         Divider()
-        Button(L("groupDelete"), systemImage: "trash", role: .destructive) {
+        Button(L("groupDelete"), systemImage: FluxSymbol.delete, role: .destructive) {
             pendingGroupDelete = GroupDeleteRequest(groupId: groupId, name: name, withFiles: false)
         }
         .disabled(readOnly)
@@ -292,7 +294,7 @@ struct DownloadsListScreen: View {
                     Banner(
                         text: L("localServiceDisconnected"),
                         tone: .warning,
-                        systemImage: "wifi.slash",
+                        systemImage: FluxSymbol.offline,
                         slim: true,
                         action: chrome.link == .failed ? BannerAction(title: L("mobileRetry")) { switchHost(container.host, force: true) } : nil
                     )
@@ -327,13 +329,8 @@ struct DownloadsListScreen: View {
     @ViewBuilder
     private var emptyState: some View {
         if model.list.taskTotal == 0 {
-            ContentUnavailableView {
-                Label(L("emptyTitle"), systemImage: "arrow.down.circle")
-            } description: {
-                Text(L("iosEmptyDownloadsSub"))
-            } actions: {
-                Button(L("newDownload"), systemImage: "plus") { container.router.openNewDownload() }
-                    .buttonStyle(.borderedProminent)
+            EmptyStateView(L("emptyTitle"), message: L("iosEmptyDownloadsSub"), systemImage: FluxSymbol.downloads) {
+                Button(L("newDownload"), systemImage: FluxSymbol.newDownload) { container.router.openNewDownload() }
             }
         } else if !model.filter.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             ContentUnavailableView.search(text: model.filter.query)
@@ -351,16 +348,17 @@ struct DownloadsListScreen: View {
 
     // MARK: 工具栏
 
-    private var subtitle: String {
-        let name = container.host.displayName
-        return switch model.chrome.link {
-        case .live: name
-        case .connecting: name + " · " + L("mobileHostConnConnecting")
-        case .stale: name + " · " + L("mobileHostConnStale")
-        case .failed: name + " · " + L("mobileHostConnFailed")
+    /// 当前主机的连接状态文案（在线 = nil）：标题副行与标题菜单共用。
+    private var linkStatus: String? {
+        switch model.chrome.link {
+        case .live: nil
+        case .connecting: L("mobileHostConnConnecting")
+        case .stale: L("mobileHostConnStale")
+        case .failed: L("mobileHostConnFailed")
         }
     }
 
+    /// 顶栏只放两组：全局搜索 ·（iOS 26 回退的新建 +）视图菜单。「选择」在视图菜单里，也可长按行进入，不单独占按钮。
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if !model.isSelecting {
@@ -368,10 +366,8 @@ struct DownloadsListScreen: View {
             ToolbarSpacer(.fixed, placement: .primaryAction)
             ToolbarItemGroup(placement: .primaryAction) {
                 if !hasProminentNewTab {
-                    Button(L("newDownload"), systemImage: "plus") { container.router.openNewDownload() }
+                    Button(L("newDownload"), systemImage: FluxSymbol.newDownload) { container.router.openNewDownload() }
                 }
-                Button(L("mobileMenuSelect"), systemImage: "checklist") { model.beginSelecting() }
-                    .disabled(model.list.visibleIds.isEmpty)
                 DownloadsViewMenu(prefs: prefs, model: model, onClearFinished: confirmClearFinished)
             }
         }
@@ -386,18 +382,18 @@ struct DownloadsListScreen: View {
             }
             ToolbarItemGroup(placement: .bottomBar) {
                 let caps = model.selectionCaps
-                Button(L("resume"), systemImage: "play.fill") { actions.resume(caps.resumeIds) }
+                Button(L("resume"), systemImage: FluxSymbol.resume) { actions.resume(caps.resumeIds) }
                     .disabled(!caps.canResume)
-                Button(L("pause"), systemImage: "pause.fill") { actions.pause(caps.pauseIds) }
+                Button(L("pause"), systemImage: FluxSymbol.pause) { actions.pause(caps.pauseIds) }
                     .disabled(!caps.canPause)
-                Button(L("moveToQueueAction"), systemImage: "list.number") { actions.moveToQueue(caps.moveIds) }
+                Button(L("moveToQueueAction"), systemImage: FluxSymbol.queue) { actions.moveToQueue(caps.moveIds) }
                     .disabled(!caps.canMove)
-                Button(L("copyUrl"), systemImage: "doc.on.doc") { copyLinks(model.selectedTasks()) }
+                Button(L("copyUrl"), systemImage: FluxSymbol.copy) { copyLinks(model.selectedTasks()) }
                     .disabled(model.selection.isEmpty)
             }
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItem(placement: .bottomBar) {
-                Button(L("delete"), systemImage: "trash", role: .destructive) {
+                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) {
                     actions.confirmDelete(model.selectedTasks()) { model.isSelecting = false }
                 }
                 .disabled(model.selection.isEmpty)
@@ -407,49 +403,24 @@ struct DownloadsListScreen: View {
 
     // MARK: 主机切换（toolbarTitleMenu）
 
-    @ViewBuilder
     private var hostMenu: some View {
-        Picker(L("mobileHostSwitchTitle"), selection: Binding(
-            get: { container.host.id },
-            set: { id in
-                if let ref = container.hosts.first(where: { $0.id == id }) { switchHost(ref) }
-            }
-        )) {
-            ForEach(container.hosts) { ref in
-                Label(hostMenuTitle(ref), systemImage: ref.isLocal ? "iphone" : "server.rack").tag(ref.id)
-            }
-        }
-        .pickerStyle(.inline)
-        .disabled(container.isSwitching)
-        Divider()
-        Button(L("mobileHostAdd"), systemImage: "plus") { container.router.sheet = .addHost }
-    }
-
-    private func hostMenuTitle(_ ref: HostRef) -> String {
-        guard ref.id == container.host.id else { return ref.displayName }
-        let status: String? = switch model.chrome.link {
-        case .live: nil
-        case .connecting: L("mobileHostConnConnecting")
-        case .stale: L("mobileHostConnStale")
-        case .failed: L("mobileHostConnFailed")
-        }
-        return status.map { ref.displayName + " · " + $0 } ?? ref.displayName
+        HostTitleMenuItems(status: linkStatus)
     }
 
     /// 切换主机（toast：切换中 / 已切换 / 失败原因）；`force` = 重连当前主机。
     private func switchHost(_ ref: HostRef, force: Bool = false) {
         guard !container.isSwitching, force || ref.id != container.host.id else { return }
-        let name = ref.displayName
-        toasts.show(text: L("mobileHostSwitching", ["name": name]), tone: .info, systemImage: "server.rack")
+        let name = ref.localizedName
+        toasts.show(text: L("mobileHostSwitching", ["name": name]), tone: .info, systemImage: FluxSymbol.remoteHost)
         Task {
             switch await container.switchHost(ref) {
             case .success:
-                toasts.show(text: L("mobileHostSwitched", ["name": name]), tone: .success, systemImage: "checkmark")
+                toasts.show(text: L("mobileHostSwitched", ["name": name]), tone: .success, systemImage: FluxSymbol.done)
             case let .failure(error):
                 toasts.show(
                     text: L("mobileHostSwitchFailed", ["name": name, "reason": ErrorText.describe(error)]),
                     tone: .error,
-                    systemImage: "wifi.slash"
+                    systemImage: FluxSymbol.offline
                 )
             }
         }
@@ -460,7 +431,7 @@ struct DownloadsListScreen: View {
     /// `daemon.plugin.ignoreRetry`：跳过插件，用原始链接重试（仅插件失败任务，已由菜单条件保证）。
     private func ignorePluginRetry(_ taskId: String) {
         actions.run(onSuccess: { [toasts] in
-            toasts.show(text: L("taskIgnorePluginRetryDone"), tone: .success, systemImage: "checkmark")
+            toasts.show(text: L("taskIgnorePluginRetryDone"), tone: .success, systemImage: FluxSymbol.done)
         }) { session throws(HostError) in
             try await session.callVoid(HostMethod.daemonPluginIgnoreRetry, params: TaskIdParams(taskId: taskId))
         }
@@ -478,7 +449,7 @@ struct DownloadsListScreen: View {
     private func copyLinks(_ tasks: [DownloadTask]) {
         guard !tasks.isEmpty else { return }
         UIPasteboard.general.string = tasks.map(\.shareUrl).joined(separator: "\n")
-        toasts.show(text: L("urlCopied"), tone: .success, systemImage: "doc.on.doc")
+        toasts.show(text: L("urlCopied"), tone: .success, systemImage: FluxSymbol.copy)
     }
 
     /// 清除已完成任务：确认 → `deleteMany(deleteFiles: false)`（只移除记录，保留文件）。
@@ -495,7 +466,7 @@ struct DownloadsListScreen: View {
 
     private func clearFinished(_ ids: [String]) {
         actions.run(onSuccess: { [toasts] in
-            toasts.show(text: L("mobileToastClearedFinished", ["n": ids.count]), tone: .success, systemImage: "trash")
+            toasts.show(text: L("mobileToastClearedFinished", ["n": ids.count]), tone: .success, systemImage: FluxSymbol.delete)
         }) { session throws(HostError) in
             try await session.deleteMany(ids, deleteFiles: false)
         }

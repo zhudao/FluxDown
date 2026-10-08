@@ -161,7 +161,7 @@ struct OriginIdSheet: View {
             }
         case .available:
             if let parsed = editor.parsed {
-                Label("#\(parsed)", systemImage: "checkmark.circle.fill")
+                Label("#\(parsed)", systemImage: FluxSymbol.success)
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(Color.fdStatusSeedingText)
             }

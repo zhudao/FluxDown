@@ -3,13 +3,13 @@ import Foundation
 
 /// 设备列表的纯展示规则（排序 / 平台图标与名称 / 副标题），同 Android `DevicesCommon.kt` + `DevicesScreen.kt`。
 enum DevicePresentation {
-    /// 平台 → SF Symbol。
+    /// 平台 → SF Symbol。其它设备一律用通用图形（`smartphone`）：`iphone` 等 Apple 产品符号只能指本机。
     static func symbol(platform: String?) -> String {
         switch platform?.lowercased() {
-        case "android", "ios": "iphone"
+        case "android", "ios": "smartphone"
         case "macos": "laptopcomputer"
         case "windows": "desktopcomputer"
-        case "linux": "terminal"
+        case "linux": "apple.terminal"
         case "web": "globe"
         default: "network"
         }

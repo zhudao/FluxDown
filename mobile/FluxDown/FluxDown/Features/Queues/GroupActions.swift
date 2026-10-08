@@ -34,7 +34,7 @@ struct GroupCommands {
     /// 删除任务组；成功后 Toast 并回调（详情页据此返回）。
     func delete(_ request: GroupDeleteRequest, onDone: (@MainActor () -> Void)? = nil) {
         actions.run(onSuccess: { [toasts] in
-            toasts.show(text: L("mobileGroupDeleted"), tone: .success, systemImage: "trash")
+            toasts.show(text: L("mobileGroupDeleted"), tone: .success, systemImage: FluxSymbol.delete)
             onDone?()
         }) { session throws(HostError) in
             try await session.callVoid(
@@ -57,7 +57,7 @@ struct GroupCommands {
         guard !group.sourceUrl.isEmpty else { return }
         UIPasteboard.general.string = group.sourceUrl
         FluxHaptic.success.play()
-        toasts.show(text: L("urlCopied"), tone: .success, systemImage: "doc.on.doc")
+        toasts.show(text: L("urlCopied"), tone: .success, systemImage: FluxSymbol.copy)
     }
 }
 
@@ -161,17 +161,17 @@ private struct TaskRowSwipeActions: ViewModifier {
     private var leading: some View {
         switch item.task.status {
         case .downloading, .pending:
-            Button(L("pause"), systemImage: "pause.fill") { actions.pause([item.id]) }
+            Button(L("pause"), systemImage: FluxSymbol.pause) { actions.pause([item.id]) }
                 .tint(Color.fdStatusWarning)
-            Button(item.boosted ? L("cancelBoost") : L("boostDownload"), systemImage: "bolt.fill") {
+            Button(item.boosted ? L("cancelBoost") : L("boostDownload"), systemImage: FluxSymbol.boost) {
                 actions.boost(item.task, boosted: item.boosted)
             }
             .tint(Color.fdBoost)
         case .paused:
-            Button(L("resume"), systemImage: "play.fill") { actions.resume([item.id]) }
+            Button(L("resume"), systemImage: FluxSymbol.resume) { actions.resume([item.id]) }
                 .tint(accent.color)
         case .failed:
-            Button(L("mobileRetry"), systemImage: "arrow.clockwise") { actions.resume([item.id]) }
+            Button(L("mobileRetry"), systemImage: FluxSymbol.retry) { actions.resume([item.id]) }
                 .tint(accent.color)
         case .preparing, .completed, .unknown:
             EmptyView()
@@ -181,9 +181,9 @@ private struct TaskRowSwipeActions: ViewModifier {
     @ViewBuilder
     private var trailing: some View {
         // 删除 → 对话框（保留文件 / 连同文件）；全滑同样走对话框，不会无确认删除。
-        Button(L("delete"), systemImage: "trash") { actions.confirmDelete([item.task]) }
+        Button(L("delete"), systemImage: FluxSymbol.delete) { actions.confirmDelete([item.task]) }
             .tint(Color.fdStatusFailed)
-        Button(L("mobileSwipeCopyLink"), systemImage: "doc.on.doc") { actions.copyLink(item.task) }
+        Button(L("mobileSwipeCopyLink"), systemImage: FluxSymbol.copy) { actions.copyLink(item.task) }
             .tint(Color.fdStatusPaused)
     }
 }

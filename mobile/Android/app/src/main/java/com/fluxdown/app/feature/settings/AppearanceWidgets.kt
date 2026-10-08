@@ -1,13 +1,7 @@
 package com.fluxdown.app.feature.settings
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
@@ -76,7 +70,6 @@ import com.fluxdown.fluxui.data.FlowStripState
 import com.fluxdown.fluxui.data.fileTileIcon
 import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FileCategory
 import com.fluxdown.fluxui.theme.FluxAccent
 import com.fluxdown.fluxui.theme.FluxColors
@@ -300,7 +293,6 @@ private fun AccentDot(
                 Modifier
                     .size(38.dp)
                     .scale(scale)
-                    .then(if (selected) Modifier.fluxGlow(swatch.copy(alpha = 0.7f), 10.dp, CircleShape) else Modifier)
                     .then(
                         if (brush != null) Modifier.background(brush, CircleShape) else Modifier.background(swatch, CircleShape),
                     ),
@@ -460,58 +452,14 @@ private fun ChannelSlider(
     }
 }
 
-// ───────────────────────────── 氛围光预览 ─────────────────────────────
-
-/** 氛围光预览条：强调色径向辉光在条内缓慢漂移（9s 往返；减弱动效时静止），亮度 ∝ [intensity]。 */
-@Composable
-internal fun AuraPreview(intensity: Int, modifier: Modifier = Modifier) {
-    val c = FluxTheme.colors
-    val reduce = FluxTheme.motion.reduce
-    val drift = if (reduce) {
-        null
-    } else {
-        rememberInfiniteTransition(label = "aura-preview").animateFloat(
-            initialValue = 0f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(9_000, easing = LinearEasing), RepeatMode.Reverse),
-            label = "aura-drift",
-        )
-    }
-    val shape = RoundedCornerShape(16.dp)
-    Box(
-        modifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .clip(shape)
-            .background(c.canvas, shape)
-            .drawBehind {
-                val k = (intensity / 100f).coerceIn(0f, 1f)
-                if (k > 0f) {
-                    val t = drift?.value ?: 0.5f
-                    val center = Offset(size.width * (0.2f + 0.6f * t), size.height * (0.35f + 0.3f * (1f - t)))
-                    val glow = c.accentGlow
-                    drawRect(
-                        Brush.radialGradient(
-                            colors = listOf(glow.copy(alpha = (glow.alpha * (0.4f + 0.9f * k)).coerceAtMost(1f)), Color.Transparent),
-                            center = center,
-                            radius = size.width * 0.55f,
-                        ),
-                    )
-                }
-            }
-            .border(0.5.dp, c.hairline, shape)
-            .clearAndSetSemantics { },
-    )
-}
-
 // ───────────────────────────── 主题预览（简化 MiniApp） ─────────────────────────────
 
 /**
- * 外观预览：真实组件（FlowStrip / FileTile）用当前强调色与氛围光强度绘制的迷你界面。
+ * 外观预览：真实组件（FlowStrip / FileTile）用当前强调色绘制的纯色迷你界面。
  * 数值为装饰用示意，读屏只读“预览”。
  */
 @Composable
-internal fun ThemePreview(auraIntensity: () -> Int, modifier: Modifier = Modifier) {
+internal fun ThemePreview(modifier: Modifier = Modifier) {
     val c = FluxTheme.colors
     val t = FluxTheme.type
     val shape = FluxTheme.shapes.card
@@ -522,19 +470,6 @@ internal fun ThemePreview(auraIntensity: () -> Int, modifier: Modifier = Modifie
             .fillMaxWidth()
             .clip(shape)
             .background(c.canvas, shape)
-            .drawBehind {
-                val k = (auraIntensity() / 100f).coerceIn(0f, 1f)
-                if (k > 0f) {
-                    val glow = c.accentGlow
-                    drawRect(
-                        Brush.radialGradient(
-                            colors = listOf(glow.copy(alpha = (glow.alpha * (0.4f + 0.9f * k)).coerceAtMost(1f)), Color.Transparent),
-                            center = Offset(size.width * 0.85f, 0f),
-                            radius = size.width * 0.75f,
-                        ),
-                    )
-                }
-            }
             .border(0.5.dp, c.hairline, shape)
             .clearAndSetSemantics { contentDescription = preview }
             .padding(16.dp),
@@ -553,7 +488,6 @@ internal fun ThemePreview(auraIntensity: () -> Int, modifier: Modifier = Modifie
                     val y = size.height * (0.55f - 0.28f * sin(phase * 2f * PI.toFloat() * 1.5f) - 0.12f * sin(phase * 2f * PI.toFloat() * 4f))
                     if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 }
-                drawPath(path, c.accentGlow, style = Stroke(5.dp.toPx()))
                 drawPath(path, c.accentHi, style = Stroke(1.5.dp.toPx()))
             }
             PreviewRow(FileCategory.Video, 0.62f)

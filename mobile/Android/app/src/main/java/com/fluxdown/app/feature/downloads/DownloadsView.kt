@@ -20,6 +20,8 @@ import com.fluxdown.app.AppContainer
 import com.fluxdown.app.data.ViewPrefs
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
+import com.fluxdown.core.protocol.FilterBarVisibility
+import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
 import com.fluxdown.core.model.TaskStatus
@@ -79,6 +81,10 @@ class DownloadsView internal constructor(private val container: AppContainer) {
         private set
 
     var facets by mutableStateOf(Facets.Initial)
+        private set
+
+    /** 筛选区各部分的显隐（云同步偏好 `ui.show_sidebar_status|queues|category`，通用设置「下载页显示」）。 */
+    var filterVisibility by mutableStateOf(FilterBarVisibility())
         private set
 
     /** 断连宽限后只读（Stale / Failed）。 */
@@ -148,6 +154,15 @@ class DownloadsView internal constructor(private val container: AppContainer) {
                     live = it.live
                     connecting = it.connecting
                 }
+        }
+        launch {
+            // 被隐藏的部分对应的筛选必须复位，否则列表会被一个看不见的筛选卡住。
+            container.store.state.map { FilterBarVisibility.of(it.preferences) }.distinctUntilChanged().collect { v ->
+                filterVisibility = v
+                if (!v.status && filter.folder != StatusFolder.All) setFolder(StatusFolder.All)
+                if (!v.queues && filter.queueId != null) setQueue(null)
+                if (!v.categories && filter.categoryId != null) setCategory(null)
+            }
         }
         launch {
             container.store.state.map { it.speedHistory }.distinctUntilChanged().collect { wave.update(it) }

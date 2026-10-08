@@ -7,8 +7,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.fluxdown.core.capture.ExternalDownload
 import com.fluxdown.core.host.CreateTaskRequest
-import com.fluxdown.core.model.Queue
 import com.fluxdown.core.model.TaskProtocol
 import com.fluxdown.core.store.HostState
 
@@ -140,6 +140,39 @@ internal class NewDownloadState(
         urlText = if (urlText.isBlank()) t else urlText.trimEnd() + "\n" + t
     }
 
+    /**
+     * 外部唤起（浏览器外部下载器 / 分享 / 协议链接）带来的请求上下文，按链接归属（同 Flutter
+     * `_requests`）：首条（[primaryUrl]）预填进面板，随面板提交；之后追加的链接沿用各自的
+     * Cookie / 来源页 / 请求头，面板对应项不覆盖它们。
+     */
+    private val external = HashMap<String, ExternalDownload>()
+    private var primaryUrl: String? = null
+
+    /** 收下一条外部请求：链接追加进文本框（已存在则忽略）；首条同时预填 Cookie / 来源页 / UA / 请求头。 */
+    fun addExternal(request: ExternalDownload) {
+        if (request.url.isEmpty() || external.containsKey(request.url)) return
+        external[request.url] = request
+        if (primaryUrl == null) {
+            primaryUrl = request.url
+            val adv = advanced
+            adv.cookie = request.cookies
+            adv.referrer = request.referrer
+            for ((key, value) in request.headers) {
+                if (key.equals(USER_AGENT, ignoreCase = true)) {
+                    adv.userAgent = value
+                    adv.uaPreset = detectUaPreset(value)
+                } else {
+                    adv.addHeader()
+                    adv.headers.last().let {
+                        it.key = key
+                        it.value = value
+                    }
+                }
+            }
+        }
+        urlText = appendEntries(urlText, listOf(UrlEntry(request.url))).first
+    }
+
     /** 为每条链接构造请求。单条：重命名优先于 `out=`、面板校验值优先于 `checksum=`、附带 HTTP 认证。 */
     fun buildRequests(startPaused: Boolean, queue: String, manualProxy: String): List<CreateTaskRequest> {
         val list = entries
@@ -150,20 +183,29 @@ internal class NewDownloadState(
         val panelChecksum = if (single) checksumSpec(adv.checksumAlgo, adv.checksumHex) else ""
         return list.map { e ->
             val authOk = single && singleHttp
+            // 追加进来的外部链接带自己的请求上下文；首条与手输链接用面板值
+            val own = external[e.url]?.takeIf { e.url != primaryUrl }
+            val userAgent = adv.userAgent.trim()
             CreateTaskRequest(
                 url = e.url,
-                fileName = if (single && rename.isNotBlank()) rename.trim() else e.fileName,
+                fileName = when {
+                    single && rename.isNotBlank() -> rename.trim()
+                    e.fileName.isNotEmpty() -> e.fileName
+                    else -> external[e.url]?.fileName.orEmpty()
+                },
                 saveDir = saveDir.trim(),
                 segments = if (threadsApplicable) segments else 0,
                 queueId = queue,
                 startPaused = startPaused,
-                cookies = adv.cookie.trim(),
-                referrer = adv.referrer.trim(),
-                userAgent = adv.userAgent.trim(),
+                cookies = own?.cookies ?: adv.cookie.trim(),
+                referrer = own?.referrer ?: adv.referrer.trim(),
+                userAgent = userAgent,
                 proxyUrl = proxy,
                 checksum = panelChecksum.ifEmpty { e.checksum },
                 ignoreTlsErrors = adv.ignoreTls,
-                headers = headers,
+                headers = own?.headers?.let { h ->
+                    if (userAgent.isEmpty()) h else h.filterKeys { !it.equals(USER_AGENT, ignoreCase = true) }
+                } ?: headers,
                 httpUser = if (authOk) adv.httpUser.trim() else "",
                 httpPassword = if (authOk) adv.httpPassword else "",
                 saveSiteAuth = authOk && adv.saveSiteAuth,
@@ -179,18 +221,17 @@ internal class NewDownloadState(
     }
 
     companion object {
-        fun create(prefill: String, state: HostState): NewDownloadState {
+        private const val USER_AGENT = "User-Agent"
+
+        /** [external] 非空 = 外部唤起：链接与请求上下文按 [addExternal] 规则预填。 */
+        fun create(prefill: String, state: HostState, external: ExternalDownload? = null): NewDownloadState {
             val cfg = state.config
-            val queueId = cfg["default_queue_id"]?.takeIf { id -> state.queues.any { it.queueId == id } }
-                ?: state.queues.firstOrNull { it.queueId == Queue.MAIN }?.queueId
-                ?: state.queues.firstOrNull()?.queueId
-                ?: ""
             return NewDownloadState(
                 prefill = prefill.trim(),
                 defaultSaveDir = cfg["default_save_dir"].orEmpty().trim(),
-                defaultQueueId = queueId,
+                defaultQueueId = state.defaultQueueId(),
                 defaultSegments = cfg["default_segments"]?.toIntOrNull() ?: 0,
-            )
+            ).also { form -> external?.let(form::addExternal) }
         }
     }
 }

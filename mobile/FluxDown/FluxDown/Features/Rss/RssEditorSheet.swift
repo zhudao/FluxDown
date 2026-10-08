@@ -75,7 +75,7 @@ struct RssEditorSheet: View {
             Form {
                 if let error = model.error, error.tab == model.tab {
                     Section {
-                        Label(error.message, systemImage: "exclamationmark.circle.fill")
+                        Label(error.message, systemImage: FluxSymbol.failure)
                             .font(.footnote)
                             .foregroundStyle(Color.fdStatusFailedText)
                             .accessibilityAddTraits(.isStaticText)
@@ -201,13 +201,13 @@ struct RssEditorSheet: View {
                     Button {
                         pickingDirectory = true
                     } label: {
-                        Label(L("browse"), systemImage: "folder")
+                        Label(L("browse"), systemImage: FluxSymbol.folder)
                             .labelStyle(.iconOnly)
                     }
                     .buttonStyle(.borderless)
                 }
                 if !model.form.saveDir.isEmpty, !isValidSaveDir(model.form.saveDir) {
-                    Label(L("mobileSaveDirInvalid"), systemImage: "exclamationmark.circle.fill")
+                    Label(L("mobileSaveDirInvalid"), systemImage: FluxSymbol.failure)
                         .font(.footnote)
                         .foregroundStyle(Color.fdStatusFailedText)
                 }
@@ -255,12 +255,12 @@ struct RssEditorSheet: View {
                             .foregroundStyle(.secondary)
                     }
                 } icon: {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.fdStatusSeedingText)
+                    Image(systemName: FluxSymbol.success).foregroundStyle(Color.fdStatusSeedingText)
                 }
                 .accessibilityElement(children: .combine)
             }
         case let .failed(message):
-            Label(message, systemImage: "exclamationmark.triangle.fill")
+            Label(message, systemImage: FluxSymbol.warning)
                 .font(.footnote)
                 .foregroundStyle(Color.fdStatusFailedText)
                 .textSelection(.enabled)
@@ -302,7 +302,7 @@ struct RssEditorSheet: View {
                     .submitLabel(.done)
             }
             if let message = sizeProblem {
-                Label(message, systemImage: "exclamationmark.circle.fill")
+                Label(message, systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -362,7 +362,7 @@ struct RssEditorSheet: View {
                     .keyboardType(.numberPad)
             }
             if !maxPerFetchValid {
-                Label(L("rssInvalidNumber"), systemImage: "exclamationmark.circle.fill")
+                Label(L("rssInvalidNumber"), systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -428,7 +428,7 @@ struct RssEditorSheet: View {
                 container.toasts.show(
                     text: L(editing ? "mobileRssSavedToast" : "mobileRssCreatedToast"),
                     tone: .success,
-                    systemImage: "checkmark"
+                    systemImage: FluxSymbol.done
                 )
                 dismiss()
             }

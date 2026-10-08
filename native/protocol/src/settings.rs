@@ -54,8 +54,8 @@ pub const MAX_CUSTOM_THEME_ID_LEN: usize = 64;
 pub const MAX_SYNC_VALUE_BYTES: usize = 64 * 1024;
 
 /// 与 `lib/src/services/cloud/sync_catalog.dart` 对应的键，外加 GPUI 专属的 `ui.show_activity_*`、
-/// `custom_categories`（自定义分类，推送时剥离各设备不同的 `saveDir`）与 [`CUSTOM_THEMES_KEY`]
-/// （自定义主题集合；Flutter 拉到未知键会忽略），共 56 个。
+/// `custom_categories`（自定义分类，推送时剥离各设备不同的 `saveDir`）、[`CUSTOM_THEMES_KEY`]
+/// （自定义主题集合；Flutter 拉到未知键会忽略）与 [`FILE_ICON_PACK_KEY`]（GPUI / Web 文件图标包），共 59 个。
 pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("appearance.theme_mode", Preferences),
     spec!("appearance.dark_theme", Preferences),
@@ -63,6 +63,7 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("appearance.color_scheme", Preferences),
     spec!("appearance.custom_color", Preferences),
     spec!("appearance.custom_themes", Preferences),
+    spec!("appearance.file_icon_pack", Preferences),
     spec!("general.locale", Preferences),
     spec!("general.update_channel", Preferences),
     spec!("general.auto_check_update", Preferences),
@@ -76,6 +77,7 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("ui.show_activity_rss", Preferences),
     spec!("ui.show_activity_webhooks", Preferences),
     spec!("ui.show_activity_theme", Preferences),
+    spec!("ui.show_activity_account", Preferences),
     spec!("ui.show_titlebar_pause_all", Preferences),
     spec!("ui.show_titlebar_resume_all", Preferences),
     spec!("ui.show_titlebar_settings", Preferences),
@@ -111,6 +113,7 @@ pub const SYNC_SETTING_SPECS: &[SettingSpec] = &[
     spec!("download.notify_on_complete", Agent),
     spec!("download.silent_download", Agent),
     spec!("download.keep_awake", Agent),
+    spec!("bt.enabled", Daemon, "bt_enabled"),
     spec!("bt.enable_dht", Daemon, "bt_enable_dht"),
     spec!("bt.enable_upnp", Daemon, "bt_enable_upnp"),
     spec!("bt.custom_trackers", Daemon, "bt_custom_trackers"),
@@ -190,6 +193,17 @@ pub fn custom_theme_fits_sync(text: &str) -> bool {
     serde_json::to_vec(text).is_ok_and(|bytes| bytes.len() <= MAX_SYNC_VALUE_BYTES)
 }
 
+/// 文件图标包选择（GPUI / Web 任务列表）：`builtin:<id>` 或 `custom:<id>`，id 规则同自定义主题。
+pub const FILE_ICON_PACK_KEY: &str = "appearance.file_icon_pack";
+
+/// 合法的图标包引用：`builtin:<id>` / `custom:<id>`（id 见 [`is_custom_theme_id`]）。
+#[must_use]
+pub fn is_icon_pack_ref(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(source, id)| {
+        matches!(source, "builtin" | "custom") && is_custom_theme_id(id)
+    })
+}
+
 /// 非空、不超过 [`MAX_CUSTOM_THEME_ID_LEN`] 字节，由 `separator` 分隔的 `[a-z0-9_]+` 段。
 fn is_segmented(text: &str, separator: char) -> bool {
     !text.is_empty()
@@ -252,6 +266,9 @@ pub fn validate_value(key: &str, value: &Value) -> Result<(), String> {
     match key {
         "appearance.theme_mode" if !matches!(value, "system" | "light" | "dark") => {
             Err(format!("{key} has unknown value"))
+        }
+        FILE_ICON_PACK_KEY if !is_icon_pack_ref(value) => {
+            Err(format!("{key} must be builtin:<id> or custom:<id>"))
         }
         "general.update_channel" if !matches!(value, "stable" | "frontier") => {
             Err(format!("{key} has unknown value"))
@@ -349,6 +366,7 @@ fn boolean_key(key: &str) -> bool {
             | "ui.show_activity_rss"
             | "ui.show_activity_webhooks"
             | "ui.show_activity_theme"
+            | "ui.show_activity_account"
             | "ui.show_titlebar_pause_all"
             | "ui.show_titlebar_resume_all"
             | "ui.show_titlebar_settings"
@@ -360,6 +378,7 @@ fn boolean_key(key: &str) -> bool {
             | "download.notify_on_complete"
             | "download.silent_download"
             | "download.keep_awake"
+            | "bt.enabled"
             | "bt.enable_dht"
             | "bt.enable_upnp"
             | "bt.tracker_sub_enabled"
@@ -411,20 +430,21 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CUSTOM_THEMES_KEY, MAX_SYNC_VALUE_BYTES, SYNC_SETTING_SPECS, SettingOwner, custom_theme_id,
-        custom_theme_key, setting_spec, sync_scope_key, validate_value,
+        CUSTOM_THEMES_KEY, FILE_ICON_PACK_KEY, MAX_SYNC_VALUE_BYTES, SYNC_SETTING_SPECS,
+        SettingOwner, custom_theme_id, custom_theme_key, setting_spec, sync_scope_key,
+        validate_value,
     };
 
     #[test]
     fn catalog_has_exact_unique_flutter_count_and_namespaced_daemon_mapping() {
-        assert_eq!(SYNC_SETTING_SPECS.len(), 56);
+        assert_eq!(SYNC_SETTING_SPECS.len(), 59);
         assert_eq!(
             SYNC_SETTING_SPECS
                 .iter()
                 .map(|spec| spec.key)
                 .collect::<HashSet<_>>()
                 .len(),
-            56
+            59
         );
         let spec = setting_spec("download.max_concurrent_tasks").expect("download spec");
         assert_eq!(spec.owner, SettingOwner::Daemon);
@@ -448,6 +468,27 @@ mod tests {
         assert!(validate_value("appearance.custom_color", &json!(u32::MAX)).is_ok());
         assert!(validate_value("appearance.custom_color", &json!(-1)).is_err());
         assert!(validate_value("appearance.custom_color", &json!("ff112233")).is_err());
+    }
+
+    #[test]
+    fn file_icon_pack_accepts_canonical_pack_refs_only() {
+        for value in ["builtin:material", "custom:my-pack_2"] {
+            assert!(
+                validate_value(FILE_ICON_PACK_KEY, &json!(value)).is_ok(),
+                "{value}"
+            );
+        }
+        for value in [
+            json!("material"),
+            json!("theme:x"),
+            json!("custom:A"),
+            json!(1),
+        ] {
+            assert!(
+                validate_value(FILE_ICON_PACK_KEY, &value).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

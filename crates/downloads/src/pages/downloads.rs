@@ -16,7 +16,10 @@ use crate::{
         TogglePauseSelected,
     },
     components::{
-        task_table::{DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand},
+        task_table::{
+            DownloadTableDelegate, SelectionSummary, TableFilter, ToolbarCommand,
+            spawn_midnight_refresh,
+        },
         title_bar::{DownloadTitleBar, left_edge_probe},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort},
@@ -175,6 +178,7 @@ impl DownloadView {
             .row_selectable(false)
             .col_selectable(false)
         });
+        spawn_midnight_refresh(&table_state, cx);
         let weak_self = cx.weak_entity();
         table_state.update(cx, |table, _| {
             table.delegate_mut().set_host(weak_self);
@@ -506,8 +510,9 @@ impl DownloadView {
             }
         };
         self.prefs_loaded = true;
-        self.table_state.update(cx, |table, _| {
+        self.table_state.update(cx, |table, cx| {
             table.delegate_mut().set_prefs(prefs);
+            cx.notify();
         });
     }
 
@@ -572,6 +577,8 @@ impl DownloadView {
             if delegate.take_columns_dirty() {
                 table.refresh(cx);
             }
+            // 行从共享的 `TaskStore` 读取：表格必须显式 notify，retained 渲染才会重画行。
+            cx.notify();
         });
         cx.notify();
     }
@@ -642,6 +649,7 @@ impl DownloadView {
             table.delegate_mut().set_strings(strings);
             table.delegate_mut().refresh_view();
             table.refresh(cx);
+            cx.notify();
         });
         cx.notify();
     }
@@ -918,6 +926,7 @@ impl DownloadView {
             mutate(table.delegate_mut().prefs_mut());
             table.delegate_mut().refresh_view();
             table.refresh(cx);
+            cx.notify();
         });
         self.schedule_persist_prefs(cx);
         cx.notify();
@@ -949,6 +958,8 @@ impl DownloadView {
                     table.delegate_mut().set_query(&query);
                     if table.delegate_mut().refresh_view() {
                         table.refresh(cx);
+                        // 空闲时没有别的重绘来源：不 notify 则 retained 表格停在旧结果。
+                        cx.notify();
                     }
                 });
             }) else {
@@ -976,6 +987,7 @@ impl DownloadView {
             table.delegate_mut().set_query("");
             if table.delegate_mut().refresh_view() {
                 table.refresh(cx);
+                cx.notify();
             }
         });
         self.focus_handle.focus(window, cx);

@@ -26,9 +26,9 @@ use gpui_component::{
 
 use crate::{
     components::{
-        file_icon::{SystemFileIcon, system_file_icon},
+        file_icon::task_file_icon,
         segment_progress::render_segment_progress,
-        task_table::{kind_icon, progress_bar_color, progress_track_color, status_color},
+        task_table::{progress_bar_color, progress_track_color, status_color},
     },
     controller::{DownloadsCommand, DownloadsController, DownloadsPort},
     model::{DownloadTaskView, RowKey, TaskProtocol, TaskState, format_bytes},
@@ -42,10 +42,10 @@ pub const PROGRESS_WINDOW_INITIAL_HEIGHT: f32 = 340.;
 
 /// 进度条高度：比任务表更醒目。
 const BAR_HEIGHT: f32 = 8.;
-/// 文件图标位边长：回退的类型图标带底块，系统图标不加底块、在此位置内居中。
+/// 文件图标位边长：图标在此位置内居中。
 const ICON_TILE: f32 = 40.;
-/// 系统文件图标边长（图标自带留白，四周再留 4px）。
-const SYSTEM_ICON: f32 = 32.;
+/// 文件图标边长（系统图标自带留白，四周再留 4px）。
+const FILE_ICON: f32 = 32.;
 /// 完成视图的状态角标边长。
 const BADGE: f32 = 18.;
 /// 分段列表最大高度，超出后内部滚动。
@@ -301,32 +301,16 @@ impl ProgressWindowView {
 
     // ---- 渲染 ----
 
-    /// 文件图标位：系统图标直接显示；请求中留空（避免先闪一下类型图标）；取不到时回退为
-    /// 底块 + 按类型的图标。
+    /// 文件图标位（按所选图标包；系统图标请求中留空，避免先闪一下回退图标）。
     fn render_icon_tile(row: &DownloadTaskView, window: &mut Window, cx: &mut App) -> AnyElement {
-        let tile = div()
+        div()
             .flex_none()
             .size(px(ICON_TILE))
             .flex()
             .items_center()
-            .justify_center();
-        match system_file_icon(row, px(SYSTEM_ICON), window, cx) {
-            SystemFileIcon::Ready(icon) => tile.child(icon).into_any_element(),
-            SystemFileIcon::Loading => tile.into_any_element(),
-            SystemFileIcon::Unavailable => {
-                let theme = active_theme(cx);
-                let tokens = theme.tokens();
-                let extended = theme.extended();
-                tile.rounded(tokens.radius.lg)
-                    .bg(extended.colors.nav_hover)
-                    .child(
-                        Icon::new(kind_icon(row.kind))
-                            .size(extended.icon.lg)
-                            .text_color(tokens.colors.muted_foreground),
-                    )
-                    .into_any_element()
-            }
-        }
+            .justify_center()
+            .child(task_file_icon(row, px(FILE_ICON), window, cx))
+            .into_any_element()
     }
 
     fn render_title(name: SharedString, cx: &App) -> gpui::Div {

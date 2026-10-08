@@ -45,7 +45,14 @@ import com.fluxdown.app.nav.AppNavigator
 import com.fluxdown.app.nav.AppTab
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.Route
-import com.fluxdown.app.nav.SettingsPage
+import com.fluxdown.app.feature.settings.LocalSettingsFocus
+import com.fluxdown.app.feature.settings.SettingsIndex
+import com.fluxdown.app.feature.settings.SettingsSearchContext
+import com.fluxdown.core.model.HostRef
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.SettingsForm
+import com.fluxdown.core.protocol.preferences
+import androidx.compose.runtime.collectAsState
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
@@ -130,6 +137,9 @@ fun CommandSearch(visible: Boolean, onDismiss: () -> Unit) {
 
     var query by remember { mutableStateOf("") }
     var scope by remember { mutableStateOf(SearchScope.All) }
+    // `ui.show_activity_theme`（云同步偏好，通用设置「入口」）关闭 → 不提供明暗切换命令
+    val host = hostState()
+    val showThemeToggle by remember { derivedStateOf { host.value.preferences.bool("ui.show_activity_theme", true) } }
     LaunchedEffect(visible) {
         if (visible) {
             query = ""
@@ -137,9 +147,10 @@ fun CommandSearch(visible: Boolean, onDismiss: () -> Unit) {
         }
     }
 
-    val groups = remember(context, config, dark, nav, actions, container) {
-        buildEntries(context, dark, nav, actions, container)
+    val groups = remember(context, config, dark, nav, actions, container, showThemeToggle) {
+        buildEntries(context, dark, nav, actions, container, showThemeToggle)
     }
+    val settings = rememberSettingsEntries(nav)
     val first = remember { FirstAction() }
 
     CommandSearchScaffold(
@@ -155,7 +166,7 @@ fun CommandSearch(visible: Boolean, onDismiss: () -> Unit) {
             scope = scope,
             onScope = { scope = it },
             commands = groups.commands,
-            settings = groups.settings,
+            settings = settings,
             nav = nav,
             onDismiss = onDismiss,
             first = first,
@@ -165,7 +176,7 @@ fun CommandSearch(visible: Boolean, onDismiss: () -> Unit) {
 
 // ── 条目 ────────────────────────────────────────────────────────────────
 
-private class EntryGroups(val commands: List<Entry>, val settings: List<Entry>)
+private class EntryGroups(val commands: List<Entry>)
 
 private fun String.words(): List<String> = split(',', '|', '，').map { it.trim() }.filter { it.isNotEmpty() }
 
@@ -175,6 +186,7 @@ private fun buildEntries(
     nav: AppNavigator,
     actions: TaskActions,
     container: AppContainer,
+    showThemeToggle: Boolean,
 ): EntryGroups {
     fun s(id: Int, vararg args: Pair<String, Any?>) = context.str(id, *args)
 
@@ -215,31 +227,33 @@ private fun buildEntries(
             nav.selectTab(AppTab.Devices)
         },
     )
-    val settings = listOf(
-        Entry(
-            "settings.appearance",
-            s(R.string.settingsCatAppearance),
-            s(R.string.settingsCatAppearanceDesc),
-            s(R.string.searchKeywordsThemeMode).words() + s(R.string.searchKeywordsThemeColor).words(),
-            FluxIcons.Palette,
-        ) { nav.push(Route.Settings(SettingsPage.Appearance)) },
-        Entry(
-            "settings.download",
-            s(R.string.settingsCatDownload),
-            s(R.string.settingsCatDownloadDesc),
-            s(R.string.searchKeywordsSaveDir).words() + s(R.string.searchKeywordsThreads).words() +
-                s(R.string.searchKeywordsConcurrent).words() + s(R.string.searchKeywordsSpeedLimit).words(),
-            FluxIcons.Download,
-        ) { nav.push(Route.Settings(SettingsPage.Download)) },
-        Entry(
-            "settings.about",
-            s(R.string.settingsCatAbout),
-            s(R.string.settingsCatAboutDesc),
-            s(R.string.searchKeywordsUpdate).words(),
-            FluxIcons.Info,
-        ) { nav.push(Route.Settings(SettingsPage.About)) },
-    )
-    return EntryGroups(commands, settings)
+    return EntryGroups(commands.filter { showThemeToggle || it.id != "theme" })
+}
+
+/** 设置条目 = 设置首页搜索的同一份索引（[SettingsIndex]：分类入口 + 各页的行，按主机能力 / 配置过滤）。 */
+@Composable
+private fun rememberSettingsEntries(nav: AppNavigator): List<Entry> {
+    val context = LocalContext.current
+    val config = LocalConfiguration.current
+    val container = LocalAppContainer.current
+    val focus = LocalSettingsFocus.current
+    val host = hostState()
+    val hostRef by container.host.collectAsState()
+    val cfg by remember { derivedStateOf { host.value.config } }
+    val prefs by remember { derivedStateOf { host.value.sections[HostSection.agentPreferences] } }
+    val info by remember { derivedStateOf { host.value.info } }
+    return remember(context, config, cfg, prefs, info, hostRef, nav, focus) {
+        val state = host.value
+        val ctx = SettingsSearchContext(
+            context, state, SettingsForm(state.config, prefs = state.preferences.values), hostRef is HostRef.Local,
+        )
+        SettingsIndex.entries(ctx).map { e ->
+            Entry(e.id, e.title, e.breadcrumb, e.keywords + listOfNotNull(e.detail.ifEmpty { null }), e.icon) {
+                focus.request(e)
+                nav.push(Route.Settings(e.page))
+            }
+        }
+    }
 }
 
 // ── 匹配 ────────────────────────────────────────────────────────────────

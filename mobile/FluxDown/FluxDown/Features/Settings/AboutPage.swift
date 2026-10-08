@@ -121,7 +121,7 @@ extension AboutPage {
     static func searchEntries(_ ctx: SettingsSearchContext) -> [SettingsEntry] {
         let name = L("settingsCatAbout")
         func entry(_ id: String, _ title: String, _ detail: String = "") -> SettingsEntry {
-            SettingsEntry(id: id, route: .about, title: title, detail: detail, breadcrumb: name, symbol: "info.circle.fill")
+            SettingsEntry(id: id, route: .about, title: title, detail: detail, breadcrumb: name, symbol: FluxSymbol.info)
         }
         var list = [
             entry("about.version", L("currentVersion")),

@@ -29,7 +29,7 @@ use gpui_component::{
 use std::{
     collections::HashSet,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 /// 订阅源侧栏默认宽度。
@@ -45,6 +45,40 @@ const ITEM_ROW_PADDING_Y: Pixels = px(5.);
 const STATUS_COLUMN_WIDTH: f32 = 120.;
 /// 条目搜索框宽度（基准 px，按文字缩放）。
 const SEARCH_WIDTH: f32 = 200.;
+/// 「上次抓取 N 分钟前」的最长复查间隔（没有可显示的抓取时间，或时间点可能被新抓取改写时）。
+const FETCH_AGE_RECHECK: Duration = Duration::from_secs(60);
+
+fn now_unix_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64)
+}
+
+/// 抓取时间相对文案：`(文案键, 数量)`。
+fn fetch_age_label(age_secs: i64) -> (&'static str, i64) {
+    if age_secs < 60 {
+        ("rssJustNow", 0)
+    } else if age_secs < 3_600 {
+        ("rssMinutesAgo", age_secs / 60)
+    } else if age_secs < 86_400 {
+        ("rssHoursAgo", age_secs / 3_600)
+    } else {
+        ("rssDaysAgo", age_secs / 86_400)
+    }
+}
+
+/// [`fetch_age_label`] 距下一次跨档（下一个分钟 / 小时 / 天）的时长。
+fn fetch_age_changes_in(age_secs: i64) -> Duration {
+    let age = age_secs.max(0);
+    let unit: i64 = if age < 3_600 {
+        60
+    } else if age < 86_400 {
+        3_600
+    } else {
+        86_400
+    };
+    Duration::from_secs(u64::try_from(unit - age % unit).unwrap_or(60))
+}
 
 /// 条目行高：三行文字随字号增长，默认字号下等于 `ITEM_ROW_HEIGHT`。
 fn item_row_height(cx: &App) -> Pixels {
@@ -97,6 +131,7 @@ impl RssView {
             )
         });
         cx.observe(&sidebar, |_, _, cx| cx.notify()).detach();
+        Self::spawn_fetch_age_ticker(cx);
         Self {
             translator,
             controller: RssController::new(port),
@@ -108,6 +143,36 @@ impl RssView {
             load_error: false,
             sidebar,
         }
+    }
+
+    /// 「上次抓取 N 分钟前」由时钟推进，不在任何被追踪的状态里：retained 渲染只在依赖变化时
+    /// 重建本视图，必须在相对时间跨档时主动 notify。视图释放后循环随 `update` 失败结束。
+    fn spawn_fetch_age_ticker(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let mut delay = FETCH_AGE_RECHECK;
+            loop {
+                cx.background_executor().timer(delay).await;
+                let Ok(next) = this.update(cx, |this, cx| {
+                    let now = now_unix_secs();
+                    let next = this
+                        .controller
+                        .sources()
+                        .iter()
+                        .filter(|source| source.last_success_at > 0)
+                        .map(|source| fetch_age_changes_in(now - source.last_success_at))
+                        .min();
+                    if next.is_some() {
+                        cx.notify();
+                    }
+                    next.map_or(FETCH_AGE_RECHECK, |next| next.min(FETCH_AGE_RECHECK))
+                }) else {
+                    // RSS 页已释放，结束定时刷新。
+                    return;
+                };
+                delay = next;
+            }
+        })
+        .detach();
     }
 
     /// 供 shell 顶栏与订阅源导航共享的侧栏状态。
@@ -166,14 +231,18 @@ impl RssView {
             }
             _ => None,
         };
-        self.controller.apply_event(event);
-        if before != self.controller.selected_source || changed {
+        let state_changed = self.controller.apply_event(event);
+        let refetch = before != self.controller.selected_source || changed;
+        if refetch {
             self.fetch_items(cx);
         }
         if let Some(count) = item_event.filter(|n| *n > 0) {
             self.feedback = Some(self.with("rssItemsUpdated", &[("n", &count.to_string())], cx));
         }
-        cx.notify();
+        // 无关事件（如其它任务的下载进度帧）不重绘，保住 retained 渲染的复用。
+        if state_changed || refetch || item_event.is_some() {
+            cx.notify();
+        }
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
@@ -505,19 +574,8 @@ impl RssView {
             ));
             parts.push(source.last_error.clone());
         } else if source.last_success_at > 0 {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_secs() as i64);
-            let age = now.saturating_sub(source.last_success_at);
-            let when = if age < 60 {
-                self.t("rssJustNow", cx).to_string()
-            } else if age < 3_600 {
-                self.with("rssMinutesAgo", &[("n", &(age / 60).to_string())], cx)
-            } else if age < 86_400 {
-                self.with("rssHoursAgo", &[("n", &(age / 3_600).to_string())], cx)
-            } else {
-                self.with("rssDaysAgo", &[("n", &(age / 86_400).to_string())], cx)
-            };
+            let (key, n) = fetch_age_label(now_unix_secs().saturating_sub(source.last_success_at));
+            let when = self.with(key, &[("n", &n.to_string())], cx);
             parts.push(self.with("rssLastFetch", &[("when", &when)], cx));
         } else {
             parts.push(self.t("rssNeverFetched", cx).to_string());
@@ -1435,5 +1493,39 @@ impl Render for RssView {
             panel = panel.sidebar(self.render_sidebar(cx));
         }
         panel
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fetch_age_changes_in, fetch_age_label};
+
+    #[test]
+    fn fetch_age_refresh_fires_exactly_when_the_label_changes() {
+        for age in [
+            0,
+            59,
+            60,
+            61,
+            3_599,
+            3_600,
+            5 * 3_600 + 7,
+            86_399,
+            86_400,
+            3 * 86_400 + 1,
+        ] {
+            let delay = i64::try_from(fetch_age_changes_in(age).as_secs()).unwrap_or(i64::MAX);
+            assert!(delay > 0, "age {age}");
+            assert_eq!(
+                fetch_age_label(age + delay - 1),
+                fetch_age_label(age),
+                "age {age}"
+            );
+            assert_ne!(
+                fetch_age_label(age + delay),
+                fetch_age_label(age),
+                "age {age}"
+            );
+        }
     }
 }

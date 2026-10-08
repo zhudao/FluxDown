@@ -94,7 +94,7 @@ public struct ActivityBarContent: View {
             toggleCount += 1
             onTogglePause()
         } label: {
-            Image(systemName: isPaused ? "play.fill" : "pause.fill")
+            Image(systemName: isPaused ? FluxSymbol.resume : FluxSymbol.pause)
                 .font(.system(size: 14, weight: .semibold))
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 34, height: 34)

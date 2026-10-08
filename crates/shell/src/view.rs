@@ -90,15 +90,23 @@ impl ShellRoute {
 }
 
 type ShellActionHandler = Rc<dyn Fn(&mut Window, &mut App)>;
-type ShellActionIcon = Rc<dyn Fn(&App) -> Icon>;
+
+/// 活动栏动作的呈现：标准图标按钮，或由 app 注入的自绘视图（如账户头像）。
+enum ShellActionContent {
+    Button {
+        tooltip_id: &'static str,
+        label_key: &'static str,
+        icon: Box<Icon>,
+        handler: ShellActionHandler,
+    },
+    /// 自绘视图自带悬浮提示与点击行为；shell 只提供按钮位。
+    View(AnyView),
+}
 
 /// 由应用装配并注入 shell 的窗口级活动栏动作。
 pub struct ShellAction {
     button_id: &'static str,
-    tooltip_id: &'static str,
-    label_key: &'static str,
-    icon: ShellActionIcon,
-    handler: ShellActionHandler,
+    content: ShellActionContent,
     /// 可选动作参与活动栏「是否整体渲染」的判定；固定动作（如设置）不参与。
     optional: bool,
     visible: bool,
@@ -113,29 +121,25 @@ impl ShellAction {
         icon: Icon,
         handler: impl Fn(&mut Window, &mut App) + 'static,
     ) -> Self {
-        Self::with_dynamic_icon(
-            button_id,
-            tooltip_id,
-            label_key,
-            move |_cx| icon.clone(),
-            handler,
-        )
-    }
-
-    /// 创建图标随运行时状态变化的活动栏动作（例如随主题模式在日/月间切换）。
-    pub fn with_dynamic_icon(
-        button_id: &'static str,
-        tooltip_id: &'static str,
-        label_key: &'static str,
-        icon: impl Fn(&App) -> Icon + 'static,
-        handler: impl Fn(&mut Window, &mut App) + 'static,
-    ) -> Self {
         Self {
             button_id,
-            tooltip_id,
-            label_key,
-            icon: Rc::new(icon),
-            handler: Rc::new(handler),
+            content: ShellActionContent::Button {
+                tooltip_id,
+                label_key,
+                icon: Box::new(icon),
+                handler: Rc::new(handler),
+            },
+            optional: false,
+            visible: true,
+        }
+    }
+
+    /// 以自绘视图占据一个活动栏按钮位（`ACTIVITY_BUTTON_SIZE` 见方，居中摆放）。
+    /// 视图自行观察数据源并 notify，shell 不重建它。
+    pub fn view(button_id: &'static str, view: AnyView) -> Self {
+        Self {
+            button_id,
+            content: ShellActionContent::View(view),
             optional: false,
             visible: true,
         }
@@ -530,21 +534,33 @@ impl ShellView {
     }
 
     fn action_button(&self, action: &ShellAction, cx: &mut Context<Self>) -> AnyElement {
-        let label = SharedString::from(self.translator.read(cx).text(action.label_key).to_owned());
-        let tooltip_label = label.clone();
-        let handler = Rc::clone(&action.handler);
-        let icon = (action.icon)(cx);
-        let theme = active_theme(cx);
-        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
-        let icon_color = theme.tokens().colors.muted_foreground;
-
-        div()
-            .id(action.tooltip_id)
+        let tile = div()
             .w(ACTIVITY_RAIL_WIDTH)
             .h(ACTIVITY_TILE_HEIGHT)
             .flex()
             .items_center()
-            .justify_center()
+            .justify_center();
+        let (tooltip_id, label_key, icon, handler) = match &action.content {
+            ShellActionContent::View(view) => return tile.child(view.clone()).into_any_element(),
+            ShellActionContent::Button {
+                tooltip_id,
+                label_key,
+                icon,
+                handler,
+            } => (
+                *tooltip_id,
+                *label_key,
+                Icon::clone(icon),
+                Rc::clone(handler),
+            ),
+        };
+        let label = SharedString::from(self.translator.read(cx).text(label_key).to_owned());
+        let tooltip_label = label.clone();
+        let theme = active_theme(cx);
+        let icon_size = theme.extended().icon.lg + ACTIVITY_ICON_EXTRA;
+        let icon_color = theme.tokens().colors.muted_foreground;
+
+        tile.id(tooltip_id)
             .tooltip(move |window, cx| Tooltip::new(tooltip_label.clone()).build(window, cx))
             .child(
                 activity_bar_button(
@@ -559,6 +575,9 @@ impl ShellView {
             )
             .into_any_element()
     }
+
+    /// 自绘动作视图的按钮位尺寸（视图按此尺寸绘制以与图标按钮对齐）。
+    pub const ACTION_BUTTON_SIZE: Pixels = ACTIVITY_BUTTON_SIZE;
 
     fn action_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let gap = active_theme(cx).tokens().spacing.xs;

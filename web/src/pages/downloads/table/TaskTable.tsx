@@ -15,6 +15,7 @@ import { notePointerActivity } from '../model/rowOrder'
 import { formatBytes, formatDateTime, MAX_ETA_SECS, PROTOCOL_LABEL, sourceSite } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import {
+  columnShown,
   COLUMN_LABEL_KEY,
   COLUMN_SORT_KEY,
   FILE_NAME_MAX_WIDTH,
@@ -210,7 +211,7 @@ const TaskRow = memo(function TaskRow(props: RowProps) {
               <Checkbox checked={selected} onCheckedChange={() => onToggle(view)} aria-label={view.name} />
             </div>
           ) : (
-            <KindGlyph view={view} />
+            <KindGlyph view={view} tile={density === 'relaxed'} />
           )}
         </div>
         {columns.map((column) => (
@@ -277,7 +278,7 @@ export function TaskTable() {
 
   const resolved = useMemo(() => resolveColumns(prefs.columns), [prefs.columns])
   const columns = useMemo<LayoutColumn[]>(() => {
-    const shown = resolved.filter((column) => column.visible)
+    const shown = resolved.filter((column) => columnShown(column.kind, column.visible, prefs.density))
     return shown.map((column) => {
       let width = column.width
       let fluid = false
@@ -294,7 +295,7 @@ export function TaskTable() {
       }
       return { ...column, width, fluid }
     })
-  }, [resolved, prefs.file_name_width, resizing])
+  }, [resolved, prefs.file_name_width, prefs.density, resizing])
   const totalMinWidth = useMemo(
     () =>
       SELECTION_COLUMN_WIDTH +

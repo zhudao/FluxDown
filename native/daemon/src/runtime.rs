@@ -144,7 +144,9 @@ pub async fn run_with(
     let maintenance_actor = actor.clone();
     let startup_config = all_config.clone();
     let startup_maintenance_task = tokio::spawn(async move {
-        if config_enabled(&startup_config, "bt_tracker_sub_enabled", true) {
+        if config_enabled(&startup_config, "bt_enabled", true)
+            && config_enabled(&startup_config, "bt_tracker_sub_enabled", true)
+        {
             match maintenance_actor
                 .execute(crate::actor::ActorOperation::RefreshTrackerSubscription)
                 .await

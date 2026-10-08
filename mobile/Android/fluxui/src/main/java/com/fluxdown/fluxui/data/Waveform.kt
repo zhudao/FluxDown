@@ -55,12 +55,12 @@ private const val MIB = 1024f * 1024f
 private const val MINI_POINTS = 30
 
 /**
- * 实时速度波形（品牌签名之二）：点阵网格 → 面积渐变 → 发光线 → 上行虚线 → 主线 → 头部光点，
- * 左侧 0→28% 渐隐。曲线为 Catmull-Rom → 三次贝塞尔（张力 .18）。
+ * 实时速度波形（品牌签名之二）：点阵网格 → 面积纯色（低 α）→ 上行虚线 → 主线 → 头部光点，
+ * 左侧 0→28% 渐隐（内容遮罩）。曲线为 Catmull-Rom → 三次贝塞尔（张力 .18）。
  *
  * - [samples] 在**绘制阶段**读取：把它连到 Snapshot State 即可只触发重绘、不触发重组；
  *   绘制路径复用同一组 `Path`，逐帧零分配。
- * - [mini]：最近 30 点、无网格 / 发光 / 上行线 / 头点，面积渐变 α .22（顶部读数条）。
+ * - [mini]：最近 30 点、无网格 / 上行线 / 头点，面积纯色 α .10（顶部读数条）。
  * - 高度由调用方给定（建议 92 / 56 / mini 22）；未给定时 92 / 22。
  * - 装饰：不进入无障碍树（由所属仪表汇总朗读）。
  */
@@ -87,9 +87,6 @@ fun Waveform(
                 val area = Path()
                 val upPath = Path()
                 val lineStroke = Stroke(1.6.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-                val glowStrokeA = Stroke(11.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-                val glowStrokeB = Stroke(8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
-                val glowStrokeC = Stroke(5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
                 val upStroke = Stroke(
                     1.dp.toPx(),
                     cap = StrokeCap.Butt,
@@ -97,14 +94,7 @@ fun Waveform(
                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(2.dp.toPx(), 3.dp.toPx())),
                 )
                 val hi = colors.accentHi
-                val areaBrush = Brush.verticalGradient(
-                    listOf(hi.copy(alpha = if (mini) 0.22f else 0.30f), Color.Transparent),
-                    startY = 0f,
-                    endY = h,
-                )
-                val glowA = hi.copy(alpha = 0.05f)
-                val glowB = hi.copy(alpha = 0.07f)
-                val glowC = hi.copy(alpha = 0.10f)
+                val areaColor = hi.copy(alpha = if (mini) 0.10f else 0.12f)
                 val upColor = colors.inkMuted.copy(alpha = 0.75f)
                 val maskBrush = Brush.horizontalGradient(
                     0f to Color.Transparent, 0.28f to Color.Black, 1f to Color.Black,
@@ -150,12 +140,9 @@ fun Waveform(
                     area.lineTo(chartW, h)
                     area.lineTo(0f, h)
                     area.close()
-                    drawPath(area, areaBrush, style = Fill)
+                    drawPath(area, areaColor, style = Fill)
 
                     if (!mini) {
-                        drawPath(line, glowA, style = glowStrokeA)
-                        drawPath(line, glowB, style = glowStrokeB)
-                        drawPath(line, glowC, style = glowStrokeC)
                         if (upN > 0) {
                             buildSmooth(upPath, s.up, upOff, upN, chartW, h, pad, max)
                             drawPath(upPath, upColor, style = upStroke)

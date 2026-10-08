@@ -13,15 +13,22 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
@@ -29,6 +36,12 @@ import com.fluxdown.app.data.AppearanceState
 import com.fluxdown.app.data.ThemeMode
 import com.fluxdown.app.feature.devices.localizedName
 import com.fluxdown.app.feature.devices.localizedSubtitle
+import com.fluxdown.app.feature.settings.bt.btReadout
+import com.fluxdown.app.feature.settings.bt.ed2kReadout
+import com.fluxdown.app.feature.settings.diagnostics.diagnosticsReadout
+import com.fluxdown.app.feature.settings.general.generalReadout
+import com.fluxdown.app.feature.settings.general.notifyReadout
+import com.fluxdown.app.feature.settings.network.networkReadout
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.Route
@@ -38,13 +51,21 @@ import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.model.HostRef
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.SettingsForm
+import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.store.Connection
 import com.fluxdown.fluxui.chrome.FluxHeader
 import com.fluxdown.fluxui.chrome.FluxHostPill
+import com.fluxdown.fluxui.controls.FluxField
+import com.fluxdown.fluxui.controls.FluxFieldAction
 import com.fluxdown.fluxui.controls.FluxListRow
 import com.fluxdown.fluxui.controls.FluxPresenceDot
 import com.fluxdown.fluxui.controls.GlassSection
 import com.fluxdown.fluxui.controls.Tone
+import com.fluxdown.fluxui.feedback.FluxEmpty
+import com.fluxdown.fluxui.feedback.FluxGlyph
+import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.rememberFlowInGate
 import com.fluxdown.fluxui.overlay.FluxBanner
@@ -54,26 +75,73 @@ import com.fluxdown.fluxui.theme.FluxTheme
 import java.util.Locale
 
 /**
- * S1 · 设置首页（Tab 根页）。只列出已实现的分类：外观 / 下载 / 关于。
- * 顶部为当前主机卡（点按打开主机切换器）；离线时「引擎」分组降为 40% 并出现只读横幅。
+ * S1 · 设置首页（Tab 根页）。分类顺序同 iOS / PC（[visibleSettingsPages]）；各分类行的读数由所在页提供
+ * （`xxxReadout(ctx)`，与页面渲染共用同一份判定）。顶部搜索框过滤 [SettingsIndex]（与全局搜索同一份索引），
+ * 命中后跳到目标页并定位、高亮该行。断线时「引擎」分组降为 40% 并出现只读横幅（分类仍可点进，页内只读）。
  */
 @Composable
 fun SettingsScreen() {
     val nav = LocalNavigator.current
     val container = LocalAppContainer.current
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val focus = LocalSettingsFocus.current
+    val focusManager = LocalFocusManager.current
     val hostState = hostState()
     val readOnly by remember { derivedStateOf { hostState.value.isReadOnly } }
     val host by container.host.collectAsState()
     val appearance by container.appearance.state.collectAsState(initial = AppearanceState())
+    val cfg by remember { derivedStateOf { hostState.value.config } }
+    val prefs by remember { derivedStateOf { hostState.value.sections[HostSection.agentPreferences] } }
+    val info by remember { derivedStateOf { hostState.value.info } }
     val listState = rememberLazyListState()
     val gate = rememberFlowInGate()
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     DockMiniOnScroll(listState, nav)
-    val context = LocalContext.current
     val version = remember(context) { context.appVersionName() }
+    var query by rememberSaveable { mutableStateOf("") }
+
+    val isLocal = host is HostRef.Local
+    val ctx = remember(context, configuration, cfg, prefs, info, isLocal) {
+        val state = hostState.value
+        SettingsSearchContext(context, state, SettingsForm(state.config, prefs = state.preferences.values), isLocal)
+    }
+    val pages = remember(ctx) { visibleSettingsPages(ctx.state, isLocal) }
+    val trimmed = query.trim()
+    val hits = remember(ctx, trimmed) {
+        if (trimmed.isEmpty()) emptyList() else SettingsSearch.filter(SettingsIndex.entries(ctx), trimmed)
+    }
 
     val hostTitle = host.localizedName()
     val switchHostDescription = str(R.string.mobileSettingsSwitchHost, "name" to hostTitle)
+
+    fun open(page: SettingsPage) = nav.push(Route.Settings(page))
+
+    @Composable
+    fun readout(page: SettingsPage): String? = when (page) {
+        SettingsPage.General -> generalReadout(ctx)
+        SettingsPage.Appearance -> appearanceReadout(appearance)
+        SettingsPage.Notify -> notifyReadout(ctx)
+        SettingsPage.Download -> downloadReadout(ctx, isLocal)
+        SettingsPage.Bt -> btReadout(ctx)
+        SettingsPage.Ed2k -> ed2kReadout(ctx)
+        SettingsPage.Network -> networkReadout(ctx)
+        SettingsPage.Diagnostics -> diagnosticsReadout(ctx)
+        SettingsPage.About -> "v$version"
+        else -> null
+    }
+
+    @Composable
+    fun categoryRow(page: SettingsPage) {
+        val meta = page.meta()
+        FluxListRow(
+            title = str(meta.title),
+            subtitle = readout(page)?.ifEmpty { null } ?: meta.desc?.let { str(it) },
+            icon = meta.icon,
+            chevron = true,
+            onClick = { open(page) },
+        )
+    }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         LazyColumn(
@@ -90,12 +158,63 @@ fun SettingsScreen() {
             flowItem(0, gate, "header") {
                 FluxHeader(title = str(R.string.settings))
             }
+            flowItem(1, gate, "search") {
+                FluxField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = str(R.string.settingsSearchHint),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    trailing = {
+                        if (query.isNotEmpty()) {
+                            FluxFieldAction(FluxIcons.X, str(R.string.webSearchClear), onClick = { query = "" })
+                        } else {
+                            FluxIcon(FluxIcons.Search, null, Modifier.padding(end = 12.dp), 18.dp, FluxTheme.colors.inkMuted)
+                        }
+                    },
+                )
+            }
+            if (trimmed.isNotEmpty()) {
+                if (hits.isEmpty()) {
+                    item(key = "empty") {
+                        FluxEmpty(
+                            glyph = FluxGlyph.Search,
+                            title = str(R.string.settingsSearchNoResults),
+                        )
+                    }
+                } else {
+                    item(key = "results") {
+                        GlassSection {
+                            for (entry in hits) {
+                                row(hasIcon = true) {
+                                    FluxListRow(
+                                        title = entry.title,
+                                        subtitle = entry.breadcrumb,
+                                        icon = entry.icon,
+                                        chevron = true,
+                                        onClick = {
+                                            focusManager.clearFocus()
+                                            focus.request(entry)
+                                            open(entry.page)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                return@LazyColumn
+            }
             if (readOnly) {
-                flowItem(1, gate, "banner") {
+                flowItem(2, gate, "banner") {
                     FluxBanner(text = str(R.string.localServiceDisconnected), kind = FluxBannerKind.Warn, slim = true)
                 }
             }
-            flowItem(2, gate, "host") {
+            if (SettingsPage.Account in pages) {
+                flowItem(3, gate, "account") {
+                    GlassSection { row(hasIcon = true) { categoryRow(SettingsPage.Account) } }
+                }
+            }
+            flowItem(4, gate, "host") {
                 GlassSection {
                     row(hasIcon = true) {
                         FluxListRow(
@@ -109,20 +228,12 @@ fun SettingsScreen() {
                     }
                 }
             }
-            flowItem(3, gate, "personal") {
+            flowItem(5, gate, "personal") {
                 GlassSection(title = str(R.string.settingsGroupPersonal)) {
-                    row(hasIcon = true) {
-                        FluxListRow(
-                            title = str(R.string.settingsCatAppearance),
-                            subtitle = appearanceReadout(appearance),
-                            icon = FluxIcons.Palette,
-                            chevron = true,
-                            onClick = { nav.push(Route.Settings(SettingsPage.Appearance)) },
-                        )
-                    }
+                    for (page in pages.filter { it in PersonalPages }) row(hasIcon = true) { categoryRow(page) }
                 }
             }
-            flowItem(4, gate, "engine") {
+            flowItem(6, gate, "engine") {
                 Box(Modifier.alpha(if (readOnly) 0.4f else 1f)) {
                     GlassSection(
                         title = str(R.string.settingsGroupEngine),
@@ -135,32 +246,16 @@ fun SettingsScreen() {
                             )
                         },
                     ) {
-                        row(hasIcon = true) {
-                            FluxListRow(
-                                title = str(R.string.settingsCatDownload),
-                                subtitle = downloadReadout(),
-                                icon = FluxIcons.Download,
-                                chevron = true,
-                                onClick = { nav.push(Route.Settings(SettingsPage.Download)) },
-                            )
-                        }
+                        for (page in pages.filter { it in EnginePages }) row(hasIcon = true) { categoryRow(page) }
                     }
                 }
             }
-            flowItem(5, gate, "maintenance") {
+            flowItem(7, gate, "maintenance") {
                 GlassSection(title = str(R.string.settingsGroupMaintenance)) {
-                    row(hasIcon = true) {
-                        FluxListRow(
-                            title = str(R.string.settingsCatAbout),
-                            subtitle = "v$version",
-                            icon = FluxIcons.Info,
-                            chevron = true,
-                            onClick = { nav.push(Route.Settings(SettingsPage.About)) },
-                        )
-                    }
+                    for (page in pages.filter { it in MaintenancePages }) row(hasIcon = true) { categoryRow(page) }
                 }
             }
-            flowItem(6, gate, "footer") {
+            flowItem(8, gate, "footer") {
                 FluxText(
                     text = str(R.string.mobileFooter),
                     modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
@@ -171,6 +266,13 @@ fun SettingsScreen() {
         }
     }
 }
+
+private val PersonalPages = setOf(SettingsPage.General, SettingsPage.Appearance, SettingsPage.Notify)
+private val EnginePages = setOf(
+    SettingsPage.Download, SettingsPage.Bt, SettingsPage.Ed2k, SettingsPage.Network,
+    SettingsPage.Extensions, SettingsPage.Webhook, SettingsPage.Api,
+)
+private val MaintenancePages = setOf(SettingsPage.Diagnostics, SettingsPage.About)
 
 /** 连接状态读数：圆点 + 文字；只在 [Connection] 变化时重组。 */
 @Composable
@@ -208,16 +310,14 @@ private fun appearanceReadout(a: AppearanceState): String {
     val parts = ArrayList<String>(3)
     parts += mode
     parts += accent
-    if (a.auraIntensity != AURA_DEFAULT) parts += str(R.string.mobileSettingsReadoutAura, "n" to a.auraIntensity)
     return parts.joinToString(" · ")
 }
 
-/** 下载分类读数：默认目录末段 · 并发数 [· 限速]；全部来自 `config`，仅在配置变化时重组。 */
+/** 下载分类读数：默认目录末段（仅远端主机） · 并发数 [· 限速]；全部来自 `config`。 */
 @Composable
-private fun downloadReadout(): String {
-    val hostState = hostState()
-    val config by remember { derivedStateOf { hostState.value.config } }
-    val dir = config["default_save_dir"].orEmpty().trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\')
+private fun downloadReadout(ctx: SettingsSearchContext, isLocal: Boolean): String {
+    val config = ctx.state.config
+    val dir = if (isLocal) "" else config["default_save_dir"].orEmpty().trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\')
     val concurrent = config["max_concurrent_tasks"]
     val limit = config["speed_limit_bytes"]?.toLongOrNull() ?: 0L
     val parts = ArrayList<String>(3)
@@ -230,8 +330,6 @@ private fun downloadReadout(): String {
     Format.speed(limit)?.let { parts += str(R.string.mobileSettingsReadoutLimit, "speed" to it.toString()) }
     return parts.joinToString(" · ")
 }
-
-internal const val AURA_DEFAULT = 60
 
 /** `#RRGGBB`（忽略 alpha）。 */
 internal fun Int.hexRgb(): String = String.format(Locale.ROOT, "#%06X", this and 0xFFFFFF)

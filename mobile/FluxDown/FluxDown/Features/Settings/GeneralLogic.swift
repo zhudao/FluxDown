@@ -178,10 +178,10 @@ enum GeneralCategoryIcon {
         case "folders": "square.stack.fill"
         case "film": "film"
         case "music": "music.note"
-        case "fileText": "doc.text"
+        case "fileText": "text.document"
         case "image": "photo"
         case "archive": "archivebox"
-        case "file": "doc"
+        case "file": "document"
         case "code": "chevron.left.forwardslash.chevron.right"
         case "database": "cylinder"
         case "gamepad": "gamecontroller"
@@ -193,14 +193,14 @@ enum GeneralCategoryIcon {
         case "font": "textformat"
         case "hardDrive": "externaldrive"
         case "library": "books.vertical"
-        case "package2": "cube.box"
+        case "package2": "cube"
         case "pen": "pencil"
         case "printer": "printer"
-        case "smartphone": "iphone"
+        case "smartphone": "smartphone"
         case "subtitles": "captions.bubble"
         case "type": "character"
         case "zap": "bolt"
-        default: "doc" // 未知 wire 名回退到「文件」（同 `file`）
+        default: "document" // 未知 wire 名回退到「文件」（同 `file`）
         }
     }
 

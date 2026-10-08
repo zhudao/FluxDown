@@ -60,7 +60,7 @@ struct GeneralCategoryStore {
         write(previous.filter { $0.id != entry.id })
         toasts.show(
             text: L("mobileGeneralCategoryDeleted", ["name": GeneralCategoryText.displayName(entry)]),
-            tone: .info, systemImage: "trash",
+            tone: .info, systemImage: FluxSymbol.delete,
             actionTitle: L("mobileGeneralUndo")
         ) {
             write(previous)
@@ -122,7 +122,7 @@ struct CategoriesSection: View {
                         Button(role: .destructive) {
                             store.delete(entry)
                         } label: {
-                            Label(L("delete"), systemImage: "trash")
+                            Label(L("delete"), systemImage: FluxSymbol.delete)
                         }
                     }
                 }
@@ -130,13 +130,13 @@ struct CategoriesSection: View {
                     Button {
                         editing = .edit(entry)
                     } label: {
-                        Label(L("editCategory"), systemImage: "pencil")
+                        Label(L("editCategory"), systemImage: FluxSymbol.edit)
                     }
                     if !entry.isBuiltin {
                         Button(role: .destructive) {
                             store.delete(entry)
                         } label: {
-                            Label(L("delete"), systemImage: "trash")
+                            Label(L("delete"), systemImage: FluxSymbol.delete)
                         }
                     }
                 }
@@ -158,7 +158,7 @@ struct CategoriesSection: View {
 
     @ViewBuilder
     private func actions(hasBase: Bool, store: GeneralCategoryStore) -> some View {
-        SettingsActionRow(title: L("addCategory"), systemImage: "plus") {
+        SettingsActionRow(title: L("addCategory"), systemImage: FluxSymbol.add) {
             editing = .new
         }
         SettingsActionRow(title: L("autoCategoryDirs"), systemImage: "folder.badge.gearshape") {

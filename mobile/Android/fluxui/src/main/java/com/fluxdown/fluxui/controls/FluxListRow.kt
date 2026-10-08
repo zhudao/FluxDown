@@ -207,6 +207,7 @@ fun FluxStepperRow(
     format: (Int) -> String = { it.toString() },
     editable: Boolean = false,
     enabled: Boolean = true,
+    cloud: Boolean = false,
 ) {
     val name = if (subtitle == null) title else "$title，$subtitle"
     val stepper: @Composable (Modifier) -> Unit = { m ->
@@ -219,13 +220,13 @@ fun FluxStepperRow(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            RowTitleBlock(title, subtitle, false, Color.Unspecified, Modifier.clearAndSetSemantics { })
+            RowTitleBlock(title, subtitle, cloud, Color.Unspecified, Modifier.clearAndSetSemantics { })
             stepper(Modifier)
         }
     } else {
         ListRowImpl(
             title, modifier, subtitle, null, Tone.Neutral, null, null,
-            { stepper(Modifier) }, false, false,
+            { stepper(Modifier) }, false, cloud,
             titleColor = Color.Unspecified, enabled = true, selected = false,
             source = remember { MutableInteractionSource() }, gesture = Modifier, mergeText = false,
         )
@@ -238,6 +239,7 @@ fun FluxFieldRow(
     title: String,
     modifier: Modifier = Modifier,
     subtitle: String? = null,
+    cloud: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
@@ -246,7 +248,7 @@ fun FluxFieldRow(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        RowTitleBlock(title, subtitle, false, Color.Unspecified, Modifier)
+        RowTitleBlock(title, subtitle, cloud, Color.Unspecified, Modifier)
         content()
     }
 }

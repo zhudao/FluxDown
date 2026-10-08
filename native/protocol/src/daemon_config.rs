@@ -122,6 +122,7 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field("default_queue_id", DaemonConfigKind::Text, ""),
     field("domain_conn_caps", DaemonConfigKind::ReadOnly, ""),
     // ── BT ──
+    field("bt_enabled", DaemonConfigKind::Bool, "true"),
     field("bt_enable_dht", DaemonConfigKind::Bool, "true"),
     field("bt_enable_upnp", DaemonConfigKind::Bool, "true"),
     field(

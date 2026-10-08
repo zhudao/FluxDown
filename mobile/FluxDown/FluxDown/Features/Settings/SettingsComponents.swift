@@ -8,7 +8,7 @@ import UIKit
 
 // MARK: - 图标方块
 
-/// 30×30 圆角方块图标（01-foundations §5.1 `tile`：半径 8、白色符号 17pt medium、底色渐变）。
+/// 30×30 圆角方块图标（01-foundations §5.1 `tile`：半径 8、白色符号 17pt medium）：系统「设置」式纯色底，不叠渐变 / 高光。
 /// 随 Dynamic Type 轻度放大（封顶 56）；纯装饰，对 VoiceOver 隐藏。
 struct SettingsTile: View {
     let symbol: String
@@ -22,7 +22,7 @@ struct SettingsTile: View {
             .font(.system(size: side * 17 / 30, weight: .medium))
             .foregroundStyle(.white)
             .frame(width: side, height: side)
-            .background(color.gradient, in: .rect(cornerRadius: side * 8 / 30, style: .continuous))
+            .background(color, in: .rect(cornerRadius: side * 8 / 30, style: .continuous))
             .accessibilityHidden(true)
     }
 }
@@ -115,7 +115,7 @@ private struct SettingsRowModifier: ViewModifier {
         VStack(alignment: .leading, spacing: 6) {
             content
             if let failure {
-                Label(failure, systemImage: "exclamationmark.circle.fill")
+                Label(failure, systemImage: FluxSymbol.failure)
                     .font(.caption)
                     .foregroundStyle(Color.fdStatusFailedText)
                     .transition(.opacity)
@@ -160,7 +160,7 @@ struct SettingsPage<Content: View>: View {
             Form {
                 if showsReadOnlyBanner, container.store.state.isReadOnly {
                     Section {
-                        Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                        Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     }
@@ -170,6 +170,7 @@ struct SettingsPage<Content: View>: View {
                     Section {} footer: { SettingsSyncLegend() }
                 }
             }
+            .readableContentWidth()
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .scrollDismissesKeyboard(.interactively)
@@ -186,10 +187,10 @@ struct SettingsPage<Content: View>: View {
 
 // MARK: - ☁︎ 同步标记
 
-/// ☁︎ 标记（标题后 12pt `icloud`，tertiary；VoiceOver 读「已同步」）。
+/// ☁︎ 标记（标题后 12pt `cloud`，tertiary；VoiceOver 读「已同步」）。FluxCloud 是第三方服务，不得用受限的 `icloud*`。
 struct SettingsSyncMark: View {
     var body: some View {
-        Image(systemName: "icloud")
+        Image(systemName: FluxSymbol.cloud)
             .font(.caption)
             .foregroundStyle(.tertiary)
             .accessibilityLabel(L("settingsSyncedA11y"))
@@ -202,7 +203,7 @@ struct SettingsSyncLegend: View {
         Label {
             Text(L("settingsSyncLegend"))
         } icon: {
-            Image(systemName: "icloud").accessibilityHidden(true)
+            Image(systemName: FluxSymbol.cloud).accessibilityHidden(true)
         }
         .font(.footnote)
         .foregroundStyle(.secondary)
@@ -234,7 +235,7 @@ struct SettingsText: View {
     }
 }
 
-/// 文字块在左、控件在右；字号放大或空间不足时纵向堆叠（`ViewThatFits`）。
+/// 文字块在左、控件在右（`LeadingTrailingRow`：常规字号恒左右排，说明文字换行；辅助功能字号上下排）。
 struct SettingsTrailingLayout<Trailing: View>: View {
     let title: String
     var detail: String?
@@ -242,17 +243,36 @@ struct SettingsTrailingLayout<Trailing: View>: View {
     @ViewBuilder let trailing: Trailing
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .center, spacing: 12) {
-                SettingsText(title: title, detail: detail, synced: synced)
-                Spacer(minLength: 8)
-                trailing
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                SettingsText(title: title, detail: detail, synced: synced)
-                trailing
-            }
+        LeadingTrailingRow {
+            SettingsText(title: title, detail: detail, synced: synced)
+        } trailing: {
+            trailing
         }
+    }
+}
+
+extension View {
+    /// 行内数值输入框：右对齐等宽数字、与系统步进器同材质的填充色圆角底。
+    /// `width` = 常规字号下的固定宽度（nil = 占满剩余宽度）；辅助功能字号下一律占满整行。
+    func settingsValueField(width: CGFloat? = 88) -> some View {
+        modifier(SettingsValueFieldStyle(width: width))
+    }
+}
+
+private struct SettingsValueFieldStyle: ViewModifier {
+    let width: CGFloat?
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    func body(content: Content) -> some View {
+        let fixed = typeSize.isAccessibilitySize ? nil : width
+        content
+            .textFieldStyle(.plain)
+            .multilineTextAlignment(.trailing)
+            .monospacedDigit()
+            .padding(.horizontal, 10)
+            .frame(width: fixed)
+            .frame(maxWidth: fixed == nil ? .infinity : nil, minHeight: 36)
+            .background(.fill.tertiary, in: .rect(cornerRadius: 9, style: .continuous))
     }
 }
 
@@ -360,7 +380,6 @@ struct ConfigNumberRow: View {
     var step = 1
 
     @Environment(ConfigEditor.self) private var editor
-    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var draft = ""
     @State private var adjustedTo: Int?
     @State private var stepTick = 0
@@ -399,12 +418,9 @@ struct ConfigNumberRow: View {
                 HStack(spacing: 8) {
                     TextField(title, text: $draft)
                         .keyboardType(range.lowerBound < 0 ? .numbersAndPunctuation : .numberPad)
-                        .multilineTextAlignment(.trailing)
-                        .monospacedDigit()
                         .focused($focused)
                         .onSubmit(commit)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(minWidth: 72, maxWidth: typeSize.isAccessibilitySize ? CGFloat.infinity : 112, minHeight: 44)
+                        .settingsValueField()
                         .accessibilityLabel(title)
                         .accessibilityValue(display(value))
                     Stepper(title, value: Binding(get: { value }, set: { stepTo($0) }), in: range, step: step)
@@ -475,7 +491,6 @@ struct ConfigDecimalRow: View {
     var zeroText: String?
 
     @Environment(ConfigEditor.self) private var editor
-    @Environment(\.dynamicTypeSize) private var typeSize
     @State private var draft = ""
     @State private var stepTick = 0
     @State private var warnTick = 0
@@ -497,11 +512,8 @@ struct ConfigDecimalRow: View {
             HStack(spacing: 8) {
                 TextField(title, text: $draft)
                     .keyboardType(.decimalPad)
-                    .multilineTextAlignment(.trailing)
-                    .monospacedDigit()
                     .focused($focused)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minWidth: 72, maxWidth: typeSize.isAccessibilitySize ? CGFloat.infinity : 112, minHeight: 44)
+                    .settingsValueField()
                     .onChange(of: draft) { _, new in
                         let clean = SettingsRateLimit.sanitize(new)
                         if clean != new, new != zeroText { draft = clean }
@@ -588,7 +600,7 @@ struct ConfigTextRow: View {
                 }
             }
             if let invalid {
-                Label(invalid, systemImage: "exclamationmark.circle.fill")
+                Label(invalid, systemImage: FluxSymbol.failure)
                     .font(.caption)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -779,11 +791,8 @@ struct SettingsRateLimitRow: View {
             HStack(spacing: 8) {
                 TextField(title, text: $draft, prompt: Text(unlimited))
                     .keyboardType(.decimalPad)
-                    .multilineTextAlignment(.trailing)
-                    .monospacedDigit()
                     .focused($focused)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minHeight: 44)
+                    .settingsValueField(width: nil)
                     .onChange(of: draft) { _, new in
                         let clean = SettingsRateLimit.sanitize(new)
                         if clean != new { draft = clean }
@@ -811,7 +820,7 @@ struct SettingsRateLimitRow: View {
                         presetButton(preset.amount, preset.unit, unlimited: unlimited)
                     }
                 } label: {
-                    Image(systemName: "speedometer")
+                    Image(systemName: "gauge.with.dots.needle.67percent")
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(.rect)
                 }
@@ -840,7 +849,7 @@ struct SettingsRateLimitRow: View {
             draft = SettingsRateLimit.text(bytes: value, unit: amount == 0 ? unit : chipUnit)
         } label: {
             if selected {
-                Label(label, systemImage: "checkmark")
+                Label(label, systemImage: FluxSymbol.done)
             } else {
                 Text(label)
             }

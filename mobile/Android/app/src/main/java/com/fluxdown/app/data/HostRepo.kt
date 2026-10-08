@@ -45,6 +45,23 @@ class HostRepo(private val ds: DataStore<Preferences>, private val box: SecretBo
         return ref
     }
 
+    /** 原地更换访问密钥（主机侧已改密钥）；条目不存在 → false。 */
+    suspend fun updateAccessKey(id: String, accessKey: String): Boolean {
+        var found = false
+        ds.edit { p ->
+            val entries = decode(p[K.remote]).map { e ->
+                if (e.ref.id != id) {
+                    e
+                } else {
+                    found = true
+                    Entry(e.ref, box.seal(accessKey, aad = id))
+                }
+            }
+            if (found) p[K.remote] = encode(entries)
+        }
+        return found
+    }
+
     suspend fun remove(id: String) {
         ds.edit { p ->
             val kept = decode(p[K.remote]).filter { it.ref.id != id }

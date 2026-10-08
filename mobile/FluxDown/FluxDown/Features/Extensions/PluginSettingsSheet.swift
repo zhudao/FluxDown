@@ -59,7 +59,7 @@ struct PluginSettingsSheet: View {
             Form {
                 if let serverError {
                     Section {
-                        Banner(text: L("pluginSettingsSaveFailed", ["message": serverError]), tone: .error, systemImage: "exclamationmark.triangle.fill", slim: true)
+                        Banner(text: L("pluginSettingsSaveFailed", ["message": serverError]), tone: .error, systemImage: FluxSymbol.warning, slim: true)
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     }
@@ -208,7 +208,7 @@ struct PluginSettingsSheet: View {
                 ExtensionsClipboard.copy(script)
                 container.toasts.show(text: L("pluginHelperScriptCopied"), tone: .success)
             } label: {
-                Label(field.helperLabel.flatMap { $0.isEmpty ? nil : $0 } ?? L("pluginCopyHelperScript"), systemImage: "doc.on.doc")
+                Label(field.helperLabel.flatMap { $0.isEmpty ? nil : $0 } ?? L("pluginCopyHelperScript"), systemImage: FluxSymbol.copy)
             }
         }
     }
@@ -227,7 +227,7 @@ struct PluginSettingsSheet: View {
                 .font(.footnote)
             }
             if let error = errors[field.key] {
-                Label(errorText(error), systemImage: "exclamationmark.circle.fill")
+                Label(errorText(error), systemImage: FluxSymbol.failure)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
         }

@@ -1,4 +1,5 @@
 import FluxDomain
+import FluxUI
 import SwiftUI
 
 /// D5#7 移动到队列：单选列表，点选即提交（`TaskActions.moveToQueueNow`）。
@@ -28,7 +29,7 @@ struct MoveToQueueSheet: View {
                             dismiss()
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: "list.number")
+                                Image(systemName: FluxSymbol.queue)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 28)
                                     .accessibilityHidden(true)
@@ -41,7 +42,7 @@ struct MoveToQueueSheet: View {
                                 }
                                 Spacer(minLength: 0)
                                 if key == current {
-                                    Image(systemName: "checkmark")
+                                    Image(systemName: FluxSymbol.done)
                                         .fontWeight(.semibold)
                                         .foregroundStyle(.tint)
                                         .accessibilityHidden(true)
@@ -59,7 +60,7 @@ struct MoveToQueueSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(L("close"), systemImage: "xmark") { dismiss() }
+                    Button(L("close"), systemImage: FluxSymbol.close) { dismiss() }
                 }
             }
         }

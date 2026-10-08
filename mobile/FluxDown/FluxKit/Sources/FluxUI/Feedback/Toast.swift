@@ -186,7 +186,7 @@ struct ToastView: View {
             }
             if item.tone == .error {
                 Button(action: onDismiss) {
-                    Image(systemName: "xmark")
+                    Image(systemName: FluxSymbol.close)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .frame(minWidth: 28, minHeight: 44)
@@ -273,7 +273,7 @@ extension View {
                 Button("Warning") { center.show(text: "Network switched to cellular", tone: .warning) }
                 Button("Error (sticky)") { center.show(text: "Failed to add: unsupported URL scheme", tone: .error) }
                 Button("Action") {
-                    center.show(text: "Endpoint deleted", tone: .info, systemImage: "trash", actionTitle: "Undo") {}
+                    center.show(text: "Endpoint deleted", tone: .info, systemImage: FluxSymbol.delete, actionTitle: "Undo") {}
                 }
             }
             .toastHost(center)

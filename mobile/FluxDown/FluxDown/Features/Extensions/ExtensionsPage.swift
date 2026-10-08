@@ -143,7 +143,7 @@ private struct ExtensionsContent: View {
                     )
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(L("pluginUninstallTooltip"), systemImage: "trash", role: .destructive) { uninstallTarget = plugin }
+                    Button(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete, role: .destructive) { uninstallTarget = plugin }
                         .disabled(readOnly)
                     if !plugin.loadFailed, !plugin.settings.isEmpty {
                         Button(L("pluginSettingsTooltip"), systemImage: "gearshape") { model.sheet = .settings(plugin.identity) }
@@ -159,7 +159,7 @@ private struct ExtensionsContent: View {
                         .disabled(readOnly)
                     }
                     if !plugin.loadFailed, plugin.authSupported {
-                        Button(L("pluginAuthButton"), systemImage: "person.badge.key") { model.sheet = .auth(plugin.identity) }
+                        Button(L("pluginAuthButton"), systemImage: "key") { model.sheet = .auth(plugin.identity) }
                             .tint(Color.fdBoost)
                             .disabled(readOnly)
                     }
@@ -223,21 +223,21 @@ private struct ExtensionsContent: View {
             Button(L("pluginSettingsTooltip"), systemImage: "gearshape") { model.sheet = .settings(plugin.identity) }
         }
         if !plugin.loadFailed, plugin.authSupported {
-            Button(L("pluginAuthButton"), systemImage: "person.badge.key") { model.sheet = .auth(plugin.identity) }
+            Button(L("pluginAuthButton"), systemImage: "key") { model.sheet = .auth(plugin.identity) }
                 .disabled(readOnly)
         }
         if plugin.devMode {
-            Button(L("pluginReloadTooltip"), systemImage: "arrow.clockwise") { Task { await model.reload(plugin) } }
+            Button(L("pluginReloadTooltip"), systemImage: FluxSymbol.retry) { Task { await model.reload(plugin) } }
                 .disabled(readOnly)
         }
         if plugin.loadFailed, !plugin.loadError.isEmpty {
-            Button(L("pluginLoadErrorCopy"), systemImage: "doc.on.doc") {
+            Button(L("pluginLoadErrorCopy"), systemImage: FluxSymbol.copy) {
                 ExtensionsClipboard.copy(plugin.loadError)
                 container.toasts.show(text: L("pluginLoadErrorCopied"), tone: .success)
             }
         }
         Divider()
-        Button(L("pluginUninstallTooltip"), systemImage: "trash", role: .destructive) { uninstallTarget = plugin }
+        Button(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete, role: .destructive) { uninstallTarget = plugin }
             .disabled(readOnly)
     }
 }
@@ -290,15 +290,15 @@ struct PluginRow: View {
                 StatusBadge(text: L("pluginDevModeBadge"), tone: .accent, systemImage: "hammer")
             }
             if plugin.loadFailed {
-                StatusBadge(text: L("pluginLoadStatusFailed"), tone: .failure, systemImage: "exclamationmark.triangle.fill")
+                StatusBadge(text: L("pluginLoadStatusFailed"), tone: .failure, systemImage: FluxSymbol.warning)
             } else {
-                StatusBadge(text: L("pluginLoadStatusLoaded"), tone: .success, systemImage: "checkmark.circle.fill")
+                StatusBadge(text: L("pluginLoadStatusLoaded"), tone: .success, systemImage: FluxSymbol.success)
             }
             if plugin.disabledReason == "Manual" {
                 StatusBadge(text: L("pluginDisabledManual"), tone: .neutral, systemImage: "pause.circle")
             }
             if plugin.disabledReason == "CircuitBreaker" {
-                StatusBadge(text: L("pluginDisabledCircuitBreaker"), tone: .failure, systemImage: "bolt.slash.fill")
+                StatusBadge(text: L("pluginDisabledCircuitBreaker"), tone: .failure, systemImage: FluxSymbol.cancelBoost)
             }
             if let yanked, let key = PluginMarket.yankedLabelKey(yanked) {
                 StatusBadge(text: L("pluginInstalledVersionYanked", ["label": L(key)]), tone: .failure, systemImage: "exclamationmark.octagon.fill")
@@ -352,7 +352,7 @@ private struct PermissionConfirmSheet: View {
             List {
                 if request.versionChanged {
                     Section {
-                        Banner(text: L("pluginErrorMarketVersionChanged"), tone: .warning, systemImage: "exclamationmark.triangle.fill", slim: true)
+                        Banner(text: L("pluginErrorMarketVersionChanged"), tone: .warning, systemImage: FluxSymbol.warning, slim: true)
                             .listRowInsets(EdgeInsets())
                             .listRowBackground(Color.clear)
                     }

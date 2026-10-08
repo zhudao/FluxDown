@@ -59,9 +59,8 @@ private struct SettingsHome: View {
 
     var body: some View {
         SettingsHomeList(query: query)
-            .navigationTitle(L("settings"))
-            .navigationBarTitleDisplayMode(.large)
-            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: L("settingsSearchHint"))
+            .rootNavigationTitle(L("settings"))
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .automatic), prompt: L("settingsSearchHint"))
             .toolbar {
                 ToolbarItem(placement: .primaryAction) { GlobalSearchButton() }
             }
@@ -88,6 +87,7 @@ private struct SettingsHomeList: View {
                 categories(state: state)
             }
         }
+        .readableContentWidth()
         .overlay {
             if !trimmed.isEmpty, SettingsSearch.filter(entries(state: state), query: trimmed).isEmpty {
                 ContentUnavailableView.search(text: trimmed)
@@ -103,7 +103,7 @@ private struct SettingsHomeList: View {
         let ctx = searchContext(state)
         if state.isReadOnly {
             Section {
-                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                     .listRowInsets(EdgeInsets())
                     .listRowBackground(Color.clear)
             }
@@ -175,7 +175,7 @@ private struct SettingsHomeList: View {
             SettingsTileLabel(
                 title: host.displayName,
                 subtitle: Self.subtitle(host),
-                symbol: host.isLocal ? "iphone" : "server.rack",
+                symbol: host.symbolName,
                 color: host.isLocal ? .gray : .indigo
             )
             Spacer(minLength: 8)
@@ -206,7 +206,7 @@ private struct SettingsHomeList: View {
             }
             .accessibilityLabel(L("mobileSettingsSwitchHost", ["name": container.host.displayName]))
             if state.isReadOnly {
-                Label(L("mobileHostOffline"), systemImage: "wifi.slash")
+                Label(L("mobileHostOffline"), systemImage: FluxSymbol.offline)
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(Color.fdStatusWarningText)
             }
@@ -325,13 +325,13 @@ private struct ConnectionBadge: View {
     var body: some View {
         switch connection {
         case .live:
-            StatusBadge(text: L("mobileSettingsConnLive"), tone: .success, systemImage: "checkmark.circle.fill")
+            StatusBadge(text: L("mobileSettingsConnLive"), tone: .success, systemImage: FluxSymbol.success)
         case .connecting:
-            StatusBadge(text: L("mobileSettingsConnConnecting"), tone: .warning, systemImage: "arrow.triangle.2.circlepath")
+            StatusBadge(text: L("mobileSettingsConnConnecting"), tone: .warning, systemImage: FluxSymbol.syncing)
         case .stale:
-            StatusBadge(text: L("mobileSettingsConnStale"), tone: .warning, systemImage: "arrow.triangle.2.circlepath")
+            StatusBadge(text: L("mobileSettingsConnStale"), tone: .warning, systemImage: FluxSymbol.syncing)
         case .failed:
-            StatusBadge(text: L("mobileSettingsConnFailed"), tone: .failure, systemImage: "exclamationmark.triangle.fill")
+            StatusBadge(text: L("mobileSettingsConnFailed"), tone: .failure, systemImage: FluxSymbol.warning)
         }
     }
 }
@@ -368,7 +368,7 @@ private struct SettingsHostMenu<Label: View>: View {
             }
             .pickerStyle(.inline)
             Divider()
-            Button(L("mobileHostAdd"), systemImage: "plus") { router.sheet = .addHost }
+            Button(L("mobileHostAdd"), systemImage: FluxSymbol.add) { router.sheet = .addHost }
         } label: {
             label
         }
@@ -379,7 +379,7 @@ private struct SettingsHostMenu<Label: View>: View {
         guard id != container.host.id, let target = container.hosts.first(where: { $0.id == id }) else { return }
         let name = target.displayName
         Task {
-            container.toasts.show(text: L("mobileHostSwitching", ["name": name]), tone: .info, systemImage: "arrow.triangle.2.circlepath")
+            container.toasts.show(text: L("mobileHostSwitching", ["name": name]), tone: .info, systemImage: FluxSymbol.syncing)
             switch await container.switchHost(target) {
             case .success:
                 container.toasts.show(text: L("mobileHostSwitched", ["name": name]), tone: .success)

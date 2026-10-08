@@ -180,7 +180,8 @@ struct LinkProtocolTests {
 
     @Test func syncGroupsPartitionTheFullCatalogWithoutOverlap() {
         let all = SyncRules.groups.flatMap(\.keys)
-        #expect(all.count == 56)
+        #expect(all.count == 57)
+        #expect(all.contains("bt.enabled"))
         #expect(Set(all).count == all.count)
         #expect(SyncRules.groups.map(\.id) == SyncGroup.ID.allCases)
         #expect(all.contains("custom_categories"))

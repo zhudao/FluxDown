@@ -279,13 +279,13 @@ private struct ComponentCardBody: View {
             if status.source == "none" {
                 Label(
                     L(status.managedSupported ? "componentsStatusNotFound" : "componentsStatusNotFoundUnsupported", ["name": title]),
-                    systemImage: "exclamationmark.triangle.fill"
+                    systemImage: FluxSymbol.warning
                 )
                 .foregroundStyle(Color.fdStatusWarningText)
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
+                        Image(systemName: FluxSymbol.success)
                             .foregroundStyle(Color.fdStatusSeedingText)
                             .accessibilityHidden(true)
                         StatusBadge(text: sourceLabel(status.source), tone: .neutral)
@@ -306,7 +306,7 @@ private struct ComponentCardBody: View {
             }
         } else {
             // 快照已到但没有该组件：主机未编译组件支持（或当前平台不可用）。
-            Label(L("settingsUnsupportedOnPlatform"), systemImage: "exclamationmark.triangle.fill")
+            Label(L("settingsUnsupportedOnPlatform"), systemImage: FluxSymbol.warning)
                 .foregroundStyle(Color.fdStatusWarningText)
         }
     }
@@ -331,7 +331,7 @@ private struct ComponentCardBody: View {
                 }
                 if let error = controller.versionsError {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label(L("componentsVersionsLoadFailed", ["message": error]), systemImage: "exclamationmark.circle.fill")
+                        Label(L("componentsVersionsLoadFailed", ["message": error]), systemImage: FluxSymbol.failure)
                             .font(.footnote)
                             .foregroundStyle(Color.fdStatusFailedText)
                         Button(L("componentsRetryVersions")) { Task { await controller.fetchVersions() } }

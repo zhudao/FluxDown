@@ -23,7 +23,7 @@ struct ActivitySheet: View {
             List {
                 if readOnly {
                     Section {
-                        Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash")
+                        Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline)
                             .taskDetailBareRow()
                     }
                 }
@@ -81,7 +81,7 @@ struct ActivitySheet: View {
                 FluxHaptic.medium.play()
                 actions.pauseAll()
             } label: {
-                Label(L("pauseAll"), systemImage: "pause.fill")
+                Label(L("pauseAll"), systemImage: FluxSymbol.pause)
             }
             .disabled(readOnly || !running)
         }
@@ -91,7 +91,7 @@ struct ActivitySheet: View {
                 FluxHaptic.medium.play()
                 actions.resumeAll()
             } label: {
-                Label(L("resumeAll"), systemImage: "play.fill")
+                Label(L("resumeAll"), systemImage: FluxSymbol.resume)
             }
             .disabled(readOnly)
         }

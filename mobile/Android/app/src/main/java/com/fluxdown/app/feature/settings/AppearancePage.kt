@@ -20,7 +20,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
@@ -36,13 +35,13 @@ import com.fluxdown.app.R
 import com.fluxdown.app.data.AppearanceState
 import com.fluxdown.app.data.ThemeMode
 import com.fluxdown.app.i18n.str
+import com.fluxdown.app.nav.SettingsPage
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.fluxui.controls.ButtonSize
 import com.fluxdown.fluxui.controls.ButtonVariant
 import com.fluxdown.fluxui.controls.FluxButton
 import com.fluxdown.fluxui.controls.FluxListRow
-import com.fluxdown.fluxui.controls.FluxSlider
 import com.fluxdown.fluxui.controls.FluxSwitchRow
 import com.fluxdown.fluxui.controls.GlassSection
 import com.fluxdown.fluxui.icons.FluxIcon
@@ -57,11 +56,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.IOException
-import kotlin.math.roundToInt
 
 /**
  * S4 · 外观（设备本地，断线不影响）：预览、语言、主题模式、主题色（含自定义取色器）、
- * 跟随壁纸取色、氛围光强度、系统文字与显示大小。所有修改经 [com.fluxdown.app.data.AppearanceRepo] 持久化，
+ * 跟随壁纸取色、系统文字与显示大小。所有修改经 [com.fluxdown.app.data.AppearanceRepo] 持久化，
  * FluxTheme 随 DataStore 流实时重绘。
  */
 @Composable
@@ -86,37 +84,6 @@ internal fun AppearancePage() {
                 block()
             } catch (e: IOException) {
                 overlays.toast(failText, FluxToastKind.Error)
-            }
-        }
-    }
-
-    // 氛围光：本地草稿即时驱动预览（读取下沉到各自的叶子里，拖动时不重组整页），200ms 防抖写入；离开页面时冲刷
-    var auraDraft by remember { mutableStateOf<Int?>(null) }
-    val auraState = remember { derivedStateOf { auraDraft ?: appearance.auraIntensity } }
-    LaunchedEffect(Unit) {
-        snapshotFlow { auraDraft }.collectLatest { d ->
-            if (d != null) {
-                delay(200)
-                write { repo.setAuraIntensity(d) }
-            }
-        }
-    }
-    LaunchedEffect(Unit) {
-        snapshotFlow { auraDraft != null && auraDraft == appearance.auraIntensity }.collect { settled ->
-            if (settled) auraDraft = null
-        }
-    }
-    DisposableEffect(Unit) {
-        onDispose {
-            val d = auraDraft
-            if (d != null && d != appearance.auraIntensity) {
-                container.appScope.launch {
-                    try {
-                        repo.setAuraIntensity(d)
-                    } catch (e: IOException) {
-                        overlays.toast(failText, FluxToastKind.Error)
-                    }
-                }
             }
         }
     }
@@ -150,14 +117,15 @@ internal fun AppearancePage() {
 
     SettingsPageFrame(title = str(R.string.settingsCatAppearance), onBack = { nav.pop() }) {
         flowItem(0, gate, "preview") {
-            ThemePreview(auraIntensity = { auraState.value })
+            ThemePreview()
         }
         if (Build.VERSION.SDK_INT >= 33) {
             flowItem(1, gate, "language") {
-                GlassSection {
+                GlassSection(footer = str(R.string.mobileLanguageSystemHint)) {
                     row(hasIcon = true) {
                         FluxListRow(
                             title = str(R.string.language),
+                            modifier = Modifier.settingsFocus("appearance.language"),
                             icon = FluxIcons.Globe,
                             value = str(R.string.languageNativeName),
                             chevron = true,
@@ -172,10 +140,10 @@ internal fun AppearancePage() {
             }
         }
         flowItem(2, gate, "theme") {
-            GlassSection(animateSize, title = str(R.string.settingsGroupTheme)) {
+            GlassSection(animateSize, title = str(R.string.settingsGroupTheme), footer = str(R.string.settingsSyncLegend)) {
                 custom(padded = true) {
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(22.dp)) {
-                        SubBlock(str(R.string.themeMode)) {
+                        SubBlock(str(R.string.themeMode), "appearance.mode") {
                             ModeTiles(
                                 selected = appearance.mode,
                                 onSelect = { mode: ThemeMode ->
@@ -186,7 +154,7 @@ internal fun AppearancePage() {
                                 },
                             )
                         }
-                        SubBlock(str(R.string.themeColor)) {
+                        SubBlock(str(R.string.themeColor), "appearance.color") {
                             Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
                                 AccentDots(
                                     scheme = appearance.scheme,
@@ -238,17 +206,6 @@ internal fun AppearancePage() {
                         WallpaperCard(onUseOwn = { write { repo.setDynamicColor(false) } })
                     }
                 }
-                custom { FluxDivider(startInset = 16.dp) }
-                custom(padded = true) {
-                    AuraBlock(
-                        value = auraState.value,
-                        onValueChange = { auraDraft = it },
-                        onFinished = {
-                            val d = auraDraft
-                            if (d != null) write { repo.setAuraIntensity(d) }
-                        },
-                    )
-                }
             }
         }
         flowItem(4, gate, "interface") {
@@ -256,6 +213,7 @@ internal fun AppearancePage() {
                 row(hasIcon = true) {
                     FluxListRow(
                         title = str(R.string.mobileSystemTextSize),
+                        modifier = Modifier.settingsFocus("appearance.textSize"),
                         subtitle = str(R.string.mobileSystemTextSizeDesc),
                         icon = FluxIcons.Type,
                         chevron = true,
@@ -270,13 +228,17 @@ internal fun AppearancePage() {
 }
 
 @Composable
-private fun SubBlock(label: String, content: @Composable () -> Unit) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        FluxText(
-            label,
-            style = FluxTheme.type.micro,
-            color = FluxTheme.colors.inkMuted,
-        )
+private fun SubBlock(label: String, id: String, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxWidth().settingsFocus(id), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            FluxText(
+                label,
+                style = FluxTheme.type.micro,
+                color = FluxTheme.colors.inkMuted,
+            )
+            // 外观三键（模式 / 方案 / 自定义色）参与云同步：同行构件的 ☁︎ 标记
+            FluxIcon(FluxIcons.Cloud, null, size = 13.dp, tint = FluxTheme.colors.inkFaint)
+        }
         content()
     }
 }
@@ -311,42 +273,21 @@ private fun WallpaperCard(onUseOwn: () -> Unit) {
     }
 }
 
-/** 氛围光强度：标题 + 读数、滑杆（气泡净空 36dp）、预览条。0 显示“关闭”。 */
-@Composable
-private fun AuraBlock(value: Int, onValueChange: (Int) -> Unit, onFinished: () -> Unit) {
-    val c = FluxTheme.colors
-    val t = FluxTheme.type
-    val offLabel = str(R.string.mobileAuraOff)
-    val title = str(R.string.mobileAuraIntensity)
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FluxIcon(FluxIcons.Sparkles, null, size = 18.dp, tint = c.inkMuted)
-                FluxText(title, style = t.weight(t.body, 450), color = c.ink)
-            }
-            FluxText(
-                if (value == 0) offLabel else "$value%",
-                style = t.weight(t.sm, 500, mono = true),
-                color = if (value == 0) c.inkFaint else c.ink,
-            )
+/** 本页可见行（与页面渲染同一判定：语言行仅 Android 13+ 有系统「应用语言」设置）。 */
+internal fun appearanceSearchEntries(ctx: SettingsSearchContext): List<SettingsEntry> {
+    val crumb = ctx.crumb(R.string.settingsCatAppearance)
+    return buildList {
+        if (Build.VERSION.SDK_INT >= 33) {
+            add(ctx.entry("appearance.language", SettingsPage.Appearance, "language", R.string.language, R.string.languageDesc, crumb, FluxIcons.Globe))
         }
-        FluxText(str(R.string.mobileAuraIntensityDesc), style = t.sm, color = c.inkMuted)
-        Spacer(Modifier.height(28.dp))
-        FluxSlider(
-            value = value.toFloat(),
-            onValueChange = { onValueChange(it.roundToInt()) },
-            range = 0f..100f,
-            format = { v -> if (v.roundToInt() == 0) offLabel else "${v.roundToInt()}%" },
-            onValueChangeFinished = onFinished,
-            label = title,
-            modifier = Modifier.fillMaxWidth(),
+        add(ctx.entry("appearance.mode", SettingsPage.Appearance, "theme", R.string.themeMode, null, crumb, FluxIcons.Palette))
+        add(ctx.entry("appearance.color", SettingsPage.Appearance, "theme", R.string.themeColor, null, crumb, FluxIcons.Palette))
+        add(
+            ctx.entry(
+                "appearance.textSize", SettingsPage.Appearance, "interface", R.string.mobileSystemTextSize,
+                R.string.mobileSystemTextSizeDesc, ctx.crumb(R.string.settingsCatAppearance, R.string.settingsGroupInterface),
+                FluxIcons.Type,
+            ),
         )
-        Spacer(Modifier.height(4.dp))
-        AuraPreview(intensity = value)
     }
 }
-

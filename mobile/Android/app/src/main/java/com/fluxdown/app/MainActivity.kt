@@ -1,61 +1,34 @@
 package com.fluxdown.app
 
+import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.getValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.fluxdown.app.data.AppearanceState
-import com.fluxdown.app.data.ThemeMode
-import com.fluxdown.app.nav.AppNavigator
-import com.fluxdown.app.nav.LocalNavigator
-import com.fluxdown.app.nav.SheetRoute
-import com.fluxdown.app.shell.AppShell
-import com.fluxdown.app.shell.LocalAppContainer
-import com.fluxdown.fluxui.theme.FluxTheme
 
-class MainActivity : ComponentActivity() {
-    private val navigator = AppNavigator()
-
+/**
+ * 对外公开的稳定入口：类名 `com.fluxdown.app.MainActivity` 不可改——桌面图标与固定快捷方式指向它，部分浏览器
+ * （X / Via 等）还按 Flutter 版保存的组件名把下载 intent 显式发给它。
+ *
+ * 自身无界面（`Theme.NoDisplay`）：下载 intent（VIEW / SEND / SEND_MULTIPLE）转交透明的
+ * [ExternalDownloadActivity]，其余转交主界面 [HomeActivity]，随即结束（同 Flutter 版路由）。
+ */
+class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        val container = (application as FluxApplication).container
-        if (savedInstanceState == null) handleIntent(intent)
-        setContent {
-            val appearance by container.appearance.state.collectAsStateWithLifecycle(AppearanceState())
-            val dark = when (appearance.mode) {
-                ThemeMode.System -> isSystemInDarkTheme()
-                ThemeMode.Dark -> true
-                ThemeMode.Light -> false
-            }
-            FluxTheme(dark = dark, accent = appearance.accent, auraIntensity = appearance.auraIntensity) {
-                CompositionLocalProvider(
-                    LocalAppContainer provides container,
-                    LocalNavigator provides navigator,
-                ) {
-                    AppShell()
-                }
-            }
-        }
+        forward(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleIntent(intent)
+        setIntent(intent)
+        forward(intent)
     }
 
-    /** N4：分享文本 / magnet: / ed2k:// 唤起 → 预填“新建下载”。 */
-    private fun handleIntent(intent: Intent?) {
-        val text = when (intent?.action) {
-            Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
-            Intent.ACTION_VIEW -> intent.dataString
-            else -> null
-        }?.trim()
-        if (!text.isNullOrEmpty()) navigator.openSheet(SheetRoute.NewDownload(prefill = text))
+    private fun forward(source: Intent) {
+        val target = when (source.action) {
+            Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE, Intent.ACTION_VIEW -> ExternalDownloadActivity::class.java
+            else -> HomeActivity::class.java
+        }
+        startActivity(Intent(source).setClass(this, target))
+        finish()
     }
 }

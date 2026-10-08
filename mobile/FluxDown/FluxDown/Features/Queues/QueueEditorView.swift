@@ -40,7 +40,7 @@ struct QueueEditorView: View {
                 Section {
                     VStack(spacing: 8) {
                         if readOnly {
-                            Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                            Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                         }
                         if let text = model.errorText {
                             Banner(text: text, tone: .error, slim: true)
@@ -79,7 +79,7 @@ struct QueueEditorView: View {
             case let .failed(text):
                 Section {
                     QueueIssueText(text: text)
-                    Button(L("mobileRetry"), systemImage: "arrow.clockwise") {
+                    Button(L("mobileRetry"), systemImage: FluxSymbol.retry) {
                         Task { await model.reload(session: container.session) }
                     }
                 }
@@ -180,7 +180,7 @@ struct QueueEditorView: View {
                         focus = nil
                         pickingDirectory = true
                     } label: {
-                        Label(L("browse"), systemImage: "folder")
+                        Label(L("browse"), systemImage: FluxSymbol.folder)
                             .labelStyle(.iconOnly)
                             .frame(minWidth: 44, minHeight: 44)
                             .contentShape(.rect)
@@ -214,7 +214,7 @@ struct QueueEditorView: View {
             } label: {
                 Label(
                     L(running ? "stopQueueAction" : "startQueueAction"),
-                    systemImage: running ? "pause.fill" : "play.fill"
+                    systemImage: running ? FluxSymbol.pause : FluxSymbol.resume
                 )
             }
             .disabled(model.isWorking)
@@ -222,7 +222,7 @@ struct QueueEditorView: View {
                 Button(role: .destructive) {
                     confirmingDelete = true
                 } label: {
-                    Label(L("deleteQueueAction"), systemImage: "trash")
+                    Label(L("deleteQueueAction"), systemImage: FluxSymbol.delete)
                 }
                 .disabled(model.isWorking)
             }
@@ -239,7 +239,7 @@ struct QueueEditorView: View {
             return
         }
         if await model.save(session: container.session) {
-            container.toasts.show(text: L("queueSavedToast"), tone: .success, systemImage: "checkmark")
+            container.toasts.show(text: L("queueSavedToast"), tone: .success, systemImage: FluxSymbol.done)
             dismiss()
         }
     }
@@ -249,14 +249,14 @@ struct QueueEditorView: View {
             container.toasts.show(
                 text: QueueText.runningToast(running, name: name),
                 tone: .info,
-                systemImage: running ? "play.fill" : "pause.fill"
+                systemImage: running ? FluxSymbol.resume : FluxSymbol.pause
             )
         }
     }
 
     private func delete(name: String) async {
         if await model.delete(session: container.session) {
-            container.toasts.show(text: L("queueDeletedToast", ["name": name]), tone: .success, systemImage: "trash")
+            container.toasts.show(text: L("queueDeletedToast", ["name": name]), tone: .success, systemImage: FluxSymbol.delete)
             dismiss()
         }
     }

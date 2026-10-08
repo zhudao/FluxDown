@@ -123,7 +123,7 @@ final class RssModel {
                 container.toasts.show(
                     text: L("mobileRssRefreshed", ["name": RssFormat.title(of: source)]),
                     tone: .success,
-                    systemImage: "checkmark"
+                    systemImage: FluxSymbol.done
                 )
             }
         }
@@ -156,7 +156,7 @@ final class RssModel {
         container.toasts.show(
             text: L("mobileRssRefreshSummary", ["ok": succeeded, "failed": failed]),
             tone: failed == 0 ? .success : .warning,
-            systemImage: failed == 0 ? "checkmark" : "exclamationmark.triangle"
+            systemImage: failed == 0 ? FluxSymbol.done : "exclamationmark.triangle"
         )
     }
 
@@ -214,7 +214,7 @@ final class RssModel {
             if let failure {
                 container.toasts.show(text: ErrorText.describe(failure), tone: .error, systemImage: "exclamationmark.circle")
             } else {
-                container.toasts.show(text: L("mobileRssMarkedReadToast"), tone: .success, systemImage: "checkmark")
+                container.toasts.show(text: L("mobileRssMarkedReadToast"), tone: .success, systemImage: FluxSymbol.done)
             }
         }
     }
@@ -227,7 +227,7 @@ final class RssModel {
     func confirmDelete(_ source: RssSource) {
         actions.run(onSuccess: { [self] in
             if selectedId == source.sourceId { selectedId = nil }
-            container.toasts.show(text: L("mobileRssDeletedToast"), tone: .info, systemImage: "trash")
+            container.toasts.show(text: L("mobileRssDeletedToast"), tone: .info, systemImage: FluxSymbol.delete)
         }) { session throws(HostError) in
             try await session.callVoid(HostMethod.daemonRssDeleteSource, params: RssSourceIdParams(sourceId: source.sourceId))
         }
@@ -235,7 +235,7 @@ final class RssModel {
 
     func copyLink(_ source: RssSource) {
         UIPasteboard.general.string = source.url
-        container.toasts.show(text: L("mobileRssCopied"), tone: .success, systemImage: "doc.on.doc")
+        container.toasts.show(text: L("mobileRssCopied"), tone: .success, systemImage: FluxSymbol.copy)
     }
 
     // MARK: 编辑器

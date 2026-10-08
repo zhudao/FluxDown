@@ -7,7 +7,7 @@ struct GlobalSearchButton: View {
     @Environment(AppContainer.self) private var container
 
     var body: some View {
-        Button(L("mobileSearchTitle"), systemImage: "magnifyingglass") {
+        Button(L("mobileSearchTitle"), systemImage: FluxSymbol.search) {
             container.router.sheet = .search
         }
     }
@@ -26,7 +26,8 @@ struct GlobalSearchScreen: View {
 
     @State private var query = ""
     @State private var scope: SearchScope = .all
-    @State private var searchFocused = true
+    /// 搜索激活态：初值 true = Sheet 一出现即进入搜索（无中间的「未激活」帧）。
+    @State private var searchActive = true
 
     var body: some View {
         let state = container.store.state
@@ -79,11 +80,14 @@ struct GlobalSearchScreen: View {
             .overlay {
                 if results.isEmpty { emptyState(searching: results.searching) }
             }
+            // 无标题、无自绘关闭钮：搜索一呈现即激活（导航栏让位给搜索框），关闭 = 搜索框旁系统的关闭钮 / 下滑。
+            // 之前「标题 + 自绘 ✕」在激活瞬间被系统收起、换成搜索框的 ✕，于是出现一次「出现 → 消失」的闪动。
+            .toolbar(removing: .title)
             .navigationTitle(L("mobileSearchTitle"))
             .navigationBarTitleDisplayMode(.inline)
             .searchable(
                 text: $query,
-                isPresented: $searchFocused,
+                isPresented: $searchActive,
                 placement: .navigationBarDrawer(displayMode: .always),
                 prompt: L("searchPlaceholder")
             )
@@ -93,11 +97,10 @@ struct GlobalSearchScreen: View {
                 }
             }
             .onSubmit(of: .search) { runFirst(results.first) }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button(L("close"), systemImage: "xmark") { container.router.sheet = nil }
-                        .labelStyle(.iconOnly)
-                }
+            // 用户点搜索框的关闭钮 = 结束搜索 = 收起 Sheet。只在当前 Sheet 仍是搜索时收起：
+            // 选中结果后 Sheet 已被替换为新建 / 活动面板等，本视图拆除时的失活回调不得把新 Sheet 一并关掉。
+            .onChange(of: searchActive) { _, active in
+                if !active { finish() }
             }
         }
         .presentationDetents([.large])
@@ -159,9 +162,9 @@ struct GlobalSearchScreen: View {
         }
     }
 
-    /// 结束搜索：收起 Sheet（查询状态随视图销毁）。
+    /// 结束搜索：收起 Sheet（查询状态随视图销毁）。仅当前 Sheet 仍是搜索时生效，避免误关已替换上来的 Sheet。
     private func finish() {
-        container.router.sheet = nil
+        if container.router.sheet == .search { container.router.sheet = nil }
     }
 
     // MARK: 视图片段
@@ -208,11 +211,11 @@ struct GlobalSearchScreen: View {
         if searching {
             ContentUnavailableView(
                 L("commandPaletteNoResults"),
-                systemImage: "magnifyingglass",
+                systemImage: FluxSymbol.search,
                 description: Text(L("mobileSearchNoResultTip"))
             )
         } else {
-            ContentUnavailableView(L("searchTasksPlaceholder"), systemImage: "magnifyingglass")
+            ContentUnavailableView(L("searchTasksPlaceholder"), systemImage: FluxSymbol.search)
         }
     }
 

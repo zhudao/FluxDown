@@ -50,13 +50,12 @@ import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.LocalFluxBackdrop
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 
 /**
- * 命令搜索全屏壳（§12.31，z74）：实色画布底（不透出下层页面与氛围光）；入场 scale 1.02→1、模糊 10→0（fluid），出场 snap。
- * 顶部为搜索框（h52、r26、聚焦时 accent@70% 描边 + 辉光）与“取消”；其下 [content] 占满剩余空间并随键盘收缩
+ * 命令搜索全屏壳（§12.31，z74）：实色画布底（不透出下层页面）；入场 scale 1.02→1、模糊 10→0（fluid），出场 snap。
+ * 顶部为搜索框（h52、r26、聚焦时 accent@70% 描边）与“取消”；其下 [content] 占满剩余空间并随键盘收缩
  * （结果列表用 LazyColumn，contentPadding = 0 16 40 自行设置）。显示后自动聚焦并弹出键盘。
  * 返回键 = [onDismiss]。
  *
@@ -155,8 +154,7 @@ private fun SearchField(
     Row(
         modifier
             .height(52.dp)
-            .then(if (focused) Modifier.fluxGlow(c.accentGlow, 11.dp, shape, spread = (-6).dp) else Modifier)
-            // Real + 壳内 backdrop = null ⇒ 不透明 glassSolid3：聚焦辉光只留在框外，不透进框内把文字染糊
+            // Real + 壳内 backdrop = null ⇒ 不透明 glassSolid3；聚焦只加 accent 描边
             .fluxGlass(FluxGlass.G3, shape, kind = FluxGlassKind.Real, strongLine = true)
             .then(if (focused) Modifier.border(1.dp, c.accent.copy(alpha = 0.7f), shape) else Modifier)
             .padding(start = 16.dp, end = if (query.isEmpty()) 16.dp else 4.dp),

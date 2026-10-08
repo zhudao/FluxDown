@@ -28,7 +28,7 @@ struct TaskDetailGeneralPage: View {
             Button {
                 actions.copyLink(task)
             } label: {
-                Label(L("copyUrl"), systemImage: "doc.on.doc")
+                Label(L("copyUrl"), systemImage: FluxSymbol.copy)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -67,7 +67,7 @@ struct TaskDetailGeneralPage: View {
             monospaced: true,
             copyable: true,
             copyLabel: L("webCopy"),
-            onCopy: { container.toasts.show(text: L("mobilePathCopied"), tone: .success, systemImage: "doc.on.doc") }
+            onCopy: { container.toasts.show(text: L("mobilePathCopied"), tone: .success, systemImage: FluxSymbol.copy) }
         )
         queueRow
         if !task.autoRoute.isEmpty {
@@ -81,7 +81,7 @@ struct TaskDetailGeneralPage: View {
                 copyable: true,
                 tone: .failure,
                 copyLabel: L("webCopy"),
-                onCopy: { container.toasts.show(text: L("detailErrorCopied"), tone: .success, systemImage: "doc.on.doc") }
+                onCopy: { container.toasts.show(text: L("detailErrorCopied"), tone: .success, systemImage: FluxSymbol.copy) }
             )
         }
         if let group = model.group {
@@ -495,7 +495,7 @@ struct TaskDetailAdvancedPage: View {
             monospaced: true,
             copyable: true,
             copyLabel: L("webCopy"),
-            onCopy: { container.toasts.show(text: L("webCopied"), tone: .success, systemImage: "doc.on.doc") }
+            onCopy: { container.toasts.show(text: L("webCopied"), tone: .success, systemImage: FluxSymbol.copy) }
         )
     }
 }

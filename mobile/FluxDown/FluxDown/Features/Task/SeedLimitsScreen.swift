@@ -271,7 +271,7 @@ struct SeedLimitsScreen: View {
             do throws(HostError) {
                 try await session.callVoid(HostMethod.daemonTaskSetSeedLimits, params: params)
                 FluxHaptic.success.play()
-                container.toasts.show(text: L("btSeedLimitsSaved"), tone: .success, systemImage: "checkmark")
+                container.toasts.show(text: L("btSeedLimitsSaved"), tone: .success, systemImage: FluxSymbol.done)
                 onSaved(params)
                 dismiss()
             } catch {
@@ -357,7 +357,7 @@ private struct SeedLimitInputRow: View {
                 Text(unit).foregroundStyle(.secondary)
             }
             if !isValid {
-                Label(L("pluginErrPattern"), systemImage: "exclamationmark.circle.fill")
+                Label(L("pluginErrPattern"), systemImage: FluxSymbol.failure)
                     .labelStyle(.iconOnly)
                     .foregroundStyle(Color.fdStatusFailedText)
             }

@@ -1234,7 +1234,7 @@ fn resolve_file_name(param_name: &str, link_name: &str) -> String {
     } else {
         param_name
     };
-    crate::downloader::sanitize_filename(name)
+    crate::naming::sanitize_filename(name)
 }
 
 /// Migrate a matching legacy temporary file without losing its verified blocks.

@@ -1,4 +1,5 @@
 import FluxDomain
+import FluxUI
 import QuickLook
 import SwiftUI
 
@@ -17,42 +18,42 @@ struct TaskMenuItems: View {
         let status = task.status
         Section {
             if actions.hasLocalFile(task) {
-                Button(L("openFile"), systemImage: "arrow.up.right.square") { actions.open(task) }
-                Button(L("mobileShowInFiles"), systemImage: "folder") { actions.showInFiles(task) }
+                Button(L("openFile"), systemImage: FluxSymbol.openFile) { actions.open(task) }
+                Button(L("mobileShowInFiles"), systemImage: FluxSymbol.folder) { actions.showInFiles(task) }
             }
             if actions.canRedownload(task) {
-                Button(L("redownloadTask"), systemImage: "arrow.clockwise") { actions.confirmRedownload(task) }
+                Button(L("redownloadTask"), systemImage: FluxSymbol.retry) { actions.confirmRedownload(task) }
             }
             if status == .paused || status == .failed {
-                Button(L("resume"), systemImage: "play.fill") { actions.resume([task.taskId]) }
+                Button(L("resume"), systemImage: FluxSymbol.resume) { actions.resume([task.taskId]) }
             }
             if status.isActive || status == .pending {
-                Button(L("pause"), systemImage: "pause.fill") { actions.pause([task.taskId]) }
+                Button(L("pause"), systemImage: FluxSymbol.pause) { actions.pause([task.taskId]) }
             }
             if status != .completed {
                 Toggle(isOn: Binding(get: { boosted }, set: { _ in actions.boost(task, boosted: boosted) })) {
-                    Label(L(boosted ? "cancelBoost" : "boostDownload"), systemImage: "bolt.fill")
+                    Label(L(boosted ? "cancelBoost" : "boostDownload"), systemImage: FluxSymbol.boost)
                 }
             }
         }
         Section {
-            Button(L("copyUrl"), systemImage: "doc.on.doc") { actions.copyLink(task) }
-            ShareLink(item: task.shareUrl) { Label(L("mobileShareLink"), systemImage: "square.and.arrow.up") }
+            Button(L("copyUrl"), systemImage: FluxSymbol.copy) { actions.copyLink(task) }
+            ShareLink(item: task.shareUrl) { Label(L("mobileShareLink"), systemImage: FluxSymbol.share) }
             if !status.isActive, task.protocol != .bt {
-                Button(L("renameTask"), systemImage: "pencil") { actions.rename(task) }
+                Button(L("renameTask"), systemImage: FluxSymbol.edit) { actions.rename(task) }
             }
             if status == .failed || status == .paused {
-                Button(L("mobileChangeUrl"), systemImage: "link") { actions.changeUrl(task) }
+                Button(L("mobileChangeUrl"), systemImage: FluxSymbol.link) { actions.changeUrl(task) }
             }
             if status != .completed {
-                Button(L("moveToQueueAction"), systemImage: "list.number") { actions.moveToQueue([task.taskId]) }
+                Button(L("moveToQueueAction"), systemImage: FluxSymbol.queue) { actions.moveToQueue([task.taskId]) }
             }
             if let onSelect {
                 Button(L("mobileMenuSelect"), systemImage: "checkmark.circle") { onSelect() }
             }
         }
         Section {
-            Button(L("delete"), systemImage: "trash", role: .destructive) { actions.confirmDelete([task]) }
+            Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { actions.confirmDelete([task]) }
         }
     }
 }

@@ -19,8 +19,9 @@ WORKDIR /src/web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY web/ ./
-# Vite 别名从仓库根引用共享文案与 GPUI 主题解析器（与 GPUI/Flutter 同一份事实源）
+# Vite 别名从仓库根引用共享文案、GPUI 主题解析器与内置文件图标包（与 GPUI/Flutter 同一份事实源）
 COPY assets/i18n/ /src/assets/i18n/
+COPY assets/icon-packs/ /src/assets/icon-packs/
 COPY website-v2/src/lib/gpui-theme/ /src/website-v2/src/lib/gpui-theme/
 RUN bun run build
 

@@ -286,7 +286,7 @@ private struct LocalSaveDirRow: View {
             Button {
                 showInFiles()
             } label: {
-                Label(L("mobileShowInFiles"), systemImage: "folder")
+                Label(L("mobileShowInFiles"), systemImage: FluxSymbol.folder)
             }
             .buttonStyle(.borderless)
         }
@@ -383,7 +383,7 @@ private struct ConnPolicyRow: View {
             .settingsRow("download.connPolicy")
             if let count, count > 0 {
                 SettingsActionRow(
-                    title: L("connPolicyCacheClear"), systemImage: "trash", role: .destructive, isRunning: isClearing,
+                    title: L("connPolicyCacheClear"), systemImage: FluxSymbol.delete, role: .destructive, isRunning: isClearing,
                     action: clear
                 )
             }

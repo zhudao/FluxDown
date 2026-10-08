@@ -23,8 +23,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.layout.Layout
@@ -205,7 +203,7 @@ fun FluxHeader(
  * 可选 micro 副标题、右操作槽。两侧占位等宽以保证标题真居中。
  *
  * 应满宽放置（水平内边距取 `screenMargin`），吸顶由调用方负责；[scrolled] = 内容已滚动超过 6dp 时，
- * 背后出现 canvas 94% 渐隐（自头部上方 46dp 起，覆盖状态栏区）。
+ * 背后出现 canvas 纯色底（自头部上方 46dp 起，覆盖状态栏区）并在底沿画 0.5dp 发丝线。
  */
 @Composable
 fun FluxPageHead(
@@ -265,15 +263,12 @@ fun FluxPageHead(
             .fillMaxWidth()
             .drawWithCache {
                 val top = -46.dp.toPx()
-                val solid = c.canvas.copy(alpha = 0.94f)
-                val brush = Brush.verticalGradient(
-                    0f to solid, 0.6f to solid, 1f to Color.Transparent,
-                    startY = top, endY = size.height,
-                )
+                val hw = 0.5.dp.toPx()
                 onDrawBehind {
                     val a = fade.value.coerceIn(0f, 1f)
                     if (a > 0.001f) {
-                        drawRect(brush, topLeft = Offset(0f, top), size = androidx.compose.ui.geometry.Size(size.width, size.height - top), alpha = a)
+                        drawRect(c.canvas, topLeft = Offset(0f, top), size = androidx.compose.ui.geometry.Size(size.width, size.height - top), alpha = a)
+                        drawLine(c.hairline, Offset(0f, size.height - hw / 2f), Offset(size.width, size.height - hw / 2f), strokeWidth = hw, alpha = a)
                     }
                 }
             }

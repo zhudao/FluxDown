@@ -47,14 +47,14 @@ struct AllDevicesScreen: View {
     private func emptyOverlay(rows: [CloudDeviceRecord], total: Int) -> some View {
         if rows.isEmpty {
             if total > 0 {
-                ContentUnavailableView(L("accountDevicesSearchNoResults"), systemImage: "magnifyingglass")
+                ContentUnavailableView(L("accountDevicesSearchNoResults"), systemImage: FluxSymbol.search)
             } else if case .failed = model.cloudPhase {
                 ContentUnavailableView(L("accountDevicesLoadFailed"), systemImage: "exclamationmark.triangle")
             } else if model.cloudPhase == .loading || model.cloudPhase == .idle {
                 ProgressView()
                     .accessibilityLabel(L("mobileLoading"))
             } else {
-                ContentUnavailableView(L("accountDevicesEmpty"), systemImage: "laptopcomputer.and.iphone")
+                ContentUnavailableView(L("accountDevicesEmpty"), systemImage: "laptopcomputer")
             }
         }
     }

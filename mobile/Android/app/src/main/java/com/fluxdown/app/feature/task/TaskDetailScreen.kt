@@ -48,7 +48,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInRoot
@@ -248,7 +247,7 @@ private fun DetailBody(taskId: String, modelOf: () -> DetailModel?, listState: L
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .background(Brush.verticalGradient(listOf(c.canvas.copy(alpha = 0.92f * tabBg), c.canvas.copy(alpha = 0.86f * tabBg))))
+                    .background(c.canvas.copy(alpha = 0.89f * tabBg))
                     .padding(horizontal = margin)
                     .padding(top = 6.dp),
             ) {

@@ -65,7 +65,7 @@ struct RootView: View {
         if #available(iOS 27, *) {
             TabView(selection: selection) {
                 primaryTabs
-                Tab(L("newDownload"), systemImage: "plus", value: AppTab.newTask, role: .prominent) {
+                Tab(L("newDownload"), systemImage: FluxSymbol.newDownload, value: AppTab.newTask, role: .prominent) {
                     Color.clear
                 }
             }
@@ -81,19 +81,19 @@ struct RootView: View {
 
     @TabContentBuilder<AppTab>
     private var primaryTabs: some TabContent<AppTab> {
-        Tab(L("mobileNavDownloads"), systemImage: "arrow.down.circle", value: AppTab.downloads) {
+        Tab(L("mobileNavDownloads"), systemImage: FluxSymbol.downloads, value: AppTab.downloads) {
             DownloadsScreen()
         }
-        Tab(L("mobileNavRss"), systemImage: "dot.radiowaves.up.forward", value: AppTab.rss) {
+        Tab(L("mobileNavRss"), systemImage: FluxSymbol.subscriptions, value: AppTab.rss) {
             RssScreen()
         }
         // `ui.show_activity_rss`（云同步偏好，通用设置「入口」）关闭 → 标签栏不显示「订阅」；
         // 全局搜索的「前往订阅」等入口仍可程序化进入（03-settings §4.4）。
         .hidden(!container.store.state.preferences.bool("ui.show_activity_rss", default: true))
-        Tab(L("mobileNavDevices"), systemImage: "network", value: AppTab.devices) {
+        Tab(L("mobileNavDevices"), systemImage: FluxSymbol.devices, value: AppTab.devices) {
             DevicesScreen()
         }
-        Tab(L("mobileNavSettings"), systemImage: "gearshape", value: AppTab.settings) {
+        Tab(L("mobileNavSettings"), systemImage: FluxSymbol.settings, value: AppTab.settings) {
             SettingsScreen()
         }
     }

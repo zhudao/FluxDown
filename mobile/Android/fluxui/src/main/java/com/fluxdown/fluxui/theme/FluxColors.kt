@@ -49,8 +49,7 @@ class FluxColors(
     val accentLo: Color,
     val accentMid: Color,
     val accentGlow: Color,
-    val accentFillA: Color,
-    val accentFillB: Color,
+    val accentFill: Color,
     val onAccent: Color,
     val coral: Color,
     val coralText: Color,
@@ -66,7 +65,6 @@ class FluxColors(
     private val categoryColors: Array<Color>,
     val grainAlpha: Float,
     val grainBlend: BlendMode,
-    val auraModeGain: Float,
 ) {
     fun category(c: FileCategory): Color = categoryColors[c.ordinal]
 
@@ -122,8 +120,7 @@ class FluxColors(
                 accentLo = seed.copy(alpha = .16f),
                 accentMid = seed.copy(alpha = .34f),
                 accentGlow = acc.hi.copy(alpha = .55f),
-                accentFillA = acc.fillA,
-                accentFillB = acc.fillB,
+                accentFill = acc.fill,
                 onAccent = acc.on,
                 coral = coral,
                 coralText = Color(if (dark) 0xFFFF7A7F else 0xFFC42A31),
@@ -141,7 +138,6 @@ class FluxColors(
                 },
                 grainAlpha = if (dark) .035f else .05f,
                 grainBlend = if (dark) BlendMode.Softlight else BlendMode.Multiply,
-                auraModeGain = if (dark) 1f else .55f,
             )
         }
     }
@@ -165,7 +161,7 @@ class ImportedPalette(val background: Color, val foreground: Color) {
 }
 
 @Immutable
-data class AccentSlots(val fillA: Color, val fillB: Color, val on: Color, val hi: Color)
+data class AccentSlots(val fill: Color, val on: Color, val hi: Color)
 
 /** WCAG 2.x 对比度。 */
 fun contrast(a: Color, b: Color): Float {
@@ -174,10 +170,8 @@ fun contrast(a: Color, b: Color): Float {
     return max(la, lb) / min(la, lb)
 }
 
-private fun minContrast(text: Color, a: Color, b: Color) = min(contrast(text, a), contrast(text, b))
-
 /**
- * 强调色护栏（§2.3）：保证按钮标签对渐变两端 ≥ 4.5:1，accentHi 对 canvas ≥ 4.5:1。
+ * 强调色护栏（§2.3）：保证按钮标签对纯色填充 [AccentSlots.fill] ≥ 4.5:1，accentHi 对 canvas ≥ 4.5:1。
  * 纯函数；`lerp` 即 Oklab 插值，与 CSS `color-mix(in oklab)` 等价。
  *
  * 浅色模式为满足白字对比度需要压暗强调色：只沿 OKLab 明度轴移动并保持彩度（[withOklabLightness]），
@@ -187,25 +181,21 @@ fun resolveAccent(seed: Color, dark: Boolean, canvas: Color): AccentSlots {
     val inkOn = Color(0xFF04101F)
     val white = Color.White
     val l0 = seed.oklabLightness()
-    var fa = if (dark) lerp(seed, white, .24f) else seed.withOklabLightness(l0 + (1f - l0) * .08f)
-    var fb = if (dark) seed else seed.withOklabLightness(l0 * .88f)
+    val startL = if (dark) l0 else l0 * .88f
+    var fill = if (dark) seed else seed.withOklabLightness(startL)
     val pref = if (dark) inkOn else white
     val alt = if (dark) white else inkOn
     var on = pref
-    if (minContrast(pref, fa, fb) < 4.5f) {
-        if (minContrast(alt, fa, fb) >= 4.5f) {
+    if (contrast(pref, fill) < 4.5f) {
+        if (contrast(alt, fill) >= 4.5f) {
             on = alt
         } else {
             val step = if (dark) .01f else -.01f
-            val sourceA = if (dark) fa else seed
-            val startA = if (dark) fa.oklabLightness() else l0 + (1f - l0) * .08f
-            val startB = if (dark) l0 else l0 * .88f
             var i = 0
             // 每次从原色映射，避免反复 sRGB 量化和色域裁剪累计损失彩度。
-            while (i < 100 && minContrast(pref, fa, fb) < 4.5f) {
+            while (i < 100 && contrast(pref, fill) < 4.5f) {
                 i++
-                fa = sourceA.withOklabLightness(startA + step * i)
-                fb = seed.withOklabLightness(startB + step * i)
+                fill = seed.withOklabLightness(startL + step * i)
             }
         }
     }
@@ -217,7 +207,7 @@ fun resolveAccent(seed: Color, dark: Boolean, canvas: Color): AccentSlots {
             hi = seed.withOklabLightness(l0 * .88f - .01f * i)
         }
     }
-    return AccentSlots(fa, fb, on, hi)
+    return AccentSlots(fill, on, hi)
 }
 
 /** OKLab 明度 L（0..1）。 */

@@ -8,7 +8,7 @@ public nonisolated enum RingGlyph: Sendable, Hashable, CaseIterable {
     case resume
     /// 失败：`arrow.clockwise`，满环（轨道 tint α .25）。
     case retry
-    /// 已完成 / 做种：`arrow.up.right.square`，实心淡底，无环。
+    /// 已完成 / 做种：`FluxSymbol.openFile`，实心淡底，无环。
     case open
     /// 文件已删除：`arrow.clockwise`，实心淡底，无环。
     case redownload
@@ -17,10 +17,10 @@ public nonisolated enum RingGlyph: Sendable, Hashable, CaseIterable {
 
     var symbolName: String {
         switch self {
-        case .pause, .preparing: "pause.fill"
-        case .resume: "play.fill"
-        case .retry, .redownload: "arrow.clockwise"
-        case .open: "arrow.up.right.square"
+        case .pause, .preparing: FluxSymbol.pause
+        case .resume: FluxSymbol.resume
+        case .retry, .redownload: FluxSymbol.retry
+        case .open: FluxSymbol.openFile
         }
     }
 

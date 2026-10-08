@@ -2,12 +2,12 @@
 
 use std::{rc::Rc, sync::Arc};
 
+use fluxdown_ui_account::AccountRailButton;
 use fluxdown_ui_components::FluxIcon;
 use fluxdown_ui_downloads::{DownloadHostActions, DownloadView};
 use fluxdown_ui_rss::RssView;
 use fluxdown_ui_settings::WebhookView;
 use fluxdown_ui_shell::{ShellAction, ShellRoute, ShellView, main_window_options};
-use fluxdown_ui_theme::active_theme;
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
 use gpui_component::{Icon, Root};
 
@@ -94,22 +94,18 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                     )
                     .optional(optional),
                 ),
-                ActivityEntry::Theme => actions.push(
-                    ShellAction::with_dynamic_icon(
-                        button_id,
-                        "activity-theme-tooltip",
-                        entry.label_key(),
-                        |cx| {
-                            if active_theme(cx).mode().is_dark() {
-                                Icon::new(FluxIcon::Sun)
-                            } else {
-                                Icon::new(FluxIcon::Moon)
-                            }
-                        },
-                        activity::toggle_theme,
-                    )
-                    .optional(optional),
-                ),
+                ActivityEntry::Account => {
+                    let host = Desktop::global(cx).account_host.clone();
+                    let button = cx.new(|cx| {
+                        AccountRailButton::new(
+                            host,
+                            ShellView::ACTION_BUTTON_SIZE,
+                            |_, cx| activity::open_account(cx),
+                            cx,
+                        )
+                    });
+                    actions.push(ShellAction::view(button_id, button.into()).optional(optional));
+                }
                 ActivityEntry::Settings => actions.push(
                     ShellAction::new(
                         button_id,

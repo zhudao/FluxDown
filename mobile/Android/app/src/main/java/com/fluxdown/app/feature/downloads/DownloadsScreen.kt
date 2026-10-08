@@ -35,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -89,7 +88,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import com.fluxdown.fluxui.material.FluxBackdrop
 import com.fluxdown.fluxui.material.LocalFluxBackdrop
 import com.fluxdown.fluxui.material.fluxBackdropSource
-import com.fluxdown.fluxui.material.auraActivity
 import com.fluxdown.fluxui.material.rememberFlowInGate
 import com.fluxdown.fluxui.overlay.FluxBanner
 import com.fluxdown.fluxui.overlay.FluxBannerKind
@@ -426,7 +424,6 @@ private fun HeroCard() {
         title = str(R.string.mobileInstrumentLabel),
         pauseAllLabel = str(R.string.pauseAll),
         resumeAllLabel = str(R.string.resumeAll),
-        activity = auraActivity(stats.down),
     )
 }
 
@@ -454,7 +451,6 @@ fun DownloadsRailFooter() {
         pauseAllLabel = str(R.string.pauseAll),
         resumeAllLabel = str(R.string.resumeAll),
         compact = true,
-        activity = auraActivity(stats.down),
     )
 }
 
@@ -513,7 +509,7 @@ private fun BoxScope.FiltersOverlay(tracker: ListTracker, onHeight: (Int) -> Uni
                 if (stuck > 0f) {
                     val fill = c.canvas.copy(alpha = 0.88f)
                     drawRect(
-                        Brush.verticalGradient(listOf(fill, fill)),
+                        fill,
                         topLeft = Offset(0f, -topPx),
                         size = androidx.compose.ui.geometry.Size(size.width, size.height + topPx),
                         alpha = stuck,
@@ -538,37 +534,46 @@ private fun FiltersBlock() {
     val tabs = StatusFolder.entries.map { f ->
         ScopeTab(f, f.label(), facets.count(f), hot = f == StatusFolder.Failed && facets.count(f) > 0)
     }
-    Column(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
-        ScopeTabs(
-            tabs = tabs,
-            selected = filter.folder,
-            onSelect = view::setFolder,
-            modifier = Modifier.padding(horizontal = margin),
-            countDescription = { tasksFmt.fill("n" to it) },
-        )
-        if (facets.categories.isNotEmpty() || filter.hasScope) {
+    val visibility = view.filterVisibility
+    val showCategories = visibility.categories && facets.categories.isNotEmpty()
+    val showChips = showCategories || filter.hasScope
+    // 状态条与芯片行都被隐藏时整块不占高度
+    val blockEmpty = visibility.isEmpty(hasCategories = facets.categories.isNotEmpty(), hasScopeChip = filter.hasScope)
+    Column(Modifier.fillMaxWidth().padding(bottom = if (blockEmpty) 0.dp else 10.dp)) {
+        if (visibility.status) {
+            ScopeTabs(
+                tabs = tabs,
+                selected = filter.folder,
+                onSelect = view::setFolder,
+                modifier = Modifier.padding(horizontal = margin),
+                countDescription = { tasksFmt.fill("n" to it) },
+            )
+        }
+        if (showChips) {
             Row(
                 Modifier
-                    .padding(top = 12.dp)
+                    .padding(top = if (visibility.status) 12.dp else 0.dp)
                     .horizontalScroll(rememberScrollState())
                     .padding(horizontal = margin),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 ScopeBadges()
-                for (pill in facets.categories) {
-                    val cat = pill.category
-                    val selected = filter.categoryId == cat.id
-                    FluxPill(
-                        text = cat.label(),
-                        selected = selected,
-                        onClick = {
-                            haptics.tick()
-                            view.setCategory(if (selected) null else cat.id)
-                        },
-                        dot = c.category(cat.fileCategory()),
-                        count = pill.count,
-                    )
+                if (visibility.categories) {
+                    for (pill in facets.categories) {
+                        val cat = pill.category
+                        val selected = filter.categoryId == cat.id
+                        FluxPill(
+                            text = cat.label(),
+                            selected = selected,
+                            onClick = {
+                                haptics.tick()
+                                view.setCategory(if (selected) null else cat.id)
+                            },
+                            dot = c.category(cat.fileCategory()),
+                            count = pill.count,
+                        )
+                    }
                 }
             }
         }

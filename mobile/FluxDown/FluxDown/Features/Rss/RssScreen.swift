@@ -125,9 +125,11 @@ private struct RssFeedsList: View {
         .listStyle(.insetGrouped)
         .overlay { overlayState(sources: sources, visible: visible, connection: state.connection) }
         .refreshable { await rss.refreshAll(sources) }
-        .navigationTitle(L("rssSubscriptions"))
+        // 订阅属于主机：标题副行显示当前主机（与下载页同款标题菜单切换主机），不再单独占一个左上角胶囊。
+        .rootNavigationTitle(L("rssSubscriptions"), subtitle: hostTitleSubtitle(container.host, status: state.connection.statusText))
+        .toolbarTitleMenu { HostTitleMenuItems(status: state.connection.statusText) }
         .modifier(OptionalSearch(enabled: sources.count >= RssModel.searchThreshold, text: $rss.query))
-        .toolbar { toolbarContent(sources: sources, readOnly: readOnly, connection: state.connection) }
+        .toolbar { toolbarContent(sources: sources, readOnly: readOnly) }
         .fluxAnimation(.smooth, value: visible.map(\.sourceId))
     }
 
@@ -137,7 +139,7 @@ private struct RssFeedsList: View {
     private func listContent(sources: [RssSource], visible: [RssSource], failing: Int, unread: Int, readOnly: Bool, state: HostState) -> some View {
         if showsOfflineBanner(state.connection) {
             Section {
-                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash")
+                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
             }
@@ -160,7 +162,7 @@ private struct RssFeedsList: View {
                 Banner(
                     text: L("mobileRssFailedBanner", ["n": failing]),
                     tone: .warning,
-                    systemImage: "exclamationmark.triangle.fill",
+                    systemImage: FluxSymbol.warning,
                     action: BannerAction(title: L(rss.failingOnly ? "mobileRssShowAll" : "mobileRssShowFailing")) {
                         rss.failingOnly.toggle()
                     }
@@ -203,7 +205,7 @@ private struct RssFeedsList: View {
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
             if !readOnly {
-                Button(L("rssRefreshNow"), systemImage: "arrow.clockwise") { rss.refresh(source) }
+                Button(L("rssRefreshNow"), systemImage: FluxSymbol.retry) { rss.refresh(source) }
                     .tint(.accentColor)
                     .disabled(refreshing)
                 if source.unreadCount > 0 {
@@ -214,7 +216,7 @@ private struct RssFeedsList: View {
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if !readOnly {
-                Button(L("rssDeleteSource"), systemImage: "trash", role: .destructive) { rss.requestDelete(source) }
+                Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source) }
                 Button(L("rssManageTitle"), systemImage: "slider.horizontal.3") {
                     rss.openEditor(.edit(sourceId: source.sourceId))
                 }
@@ -226,17 +228,17 @@ private struct RssFeedsList: View {
                 rss.openEditor(.edit(sourceId: source.sourceId))
             }
             .disabled(readOnly)
-            Button(L("rssRefreshNow"), systemImage: "arrow.clockwise") { rss.refresh(source) }
+            Button(L("rssRefreshNow"), systemImage: FluxSymbol.retry) { rss.refresh(source) }
                 .disabled(refreshing || readOnly)
             Button(L("rssMarkAllRead"), systemImage: "checkmark.circle") { rss.markAllRead(source) }
                 .disabled(source.unreadCount == 0 || readOnly)
-            Button(L("copyUrl"), systemImage: "doc.on.doc") { rss.copyLink(source) }
+            Button(L("copyUrl"), systemImage: FluxSymbol.copy) { rss.copyLink(source) }
             Button(L(source.enabled ? "mobileRssDisable" : "mobileRssEnable"), systemImage: source.enabled ? "pause.circle" : "play.circle") {
                 rss.toggle(source)
             }
             .disabled(readOnly)
             Divider()
-            Button(L("rssDeleteSource"), systemImage: "trash", role: .destructive) { rss.requestDelete(source) }
+            Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source) }
                 .disabled(readOnly)
         }
     }
@@ -249,13 +251,8 @@ private struct RssFeedsList: View {
             if connection == .connecting {
                 ProgressView().controlSize(.large)
             } else {
-                ContentUnavailableView {
-                    Label(L("mobileRssEmptyTitle"), systemImage: "dot.radiowaves.up.forward")
-                } description: {
-                    Text(L("rssSidebarEmptyHint"))
-                } actions: {
-                    Button(L("rssAddSource")) { rss.openEditor(.create) }
-                        .buttonStyle(.borderedProminent)
+                EmptyStateView(L("mobileRssEmptyTitle"), message: L("iosRssEmptySub"), systemImage: FluxSymbol.subscriptions) {
+                    Button(L("rssAddSource"), systemImage: FluxSymbol.add) { rss.openEditor(.create) }
                         .disabled(container.store.state.isReadOnly)
                 }
             }
@@ -278,16 +275,13 @@ private struct RssFeedsList: View {
     // MARK: 工具栏
 
     @ToolbarContentBuilder
-    private func toolbarContent(sources: [RssSource], readOnly: Bool, connection: Connection) -> some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) { hostPill(connection: connection) }
+    private func toolbarContent(sources: [RssSource], readOnly: Bool) -> some ToolbarContent {
         ToolbarItem(placement: .primaryAction) { GlobalSearchButton() }
         ToolbarSpacer(.fixed, placement: .primaryAction)
-        ToolbarItem(placement: .primaryAction) {
-            Button(L("rssAddSource"), systemImage: "plus") { rss.openEditor(.create) }
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button(L("rssAddSource"), systemImage: FluxSymbol.add) { rss.openEditor(.create) }
                 .disabled(readOnly)
-        }
-        if !sources.isEmpty {
-            ToolbarItem(placement: .primaryAction) {
+            if !sources.isEmpty {
                 moreMenu(sources: sources, readOnly: readOnly)
             }
         }
@@ -296,7 +290,7 @@ private struct RssFeedsList: View {
     private func moreMenu(sources: [RssSource], readOnly: Bool) -> some View {
         @Bindable var rss = rss
         return Menu {
-            Button(L("mobileRssRefreshAll"), systemImage: "arrow.clockwise") {
+            Button(L("mobileRssRefreshAll"), systemImage: FluxSymbol.retry) {
                 Task { await rss.refreshAll(sources) }
             }
             .disabled(readOnly || !rss.busy.isEmpty)
@@ -312,7 +306,7 @@ private struct RssFeedsList: View {
             }
             .pickerStyle(.menu)
         } label: {
-            Label(L("moreActions"), systemImage: "ellipsis")
+            Label(L("moreActions"), systemImage: FluxSymbol.more)
         }
     }
 
@@ -322,24 +316,6 @@ private struct RssFeedsList: View {
         case .stale, .failed: true
         case .live, .connecting: false
         }
-    }
-
-    /// 当前主机（订阅属于主机，不是本机偏好）；点按去「设备」页切换主机。
-    private func hostPill(connection: Connection) -> some View {
-        let name = container.host.localizedName
-        return Button {
-            container.router.tab = .devices
-        } label: {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(connection == .live ? Color.fdStatusSeeding : Color.fdStatusWarning)
-                    .frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
-                Text(name).lineLimit(1).truncationMode(.middle)
-            }
-            .frame(maxWidth: 180)
-        }
-        .accessibilityLabel(L("mobileRssSwitchHostDesc", ["name": name]))
     }
 }
 
@@ -352,7 +328,7 @@ private struct OptionalSearch: ViewModifier {
     func body(content: Content) -> some View {
         if enabled {
             content.searchable(
-                text: $text, placement: .navigationBarDrawer(displayMode: .always), prompt: L("mobileRssSearchFeeds")
+                text: $text, placement: .navigationBarDrawer(displayMode: .automatic), prompt: L("mobileRssSearchFeeds")
             )
         } else {
             content

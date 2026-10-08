@@ -37,7 +37,7 @@ enum TorrentImport {
         let toasts = container.toasts
         if container.store.state.isReadOnly {
             FluxHaptic.error.play()
-            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: "wifi.slash")
+            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: FluxSymbol.offline)
             return outcome
         }
         let session = container.session
@@ -78,7 +78,7 @@ enum TorrentImport {
         if outcome.created > 0 {
             FluxHaptic.success.play()
             let text = outcome.created == 1 ? L("torrentFileSelected") : L("torrentFileCount", ["count": outcome.created])
-            toasts.show(text: text, tone: .success, systemImage: "doc.badge.plus")
+            toasts.show(text: text, tone: .success, systemImage: "document.badge.plus")
         } else if outcome.failures.isEmpty == false {
             FluxHaptic.error.play()
         }

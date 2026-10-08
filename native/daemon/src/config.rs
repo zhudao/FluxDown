@@ -198,6 +198,10 @@ pub fn bt_config_from_map(
         .map(|value| value == "true")
         .unwrap_or(true);
     fluxdown_engine::bt_downloader::BtConfig {
+        enabled: cfg
+            .get("bt_enabled")
+            .map(|value| value == "true")
+            .unwrap_or(true),
         enable_dht: cfg
             .get("bt_enable_dht")
             .map(|value| value == "true")
@@ -402,6 +406,18 @@ mod tests {
         assert!(!public.contains_key("site_auth_credentials"));
         assert!(!public.contains_key("daemon_config_revision"));
         assert!(!public.contains_key("daemon_migration_link_acked"));
+    }
+
+    #[test]
+    fn bt_config_from_map_parses_bt_enabled() {
+        let mut map = std::collections::HashMap::new();
+        assert!(super::bt_config_from_map(&map).enabled, "defaults to true");
+
+        map.insert("bt_enabled".to_string(), "false".to_string());
+        assert!(!super::bt_config_from_map(&map).enabled, "explicit false");
+
+        map.insert("bt_enabled".to_string(), "true".to_string());
+        assert!(super::bt_config_from_map(&map).enabled, "explicit true");
     }
 }
 

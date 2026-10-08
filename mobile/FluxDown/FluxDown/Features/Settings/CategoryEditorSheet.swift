@@ -52,7 +52,7 @@ struct CategoryEditorSheet: View {
                         Button(role: .destructive) {
                             confirmDelete = true
                         } label: {
-                            Label(L("deleteCategory"), systemImage: "trash")
+                            Label(L("deleteCategory"), systemImage: FluxSymbol.delete)
                                 .frame(minHeight: 44, alignment: .leading)
                                 .contentShape(.rect)
                         }
@@ -224,7 +224,7 @@ struct CategoryEditorSheet: View {
     @ViewBuilder
     private func errorLabel(for kind: CategoryValidationError) -> some View {
         if error == kind {
-            Label(L(kind.i18nKey), systemImage: "exclamationmark.circle.fill")
+            Label(L(kind.i18nKey), systemImage: FluxSymbol.failure)
                 .font(.footnote)
                 .foregroundStyle(Color.fdStatusFailedText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -267,7 +267,7 @@ private struct CategoryIconCell: View {
                 }
                 .overlay(alignment: .topTrailing) {
                     if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
+                        Image(systemName: FluxSymbol.success)
                             .font(.caption)
                             .foregroundStyle(accent)
                             .background(Circle().fill(.background).padding(1))

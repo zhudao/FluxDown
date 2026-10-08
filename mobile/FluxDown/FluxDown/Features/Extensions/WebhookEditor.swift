@@ -259,7 +259,7 @@ struct WebhookEditorSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(L(preset == "ntfy" ? "webhookUrlHintNtfy" : "webhookUrlHint"))
                     if urlTouched, let urlError {
-                        Label(L(urlError), systemImage: "exclamationmark.circle.fill")
+                        Label(L(urlError), systemImage: FluxSymbol.failure)
                             .foregroundStyle(Color.fdStatusFailedText)
                     }
                 }
@@ -278,7 +278,7 @@ struct WebhookEditorSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(L("webhookEventsHint"))
                     if events.isEmpty {
-                        Label(L("webhookEventsEmpty"), systemImage: "exclamationmark.triangle.fill")
+                        Label(L("webhookEventsEmpty"), systemImage: FluxSymbol.warning)
                             .foregroundStyle(Color.fdStatusWarningText)
                     }
                 }
@@ -327,7 +327,7 @@ struct WebhookEditorSheet: View {
             if on { events.remove(event.wire) } else { events.insert(event.wire) }
         } label: {
             HStack(spacing: 6) {
-                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                Image(systemName: on ? FluxSymbol.success : "circle")
                 Text(L(event.labelKey)).lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -372,7 +372,7 @@ struct WebhookEditorSheet: View {
             Button {
                 headers.append(HeaderRow(key: "", value: ""))
             } label: {
-                Label(L("webhookAddHeader"), systemImage: "plus")
+                Label(L("webhookAddHeader"), systemImage: FluxSymbol.add)
             }
             .buttonStyle(.borderless)
         }
@@ -438,11 +438,11 @@ struct WebhookEditorSheet: View {
                 .buttonStyle(.borderless)
                 .accessibilityLabel(showSecret ? L("webHideKey") : L("webShowKey"))
             }
-            Button(L("webhookRegenerate"), systemImage: "arrow.triangle.2.circlepath") {
+            Button(L("webhookRegenerate"), systemImage: FluxSymbol.syncing) {
                 secretCopied = false
                 secret = WebhookTemplate.generateSecret()
             }
-            Button(secretCopied ? L("webhookCopied") : L("webhookCopy"), systemImage: secretCopied ? "checkmark" : "doc.on.doc") {
+            Button(secretCopied ? L("webhookCopied") : L("webhookCopy"), systemImage: secretCopied ? FluxSymbol.done : FluxSymbol.copy) {
                 copySecret()
             }
         }

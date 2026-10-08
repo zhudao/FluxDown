@@ -51,6 +51,8 @@ jobs:
               - 'web/**'
               - 'assets/i18n/**'
               - 'website-v2/src/lib/gpui-theme/**'
+              - 'assets/icon-packs/**'
+              - 'crates/icon_pack/tests/fixtures/**'
               - '.github/workflows/ci.yml'
             website:
               - 'website-v2/**'

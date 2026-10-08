@@ -121,7 +121,8 @@ public enum SyncRules {
             "download.notify_on_complete", "download.silent_download", "download.keep_awake",
         ]),
         SyncGroup(id: .bt, labelKey: "syncScopeBt", keys: [
-            "bt.enable_dht", "bt.enable_upnp", "bt.custom_trackers", "bt.tracker_sub_enabled", "bt.tracker_sub_urls",
+            "bt.enabled", "bt.enable_dht", "bt.enable_upnp", "bt.custom_trackers", "bt.tracker_sub_enabled",
+            "bt.tracker_sub_urls",
             "bt.seed_ratio_limit", "bt.seed_post_ratio_limit", "bt.seed_time_limit_minutes",
             "bt.seed_inactive_time_limit_minutes", "bt.seed_limit_operator", "bt.seed_then_action",
             "bt.seed_max_active",

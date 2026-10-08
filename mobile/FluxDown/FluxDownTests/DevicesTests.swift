@@ -107,11 +107,11 @@ struct DevicesTests {
     // MARK: 设备展示
 
     @Test func platformSymbols() {
-        #expect(DevicePresentation.symbol(platform: "iOS") == "iphone")
-        #expect(DevicePresentation.symbol(platform: "android") == "iphone")
+        #expect(DevicePresentation.symbol(platform: "iOS") == "smartphone")
+        #expect(DevicePresentation.symbol(platform: "android") == "smartphone")
         #expect(DevicePresentation.symbol(platform: "macos") == "laptopcomputer")
         #expect(DevicePresentation.symbol(platform: "Windows") == "desktopcomputer")
-        #expect(DevicePresentation.symbol(platform: "linux") == "terminal")
+        #expect(DevicePresentation.symbol(platform: "linux") == "apple.terminal")
         #expect(DevicePresentation.symbol(platform: "web") == "globe")
         #expect(DevicePresentation.symbol(platform: nil) == "network")
         #expect(DevicePresentation.symbol(platform: "plan9") == "network")

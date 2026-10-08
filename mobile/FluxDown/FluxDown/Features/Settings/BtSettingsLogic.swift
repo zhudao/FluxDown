@@ -23,6 +23,7 @@ nonisolated enum BtSettingsTab: String, CaseIterable, Identifiable {
 /// BT 页的每一行（GPUI 顺序）。页面渲染与设置搜索共用同一份可见性判定。
 /// 做种「时长 + 单位」两个 PC 行在移动端合成一行（各自仍写回两个键）。
 nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
+    case enabled
     case dht, upnp, portStart, portEnd, mseMode
     case customTrackers, trackerSub, trackerSubUrls, trackerSubStatus
     case seedEnabled, seedMaxActive, autoReseed, seedRatio, seedPostRatio
@@ -32,7 +33,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
 
     var tab: BtSettingsTab {
         switch self {
-        case .dht, .upnp, .portStart, .portEnd, .mseMode: .general
+        case .enabled, .dht, .upnp, .portStart, .portEnd, .mseMode: .general
         case .customTrackers, .trackerSub, .trackerSubUrls, .trackerSubStatus: .tracker
         default: .seeding
         }
@@ -40,6 +41,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
 
     var configKey: String {
         switch self {
+        case .enabled: "bt_enabled"
         case .dht: "bt_enable_dht"
         case .upnp: "bt_enable_upnp"
         case .portStart: "bt_port_start"
@@ -81,6 +83,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
 
     var titleKey: String {
         switch self {
+        case .enabled: "btEnabled"
         case .dht: "btEnableDht"
         case .upnp: "btEnableUpnp"
         case .portStart: "btListenPortStart"
@@ -105,6 +108,7 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
     /// 说明文案键。时长行的「说明」只用于搜索（命中单位键标题），页面不渲染。
     var detailKey: String? {
         switch self {
+        case .enabled: "btEnabledDesc"
         case .dht: "btEnableDhtDesc"
         case .upnp: "btEnableUpnpDesc"
         case .portStart: "btListenPortDesc"
@@ -135,8 +139,15 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
         }
     }
 
+    /// BT 总开关；缺键（旧主机）按开启处理。
+    static func isEnabled(in form: SettingsConfigForm) -> Bool {
+        form.bool(BtSettingsRow.enabled.configKey)
+    }
+
     func isVisible(in form: SettingsConfigForm) -> Bool {
         guard form.has(configKey) else { return false }
+        if self == .enabled { return true }
+        guard BtSettingsRow.isEnabled(in: form) else { return false }
         switch tab {
         case .seeding where self != .seedEnabled:
             return form.bool(BtSettingsRow.seedEnabled.configKey)
@@ -147,6 +158,11 @@ nonisolated enum BtSettingsRow: String, CaseIterable, Identifiable {
 
     static func visible(in tab: BtSettingsTab, _ form: SettingsConfigForm) -> [BtSettingsRow] {
         allCases.filter { $0.tab == tab && $0.isVisible(in: form) }
+    }
+
+    /// 当前可选页签：BT 关闭时只剩常规。
+    static func availableTabs(in form: SettingsConfigForm) -> [BtSettingsTab] {
+        isEnabled(in: form) ? BtSettingsTab.allCases : [.general]
     }
 
     /// 搜索定位：行 id 所在页签。
@@ -255,6 +271,7 @@ extension BtSettingsRow {
     /// 设置首页读数：`DHT · 做种 · 6881–6891`（只列当前生效项）；配置未加载 / 全部关闭 → nil。
     static func readout(_ form: SettingsConfigForm) -> String? {
         guard form.isLoaded else { return nil }
+        guard BtSettingsRow.isEnabled(in: form) else { return nil }
         var parts: [String] = []
         if form.bool(BtSettingsRow.dht.configKey) { parts.append("DHT") }
         if form.bool(BtSettingsRow.seedEnabled.configKey) { parts.append(L("btSeedingTitle")) }

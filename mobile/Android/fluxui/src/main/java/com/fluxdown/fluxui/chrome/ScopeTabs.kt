@@ -39,7 +39,6 @@ import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import kotlinx.coroutines.launch
@@ -50,7 +49,7 @@ import kotlin.math.roundToInt
 data class ScopeTab<T>(val value: T, val label: String, val count: Int? = null, val hot: Boolean = false)
 
 /**
- * 作用域标签（01 §12.11）：横向滚动的文字标签 + 计数，选中项下方有 2dp 发光光条
+ * 作用域标签（01 §12.11）：横向滚动的文字标签 + 计数，选中项下方有 2dp 纯色指示条
  * （`left` = `liquid`、`width` = `fluid`；首次布局不做动画），底部发丝线。
  *
  * 切换触发 tick 触感，并自动把选中项滚入可视区。无障碍：每项 `Role.Tab`，描述“{标签}，{countDescription(计数)}”。
@@ -144,8 +143,6 @@ fun <T> ScopeTabs(
                             val p = m.measure(Constraints.fixed(w, 2.dp.roundToPx()))
                             layout(w, p.height) { p.place(0, 0) }
                         }
-                        .fluxGlow(c.accent.copy(alpha = 0.40f), 14.dp, shape, spread = 2.dp)
-                        .fluxGlow(c.accentGlow, 6.dp, shape, spread = 1.dp)
                         .background(c.accentHi, shape),
                 )
             }

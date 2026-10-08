@@ -30,7 +30,7 @@ final class QueueManagerModel {
                 container.toasts.show(
                     text: QueueText.runningToast(running, name: name),
                     tone: .info,
-                    systemImage: running ? "play.fill" : "pause.fill"
+                    systemImage: running ? FluxSymbol.resume : FluxSymbol.pause
                 )
             } catch {
                 errorText = ErrorText.describe(error)
@@ -51,7 +51,7 @@ final class QueueManagerModel {
         Task {
             do throws(HostError) {
                 try await session.callVoid(HostMethod.daemonQueueDelete, params: QueueIdParams(queueId: queueId))
-                container.toasts.show(text: L("queueDeletedToast", ["name": name]), tone: .success, systemImage: "trash")
+                container.toasts.show(text: L("queueDeletedToast", ["name": name]), tone: .success, systemImage: FluxSymbol.delete)
             } catch {
                 errorText = ErrorText.describe(error)
                 FluxHaptic.error.play()

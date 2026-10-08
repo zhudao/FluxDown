@@ -27,8 +27,6 @@ data class AppearanceState(
     val customColor: Int = FluxAccent.DEFAULT_CUSTOM,
     /** 设备本地：跟随壁纸取色（只替换强调色槽位）。 */
     val dynamicColor: Boolean = false,
-    /** 设备本地：氛围光强度 0..100，60 = 1.0×，0 = 关闭。 */
-    val auraIntensity: Int = 60,
 ) {
     /** 优先级：壁纸 > 自定义 > 预设。 */
     val accent: FluxAccent
@@ -41,7 +39,7 @@ data class AppearanceState(
 
 /**
  * 外观偏好。`theme_mode / color_scheme / custom_color` 属于云同步键（接入 agent 后经
- * `agent.preferences.patch` 同步）；`dynamic_color / aura_intensity` 为设备本地新增键。
+ * `agent.preferences.patch` 同步）；`dynamic_color` 为设备本地新增键。
  */
 class AppearanceRepo(private val ds: DataStore<Preferences>) {
     private object K {
@@ -49,7 +47,6 @@ class AppearanceRepo(private val ds: DataStore<Preferences>) {
         val scheme = stringPreferencesKey("appearance.color_scheme")
         val custom = intPreferencesKey("appearance.custom_color")
         val dynamic = booleanPreferencesKey("appearance.dynamic_color")
-        val aura = intPreferencesKey("appearance.aura_intensity")
     }
 
     val state: Flow<AppearanceState> = ds.data.map { p ->
@@ -58,7 +55,6 @@ class AppearanceRepo(private val ds: DataStore<Preferences>) {
             scheme = p[K.scheme] ?: "blue",
             customColor = p[K.custom] ?: FluxAccent.DEFAULT_CUSTOM,
             dynamicColor = p[K.dynamic] ?: false,
-            auraIntensity = (p[K.aura] ?: 60).coerceIn(0, 100),
         )
     }
 
@@ -68,6 +64,12 @@ class AppearanceRepo(private val ds: DataStore<Preferences>) {
         it[K.custom] = argb
         it[K.scheme] = "custom"
     }
+
+    /** 主机偏好反向应用：一次写入；`null` = 保持本地不变（自定义色只写色值，方案由 [scheme] 单独给出）。 */
+    suspend fun applyHost(mode: ThemeMode?, scheme: String?, customColor: Int?) = ds.edit {
+        mode?.let { m -> it[K.mode] = m.wire }
+        customColor?.let { c -> it[K.custom] = c }
+        scheme?.let { s -> it[K.scheme] = s }
+    }
     suspend fun setDynamicColor(enabled: Boolean) = ds.edit { it[K.dynamic] = enabled }
-    suspend fun setAuraIntensity(v: Int) = ds.edit { it[K.aura] = v.coerceIn(0, 100) }
 }

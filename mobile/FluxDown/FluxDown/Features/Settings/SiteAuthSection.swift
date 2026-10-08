@@ -49,16 +49,16 @@ struct SiteAuthSection: View {
                 } else {
                     if showsSearch { searchRow }
                     if visible.isEmpty {
-                        emptyRow(L("settingsSiteAuthNoMatch"), systemImage: "magnifyingglass")
+                        emptyRow(L("settingsSiteAuthNoMatch"), systemImage: FluxSymbol.search)
                     }
                     ForEach(visible) { entry in entryRow(entry) }
                 }
             }
-            SettingsActionRow(title: L("settingsSiteAuthAdd"), systemImage: "plus") { sheet = .add }
+            SettingsActionRow(title: L("settingsSiteAuthAdd"), systemImage: FluxSymbol.add) { sheet = .add }
                 .disabled(readOnly)
                 .settingsRow(NetworkRow.siteAuthAdd.id)
             SettingsActionRow(
-                title: L("settingsSiteAuthClearAll"), systemImage: "trash", role: .destructive,
+                title: L("settingsSiteAuthClearAll"), systemImage: FluxSymbol.delete, role: .destructive,
                 isRunning: model.isClearing
             ) { confirmClear = true }
                 .disabled(readOnly || model.entries.isEmpty)
@@ -110,7 +110,7 @@ struct SiteAuthSection: View {
 
     private var searchRow: some View {
         HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
+            Image(systemName: FluxSymbol.search)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             TextField(L("settingsSiteAuthSearchHint"), text: $query)
@@ -162,7 +162,7 @@ struct SiteAuthSection: View {
                 Button(role: .destructive) {
                     delete(entry)
                 } label: {
-                    Label(L("settingsSiteAuthDelete"), systemImage: "trash")
+                    Label(L("settingsSiteAuthDelete"), systemImage: FluxSymbol.delete)
                 }
             }
         }
@@ -171,12 +171,12 @@ struct SiteAuthSection: View {
                 Button {
                     sheet = .edit(entry)
                 } label: {
-                    Label(L("settingsSiteAuthEdit"), systemImage: "pencil")
+                    Label(L("settingsSiteAuthEdit"), systemImage: FluxSymbol.edit)
                 }
                 Button(role: .destructive) {
                     delete(entry)
                 } label: {
-                    Label(L("settingsSiteAuthDelete"), systemImage: "trash")
+                    Label(L("settingsSiteAuthDelete"), systemImage: FluxSymbol.delete)
                 }
             }
         }
@@ -200,7 +200,7 @@ struct SiteAuthSection: View {
     private func failedRow(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             SettingsStatusLine(text: message, tone: .failure)
-            SettingsActionRow(title: L("mobileRetry"), systemImage: "arrow.clockwise") { reload() }
+            SettingsActionRow(title: L("mobileRetry"), systemImage: FluxSymbol.retry) { reload() }
         }
     }
 
@@ -299,7 +299,7 @@ struct SiteAuthEditSheet: View {
                 case let .failed(message):
                     Section {
                         SettingsStatusLine(text: message, tone: .failure)
-                        SettingsActionRow(title: L("mobileRetry"), systemImage: "arrow.clockwise") {
+                        SettingsActionRow(title: L("mobileRetry"), systemImage: FluxSymbol.retry) {
                             Task { await loadCredential() }
                         }
                     }

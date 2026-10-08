@@ -239,7 +239,7 @@ struct LogsSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 SettingsActionRow(
                     title: L("logExportButton"), runningTitle: L("mobileLogExporting"),
-                    systemImage: "square.and.arrow.up", isRunning: model.isExporting
+                    systemImage: FluxSymbol.share, isRunning: model.isExporting
                 ) {
                     Task { await model.export(container: container) }
                 }
@@ -270,11 +270,11 @@ struct LogsSection: View {
     static func searchEntries(_ ctx: SettingsSearchContext, route: SettingsRoute, breadcrumb: String) -> [SettingsEntry] {
         var entries: [SettingsEntry] = []
         if ctx.form.has(maxSizeItem.key) {
-            entries.append(SettingsEntry(item: maxSizeItem, route: route, breadcrumb: breadcrumb, symbol: "doc.text.magnifyingglass"))
+            entries.append(SettingsEntry(item: maxSizeItem, route: route, breadcrumb: breadcrumb, symbol: "text.page.badge.magnifyingglass"))
         }
         entries.append(SettingsEntry(
             id: exportID, route: route, title: L("logExportButton"), detail: L("logExportDesc"),
-            breadcrumb: breadcrumb, symbol: "square.and.arrow.up"
+            breadcrumb: breadcrumb, symbol: FluxSymbol.share
         ))
         return entries
     }

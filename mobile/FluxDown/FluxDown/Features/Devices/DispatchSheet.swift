@@ -196,7 +196,7 @@ private struct DispatchForm: View {
             Form {
                 if readOnly {
                     Section {
-                        Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                        Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                             .listRowBackground(Color.clear)
                             .listRowInsets(EdgeInsets())
                     }
@@ -235,7 +235,7 @@ private struct DispatchForm: View {
                 }
                 if let failure = model.failure {
                     Section {
-                        Banner(text: failure, tone: .error, systemImage: "exclamationmark.circle.fill", slim: true)
+                        Banner(text: failure, tone: .error, systemImage: FluxSymbol.failure, slim: true)
                             .listRowBackground(Color.clear)
                             .listRowInsets(EdgeInsets())
                     }
@@ -298,7 +298,7 @@ private struct DispatchForm: View {
                 }
                 .accessibilityLabel(L("downloadUrl"))
             if noValid {
-                Label(L("newDownloadNoValidUrl"), systemImage: "exclamationmark.circle.fill")
+                Label(L("newDownloadNoValidUrl"), systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -338,7 +338,7 @@ private struct DispatchForm: View {
                 if invalid {
                     Label(
                         L("downloadToPathInvalid", ["example": PathStyle.example(target.pathStyle)]),
-                        systemImage: "exclamationmark.circle.fill"
+                        systemImage: FluxSymbol.failure
                     )
                     .foregroundStyle(Color.fdStatusFailedText)
                 }

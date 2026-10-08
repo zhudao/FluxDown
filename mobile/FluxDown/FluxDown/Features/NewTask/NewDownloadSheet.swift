@@ -75,7 +75,7 @@ private struct NewDownloadContent: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(L("cancel"), systemImage: "xmark", action: requestClose)
+                    Button(L("cancel"), systemImage: FluxSymbol.close, action: requestClose)
                         .disabled(form.submitting)
                 }
                 ToolbarItemGroup(placement: .keyboard) {
@@ -186,7 +186,7 @@ private struct NewDownloadContent: View {
                 .accessibilityLabel(L("downloadUrl"))
                 .onChange(of: form.urlText) { form.showEmptyError = false }
             if let error {
-                Label(error, systemImage: "exclamationmark.circle.fill")
+                Label(error, systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -236,7 +236,7 @@ private struct NewDownloadContent: View {
             if importingTorrent {
                 Label { Text(L("openTorrentFile")) } icon: { ProgressView() }
             } else {
-                Label(L("openTorrentFile"), systemImage: "doc.badge.plus")
+                Label(L("openTorrentFile"), systemImage: "document.badge.plus")
             }
         }
         .disabled(form.submitting || importingTorrent || form.probe != nil)
@@ -244,7 +244,7 @@ private struct NewDownloadContent: View {
     }
 
     private var importButton: some View {
-        Button(L("importTxtFile"), systemImage: "doc.text") {
+        Button(L("importTxtFile"), systemImage: "text.document") {
             importerKind = .text
             showImporter = true
         }
@@ -298,7 +298,7 @@ private struct NewDownloadContent: View {
                     .autocorrectionDisabled()
                     .disabled(form.submitting)
                 if !form.saveDirValid {
-                    Label(L("mobileSaveDirInvalid"), systemImage: "exclamationmark.circle.fill")
+                    Label(L("mobileSaveDirInvalid"), systemImage: FluxSymbol.failure)
                         .font(.footnote)
                         .foregroundStyle(Color.fdStatusFailedText)
                 }
@@ -449,7 +449,7 @@ private struct NewDownloadContent: View {
                         }
                     }
                 } label: {
-                    Image(systemName: "ellipsis")
+                    Image(systemName: FluxSymbol.more)
                 }
                 .disabled(!canSubmit)
                 .accessibilityLabel(L("moreActions"))
@@ -484,7 +484,7 @@ private struct NewDownloadContent: View {
         let state = container.store.state
         if state.isReadOnly {
             reject()
-            container.toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: "wifi.slash")
+            container.toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: FluxSymbol.offline)
             return
         }
         if form.entries.isEmpty {
@@ -611,7 +611,7 @@ private struct NewDownloadContent: View {
         } else {
             let merged = appendEntries(form.urlText, found)
             form.urlText = merged.text
-            container.toasts.show(text: L("importTxtFound", ["count": merged.added]), tone: .success, systemImage: "doc.text")
+            container.toasts.show(text: L("importTxtFound", ["count": merged.added]), tone: .success, systemImage: "text.document")
         }
     }
 

@@ -107,7 +107,7 @@ private struct AddDeviceContent: View {
     private func accountContent(session: AgentSessionDto?) -> some View {
         Section {
             if let session {
-                Label(L("addDeviceAccountSynced", ["account": session.user.email]), systemImage: "checkmark.icloud.fill")
+                Label(L("addDeviceAccountSynced", ["account": session.user.email]), systemImage: FluxSymbol.success)
                     .foregroundStyle(.primary)
             } else {
                 Label(L("addDeviceLoginRequired"), systemImage: "person.crop.circle.badge.exclamationmark")
@@ -135,7 +135,7 @@ private struct AddDeviceContent: View {
         case let .done(name):
             Section {
                 VStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill")
+                    Image(systemName: FluxSymbol.success)
                         .font(.system(size: doneIcon))
                         .foregroundStyle(Color.fdStatusSeeding)
                         .symbolEffect(.bounce, value: celebrate)
@@ -175,7 +175,7 @@ private struct AddDeviceContent: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             if readOnly {
-                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
             }
@@ -208,7 +208,7 @@ private struct AddDeviceContent: View {
                 model.wrappedValue.rescan()
             } label: {
                 HStack {
-                    Label(L("localPairingRetryScan"), systemImage: "arrow.clockwise")
+                    Label(L("localPairingRetryScan"), systemImage: FluxSymbol.retry)
                     if model.wrappedValue.scanning {
                         Spacer()
                         ProgressView()
@@ -217,7 +217,7 @@ private struct AddDeviceContent: View {
             }
             .disabled(model.wrappedValue.scanning)
             if let error = model.wrappedValue.discoveryError {
-                Label(error, systemImage: "exclamationmark.circle.fill")
+                Label(error, systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -257,7 +257,7 @@ private struct AddDeviceContent: View {
             .textContentType(.oneTimeCode)
             .focused($focus, equals: .code)
             if let message = model.wrappedValue.message {
-                Label(message, systemImage: "exclamationmark.circle.fill")
+                Label(message, systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
             }
@@ -314,7 +314,7 @@ private struct AddDeviceContent: View {
         }
         if let message {
             Section {
-                Banner(text: message, tone: .error, systemImage: "exclamationmark.circle.fill", slim: true)
+                Banner(text: message, tone: .error, systemImage: FluxSymbol.failure, slim: true)
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets())
             }
@@ -391,7 +391,7 @@ private struct DiscoveredPeerRow: View {
             if entry.paired {
                 StatusBadge(text: L("localDevicePairedTag"), tone: .neutral)
             } else if selected {
-                Image(systemName: "checkmark")
+                Image(systemName: FluxSymbol.done)
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.tint)
                     .accessibilityHidden(true)
@@ -428,7 +428,7 @@ private struct OwnCodeSection: View {
                 .accessibilityElement(children: .combine)
             }
             if let error = model.ownError {
-                Label(error, systemImage: "exclamationmark.circle.fill")
+                Label(error, systemImage: FluxSymbol.failure)
                     .font(.footnote)
                     .foregroundStyle(Color.fdStatusFailedText)
                 if model.own == nil {
@@ -490,7 +490,7 @@ private struct OwnCodeSection: View {
             copyTick += 1
             container.toasts.show(text: L("localDeviceCodeCopied"), tone: .success)
         } label: {
-            Label(L("localDeviceCodeCopy"), systemImage: "doc.on.doc")
+            Label(L("localDeviceCodeCopy"), systemImage: FluxSymbol.copy)
         }
         .buttonStyle(.borderless)
     }
@@ -499,7 +499,7 @@ private struct OwnCodeSection: View {
         Button {
             model.refreshOwnCode()
         } label: {
-            Label(L("localPairingMyCodeRefresh"), systemImage: "arrow.clockwise")
+            Label(L("localPairingMyCodeRefresh"), systemImage: FluxSymbol.retry)
         }
         .buttonStyle(.borderless)
         .disabled(model.ownLoading)
@@ -509,7 +509,7 @@ private struct OwnCodeSection: View {
     private func addresses(_ own: LinkPairingCodeDto) -> some View {
         if own.addresses.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Label(L("localPairingNoAddress"), systemImage: "wifi.slash")
+                Label(L("localPairingNoAddress"), systemImage: FluxSymbol.offline)
                     .font(.subheadline)
                 Text(L(container.isLocalHost ? "mobileAddDeviceNoGatewayHint" : "localPairingLanDisabledHint"))
                     .font(.footnote)

@@ -28,7 +28,7 @@ struct QueueManagerSheet: View {
                     Section {
                         VStack(spacing: 8) {
                             if state.isReadOnly {
-                                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                                Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                             }
                             if let text = model.errorText {
                                 Banner(text: text, tone: .error, slim: true)
@@ -55,10 +55,10 @@ struct QueueManagerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(L("close"), systemImage: "xmark") { dismiss() }
+                    Button(L("close"), systemImage: FluxSymbol.close) { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    Button(L("createQueueAction"), systemImage: "plus") { path.append(.create) }
+                    Button(L("createQueueAction"), systemImage: FluxSymbol.add) { path.append(.create) }
                         .disabled(state.isReadOnly)
                 }
             }
@@ -135,19 +135,19 @@ struct QueueManagerSheet: View {
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if !builtin {
-                Button(L("delete"), systemImage: "trash", role: .destructive) { model.pendingDelete = queue }
+                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { model.pendingDelete = queue }
                     .disabled(readOnly || busy)
             }
         }
         .contextMenu {
-            Button(L("editQueue"), systemImage: "pencil") { path.append(.edit(queue.queueId)) }
+            Button(L("editQueue"), systemImage: FluxSymbol.edit) { path.append(.edit(queue.queueId)) }
             Button(
                 L(queue.isRunning ? "stopQueueAction" : "startQueueAction"),
-                systemImage: queue.isRunning ? "pause.fill" : "play.fill"
+                systemImage: queue.isRunning ? FluxSymbol.pause : FluxSymbol.resume
             ) { model.setRunning(!queue.isRunning, queue: queue, container: container) }
                 .disabled(readOnly || busy)
             if !builtin {
-                Button(L("deleteQueueAction"), systemImage: "trash", role: .destructive) { model.pendingDelete = queue }
+                Button(L("deleteQueueAction"), systemImage: FluxSymbol.delete, role: .destructive) { model.pendingDelete = queue }
                     .disabled(readOnly || busy)
             }
         }
@@ -183,7 +183,7 @@ struct QueueManagerSheet: View {
         if readOnly {
             ContentUnavailableView(
                 L("manageQueueAction"),
-                systemImage: "wifi.slash",
+                systemImage: FluxSymbol.offline,
                 description: Text(L("localServiceDisconnected"))
             )
         } else {

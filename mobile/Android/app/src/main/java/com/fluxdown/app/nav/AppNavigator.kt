@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateSet
 import androidx.compose.runtime.staticCompositionLocalOf
+import com.fluxdown.core.capture.ExternalDownload
 
 /** 顶层目的地（浮动导航坞 / Rail）。 */
 enum class AppTab { Downloads, Rss, Devices, Settings }
@@ -14,16 +15,28 @@ enum class AppTab { Downloads, Rss, Devices, Settings }
 /** 推入页。medium / expanded 档下 [TaskDetail] 进入右侧详情栏（paneable）。 */
 sealed interface Route {
     data class TaskDetail(val taskId: String) : Route
-    data class Settings(val page: SettingsPage) : Route
+    /** [arg]：子页参数（如插件详情的插件标识）；分类根页为空。 */
+    data class Settings(val page: SettingsPage, val arg: String = "") : Route
 }
 
-/** 已实现的设置子页（S1 列表只展示这些分类）。 */
-enum class SettingsPage { Appearance, Download, About }
+/**
+ * 设置子页（顺序同 iOS `SettingsRoute` / PC `build_pages`，移动端无法使用的桌面专属分类不在此列）。
+ * [PluginMarket] / [PluginDetail] 是「扩展」的推入子页（[PluginDetail] 的 `arg` = 插件标识）。
+ */
+enum class SettingsPage {
+    Account, General, Appearance, Notify, Download, Bt, Ed2k, Network,
+    Extensions, PluginMarket, PluginDetail, Webhook, Api, Diagnostics, About,
+}
 
 /** 浮动 Sheet（同时最多一个；X1–X3 选择请求由 shell 依据主机状态单独呈现）。 */
 sealed interface SheetRoute {
-    /** N1：[prefill] = 预填链接（粘贴 / 分享 / 扫码）。 */
-    data class NewDownload(val prefill: String = "") : SheetRoute
+    /**
+     * N1：[prefill] = 预填链接（粘贴 / 扫码）；[external] = 外部唤起（浏览器外部下载器 / 分享 / 协议链接）的
+     * 请求，带 Cookie / 来源页 / 请求头 / 建议文件名。Sheet 打开期间再次打开 = 追加到当前表单。
+     */
+    data class NewDownload(val prefill: String = "", val external: ExternalDownload? = null) : SheetRoute
+    /** R3：新建（[sourceId] = null，[prefillUrl] 预填地址）/ 编辑订阅。 */
+    data class RssEditor(val sourceId: String? = null, val prefillUrl: String = "") : SheetRoute
     /** D1v：视图（分组 / 排序 / 密度 / 卡片字段）。 */
     data object ViewOptions : SheetRoute
     /** 主机切换器。 */

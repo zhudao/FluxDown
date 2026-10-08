@@ -287,9 +287,13 @@ pub fn apply_appearance_preferences(values: &BTreeMap<String, Value>, cx: &mut A
 }
 
 /// 系统外观变化时按当前偏好重新解析 `System`；显式亮/暗偏好保持不变。
+///
+/// 每个窗口都订阅系统外观，同一次变化会回调多次：解析结果与当前模式一致时不重装。
 pub fn sync_system_theme(window: &mut Window, cx: &mut App) {
     let state = active_theme(cx);
-    if state.preference() == ThemePreference::System {
+    if state.preference() == ThemePreference::System
+        && ThemePreference::System.resolve(cx) != state.mode
+    {
         let appearance = state.appearance.clone();
         set_appearance(appearance, Some(window), cx);
     }

@@ -9,7 +9,10 @@ use super::{SectionContext, rate_limit, user_agent};
 use crate::ui::{Control, Explain, SettingsPage, SettingsSection, body_text, meta_text};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
-    if ctx.store.read(cx).conn_policy().is_none()
+    let store = ctx.store.read(cx);
+    // 先只读判定：渲染期写 store 会让其他读它的 retained 视图白白重建。
+    if store.conn_policy().is_none()
+        && !store.load_attempted("connPolicy")
         && ctx
             .store
             .update(cx, |store, _| store.begin_load("connPolicy"))

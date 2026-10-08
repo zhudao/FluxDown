@@ -7,6 +7,11 @@ import com.fluxdown.core.host.HostException
 import com.fluxdown.core.host.HostSession as HostPort
 import com.fluxdown.core.host.HostSignal
 import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.protocol.AgentPreferences
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.JsonValue
+import com.fluxdown.core.protocol.SettingsWritePlan
+import com.fluxdown.core.protocol.patchPreferences
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.io.File
@@ -166,6 +171,51 @@ class LocalHostSmokeTest {
             val again = withTimeout(step) { host.signals.first() } as HostSignal.Snapshot
             assertTrue(again.snapshot.daemonConnected)
             assertEquals("5", again.snapshot.config["max_auto_retries"])
+        } finally {
+            host.close()
+        }
+    }
+
+    /**
+     * 设置写入路由（`ConfigEditor` / `SettingsWritePlan`）依赖的主机语义：云同步目录内的 daemon 键改走
+     * `agent.preferences.patch`（同步键名 + JSON 类型值）后必须落到 daemon 配置；`sync: false` 的本机偏好
+     * 进 `agent.preferences` 分区，且返回的 revision 不低于分区里的版本。
+     */
+    @Test
+    fun preferencesChannelWritesSyncedDaemonKeysAndLocalPreferences() = runBlocking {
+        val host = openLocal("c")
+        try {
+            withTimeout(step) { host.signals.first() } as HostSignal.Snapshot
+            val plan = (SettingsWritePlan.make(mapOf("max_concurrent_tasks" to "7", "download.silent_skip_selection" to "true"))
+                as SettingsWritePlan.Result.Ok).plan
+            assertEquals(mapOf("download.max_concurrent_tasks" to JsonValue.of(7L)), plan.syncedPreferences.toMap())
+            host.patchPreferences(plan.syncedPreferences, sync = true)
+            val revision = host.patchPreferences(plan.localPreferences, sync = false)
+
+            withTimeout(step) {
+                host.signals.first { signal ->
+                    (signal is HostSignal.Event && signal.event is HostEvent.ConfigChanged &&
+                        (signal.event as HostEvent.ConfigChanged).values["max_concurrent_tasks"] == "7") ||
+                        (signal is HostSignal.Snapshot && signal.snapshot.config["max_concurrent_tasks"] == "7")
+                }
+            }
+            val prefs = withTimeout(step) {
+                host.signals.first { signal ->
+                    val json = when (signal) {
+                        is HostSignal.Event -> (signal.event as? HostEvent.SectionChanged)
+                            ?.takeIf { it.name == HostSection.agentPreferences }?.json
+                        is HostSignal.Snapshot -> signal.snapshot.sections[HostSection.agentPreferences]
+                        else -> null
+                    }
+                    AgentPreferences.parse(json).bool("download.silent_skip_selection", false)
+                }
+            }
+            val section = when (prefs) {
+                is HostSignal.Event -> (prefs.event as HostEvent.SectionChanged).json
+                is HostSignal.Snapshot -> prefs.snapshot.sections.getValue(HostSection.agentPreferences)
+                else -> error("unreachable")
+            }
+            assertTrue(AgentPreferences.parse(section).revision >= revision)
         } finally {
             host.close()
         }

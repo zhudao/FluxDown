@@ -246,7 +246,7 @@ fun FluxOrb(
                     scaleY = s
                 },
         ) {
-            // 强调色球：投影 + 渐变 + 内光（选择模式淡出）。
+            // 强调色球：投影 + 纯色面（选择模式淡出）。
             Box(
                 Modifier
                     .fillMaxSize()

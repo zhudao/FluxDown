@@ -26,9 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -181,7 +179,7 @@ fun FluxStatRow(stats: List<StatItem>, modifier: Modifier = Modifier) {
 
 /**
  * 线性进度（`progress-line`，非任务进度：备份 / 同步等）：高 4 · r2，轨道 `flowRemain`，
- * 填充 accent→accentHi + 微光；宽度 0.6 s 线性补间（Reduce motion 瞬时）。[progress] ∈ 0..1。
+ * 填充 accent 纯色；宽度 0.6 s 线性补间（Reduce motion 瞬时）。[progress] ∈ 0..1。
  */
 @Composable
 fun FluxProgressLine(progress: Float, modifier: Modifier = Modifier) {
@@ -200,17 +198,11 @@ fun FluxProgressLine(progress: Float, modifier: Modifier = Modifier) {
             .drawWithCache {
                 val h = size.height
                 val corner = CornerRadius(h / 2f)
-                val glow = 5.dp.toPx()
                 onDrawBehind {
                     drawRoundRect(c.flowRemain, cornerRadius = corner)
                     val w = size.width * p.value
                     if (w > 0f) {
-                        drawSoftGlow(Offset.Zero, Size(w, h), h / 2f, c.accentGlow, glow, layers = 3)
-                        drawRoundRect(
-                            Brush.horizontalGradient(listOf(c.accent, c.accentHi), 0f, w),
-                            size = Size(w, h),
-                            cornerRadius = corner,
-                        )
+                        drawRoundRect(c.accent, size = Size(w, h), cornerRadius = corner)
                     }
                 }
             },

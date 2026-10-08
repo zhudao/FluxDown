@@ -136,7 +136,7 @@ struct RssItemsScreen: View {
         }
         .contextMenu {
             if hasTask {
-                Button(L("mobileRssOpenTask"), systemImage: "arrow.up.right.square") {
+                Button(L("mobileRssOpenTask"), systemImage: FluxSymbol.openFile) {
                     container.router.showTask(item.taskId)
                 }
             }
@@ -151,7 +151,7 @@ struct RssItemsScreen: View {
                 .disabled(busy || readOnly)
             }
             if !item.effectiveLink.isEmpty {
-                Button(L("copyUrl"), systemImage: "doc.on.doc") { model.copyLink(item) }
+                Button(L("copyUrl"), systemImage: FluxSymbol.copy) { model.copyLink(item) }
             }
             Button(L("mobileRssSelect"), systemImage: "checklist") {
                 model.isSelecting = true
@@ -185,7 +185,7 @@ struct RssItemsScreen: View {
         if hasContent {
             VStack(spacing: 8) {
                 if showsBanner {
-                    Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: "wifi.slash", slim: true)
+                    Banner(text: L("localServiceDisconnected"), tone: .warning, systemImage: FluxSymbol.offline, slim: true)
                 }
                 if let feedback = model.feedback {
                     Banner(
@@ -264,14 +264,14 @@ struct RssItemsScreen: View {
             let trimmed = model.query.trimmingCharacters(in: .whitespacesAndNewlines)
             if model.phase == .loading {
                 if container.store.state.connection.isStaleOrFailed {
-                    ContentUnavailableView(L("localServiceDisconnected"), systemImage: "wifi.slash")
+                    ContentUnavailableView(L("localServiceDisconnected"), systemImage: FluxSymbol.offline)
                 } else {
                     fetching
                 }
             } else if !trimmed.isEmpty, !model.items.isEmpty {
                 ContentUnavailableView(
                     L("rssNoMatch", ["query": trimmed.lowercased()]),
-                    systemImage: "magnifyingglass"
+                    systemImage: FluxSymbol.search
                 )
             } else if model.phase == .failed || (source?.lastError.isEmpty == false) {
                 ContentUnavailableView {
@@ -330,7 +330,7 @@ struct RssItemsScreen: View {
                         ProgressView()
                             .accessibilityLabel(L("rssRefreshing"))
                     } else {
-                        Button(L("rssRefreshNow"), systemImage: "arrow.clockwise") { rss.refresh(source) }
+                        Button(L("rssRefreshNow"), systemImage: FluxSymbol.retry) { rss.refresh(source) }
                             .disabled(readOnly)
                     }
                 }
@@ -356,14 +356,14 @@ struct RssItemsScreen: View {
                 .disabled(readOnly)
                 Button(L("rssMarkAllRead"), systemImage: "checkmark.circle") { model.markAllRead() }
                     .disabled(readOnly || model.readBusy || source.unreadCount == 0)
-                Button(L("copyUrl"), systemImage: "doc.on.doc") { rss.copyLink(source) }
+                Button(L("copyUrl"), systemImage: FluxSymbol.copy) { rss.copyLink(source) }
             }
             Section {
-                Button(L("rssDeleteSource"), systemImage: "trash", role: .destructive) { rss.requestDelete(source) }
+                Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source) }
                     .disabled(readOnly)
             }
         } label: {
-            Label(L("moreActions"), systemImage: "ellipsis")
+            Label(L("moreActions"), systemImage: FluxSymbol.more)
         }
     }
 
@@ -508,10 +508,10 @@ private struct RssItemRow: View {
     @ViewBuilder
     private var detailActions: some View {
         if !item.effectiveLink.isEmpty {
-            Button(L("copyUrl"), systemImage: "doc.on.doc", action: onCopy)
+            Button(L("copyUrl"), systemImage: FluxSymbol.copy, action: onCopy)
         }
         if hasTask {
-            Button(L("mobileRssOpenTask"), systemImage: "arrow.up.right.square", action: onOpenTask)
+            Button(L("mobileRssOpenTask"), systemImage: FluxSymbol.openFile, action: onOpenTask)
         }
         Button(downloadTitle, systemImage: "arrow.down.circle", action: onDownload)
             .disabled(busy || !canAct)

@@ -90,7 +90,7 @@ public struct Banner: View {
 #Preview("Banner") {
     ScrollView {
         VStack(spacing: 12) {
-            Banner(text: "Disconnected from host. Read-only until the connection is restored.", tone: .warning, systemImage: "wifi.slash",
+            Banner(text: "Disconnected from host. Read-only until the connection is restored.", tone: .warning, systemImage: FluxSymbol.offline,
                    action: BannerAction(title: "Retry") {})
             Banner(text: "Boost is on for this task.", tone: .info)
             Banner(text: "Saved.", tone: .success, slim: true)

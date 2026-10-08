@@ -111,7 +111,7 @@ class FluxHaptics(private val view: View) {
 enum class FluxGlassMode { Blur, Solid }
 
 @Immutable
-data class FluxPerf(val glassMode: FluxGlassMode, val auraMaxFps: Int)
+data class FluxPerf(val glassMode: FluxGlassMode)
 
 /** 窗口尺寸档（§13.1）：compact < 600dp ≤ medium < 840dp ≤ expanded。 */
 enum class FluxWindowClass { Compact, Medium, Expanded }

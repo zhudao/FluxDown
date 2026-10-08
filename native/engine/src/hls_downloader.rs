@@ -40,11 +40,12 @@ use crate::dash_downloader::{
 };
 use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT,
-    claim_final_name, dedup_filename, extract_from_url, sanitize_filename,
+    claim_final_name, dedup_filename,
 };
 use crate::events::EventSink;
 use crate::logger::log_info;
 use crate::model::HlsQualityOption;
+use crate::naming::{extract_from_url, sanitize_filename};
 use crate::output;
 use crate::selection::SelectionOutcome;
 use crate::transfer_activity::{TaskRuntime, TransferTracker};

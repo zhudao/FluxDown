@@ -182,7 +182,7 @@ struct TaskActivityLogPage: View {
                     .foregroundStyle(.secondary)
             }
             if feed.failed {
-                Label(L("detailActivityQueryFailed"), systemImage: "exclamationmark.circle.fill")
+                Label(L("detailActivityQueryFailed"), systemImage: FluxSymbol.failure)
                     .font(.subheadline)
                     .foregroundStyle(Color.fdStatusFailedText)
                 Button(L("detailActivityRetry")) { model.retry(session: session) }
@@ -216,7 +216,7 @@ struct TaskActivityLogPage: View {
     }
 
     private func warning(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill")
+        Label(text, systemImage: FluxSymbol.warning)
             .font(.footnote)
             .foregroundStyle(Color.fdStatusWarningText)
     }

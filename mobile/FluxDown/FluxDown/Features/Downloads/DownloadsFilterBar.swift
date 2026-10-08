@@ -16,7 +16,7 @@ struct DownloadsFilterBar: View {
             if visibility.isEmpty(hasCategories: !model.facets.categories.isEmpty, hasScopeChip: showsScopeChip(visibility)) {
                 EmptyView()
             } else {
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     if visibility.status {
                         GlassScopeBar(items: scopeItems, selection: folderBinding)
                             .padding(.horizontal)
@@ -37,7 +37,7 @@ struct DownloadsFilterBar: View {
                         .scrollBounceBehavior(.basedOnSize)
                     }
                 }
-                .padding(.vertical, 2)
+                .padding(.bottom, 4)
             }
         }
         // 被隐藏的部分对应的筛选必须复位，否则列表会被一个看不见的筛选卡住。
@@ -92,15 +92,15 @@ struct DownloadsFilterBar: View {
                     if let queue = scopedQueue(scoped) {
                         Button(
                             L(queue.isRunning ? "stopQueueAction" : "startQueueAction"),
-                            systemImage: queue.isRunning ? "pause.fill" : "play.fill"
+                            systemImage: queue.isRunning ? FluxSymbol.pause : FluxSymbol.resume
                         ) { setRunning(!queue.isRunning, queue: queue) }
                     }
-                    Button(L("manageQueueAction"), systemImage: "list.number") { container.router.sheet = .queues }
+                    Button(L("manageQueueAction"), systemImage: FluxSymbol.queue) { container.router.sheet = .queues }
                 }
             } label: {
                 FilterChip(
                     title: name.map { L("mobileScopeQueue", ["name": $0]) } ?? L("mobileViewScope"),
-                    systemImage: "list.number",
+                    systemImage: FluxSymbol.queue,
                     selected: scoped != nil
                 )
             }
@@ -126,7 +126,7 @@ struct DownloadsFilterBar: View {
             toasts.show(
                 text: QueueText.runningToast(running, name: name),
                 tone: .info,
-                systemImage: running ? "play.fill" : "pause.fill"
+                systemImage: running ? FluxSymbol.resume : FluxSymbol.pause
             )
         }) { session throws(HostError) in
             try await session.callVoid(

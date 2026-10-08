@@ -91,39 +91,45 @@ import kotlinx.coroutines.withContext
 private class OpenTracker {
     var wasOpen = false
     var generation = 0
-    var prefill = ""
+    var route = SheetRoute.NewDownload()
 }
 
 /**
  * N1 新建下载 + N2 高级选项（叠在其上的第二层 Sheet）。
  * [route] 为 null 时 Sheet 退场；表单状态每次打开重建（默认值来自主机配置）。
+ * [onSubmitted]：任务已全部建成、Sheet 即将关闭（外部唤起入口据此保活本机下载）。
  */
 @Composable
-fun NewDownloadSheet(route: SheetRoute.NewDownload?, onDismiss: () -> Unit) {
+fun NewDownloadSheet(route: SheetRoute.NewDownload?, onDismiss: () -> Unit, onSubmitted: () -> Unit = {}) {
     val tracker = remember { OpenTracker() }
     if (route != null && !tracker.wasOpen) tracker.generation++
     tracker.wasOpen = route != null
-    if (route != null) tracker.prefill = route.prefill
+    if (route != null) tracker.route = route
     if (tracker.generation == 0) return
-    key(tracker.generation) { NewDownloadSheetImpl(visible = route != null, prefill = tracker.prefill, onDismiss = onDismiss) }
+    key(tracker.generation) {
+        NewDownloadSheetImpl(visible = route != null, route = tracker.route, onDismiss = onDismiss, onSubmitted = onSubmitted)
+    }
 }
 
 @Composable
-private fun NewDownloadSheetImpl(visible: Boolean, prefill: String, onDismiss: () -> Unit) {
+private fun NewDownloadSheetImpl(visible: Boolean, route: SheetRoute.NewDownload, onDismiss: () -> Unit, onSubmitted: () -> Unit) {
     val container = LocalAppContainer.current
     val overlays = LocalFluxOverlays.current
     val actions = LocalTaskActions.current
     val haptics = FluxTheme.haptics
     val context = LocalContext.current
-    val form = remember { NewDownloadState.create(prefill, container.store.state.value) }
-    LaunchedEffect(prefill) {
-        val extra = prefill.trim()
+    val form = remember { NewDownloadState.create(route.prefill, container.store.state.value, route.external) }
+    LaunchedEffect(route) {
+        // 打开期间的后续唤起追加进同一表单（批量协议唤起逐条到达）
+        route.external?.let(form::addExternal)
+        val extra = route.prefill.trim()
         if (extra.isNotEmpty() && form.urlText.lineSequence().none { it.trim() == extra }) {
             form.urlText = form.urlText.trimEnd().let { if (it.isEmpty()) extra else "$it\n$extra" }
         }
     }
     var advancedOpen by remember { mutableStateOf(false) }
     val dismiss by rememberUpdatedState(onDismiss)
+    val submitted by rememberUpdatedState(onSubmitted)
 
     val s = Strings(
         discardTitle = str(R.string.mobileDiscardTitle),
@@ -204,6 +210,7 @@ private fun NewDownloadSheetImpl(visible: Boolean, prefill: String, onDismiss: (
                     else -> s.started
                 }
                 overlays.toast(msg, FluxToastKind.Accent, if (startPaused) FluxIcons.Clock else FluxIcons.ArrowDown)
+                submitted()
                 dismiss()
             } else {
                 haptics.reject()

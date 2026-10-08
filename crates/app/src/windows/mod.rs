@@ -137,6 +137,10 @@ impl WindowRegistry {
         let options = crate::app_icon::window_options(options);
         let result = cx.open_window(options, move |window, cx| {
             crate::logging::observe_new_window(label, opened_at, window, cx);
+            // 「跟随系统」主题：系统明暗切换时重新解析；外观变化不会触发整窗刷新，必须显式订阅。
+            window
+                .observe_window_appearance(fluxdown_ui_theme::sync_system_theme)
+                .detach();
             build(window, cx)
         });
         match result {

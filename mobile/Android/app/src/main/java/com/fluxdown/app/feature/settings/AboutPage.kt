@@ -23,6 +23,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
+import com.fluxdown.app.feature.settings.diagnostics.LOGS_ITEM_KEY
+import com.fluxdown.app.feature.settings.diagnostics.LogsSection
+import com.fluxdown.app.feature.settings.diagnostics.rememberLogExportModel
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.shell.hostState
@@ -51,6 +54,12 @@ private const val SITE_HOST = "fluxdown.zerx.dev"
 private const val SITE_URL = "https://$SITE_HOST"
 private const val SPONSOR_URL = "$SITE_URL/sponsor"
 private const val PRIVACY_URL = "$SITE_URL/privacy"
+private const val CHANGELOG_URL = "$SITE_URL/changelog"
+private const val LICENSE_URL = "https://github.com/zerx-lab/FluxDown/blob/main/LICENSE"
+private const val DEPENDENCIES_URL = "https://github.com/zerx-lab/FluxDown/blob/main/Cargo.lock"
+
+/** 远端 `--server` 主机的发布页（升级由服务器管理员在服务器上完成，App 内不提供）。 */
+private const val SERVER_RELEASES_URL = "https://github.com/zerx-lab/FluxDown/releases"
 
 /** 品牌点阵 “FD”：11×7，点 6 / 间距 3 ≈ 96dp 宽；右下一枚强调点。 */
 private val BrandGlyph = listOf(
@@ -82,7 +91,10 @@ internal fun Context.appVersionName(): String {
     return info.versionName.orEmpty()
 }
 
-/** S14 · 关于：品牌头、版本信息、支持 / 网站 / 隐私 / 开源许可。 */
+/**
+ * S14 · 关于：品牌头、版本信息（应用 / 协议 / 远端服务版本）、日志工具、支持 / 网站 / 更新日志 / 隐私 / 开源许可。
+ * 同 iOS `AboutPage`；Android 没有 App Store 审核限制，保留捐赠入口。应用内更新器不提供（更新走应用商店 / 发布页）。
+ */
 @Composable
 internal fun AboutPage() {
     val nav = LocalNavigator.current
@@ -90,11 +102,16 @@ internal fun AboutPage() {
     val overlays = LocalFluxOverlays.current
     val hostState = hostState()
     val protocol by remember { derivedStateOf { hostState.value.info?.protocolVersion } }
+    val serviceVersion by remember { derivedStateOf { hostState.value.info?.serviceVersion.orEmpty() } }
     val version = remember(context) { context.appVersionName() }
     val gate = rememberFlowInGate()
+    val ctx = rememberSettingsCtx { }
+    val logModel = rememberLogExportModel()
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var showLicenses by remember { mutableStateOf(false) }
     val noBrowser = str(R.string.mobileNoBrowser)
     val c = FluxTheme.colors
+    val remote = !ctx.isLocalHost
 
     Box(Modifier.fillMaxSize()) {
         SettingsPageFrame(title = str(R.string.settingsCatAbout), onBack = { nav.pop() }) {
@@ -102,16 +119,29 @@ internal fun AboutPage() {
             flowItem(1, gate, "info") {
                 GlassSection {
                     row {
-                        FluxListRow(title = str(R.string.currentVersion), value = "v$version")
+                        SettingRowBox(ctx, "about.version", null) {
+                            FluxListRow(title = str(R.string.currentVersion), value = "v$version")
+                        }
                     }
                     protocol?.let { p ->
                         row {
-                            FluxListRow(title = str(R.string.protocolVersionLabel), value = "v$p")
+                            SettingRowBox(ctx, "about.protocol", null) {
+                                FluxListRow(title = str(R.string.protocolVersionLabel), value = "v$p")
+                            }
+                        }
+                    }
+                    // 远端主机的服务版本与本机应用版本不同，单独列出；本机引擎与应用同版本，不重复。
+                    if (remote && serviceVersion.isNotEmpty()) {
+                        row {
+                            SettingRowBox(ctx, "about.serviceVersion", null) {
+                                FluxListRow(title = str(R.string.mobileServiceVersion), value = "v$serviceVersion")
+                            }
                         }
                     }
                 }
             }
-            flowItem(2, gate, "support") {
+            flowItem(2, gate, LOGS_ITEM_KEY) { LogsSection(ctx, logModel, scope) }
+            flowItem(3, gate, "support") {
                 GlassSection(title = str(R.string.donateTitle), footer = str(R.string.donateThanks)) {
                     row(hasIcon = true) {
                         FluxListRow(
@@ -122,34 +152,66 @@ internal fun AboutPage() {
                             onClick = { openLink(context, overlays, SPONSOR_URL, noBrowser) },
                         )
                     }
+                }
+            }
+            flowItem(4, gate, "links") {
+                GlassSection {
                     row(hasIcon = true) {
-                        FluxListRow(
-                            title = str(R.string.officialWebsite),
-                            icon = FluxIcons.Globe,
-                            value = SITE_HOST,
-                            trailing = { ExternalMark() },
-                            onClick = { openLink(context, overlays, SITE_URL, noBrowser) },
-                        )
+                        SettingRowBox(ctx, "about.website", null) {
+                            FluxListRow(
+                                title = str(R.string.officialWebsite),
+                                icon = FluxIcons.Globe,
+                                value = SITE_HOST,
+                                trailing = { ExternalMark() },
+                                onClick = { openLink(context, overlays, SITE_URL, noBrowser) },
+                            )
+                        }
                     }
                     row(hasIcon = true) {
-                        FluxListRow(
-                            title = str(R.string.mobilePrivacyPolicy),
-                            icon = FluxIcons.ShieldCheck,
-                            trailing = { ExternalMark() },
-                            onClick = { openLink(context, overlays, PRIVACY_URL, noBrowser) },
-                        )
+                        SettingRowBox(ctx, "about.changelog", null) {
+                            FluxListRow(
+                                title = str(R.string.mobileReleaseNotes),
+                                icon = FluxIcons.ListChecks,
+                                trailing = { ExternalMark() },
+                                onClick = { openLink(context, overlays, CHANGELOG_URL, noBrowser) },
+                            )
+                        }
+                    }
+                    if (remote) {
+                        row(hasIcon = true) {
+                            SettingRowBox(ctx, "about.serverReleases", null) {
+                                FluxListRow(
+                                    title = str(R.string.webServerReleases),
+                                    icon = FluxIcons.Server,
+                                    trailing = { ExternalMark() },
+                                    onClick = { openLink(context, overlays, SERVER_RELEASES_URL, noBrowser) },
+                                )
+                            }
+                        }
                     }
                     row(hasIcon = true) {
-                        FluxListRow(
-                            title = str(R.string.mobileOpenSource),
-                            icon = FluxIcons.ScrollText,
-                            chevron = true,
-                            onClick = { showLicenses = true },
-                        )
+                        SettingRowBox(ctx, "about.privacy", null) {
+                            FluxListRow(
+                                title = str(R.string.mobilePrivacyPolicy),
+                                icon = FluxIcons.ShieldCheck,
+                                trailing = { ExternalMark() },
+                                onClick = { openLink(context, overlays, PRIVACY_URL, noBrowser) },
+                            )
+                        }
+                    }
+                    row(hasIcon = true) {
+                        SettingRowBox(ctx, "about.licenses", null) {
+                            FluxListRow(
+                                title = str(R.string.mobileOpenSource),
+                                icon = FluxIcons.ScrollText,
+                                chevron = true,
+                                onClick = { showLicenses = true },
+                            )
+                        }
                     }
                 }
             }
-            flowItem(3, gate, "footer") {
+            flowItem(5, gate, "footer") {
                 FluxText(
                     text = str(R.string.mobileFooter),
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -188,11 +250,16 @@ private fun BrandHeader(version: String, protocol: Int?) {
     }
 }
 
-/** 开源许可（Full Sheet）：逐项显示随包许可文本。 */
+/**
+ * 开源许可（Full Sheet）：FluxDown 自身许可证、下载引擎依赖清单链接，以及随包第三方许可文本（字体 / 图标）。
+ */
 @Composable
 private fun LicensesSheet(visible: Boolean, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val overlays = LocalFluxOverlays.current
     val title = str(R.string.mobileOpenSource)
     val closeDescription = str(R.string.close)
+    val noBrowser = str(R.string.mobileNoBrowser)
     FluxPortal {
         FluxSheet(
             visible = visible,
@@ -209,6 +276,24 @@ private fun LicensesSheet(visible: Boolean, onDismiss: () -> Unit) {
             },
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(SectionGap)) {
+                GlassSection(title = "FluxDown", footer = "GNU Affero General Public License v3.0") {
+                    row {
+                        FluxListRow(
+                            title = str(R.string.mobileLicenseViewFull),
+                            trailing = { ExternalMark() },
+                            onClick = { openLink(context, overlays, LICENSE_URL, noBrowser) },
+                        )
+                    }
+                }
+                GlassSection(footer = str(R.string.mobileLicenseEngineDepsDesc)) {
+                    row {
+                        FluxListRow(
+                            title = str(R.string.mobileLicenseEngineDeps),
+                            trailing = { ExternalMark() },
+                            onClick = { openLink(context, overlays, DEPENDENCIES_URL, noBrowser) },
+                        )
+                    }
+                }
                 for (entry in BundledLicenses) LicenseBlock(entry)
             }
         }

@@ -130,7 +130,7 @@ struct AdvancedOptionsView: View {
                             if trimmed != adv.checksumHex { adv.checksumHex = trimmed }
                         }
                     if !checksumHexValid(adv.checksumHex) {
-                        Label(L("mobileChecksumInvalid"), systemImage: "exclamationmark.circle.fill")
+                        Label(L("mobileChecksumInvalid"), systemImage: FluxSymbol.failure)
                             .font(.footnote)
                             .foregroundStyle(Color.fdStatusFailedText)
                     }
@@ -155,7 +155,7 @@ struct AdvancedOptionsView: View {
                     adv.headers.remove(atOffsets: offsets)
                     FluxHaptic.light.play()
                 }
-                Button(L("taskHeadersAdd"), systemImage: "plus") {
+                Button(L("taskHeadersAdd"), systemImage: FluxSymbol.add) {
                     adv.addHeader()
                     FluxHaptic.light.play()
                 }

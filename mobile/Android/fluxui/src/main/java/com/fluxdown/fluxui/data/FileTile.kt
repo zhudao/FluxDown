@@ -27,7 +27,6 @@ import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
 import com.fluxdown.fluxui.material.fluxGlass
-import com.fluxdown.fluxui.material.fluxGlow
 import com.fluxdown.fluxui.theme.FileCategory
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
@@ -53,7 +52,7 @@ fun fileTileIcon(category: FileCategory, bt: Boolean = false): ImageVector = whe
  * 文件图块：glass2 + 发丝线 + 顶沿高光（Flat，可安全用于列表项）+ 单色线性图标；
  * 右上角 (−2,−2) 为 6dp 分类色点（2dp canvas 色环 + 8dp 同色辉光），[categoryColor] 为 null 时不画点。
  *
- * - 选择模式：底 glass3；[selected] 时覆盖层 accentHi + onAccent 勾 + 辉光，scale .7→1（liquid 弹簧）。
+ * - 选择模式：底 glass3；[selected] 时覆盖层 accentHi + onAccent 勾，scale .7→1（liquid 弹簧）。
  * - [onClick] 非 null 时可点：未进入选择模式 = LONG_PRESS 触感（进入多选），选择模式 = SEGMENT_TICK（切换勾选）。
  * - 装饰节点：不进入无障碍树，行节点负责朗读（`TaskRow` 以 customActions 暴露“选择”）。
  */
@@ -119,7 +118,6 @@ fun FileTile(
                         scaleY = k
                         alpha = v.coerceIn(0f, 1f)
                     }
-                    .fluxGlow(colors.accentGlow, radius = 8.dp, shape = shape, spread = (-2).dp)
                     .background(colors.accentHi, shape),
                 contentAlignment = Alignment.Center,
             ) {

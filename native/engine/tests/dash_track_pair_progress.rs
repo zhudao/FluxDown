@@ -246,6 +246,17 @@ async fn track_pair_reports_midway_progress_with_real_total() {
         "midway total_bytes must be {expected_total}: {midway:?}"
     );
 
+    // 3. 进入合并阶段前必须上报 status=5（准备/合并中）。
+    let preparing: Vec<(i32, i64, i64)> = summary
+        .iter()
+        .copied()
+        .filter(|(st, _, _)| *st == 5)
+        .collect();
+    assert!(
+        !preparing.is_empty(),
+        "expected status=5 (preparing/muxing) event before completion, got only: {summary:?}"
+    );
+
     // 产物字节完整（mux 失败是非致命 warning：无 ffmpeg 时视频/音频各自成文件）。
     let video_out = work_dir.join("pair.mp4");
     let meta = tokio::fs::metadata(&video_out).await.expect("video output");

@@ -19,17 +19,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -39,6 +38,8 @@ import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.fluxdown.fluxui.theme.FluxTheme
+import kotlin.math.PI
+import kotlin.math.cos
 
 /** 1.6 s 线性相位 0..1；Reduce motion 时返回 null（静态）。 */
 @Composable
@@ -53,7 +54,7 @@ private fun rememberShimmerPhase(): State<Float>? {
 }
 
 /**
- * 闪烁填充（§12.41）：`glass2 → glass3 → glass2` 线性渐变，周期宽 = 200 % 节点宽，1.6 s 线性向右扫过。
+ * 闪烁填充（§12.41）：`glass2 ↔ glass3` 纯色呼吸脉冲（无渐变），1.6 s 一个周期（余弦缓动，首尾无缝）。
  * Reduce motion：取 `glass2` 实色。相位在绘制阶段读取，不触发重组。[shape] 用于裁剪。
  */
 @Composable
@@ -64,23 +65,9 @@ private fun Modifier.shimmer(shape: Shape, phase: State<Float>?): Modifier {
     val c = FluxTheme.colors
     val g2 = c.glass2
     val g3 = c.glass3
-    return this.clip(shape).drawWithCache {
-        if (phase == null) {
-            onDrawBehind { drawRect(g2) }
-        } else {
-            val period = size.width * 2f
-            val brush = Brush.linearGradient(
-                colors = listOf(g2, g3, g2),
-                start = Offset.Zero,
-                end = Offset(period.coerceAtLeast(1f), 0f),
-                tileMode = TileMode.Repeated,
-            )
-            onDrawBehind {
-                // CSS: background-size 200%、position 0 → -200%，即图案整体右移一个周期（2W）
-                val dx = phase.value * period
-                translate(dx, 0f) { drawRect(brush, topLeft = Offset(-dx, 0f), size = size) }
-            }
-        }
+    return this.clip(shape).drawBehind {
+        val t = if (phase == null) 0f else 0.5f - 0.5f * cos(2f * PI.toFloat() * phase.value)
+        drawRect(lerp(g2, g3, t))
     }
 }
 

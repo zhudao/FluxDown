@@ -545,6 +545,7 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
         log::warn!("failed to load imported theme: {failure}");
     }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
+    fluxdown_ui_icon_pack::apply_icon_pack_preference(values, cx);
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
         .get("general.locale")
@@ -555,12 +556,19 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
         } else {
             locale.to_owned()
         };
-        translator.update(cx, |translator, cx| {
-            if translator.set_locale(&target) {
+        let locale_changed = translator.update(cx, |translator, cx| {
+            let changed = translator.set_locale(&target);
+            if changed {
                 gpui_component::set_locale(component_locale(translator.locale()));
                 cx.notify();
             }
+            changed
         });
+        if locale_changed {
+            // gpui-component 自带文案读进程级静态 locale，不在被追踪的状态里；retained 渲染
+            // 下只有整窗刷新才能让没读 Translator 的库控件换成新语言。
+            cx.refresh_windows();
+        }
     }
 }
 
@@ -588,16 +596,19 @@ fn capture_calls(
     &'static str,
     crate::agent_client::AgentFuture<serde_json::Value>,
 )> {
-    use fluxdown_protocol::capture_link::{OpenAssociation, normalize_capture_url};
+    use fluxdown_protocol::capture_link::{
+        OpenAssociation, deep_link_file_name, normalize_capture_url,
+    };
     let mut calls = Vec::with_capacity(urls.len() + files.len());
     for url in urls {
         // 关联按原始 scheme 判定：`fluxdown:` 深链解码出的 `magnet:` 不受 magnet 开关约束。
         let association = OpenAssociation::of_url(&url);
+        let filename = deep_link_file_name(&url).unwrap_or_default();
         let url = normalize_capture_url(&url);
         let future = client.call::<serde_json::Value, serde_json::Value>(
             fluxdown_protocol::method::AGENT_CAPTURE_SUBMIT,
             Some(serde_json::json!({
-                "request": { "url": url },
+                "request": { "url": url, "filename": filename },
                 "silent": true,
                 "association": association,
             })),

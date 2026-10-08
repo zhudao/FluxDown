@@ -72,7 +72,7 @@ enum class FluxBlur(val sigma: Dp, val saturation: Float) {
 enum class FluxGlass { G1, G2, G3, G4, Sheet, Menu }
 
 /**
- * Real = 下方有内容穿过（共享模糊副本）；Flat = 下方只有画布 + 氛围光（不模糊，直接合成色）。
+ * Real = 下方有内容穿过（共享模糊副本）；Flat = 下方只有画布（不模糊，直接合成色）。
  * 同屏 Real 面 ≤ 4（§5.3）；可回收列表项内禁止 Real。
  */
 enum class FluxGlassKind { Real, Flat }
@@ -97,7 +97,7 @@ class FluxBackdrop {
 
 val LocalFluxBackdrop = staticCompositionLocalOf<FluxBackdrop?> { null }
 
-/** 放在“整屏内容”的根上（画布 + 氛围光 + 颗粒 + 页面内容）。玻璃面必须是其后绘制的兄弟。 */
+/** 放在“整屏内容”的根上（画布 + 颗粒 + 页面内容）。玻璃面必须是其后绘制的兄弟。 */
 fun Modifier.fluxBackdropSource(backdrop: FluxBackdrop): Modifier = this then BackdropSourceElement(backdrop)
 
 private data class BackdropSourceElement(val b: FluxBackdrop) : ModifierNodeElement<BackdropSourceNode>() {
