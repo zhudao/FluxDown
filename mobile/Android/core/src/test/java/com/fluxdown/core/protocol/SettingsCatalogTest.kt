@@ -33,6 +33,8 @@ class SettingsCatalogTest {
         assertTrue(rejected("bt_seed_ratio_limit", "NaN"))
         assertEquals("socks5", ok("proxy_type", " socks5 "))
         assertTrue(rejected("proxy_type", "ftp"))
+        assertEquals("ask", ok("file_exists_behavior", " ask "))
+        assertTrue(rejected("file_exists_behavior", "prompt"))
         assertTrue(rejected("domain_conn_caps", ""))
         assertTrue(rejected("no_such_key", "x"))
         assertEquals("a b", ok("proxy_host", " a b "))

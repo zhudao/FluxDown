@@ -144,6 +144,9 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                     crate::windows::queue_manager::open(cx);
                 })),
                 open_add_device: Some(Rc::new(crate::account_host::open_add_device_dialog)),
+                open_file_conflicts: Some(Rc::new(|window, cx| {
+                    crate::windows::file_conflict::open_from_window(window, cx);
+                })),
                 open_category_editor: Some(Rc::new(move |id, window, cx| {
                     let translator = translator_for_categories.read(cx).clone();
                     fluxdown_ui_settings::open_category_editor(
@@ -177,6 +180,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
         // 启动前就已存在的入站配对请求、窗口尚未就绪时跳过的插件熔断提示：窗口就绪后补弹。
         cx.defer(crate::account_host::replay_pending);
         cx.defer(crate::plugin_notices::replay_pending);
+        cx.defer(crate::update_notices::replay_pending);
     }
     handle
 }

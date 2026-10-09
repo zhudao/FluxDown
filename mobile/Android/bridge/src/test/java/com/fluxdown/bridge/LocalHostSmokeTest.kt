@@ -97,6 +97,7 @@ class LocalHostSmokeTest {
             dataDir = File(root, "data").absolutePath,
             saveDir = File(root, "downloads-$label").absolutePath,
             platform = "test",
+            deviceName = null,
         )
 
     private fun isCompleted(signal: HostSignal, taskId: String): Boolean = when (signal) {

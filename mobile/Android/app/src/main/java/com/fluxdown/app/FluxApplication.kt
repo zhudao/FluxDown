@@ -3,7 +3,9 @@ package com.fluxdown.app
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
+import androidx.compose.runtime.snapshots.SnapshotStateSet
 import androidx.datastore.preferences.preferencesDataStore
 import com.fluxdown.app.data.AppearanceRepo
 import com.fluxdown.app.data.HostRepo
@@ -69,6 +71,9 @@ class AppContainer(context: Context) {
     private val appContext = context.applicationContext
 
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** 正在抓取的订阅 id（订阅列表与条目流共用：两页都显示抓取中状态）。 */
+    val rssFetching = SnapshotStateSet<String>()
 
     /** HostStore 要求串行调度（工作副本单线程访问）。 */
     private val storeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default.limitedParallelism(1))
@@ -307,7 +312,25 @@ class AppContainer(context: Context) {
             save.mkdirs()
             data.path to save.path
         }
-        return FluxBridge.openLocal(dataDir = dataDir, saveDir = saveDir, platform = PLATFORM)
+        return FluxBridge.openLocal(dataDir = dataDir, saveDir = saveDir, platform = PLATFORM, deviceName = systemDeviceName())
+    }
+
+    /**
+     * 云端设备列表里的默认名：系统「设置 › 关于手机 › 设备名称」（厂商出厂即填，如「Galaxy S24 Ultra」），
+     * 读不到再用厂商 + 机型（「Google Pixel 9 Pro」）。沙盒里的内核主机名恒为 `localhost`，不可用。
+     */
+    private fun systemDeviceName(): String? {
+        Settings.Global.getString(appContext.contentResolver, Settings.Global.DEVICE_NAME)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
+        val model = Build.MODEL.orEmpty().trim()
+        val manufacturer = Build.MANUFACTURER.orEmpty().trim().replaceFirstChar { it.titlecase() }
+        return when {
+            model.isEmpty() -> manufacturer.takeIf { it.isNotEmpty() }
+            manufacturer.isEmpty() || model.startsWith(manufacturer, ignoreCase = true) -> model
+            else -> "$manufacturer $model"
+        }
     }
 
     private companion object {

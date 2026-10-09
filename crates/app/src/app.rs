@@ -34,6 +34,9 @@ const EVENT_BATCH: usize = 256;
 /// 次实例等待刚启动主实例的 IPC 端点就绪、或等待旧主实例释放锁的最长时间。
 const ACTIVATION_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+/// `--after-update`：旧桌面进程随 agent 整体退出而退出，等它释放单实例锁的最长时间与轮询间隔。
+const AFTER_UPDATE_LOCK_WAIT: Duration = Duration::from_secs(30);
+const AFTER_UPDATE_LOCK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 桌面入口完成后的进程语义。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,18 +131,24 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         activate: launch.activate_existing || !launch.capture_only,
         settings: launch.settings,
     };
-    let _instance_lock =
-        match acquire_or_activate(&instance_dir, &endpoint, &message, launch.activate_existing)? {
-            LaunchDisposition::Primary(lock) => lock,
-            LaunchDisposition::Activated => {
-                log::info!("another desktop instance is primary; request forwarded, exiting");
-                return Ok(RunOutcome::Completed);
-            }
-            LaunchDisposition::NoPrimary => {
-                log::info!("--activate-existing without a primary instance; exiting");
-                return Ok(RunOutcome::NoPrimary);
-            }
-        };
+    let lock_wait = launch.after_update.then_some(AFTER_UPDATE_LOCK_WAIT);
+    let _instance_lock = match acquire_or_activate(
+        &instance_dir,
+        &endpoint,
+        &message,
+        launch.activate_existing,
+        lock_wait,
+    )? {
+        LaunchDisposition::Primary(lock) => lock,
+        LaunchDisposition::Activated => {
+            log::info!("another desktop instance is primary; request forwarded, exiting");
+            return Ok(RunOutcome::Completed);
+        }
+        LaunchDisposition::NoPrimary => {
+            log::info!("--activate-existing without a primary instance; exiting");
+            return Ok(RunOutcome::NoPrimary);
+        }
+    };
     let (activate_tx, mut activate_rx) = mpsc::channel::<ActivationRequest>(16);
     // Unix sockets can bind before Tokio starts, so parallel starters are queued immediately.
     #[cfg(unix)]
@@ -345,7 +354,12 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 引擎选择请求窗口 / 外部捕获确认（并入新建下载窗口）：跟随会话事件独立开关，
         // 不依赖主窗口存在。
         crate::windows::selection::install(cx);
+        crate::windows::file_conflict::install(cx);
         crate::plugin_notices::install(cx);
+        crate::update_notices::install(cx);
+        if launch.after_update {
+            after_session_settled(cx, crate::update_notices::show_installed);
+        }
         crate::progress_windows::install(cx);
         if let Some(task_id) = launch.progress_task.clone() {
             // 须先于下方「无待确认即退出」登记：意图的界面保活会推迟那次退出。
@@ -376,12 +390,33 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
 
     Ok(RunOutcome::Completed)
 }
+/// `lock_wait` 为 `Some`（`--after-update`）时先轮询等待旧主实例释放锁，而不是把请求转发给
+/// 正在退出的旧主实例；超时后回退到常规的转发 / 重试路径。
 fn acquire_or_activate(
     instance_dir: &Path,
     endpoint: &Endpoint,
     message: &ActivateMessage,
     activate_existing: bool,
+    lock_wait: Option<Duration>,
 ) -> Result<LaunchDisposition, AppError> {
+    if let Some(wait) = lock_wait {
+        let deadline = Instant::now() + wait;
+        loop {
+            match launch::InstanceLock::try_acquire(instance_dir).map_err(AppError::InstanceLock)? {
+                Some(_lock) if activate_existing => return Ok(LaunchDisposition::NoPrimary),
+                Some(lock) => return Ok(LaunchDisposition::Primary(lock)),
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(AFTER_UPDATE_LOCK_INTERVAL);
+                }
+                None => {
+                    log::warn!(
+                        "old desktop instance still holds the lock after update; forwarding"
+                    );
+                    break;
+                }
+            }
+        }
+    }
     let deadline = Instant::now() + ACTIVATION_RETRY_TIMEOUT;
     loop {
         match launch::InstanceLock::try_acquire(instance_dir).map_err(AppError::InstanceLock)? {
@@ -906,7 +941,7 @@ mod tests {
     fn activate_existing_never_claims_a_free_lock() {
         let dir = test_dir("activate-only");
         let endpoint = Endpoint::for_instance_dir(&dir);
-        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), true)
+        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), true, None)
             .expect("coordinate launch");
         assert!(matches!(outcome, LaunchDisposition::NoPrimary));
         if let Err(error) = std::fs::remove_dir_all(dir) {
@@ -925,8 +960,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
             drop(held);
         });
-        let outcome = acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), false)
-            .expect("take over after release");
+        let outcome =
+            acquire_or_activate(&dir, &endpoint, &ActivateMessage::default(), false, None)
+                .expect("take over after release");
         releaser.join().expect("release thread");
         match outcome {
             LaunchDisposition::Primary(lock) => drop(lock),
@@ -936,6 +972,38 @@ mod tests {
         }
         if let Err(error) = std::fs::remove_dir_all(dir) {
             log::warn!("could not remove takeover test fixture: {error}");
+        }
+    }
+
+    #[test]
+    fn after_update_waits_for_the_old_primary_instead_of_forwarding() {
+        let dir = test_dir("after-update");
+        let endpoint = Endpoint::for_instance_dir(&dir);
+        let held = launch::InstanceLock::try_acquire(&dir)
+            .expect("acquire initial lock")
+            .expect("initial primary");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        // 旧主实例没有激活监听：若转发则会以 Activation 错误失败。
+        let outcome = acquire_or_activate(
+            &dir,
+            &endpoint,
+            &ActivateMessage::default(),
+            false,
+            Some(Duration::from_secs(10)),
+        )
+        .expect("wait for old primary");
+        releaser.join().expect("release thread");
+        match outcome {
+            LaunchDisposition::Primary(lock) => drop(lock),
+            LaunchDisposition::Activated | LaunchDisposition::NoPrimary => {
+                panic!("expected primary after waiting")
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(dir) {
+            log::warn!("could not remove after-update test fixture: {error}");
         }
     }
 }

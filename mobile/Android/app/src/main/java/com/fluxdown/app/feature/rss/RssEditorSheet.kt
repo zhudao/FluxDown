@@ -279,8 +279,8 @@ private fun isAbsolutePath(path: String): Boolean =
     path.startsWith("/") || path.startsWith("\\\\") || Regex("^[A-Za-z]:[\\\\/]").containsMatchIn(path)
 
 /**
- * R3 订阅编辑器 Sheet（新建 / 编辑）。页签：基本 · 过滤 · 高级。新建时先输入地址并「验证」，
- * 通过后显示其余字段并可「订阅」；编辑直接显示全部字段，可删除订阅。
+ * R3 订阅编辑器 Sheet（新建 / 编辑）。页签：基本 · 过滤 · 高级。新建时先输入地址（以及影响验证请求的
+ * Cookie / UA / 代理）并「验证」，通过后显示页签与其余字段并可「订阅」；编辑直接显示全部字段，可删除订阅。
  */
 @Composable
 internal fun RssEditorSheet(target: RssEditorTarget?, onDismiss: () -> Unit) {
@@ -457,6 +457,11 @@ private fun EditorBody(m: RssEditorModel, openPicker: (PickerSpec) -> Unit, onBr
                     mono = true,
                 )
                 if (!m.isEditing) {
+                    if (!m.showsDetails) {
+                        // 验证前只露出会进入验证请求的字段；通过后它们回到「高级」页签
+                        FluxText(str(R.string.rssTabAdvanced), style = t.micro, color = c.inkMuted, modifier = Modifier.padding(start = 4.dp, top = 6.dp))
+                        RequestFields(m)
+                    }
                     when (val v = m.validation) {
                         is Validation.Passed -> FluxBanner(
                             v.title.ifBlank { f.url } + " · " + str(R.string.rssWizardFeedSummary, "n" to v.itemCount),
@@ -543,9 +548,7 @@ private fun EditorBody(m: RssEditorModel, openPicker: (PickerSpec) -> Unit, onBr
                 }
             }
             RssTab.Advanced -> {
-                FluxField(f.cookies, { v -> m.update { it.copy(cookies = v) } }, label = str(R.string.rssCookiesLabel), placeholder = str(R.string.rssCookiesHint), mono = true)
-                FluxField(f.userAgent, { v -> m.update { it.copy(userAgent = v) } }, label = str(R.string.rssUserAgentLabel), placeholder = str(R.string.rssInheritGlobalHint), mono = true)
-                FluxField(f.proxyUrl, { v -> m.update { it.copy(proxyUrl = v) } }, label = str(R.string.rssProxyLabel), placeholder = str(R.string.rssInheritGlobalHint), mono = true)
+                RequestFields(m)
                 FluxField(f.maxPerFetch, { v -> m.update { it.copy(maxPerFetch = v.filter(Char::isDigit).take(3)) } }, label = str(R.string.rssMaxPerFetchLabel), mono = true)
                 GlassSection {
                     row {
@@ -555,6 +558,15 @@ private fun EditorBody(m: RssEditorModel, openPicker: (PickerSpec) -> Unit, onBr
             }
         }
     }
+}
+
+/** 影响验证请求的字段（Cookie / UA / 代理）：新建验证前显示在基本页，其余时候在「高级」页签。 */
+@Composable
+private fun RequestFields(m: RssEditorModel) {
+    val f = m.form
+    FluxField(f.cookies, { v -> m.update { it.copy(cookies = v) } }, label = str(R.string.rssCookiesLabel), placeholder = str(R.string.rssCookiesHint), mono = true)
+    FluxField(f.userAgent, { v -> m.update { it.copy(userAgent = v) } }, label = str(R.string.rssUserAgentLabel), placeholder = str(R.string.rssInheritGlobalHint), mono = true)
+    FluxField(f.proxyUrl, { v -> m.update { it.copy(proxyUrl = v) } }, label = str(R.string.rssProxyLabel), placeholder = str(R.string.rssInheritGlobalHint), mono = true)
 }
 
 @Composable

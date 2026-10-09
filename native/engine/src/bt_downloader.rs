@@ -96,17 +96,6 @@ impl TorrentSource {
         }
     }
 
-    /// URL string for DB storage.  Magnet links store the URI directly.
-    /// Torrent file sources store a sentinel `torrent-file://` URL since the
-    /// actual content is persisted separately in the `torrent_file_bytes` column.
-    #[allow(dead_code)]
-    pub fn url_for_db(&self) -> &str {
-        match self {
-            TorrentSource::Magnet(url) => url,
-            TorrentSource::TorrentFileBytes(_) => "torrent-file://local",
-        }
-    }
-
     /// Lowercase hex info-hash of this source, if derivable.
     ///
     /// Magnet links carry it in `xt=urn:btih:`; .torrent bytes are parsed

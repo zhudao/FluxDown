@@ -133,9 +133,11 @@ struct QueueManagerSheet: View {
                 }
             }
         }
+        // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if !builtin {
-                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { model.pendingDelete = queue }
+                Button(L("delete"), systemImage: FluxSymbol.delete) { model.pendingDelete = queue }
+                    .tint(Color.fdStatusFailed)
                     .disabled(readOnly || busy)
             }
         }

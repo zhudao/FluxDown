@@ -969,7 +969,7 @@ async fn download_track_coordinated(
         &p.progress_tx,
         &p.cancel_token,
         &p.speed_limiter,
-        &p.spec,
+        &std::sync::Arc::new(crate::downloader::DownloadSpec::new(p.spec.clone())),
         p.sink.as_ref(),
         "",
         "",
@@ -1003,7 +1003,7 @@ async fn download_track_coordinated(
 ///
 /// - 视频轨是对外可见的最终文件：按 [`crate::downloader::claim_final_name`] 的
 ///   `create_new` 占名不覆盖同名旧文件；原名被占时 dedup 换名并把新文件名写回 DB
-///   （完成信号随后上报）。`allow_overwrite`（覆盖策略）或 `is_resume`（原名上的
+///   （完成信号随后上报）。覆盖授权（`p.overwrite`）或 `is_resume`（原名上的
 ///   文件是本任务续传遗留）时对原名删除旧文件后重试一次。
 /// - 音频轨是内部 sidecar（`build_audio_path`），归属本任务：替换遗留同名文件。
 async fn finalize_track_rename(
@@ -1048,7 +1048,11 @@ async fn finalize_track_rename(
         temp,
         save_dir,
         name,
-        p.allow_overwrite || p.is_resume,
+        &if p.is_resume {
+            crate::file_exists::OverwritePolicy::Any
+        } else {
+            p.overwrite.clone()
+        },
         &avoid,
     )
     .await?;

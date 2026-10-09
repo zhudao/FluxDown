@@ -536,6 +536,7 @@ private fun GlassSectionScope.behaviorRows(ctx: SettingsCtx, shown: Set<String>,
                 SelectOption("rename", str(R.string.fileExistsRename)),
                 SelectOption("overwrite", str(R.string.fileExistsOverwrite)),
                 SelectOption("skip", str(R.string.fileExistsSkip)),
+                SelectOption("ask", str(R.string.fileExistsAsk)),
             )
         }
     }

@@ -1305,9 +1305,12 @@ impl RemoteTaskService {
         if self.runtime.lock().await.reported_statuses.get(remote_id) == Some(&status) {
             return Ok(());
         }
+        // `downloadedBytes`：云端在终态转换时冻结它（进度快照随终态回收），失败 / 取消的任务
+        // 在发起端仍显示停在哪里；旧版云端忽略该字段。
         let body = json!({
             "status": remote_status_wire(status),
             "totalBytes": task.map(|task| task.total_bytes),
+            "downloadedBytes": task.map(|task| task.downloaded_bytes.max(0)),
             "fileName": task.map(|task| task.file_name.clone()),
             "error": error,
         });

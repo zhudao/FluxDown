@@ -22,6 +22,7 @@ import com.fluxdown.app.nav.AppNavigator
 import com.fluxdown.app.nav.AppTab
 import com.fluxdown.app.nav.Route
 import com.fluxdown.core.model.HostRef
+import com.fluxdown.core.model.SelectionKind
 import com.fluxdown.core.model.SelectionRequest
 import com.fluxdown.core.model.Task
 import com.fluxdown.core.model.TaskStatus
@@ -275,14 +276,17 @@ object DownloadNotifier {
     }
 
     private fun postSelection(context: Context, request: SelectionRequest, task: Task?, hostId: String) {
-        val name = task?.fileName.orEmpty()
+        val conflict = request.kind as? SelectionKind.FileExists
+        val name = conflict?.fileName ?: task?.fileName.orEmpty()
+        val (title, body) = when {
+            conflict != null -> context.str(R.string.fileConflictTitle) to context.str(R.string.mobileNotifFileConflictBody, "name" to name)
+            name.isEmpty() -> context.str(R.string.mobileNotifSelectionTitle) to context.str(R.string.mobileNotifSelectionBodyGeneric)
+            else -> context.str(R.string.mobileNotifSelectionTitle) to context.str(R.string.mobileNotifSelectionBody, "name" to name)
+        }
         val notification = NotificationCompat.Builder(context, CHANNEL_SELECTION)
             .setSmallIcon(R.drawable.ic_stat_download)
-            .setContentTitle(context.str(R.string.mobileNotifSelectionTitle))
-            .setContentText(
-                if (name.isEmpty()) context.str(R.string.mobileNotifSelectionBodyGeneric)
-                else context.str(R.string.mobileNotifSelectionBody, "name" to name),
-            )
+            .setContentTitle(title)
+            .setContentText(body)
             .setContentIntent(openApp(context, hostId, taskId = "", code = selectionTag(hostId, request.requestId).hashCode()))
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)

@@ -88,7 +88,7 @@ struct GeneralCategoryStore {
 /// 「自定义分类」分组：列表（点按编辑 / 左滑删除 / 长按菜单 / 编辑模式拖动重排）+ 页脚三按钮。
 struct CategoriesSection: View {
     @Binding var editing: GeneralCategoryTarget?
-    @Binding var confirmReset: Bool
+    @State private var confirmReset = false
     let readOnly: Bool
 
     @Environment(AppContainer.self) private var container
@@ -167,6 +167,12 @@ struct CategoriesSection: View {
         .disabled(!hasBase)
         SettingsActionRow(title: L("resetBuiltinCategories"), systemImage: "arrow.counterclockwise", role: .destructive) {
             confirmReset = true
+        }
+        .alert(L("resetBuiltinCategories"), isPresented: $confirmReset) {
+            Button(L("resetBuiltinCategories"), role: .destructive) { store.resetBuiltin() }
+            Button(L("cancel"), role: .cancel) {}
+        } message: {
+            Text(L("resetAllCategoriesConfirm"))
         }
     }
 }

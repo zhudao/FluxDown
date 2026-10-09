@@ -25,6 +25,7 @@ pub mod download_manager;
 pub mod downloader;
 pub mod ed2k;
 pub mod events;
+pub mod file_exists;
 pub mod ftp_downloader;
 pub mod hls_downloader;
 /// 设备互联（`fluxdown_link`）的引擎数据库存储后端。仅 `link` feature 下编译。

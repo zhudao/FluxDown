@@ -31,6 +31,7 @@ import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
 import com.fluxdown.app.ui.fileCategory
 import com.fluxdown.core.format.Format
+import com.fluxdown.core.host.HostErrorCode
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.host.HostSession
 import com.fluxdown.core.model.CategoryIndex
@@ -88,14 +89,9 @@ fun SelectionRequestSheet(request: SelectionRequest?) {
     if (request != null) memory.last = request
     val shown = request ?: memory.last ?: return
 
-    val container = LocalAppContainer.current
     val overlays = LocalFluxOverlays.current
-    val actions = LocalTaskActions.current
-    val haptics = FluxTheme.haptics
     val context = LocalContext.current
-    val resolver = remember(container, overlays, haptics, actions) {
-        SelectionResolver(container.appScope, { container.session }, container.store, overlays, haptics, context.applicationContext, actions::errorText)
-    }
+    val resolver = rememberSelectionResolver()
 
     // 请求消失而不是我们答复的 → 其它设备已完成选择
     val currentId = request?.requestId
@@ -128,6 +124,8 @@ fun SelectionRequestSheet(request: SelectionRequest?) {
             is SelectionKind.Bt -> BtSelectionSheet(ui, kind)
             is SelectionKind.Hls -> HlsSelectionSheet(ui, kind)
             is SelectionKind.Variant -> VariantSelectionSheet(ui, kind)
+            // fileExists 不走单请求 Sheet：由 FileConflictSheet 聚合呈现（shell 只把其它请求传进来）
+            is SelectionKind.FileExists -> Unit
         }
     }
 }
@@ -141,6 +139,19 @@ internal class SelectionUi(
     val taskOf: () -> Task?,
     val visible: Boolean,
 )
+
+/** 选择请求的答复器（单请求 Sheet 与聚合 fileExists 对话框各持一份，互不影响去重与“本机答复”登记）。 */
+@Composable
+internal fun rememberSelectionResolver(): SelectionResolver {
+    val container = LocalAppContainer.current
+    val overlays = LocalFluxOverlays.current
+    val actions = LocalTaskActions.current
+    val haptics = FluxTheme.haptics
+    val context = LocalContext.current
+    return remember(container, overlays, haptics, actions) {
+        SelectionResolver(container.appScope, { container.session }, container.store, overlays, haptics, context.applicationContext, actions::errorText)
+    }
+}
 
 // ── 答复 ──────────────────────────────────────────────────────────────────
 
@@ -164,29 +175,50 @@ internal class SelectionResolver(
      * @param successToast 答复成功后的提示；null 不提示
      * @param userInitiated 用户操作才受只读拦截；倒计时自动答复照常尝试
      */
-    fun resolve(request: SelectionRequest, outcome: SelectionOutcome, successToast: String?, userInitiated: Boolean) {
+    fun resolve(request: SelectionRequest, outcome: SelectionOutcome, successToast: String?, userInitiated: Boolean) =
+        resolveAll(listOf(request to outcome), successToast, userInitiated)
+
+    /**
+     * 逐条答复一批请求（聚合 fileExists 对话框的批量按钮）；整批只触发一次成功 / 失败反馈。
+     * 请求已被其它设备答复或已到期（Conflict / NotFound）不算失败；其它错误保留该请求（仍在待选列表里）并提示，用户可重试。
+     */
+    fun resolveAll(items: List<Pair<SelectionRequest, SelectionOutcome>>, successToast: String?, userInitiated: Boolean) {
         if (userInitiated && store.state.value.isReadOnly) {
             haptics.reject()
             overlays.toast(context.str(R.string.localServiceDisconnected), FluxToastKind.Error, FluxIcons.WifiOff)
             return
         }
-        val id = request.requestId
-        if (!inFlight.add(id)) return
-        ours += id // 先登记：SelectionResolved 可能先于本协程恢复到达
+        val fresh = items.filter { inFlight.add(it.first.requestId) }
+        if (fresh.isEmpty()) return
+        for ((request, _) in fresh) ours += request.requestId // 先登记：SelectionResolved 可能先于本协程恢复到达
         scope.launch {
-            try {
-                session().resolveSelection(id, outcome)
+            var done = 0
+            var failure: HostException? = null
+            for ((request, outcome) in fresh) {
+                val id = request.requestId
+                try {
+                    session().resolveSelection(id, outcome)
+                    done++
+                } catch (e: HostException) {
+                    when {
+                        e.code == HostErrorCode.Conflict || e.code == HostErrorCode.NotFound -> ours -= id
+                        // 引擎已按默认项处理而状态还没刷新：不算失败
+                        store.state.value.selections.any { it.requestId == id } -> {
+                            ours -= id
+                            failure = e
+                        }
+                    }
+                } finally {
+                    inFlight.remove(id)
+                }
+            }
+            if (done > 0) {
                 haptics.confirm()
                 successToast?.let { overlays.toast(it, FluxToastKind.Success, FluxIcons.CircleCheck) }
-            } catch (e: HostException) {
-                // 请求已不在待处理列表（引擎超时自行按默认项处理 / 其它设备先答复）：不算失败
-                if (store.state.value.selections.any { it.requestId == id }) {
-                    ours -= id
-                    haptics.reject()
-                    overlays.toast(errorText(e), FluxToastKind.Error)
-                }
-            } finally {
-                inFlight.remove(id)
+            }
+            failure?.let {
+                haptics.reject()
+                overlays.toast(errorText(it), FluxToastKind.Error)
             }
         }
     }
@@ -235,23 +267,28 @@ internal class Countdown(
  * [active] 为 false（请求已消失，退场动画中）时停止刷新。
  */
 @Composable
-internal fun rememberCountdown(request: SelectionRequest, active: Boolean): Countdown {
+internal fun rememberCountdown(request: SelectionRequest, active: Boolean): Countdown =
+    rememberCountdown(request.requestId, request.deadlineUnixMs, active)
+
+/** 以 [key]（身份）与截止时间 [deadlineUnixMs] 驱动的倒计时：[key] 变化即重新起算。 */
+@Composable
+internal fun rememberCountdown(key: Any, deadlineUnixMs: Long, active: Boolean): Countdown {
     val reduce = FluxTheme.motion.reduce
-    val now = remember(request.requestId) { mutableLongStateOf(System.currentTimeMillis()) }
-    val total = remember(request.requestId) { (request.deadlineUnixMs - System.currentTimeMillis()).coerceAtLeast(1_000L) }
-    val seconds = remember(request.requestId) {
-        derivedStateOf { ceil((request.deadlineUnixMs - now.longValue) / 1000.0).toInt().coerceAtLeast(0) }
+    val now = remember(key) { mutableLongStateOf(System.currentTimeMillis()) }
+    val total = remember(key) { (deadlineUnixMs - System.currentTimeMillis()).coerceAtLeast(1_000L) }
+    val seconds = remember(key) {
+        derivedStateOf { ceil((deadlineUnixMs - now.longValue) / 1000.0).toInt().coerceAtLeast(0) }
     }
-    LaunchedEffect(request.requestId, active, reduce) {
+    LaunchedEffect(key, active, reduce) {
         if (!active) return@LaunchedEffect
         while (true) {
             val t = System.currentTimeMillis()
             now.longValue = t
-            if (t >= request.deadlineUnixMs) break
+            if (t >= deadlineUnixMs) break
             if (reduce) delay(1000L - t % 1000L) else withFrameMillis { }
         }
     }
-    return remember(request.requestId) { Countdown(request.deadlineUnixMs, total, now, seconds) }
+    return remember(key) { Countdown(deadlineUnixMs, total, now, seconds) }
 }
 
 // ── 共用 UI ───────────────────────────────────────────────────────────────
@@ -287,29 +324,35 @@ private fun selectionTag(task: Task): String = when (task.protocol) {
     TaskProtocol.Plugin -> "PLUGIN"
 }
 
-/** 页脚：左侧倒计时环 + 文案；其下是操作按钮行。 */
+/** 倒计时环 + 文案（[labelRes] 带 `{seconds}` 占位符）。 */
 @Composable
-internal fun SelectionFooter(countdown: Countdown, actions: @Composable RowScope.() -> Unit) {
+internal fun CountdownLine(countdown: Countdown, labelRes: Int = R.string.selectionAutoDefaultIn) {
     val c = FluxTheme.colors
     val type = FluxTheme.type
     val seconds = countdown.seconds
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        CountdownRing(
+            remainingFraction = countdown::fraction,
+            seconds = seconds,
+            warn = countdown.warn,
+            size = 40.dp,
+            liveDescription = str(labelRes, "seconds" to seconds),
+        )
+        FluxText(
+            str(labelRes, "seconds" to seconds),
+            style = type.sm,
+            color = if (countdown.warn) c.amberText else c.inkMuted,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** 页脚：左侧倒计时环 + 文案；其下是操作按钮行。 */
+@Composable
+internal fun SelectionFooter(countdown: Countdown, actions: @Composable RowScope.() -> Unit) {
     FluxSheetFooter {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                CountdownRing(
-                    remainingFraction = countdown::fraction,
-                    seconds = seconds,
-                    warn = countdown.warn,
-                    size = 40.dp,
-                    liveDescription = str(R.string.selectionAutoDefaultIn, "seconds" to seconds),
-                )
-                FluxText(
-                    str(R.string.selectionAutoDefaultIn, "seconds" to seconds),
-                    style = type.sm,
-                    color = if (countdown.warn) c.amberText else c.inkMuted,
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            CountdownLine(countdown)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 actions()
             }

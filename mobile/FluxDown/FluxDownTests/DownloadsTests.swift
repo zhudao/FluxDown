@@ -83,11 +83,11 @@ import Testing
 }
 
 @MainActor private func ids(_ result: DeriveResult) -> [String] {
-    result.list.sections.flatMap { $0.items.map(\.id) }
+    result.list.sections.flatMap { $0.rows.map(\.id) }
 }
 
 @MainActor private func firstItem(_ result: DeriveResult) throws -> TaskItem {
-    try #require(result.list.sections.first?.items.first)
+    try #require(result.list.sections.first?.rows.first?.item)
 }
 
 /// 恒等查表：文案 = 键 + 排序后的参数，与系统语言无关。
@@ -196,6 +196,324 @@ struct DownloadsFilterTests {
         #expect(site("ed2k://|file|x|1|h|/") == "")
         #expect(site("https://a.com/f", origin: "https://origin.org/p") == "origin.org")
         #expect(site("not a url") == "")
+    }
+}
+
+// MARK: - 远程任务行（与本机任务合并进同一列表）
+
+@MainActor
+struct DownloadsRemoteRowsTests {
+    /// ISO 时间 → Unix 秒（与远程行 `createdAt` 同一解析）。
+    private func at(_ iso: String) -> Int64 { DownloadsDeriver.createdSeconds(iso) }
+
+    private var local: [DownloadTask] {
+        [
+            makeTask("a", .downloading, name: "a.mp4", total: 500, created: at("2026-10-08T01:30:00Z")),
+            makeTask("b", .completed, name: "b.zip", total: 100, created: at("2026-10-08T02:30:00Z")),
+            makeTask("f", .failed, name: "f.bin", created: at("2026-10-08T03:30:00Z")),
+        ]
+    }
+
+    private let remote = [
+        RemoteTaskDto(id: "r1", toDevice: "pc", url: "https://e.com/movie.mp4", status: .accepted, createdAt: "2026-10-08T01:00:00Z"),
+        RemoteTaskDto(
+            id: "r2", toDevice: "pc", url: "https://www.e.com:8443/x", fileName: "song.mp3", status: .downloading,
+            totalBytes: 300, speed: 5000, createdAt: "2026-10-08T02:00:00.500Z"
+        ),
+        RemoteTaskDto(id: "r3", toDevice: "pc", fileName: "doc.pdf", status: .canceled, speed: 9000, createdAt: "2026-10-08T03:00:00Z"),
+        RemoteTaskDto(id: "r4", toDevice: "pc", fileName: "app.zip", status: .paused, createdAt: "2026-10-08T04:00:00Z"),
+    ]
+
+    private func run(
+        _ filter: DownloadsFilter = DownloadsFilter(),
+        order: ViewOrder? = nil,
+        speeds: [String: Int64] = ["a": 1000],
+        state: HostState? = nil,
+        remote override: [RemoteTaskDto]? = nil
+    ) -> DeriveResult {
+        var deriver = DownloadsDeriver()
+        return deriver.derive(
+            DeriveInput(
+                state: state ?? makeState(local, speeds: speeds),
+                order: order ?? smart,
+                filter: filter,
+                collapsed: [],
+                remote: override ?? remote
+            ),
+            nowMs: 1_000_000,
+            interactionMs: 0,
+            calendar: utc
+        )
+    }
+
+    private func order(_ key: SortKey, ascending: Bool, group: GroupBy = .none) -> ViewOrder {
+        ViewOrder(groupBy: group, sortKey: key, ascending: ascending)
+    }
+
+    @Test func createdAtParsesWithAndWithoutFractionAndFailsToZero() {
+        #expect(at("2026-10-08T01:00:00Z") == at("2026-10-08T01:00:00.750Z"))
+        #expect(at("2026-10-08T01:00:00+08:00") == at("2026-10-07T17:00:00Z"))
+        #expect(at("2026-10-08T01:00:00Z") > 1_700_000_000)
+        #expect(at("") == 0)
+        #expect(at("yesterday") == 0)
+    }
+
+    @Test func remoteTasksCountInFoldersWithGpuiStatusMapping() {
+        let result = run()
+        let facets = result.facets
+        #expect(facets.count(.all) == 7)
+        // 已接单 / 下载中 → 下载中；已取消 → 失败。
+        #expect(facets.count(.active) == 3)
+        #expect(facets.count(.failed) == 2)
+        #expect(facets.count(.paused) == 1)
+        #expect(facets.count(.completed) == 1)
+        #expect(facets.remoteCount == 4)
+        #expect(facets.matching == 7)
+        #expect(result.list.taskTotal == 7)
+    }
+
+    @Test func smartOrderInterleavesLocalAndRemoteWithOneComparator() {
+        let result = run()
+        // 档 1：下载中（添加正序）a 01:30 → r2 02:00；档 2：r1；档 3 / 5 历史新 → 旧：f 03:30 → r3 03:00；档 4：r4；档 5：b。
+        #expect(ids(result) == ["a", "remote:r2", "remote:r1", "f", "remote:r3", "remote:r4", "b"])
+        #expect(result.list.sections.map(\.id) == ["flow", "history"])
+        // 分区头计数含远程行；汇总速度只算本机（r2 的 5000 不计入）。
+        #expect(result.list.sections.map(\.count) == [3, 4])
+        #expect(result.list.sections[0].downSpeed == 1000)
+        // 远程行不参与多选。
+        #expect(result.list.visibleIds == ["a", "f", "b"])
+    }
+
+    @Test func remoteUnknownSortsWithPendingAndBothTiersSplitInflightFromHistory() {
+        let remote = [
+            RemoteTaskDto(id: "u", status: .unknown("z"), createdAt: "2026-10-08T00:30:00Z"),
+            RemoteTaskDto(id: "d", status: .completed, createdAt: "2026-10-08T05:00:00Z"),
+        ]
+        let result = run(remote: remote)
+        // 未知与等待同档（2）且属于「传输中」；已完成进历史（档 3 的 f 在档 5 的 d / b 之前）。
+        #expect(ids(result) == ["a", "remote:u", "f", "remote:d", "b"])
+        #expect(result.list.sections[0].rows.map(\.id) == ["a", "remote:u"])
+        #expect(result.list.sections[1].rows.map(\.id) == ["f", "remote:d", "b"])
+    }
+
+    @Test func nameSortUsesRemoteDisplayName() {
+        let result = run(order: order(.name, ascending: true))
+        // r1 无文件名 → 由 URL 推断 movie.mp4；不分组时先排传输中（a · movie · song），再排历史。
+        #expect(ids(result) == ["a", "remote:r1", "remote:r2", "remote:r4", "b", "remote:r3", "f"])
+    }
+
+    @Test func sizeSortUsesTotalBytesOrZeroWithNewestFirstTies() {
+        let result = run(order: order(.size, ascending: false))
+        // 不分组时仍按「传输中 / 历史」分区：传输中 a · r2 · r1，历史 b · r4 · f · r3（0 字节按创建时间新 → 旧）。
+        #expect(ids(result) == ["a", "remote:r2", "remote:r1", "b", "remote:r4", "f", "remote:r3"])
+    }
+
+    @Test func speedSortZeroesTerminalRemoteSpeed() {
+        let result = run(order: order(.speed, ascending: false))
+        // r3 已取消：9000 不计，与其它 0 速度行按创建时间新 → 旧。
+        #expect(ids(result) == ["remote:r2", "a", "remote:r1", "remote:r4", "f", "remote:r3", "b"])
+    }
+
+    @Test func progressSortTreatsUnknownRemoteAsNoProgress() {
+        let remote = [
+            RemoteTaskDto(id: "p", status: .downloading, progress: 0.4, createdAt: "2026-10-08T01:00:00Z"),
+            RemoteTaskDto(id: "u", status: .unknown("z"), progress: 0.9, createdAt: "2026-10-08T02:00:00Z"),
+        ]
+        let state = makeState([makeTask("l", .downloading, downloaded: 50, total: 100, created: at("2026-10-08T03:00:00Z"))])
+        let result = run(order: order(.progress, ascending: false), state: state, remote: remote)
+        // l 0.5 > p 0.4 > u（无进度，-1）。
+        #expect(ids(result) == ["l", "remote:p", "remote:u"])
+    }
+
+    @Test func reorderHoldIncludesRemoteIds() {
+        var deriver = DownloadsDeriver()
+        let key = order(.speed, ascending: false)
+        func derive(_ remote: [RemoteTaskDto], nowMs: Int64) -> [String] {
+            let result = deriver.derive(
+                DeriveInput(state: makeState([]), order: key, filter: DownloadsFilter(), collapsed: [], remote: remote),
+                nowMs: nowMs, interactionMs: 0
+            )
+            return result.list.sections.flatMap { $0.rows.map(\.id) }
+        }
+        let slow = RemoteTaskDto(id: "x", status: .downloading, speed: 10, createdAt: "2026-10-08T01:00:00Z")
+        let fast = RemoteTaskDto(id: "y", status: .downloading, speed: 20, createdAt: "2026-10-08T02:00:00Z")
+        #expect(derive([slow, fast], nowMs: 10_000) == ["remote:y", "remote:x"])
+        // 2 秒内速度反超也不重排（远程行同样节流）。
+        let overtaking = RemoteTaskDto(id: "x", status: .downloading, speed: 99, createdAt: "2026-10-08T01:00:00Z")
+        #expect(derive([overtaking, fast], nowMs: 10_500) == ["remote:y", "remote:x"])
+        #expect(derive([overtaking, fast], nowMs: 13_000) == ["remote:x", "remote:y"])
+    }
+
+    @Test func remoteOnlyKeepsOnlyRemoteRowsAndRemoteCountIgnoresCategory() {
+        var filter = DownloadsFilter()
+        filter.remoteOnly = true
+        let result = run(filter)
+        #expect(ids(result) == ["remote:r2", "remote:r1", "remote:r3", "remote:r4"])
+        #expect(result.list.visibleIds.isEmpty)
+        #expect(result.facets.matching == 4)
+        #expect(result.facets.remoteCount == 4)
+        #expect(!result.list.isEmpty)
+
+        // 文件夹内的远程数；文件夹计数不受 remoteOnly 影响。
+        filter.folder = .active
+        let active = run(filter)
+        #expect(ids(active) == ["remote:r2", "remote:r1"])
+        #expect(active.facets.remoteCount == 2)
+        #expect(active.facets.count(.all) == 7)
+    }
+
+    @Test func folderSearchAndCategoryFilterRemoteRowsLikeLocalRows() {
+        var filter = DownloadsFilter()
+        filter.folder = .active
+        #expect(ids(run(filter)) == ["a", "remote:r2", "remote:r1"])
+        // 文件名为空时按 URL 推断名称参与分类与搜索；选分类 = 本机 + 远程中属于该分类的，remoteCount 不受分类影响。
+        filter.categoryId = "builtin_video"
+        let video = run(filter)
+        #expect(ids(video) == ["a", "remote:r1"])
+        #expect(video.facets.categories.first { $0.id == "builtin_video" }?.count == 2)
+        #expect(video.facets.remoteCount == 2)
+        #expect(video.facets.matching == 2)
+        filter = DownloadsFilter()
+        filter.query = "SONG"
+        let search = run(filter)
+        #expect(ids(search) == ["remote:r2"])
+        #expect(search.facets.remoteCount == 1)
+    }
+
+    @Test func queueScopeHidesRemoteRowsAndRemoteCount() {
+        var filter = DownloadsFilter()
+        filter.queueId = TaskQueue.main
+        let scoped = run(filter)
+        #expect(ids(scoped) == ["a", "f", "b"])
+        #expect(scoped.facets.remoteCount == 0)
+        #expect(scoped.facets.count(.all) == 3)
+
+        filter.remoteOnly = true
+        #expect(run(filter).list.isEmpty)
+    }
+
+    @Test func onlyRemoteTasksStillProduceSections() {
+        let result = run(state: makeState([]))
+        #expect(!result.list.isEmpty)
+        #expect(result.list.sections.map(\.id) == ["flow", "history"])
+        #expect(result.list.visibleIds.isEmpty)
+    }
+
+    @Test func groupByStatusPlacesRemoteByMapping() {
+        let result = run(order: order(.smart, ascending: false, group: .status))
+        let sections = Dictionary(uniqueKeysWithValues: result.list.sections.map { ($0.id, $0.rows.map(\.id)) })
+        #expect(sections["status:1"] == ["a", "remote:r2"])
+        #expect(sections["status:0"] == ["remote:r1"])
+        #expect(sections["status:4"] == ["f", "remote:r3"])
+        #expect(sections["status:2"] == ["remote:r4"])
+        #expect(sections["status:3"] == ["b"])
+        // 分组视图的 visibleIds 同样不含远程。
+        #expect(result.list.visibleIds == ["a", "f", "b"])
+    }
+
+    @Test func groupByDateUsesRemoteCreatedAt() throws {
+        let now = try #require(utc.date(from: DateComponents(year: 2026, month: 10, day: 8, hour: 12)))
+        let nowMs = Int64(now.timeIntervalSince1970) * 1000
+        var deriver = DownloadsDeriver()
+        let remote = [
+            RemoteTaskDto(id: "today", status: .paused, createdAt: "2026-10-08T08:00:00.250Z"),
+            RemoteTaskDto(id: "old", status: .paused, createdAt: "2025-01-01T00:00:00Z"),
+            RemoteTaskDto(id: "bad", status: .paused, createdAt: "garbage"),
+        ]
+        let result = deriver.derive(
+            DeriveInput(
+                state: makeState([]), order: order(.smart, ascending: false, group: .date),
+                filter: DownloadsFilter(), collapsed: [], remote: remote
+            ),
+            nowMs: nowMs, interactionMs: 0, calendar: utc
+        )
+        #expect(result.list.sections.map(\.id) == ["date:0", "date:4"])
+        #expect(result.list.sections[0].rows.map(\.id) == ["remote:today"])
+        // 解析失败 = 0 → 最旧；历史档新 → 旧。
+        #expect(result.list.sections[1].rows.map(\.id) == ["remote:old", "remote:bad"])
+    }
+
+    @Test func groupByQueueGivesRemoteItsOwnLastGroup() {
+        let state = makeState(
+            local.map { var task = $0; task.queueId = "main"; return task },
+            queues: [TaskQueue(queueId: "main", name: "Main", position: 0)]
+        )
+        let result = run(order: order(.smart, ascending: false, group: .queue), state: state)
+        #expect(result.list.sections.map(\.id) == ["queue:main", "queue:remote"])
+        #expect(result.list.sections[1].title == .key("remoteTasksGroup"))
+        #expect(result.list.sections[1].count == 4)
+        #expect(result.list.sections[0].rows.map(\.id) == ["a", "f", "b"])
+    }
+
+    @Test func groupBySiteUsesRemoteUrlHost() {
+        let remote = [
+            RemoteTaskDto(id: "w", url: "https://www.e.com:8443/x", status: .paused, createdAt: "2026-10-08T01:00:00Z"),
+            RemoteTaskDto(id: "m", url: "magnet:?xt=urn:btih:1", status: .paused, createdAt: "2026-10-08T02:00:00Z"),
+        ]
+        let state = makeState([makeTask("l", .paused, url: "https://e.com/f", created: at("2026-10-08T03:00:00Z"))])
+        let result = run(order: order(.smart, ascending: false, group: .site), state: state, remote: remote)
+        #expect(result.list.sections.map(\.id) == ["site:e.com", "site:"])
+        #expect(result.list.sections[0].rows.map(\.id) == ["l", "remote:w"])
+        #expect(result.list.sections[1].rows.map(\.id) == ["remote:m"])
+    }
+
+    @Test func groupByTaskGroupFilesRemoteUnderUngrouped() {
+        let state = makeState(
+            [makeTask("g", .paused, created: at("2026-10-08T01:00:00Z"), group: "g1")],
+            groups: [DownloadGroup(groupId: "g1", name: "G", sourceUrl: "", saveDir: "", createdAt: 0)]
+        )
+        let result = run(order: order(.smart, ascending: false, group: .group), state: state, remote: [remote[3]])
+        #expect(result.list.sections.map(\.id) == ["group:g1", "group:none"])
+        #expect(result.list.sections[0].doneOfTotal == DoneOfTotal(done: 0, total: 1))
+        #expect(result.list.sections[1].rows.map(\.id) == ["remote:r4"])
+    }
+
+    @Test func groupByTypeUsesRemoteDisplayNameCategory() {
+        let result = run(order: order(.smart, ascending: false, group: .type))
+        let video = result.list.sections.first { $0.id == "type:builtin_video" }
+        #expect(video?.rows.map(\.id) == ["a", "remote:r1"])
+    }
+}
+
+/// 「远程任务」芯片与分类 / 文件夹的互斥规则（`DownloadsModel` 的筛选入口）。
+@MainActor
+struct DownloadsRemoteFilterStateTests {
+    private func makeModel() -> DownloadsModel {
+        DownloadsModel(defaults: UserDefaults(suiteName: "DownloadsRemoteFilterStateTests") ?? .standard)
+    }
+
+    @Test func remoteOnlyAndCategoryAreMutuallyExclusive() {
+        let model = makeModel()
+        model.setCategory("builtin_video")
+        model.setRemoteOnly(true)
+        #expect(model.filter.remoteOnly)
+        #expect(model.filter.categoryId == nil)
+
+        model.setCategory("builtin_audio")
+        #expect(!model.filter.remoteOnly)
+        #expect(model.filter.categoryId == "builtin_audio")
+
+        model.setRemoteOnly(false)
+        #expect(model.filter.categoryId == "builtin_audio")
+    }
+
+    @Test func switchingFolderClearsRemoteOnlyEvenForTheSameFolder() {
+        let model = makeModel()
+        model.setRemoteOnly(true)
+        model.setFolder(.all)
+        #expect(!model.filter.remoteOnly)
+
+        model.setRemoteOnly(true)
+        model.setFolder(.failed)
+        #expect(!model.filter.remoteOnly)
+        #expect(model.filter.folder == .failed)
+    }
+
+    @Test func clearFiltersResetsRemoteOnly() {
+        let model = makeModel()
+        model.setRemoteOnly(true)
+        model.clearFilters()
+        #expect(model.filter == DownloadsFilter())
     }
 }
 
@@ -359,7 +677,7 @@ struct DownloadsGroupingTests {
         #expect(sections.map(\.id) == ["flow", "history"])
         #expect(sections[0].kind == .inFlight)
         #expect(sections[0].downSpeed == 1000)
-        #expect(sections[0].items.map(\.id) == ["dl", "q"])
+        #expect(sections[0].rows.map(\.id) == ["dl", "q"])
         #expect(sections[1].title == .history(nil))
     }
 
@@ -378,7 +696,7 @@ struct DownloadsGroupingTests {
         ])
         let sections = derive(state, order: ViewOrder(groupBy: .status, sortKey: .smart, ascending: false)).list.sections
         #expect(sections.map(\.id) == ["status:1", "status:0", "status:4", "status:2", "status:3"])
-        #expect(Set(sections[1].items.map(\.id)) == ["prep", "pend"])
+        #expect(Set(sections[1].rows.map(\.id)) == ["prep", "pend"])
         #expect(sections.allSatisfy { $0.kind == .group })
     }
 
@@ -397,7 +715,7 @@ struct DownloadsGroupingTests {
         let sections = derive(state, order: ViewOrder(groupBy: .date, sortKey: .smart, ascending: false), nowMs: nowSec * 1000, calendar: calendar).list.sections
         #expect(sections.map(\.id) == ["date:0", "date:1", "date:2", "date:3", "date:4"])
         #expect(sections.map(\.title) == [.key("today"), .key("yesterday"), .key("thisWeek"), .key("thisMonth"), .key("older")])
-        #expect(sections.flatMap { $0.items.map(\.id) } == ["today", "yesterday", "week", "month", "old"])
+        #expect(sections.flatMap { $0.rows.map(\.id) } == ["today", "yesterday", "week", "month", "old"])
     }
 
     @Test func groupByTypeFollowsCategoryOrderAndOtherLast() {
@@ -417,7 +735,7 @@ struct DownloadsGroupingTests {
         let sections = derive(state, order: ViewOrder(groupBy: .queue, sortKey: .smart, ascending: false)).list.sections
         #expect(sections.map(\.id) == ["queue:main", "queue:later", "queue:ghost"])
         #expect(sections[2].title == .text("ghost"))
-        #expect(sections[0].items.map(\.id) == ["b"])
+        #expect(sections[0].rows.map(\.id) == ["b"])
     }
 
     @Test func groupBySiteSortsHostsAndSplitsHostless() {
@@ -448,7 +766,7 @@ struct DownloadsGroupingTests {
         #expect(sections.map(\.id) == ["group:g1", "group:g2", "group:none"])
         #expect(sections[1].doneOfTotal == DoneOfTotal(done: 1, total: 2))
         #expect(sections[2].title == .key("ungroupedTasks"))
-        #expect(Set(sections[2].items.map(\.id)) == ["d", "e"])
+        #expect(Set(sections[2].rows.map(\.id)) == ["d", "e"])
     }
 
     @Test func collapsedGroupKeepsCountButDropsRowsAndVisibleIds() {
@@ -458,7 +776,7 @@ struct DownloadsGroupingTests {
         let paused = result.list.sections.first { $0.id == "status:2" }
         #expect(paused?.collapsed == true)
         #expect(paused?.count == 1)
-        #expect(paused?.items.isEmpty == true)
+        #expect(paused?.rows.isEmpty == true)
         #expect(result.list.visibleIds == ["b"])
     }
 
@@ -468,7 +786,7 @@ struct DownloadsGroupingTests {
             "today", "yesterday", "thisWeek", "thisMonth", "older", "categoryOther", "viewSiteBt", "ungroupedTasks",
             "statusDownloading", "statusPending", "statusError", "statusPaused", "statusCompleted",
             "btFileSelectTitle", "hlsQualityTitle", "resolveVariantTitle", "mobileExpand", "mobileCollapse",
-            "mainQueue", "downloadLater", "queueRunningBadge", "queueStoppedBadge",
+            "mainQueue", "downloadLater", "queueRunningBadge", "queueStoppedBadge", "remoteTasksGroup",
         ]
         for key in keys { #expect(english.has(key), "missing i18n key \(key)") }
     }
@@ -670,6 +988,42 @@ struct DownloadsRowTextTests {
         let line = echo.status(seeding, fields: allFields)
         #expect(line.tone == .success)
         #expect(line.text == "statusSeeding · ↑ \(try #require(Format.speed(640 * 1024)).description)")
+    }
+
+    @Test func pendingFileConflictMarksOnlyItsTaskAndOverridesTheStatusLine() throws {
+        let conflict = SelectionRequest(
+            requestId: "r", taskId: "a",
+            kind: .fileExists(FileConflict(fileName: "a.bin", saveDir: "/dl", renamePreview: "a (1).bin", actions: [.rename, .overwrite])),
+            defaultChoice: .fileExists(action: .rename), deadlineUnixMs: 0
+        )
+        var state = makeState([makeTask("a", .pending), makeTask("b", .pending)])
+        state.selections = [conflict]
+        let rows = try #require(derive(state).list.sections.first?.rows)
+        let items = rows.compactMap(\.item)
+        let flagged = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0.awaitingDecision) })
+        #expect(flagged == ["a": true, "b": false])
+        let a = try #require(items.first { $0.id == "a" })
+        #expect(echo.status(a, fields: allFields) == StatusLine(text: "fileConflictPending", tone: .warning))
+    }
+
+    @Test func conflictBannerAggregatesAllConflictsWithEarliestDeadline() {
+        func conflict(_ id: String, deadline: Int64) -> SelectionRequest {
+            SelectionRequest(
+                requestId: id, taskId: "t-\(id)",
+                kind: .fileExists(FileConflict(fileName: "\(id).bin", saveDir: "/dl", renamePreview: "\(id) (1).bin", actions: [.rename, .overwrite])),
+                defaultChoice: .fileExists(action: .rename), deadlineUnixMs: deadline
+            )
+        }
+        let one = PendingSelection.make([conflict("a", deadline: 9)]) { _ in nil }
+        #expect(one?.route == .fileConflicts)
+        #expect(one?.titleKey == "fileConflictTitle" && one?.taskName == "a.bin" && one?.titleCount == nil)
+
+        let many = PendingSelection.make([conflict("a", deadline: 9), conflict("b", deadline: 5)]) { _ in nil }
+        #expect(many?.titleKey == "fileConflictTitleMany" && many?.titleCount == 2)
+        #expect(many?.deadlineUnixMs == 5 && many?.countdownKey == "fileConflictAutoRenameIn")
+
+        let bt = SelectionRequest(requestId: "bt", taskId: "t", kind: .bt([]), defaultChoice: .cancelled, deadlineUnixMs: 1)
+        #expect(PendingSelection.make([bt]) { _ in "x" }?.route == .selection(requestId: "bt"))
     }
 
     @Test func metaLineByStateAndFields() throws {

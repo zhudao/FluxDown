@@ -209,6 +209,9 @@ object HostMethod {
     const val agentDiagnosticsLogPaths = "agent.diagnostics.logPaths"
     const val agentDiagnosticsExportLogs = "agent.diagnostics.exportLogs"
     const val agentUpdateCheck = "agent.update.check"
+    const val agentUpdateDownload = "agent.update.download"
+    const val agentUpdateInstall = "agent.update.install"
+    const val agentUpdateCancel = "agent.update.cancel"
     /** 完成后关机：`{delaySecs}`；无活跃任务时拒绝（`InvalidArgument`）。 */
     const val agentPowerArm = "agent.power.arm"
     const val agentPowerDisarm = "agent.power.disarm"

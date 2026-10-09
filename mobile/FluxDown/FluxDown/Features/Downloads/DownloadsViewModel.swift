@@ -17,11 +17,47 @@ nonisolated struct DownloadsChrome: Equatable {
 }
 
 nonisolated struct PendingSelection: Equatable {
-    let requestId: String
-    /// 标题 i18n 键（BT 文件 / HLS 画质 / 插件规格）。
+    /// 「选择」按钮打开的 Sheet：BT / HLS / 插件规格各自一个请求，文件已存在聚合为 `.fileConflicts`。
+    let route: SheetRoute
+    /// 标题 i18n 键（BT 文件 / HLS 画质 / 插件规格 / 文件已存在）。
     let titleKey: String
+    /// 标题占位符 `{count}`（仅「N 个文件已存在」）。
+    let titleCount: Int?
     let taskName: String
+    /// 倒计时文案键（占位符 `{seconds}`）：默认选择 / 自动重命名。
+    let countdownKey: String
     let deadlineUnixMs: Int64
+
+    /// 横幅对应队首请求；队首是「文件已存在」时聚合全部同类请求（最早的到期时间）。
+    static func make(_ selections: [SelectionRequest], taskName: (String) -> String?) -> PendingSelection? {
+        guard let request = selections.first else { return nil }
+        func plain(_ titleKey: String) -> PendingSelection {
+            PendingSelection(
+                route: .selection(requestId: request.requestId),
+                titleKey: titleKey,
+                titleCount: nil,
+                taskName: taskName(request.taskId) ?? "",
+                countdownKey: "selectionAutoDefaultIn",
+                deadlineUnixMs: request.deadlineUnixMs
+            )
+        }
+        switch request.kind {
+        case .bt: return plain("btFileSelectTitle")
+        case .hls: return plain("hlsQualityTitle")
+        case .variant: return plain("resolveVariantTitle")
+        case let .fileExists(conflict):
+            let conflicts = selections.fileConflicts
+            let many = conflicts.count > 1
+            return PendingSelection(
+                route: .fileConflicts,
+                titleKey: many ? "fileConflictTitleMany" : "fileConflictTitle",
+                titleCount: many ? conflicts.count : nil,
+                taskName: many ? "" : conflict.fileName,
+                countdownKey: "fileConflictAutoRenameIn",
+                deadlineUnixMs: conflicts.map(\.deadlineUnixMs).min() ?? request.deadlineUnixMs
+            )
+        }
+    }
 }
 
 /// 多选的批量能力：继续 / 暂停 / 移动 各自的可用性（Resume / Pause 取「存在」）。
@@ -69,6 +105,8 @@ final class DownloadsModel {
     @ObservationIgnored private var lastInteractionMs: Int64 = 0
     @ObservationIgnored private var retryTask: Task<Void, Never>?
     @ObservationIgnored private let defaults: UserDefaults
+    /// 远程任务 / 会话分区的缓存解码（只在分区字节变化时重新解码）。
+    @ObservationIgnored private let agentSections = AgentSections()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -122,7 +160,8 @@ final class DownloadsModel {
                 state: state,
                 order: ViewOrder(groupBy: prefs.groupBy, sortKey: prefs.sortKey, ascending: prefs.ascending),
                 filter: filter,
-                collapsed: collapsed
+                collapsed: collapsed,
+                remote: remoteTasks(state)
             ),
             nowMs: now,
             interactionMs: lastInteractionMs
@@ -150,6 +189,15 @@ final class DownloadsModel {
         }
     }
 
+    /// 其他设备上执行的远程任务（同 PC 下载页的远程行）：主机支持远程任务时才有；目标为本机的云端镜像
+    /// 不显示（本地已有真实任务）。本机 id 取会话设备，其次名册里的 `isCurrent`。
+    private func remoteTasks(_ state: HostState) -> [RemoteTaskDto] {
+        guard state.has(HostCapability.agentRemoteTasks) else { return [] }
+        let current = agentSections.session(state)?.device.deviceId
+            ?? state.cloudDevices.first(where: \.isCurrent)?.deviceId
+        return RemoteTaskRules.visible(agentSections.remoteTasks(state), currentDeviceId: current)
+    }
+
     private static func chrome(for state: HostState) -> DownloadsChrome {
         let link: DownloadsChrome.Link = switch state.connection {
         case .connecting: .connecting
@@ -157,20 +205,7 @@ final class DownloadsModel {
         case .stale: .stale
         case .failed: .failed
         }
-        var pending: PendingSelection?
-        if let request = state.selections.first {
-            let titleKey = switch request.kind {
-            case .bt: "btFileSelectTitle"
-            case .hls: "hlsQualityTitle"
-            case .variant: "resolveVariantTitle"
-            }
-            pending = PendingSelection(
-                requestId: request.requestId,
-                titleKey: titleKey,
-                taskName: state.task(request.taskId)?.fileName ?? "",
-                deadlineUnixMs: request.deadlineUnixMs
-            )
-        }
+        let pending = PendingSelection.make(state.selections) { state.task($0)?.fileName }
         return DownloadsChrome(link: link, diskFree: state.stats.diskFreeBytes, pendingSelection: pending)
     }
 
@@ -182,13 +217,22 @@ final class DownloadsModel {
     // MARK: 筛选
 
     func setFolder(_ folder: StatusFolder) {
-        guard filter.folder != folder || filter.categoryId != nil else { return }
+        guard filter.folder != folder || filter.categoryId != nil || filter.remoteOnly else { return }
         filter.folder = folder
         filter.categoryId = nil
+        filter.remoteOnly = false
     }
 
+    /// 选分类清「远程任务」（二者互斥）；nil 仅清分类。
     func setCategory(_ id: String?) {
         filter.categoryId = id
+        if id != nil { filter.remoteOnly = false }
+    }
+
+    /// 「远程任务」芯片：开 = 只看远程任务并清分类（二者互斥）。
+    func setRemoteOnly(_ on: Bool) {
+        filter.remoteOnly = on
+        if on { filter.categoryId = nil }
     }
 
     /// nil 清除队列范围。

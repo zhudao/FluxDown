@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import com.fluxdown.core.capture.ExternalDownload
 import com.fluxdown.core.host.CreateTaskRequest
 import com.fluxdown.core.model.TaskProtocol
+import com.fluxdown.core.protocol.DispatchTarget
 import com.fluxdown.core.store.HostState
 
 internal enum class ThreadMode { Auto, Preset, Custom }
@@ -103,6 +104,18 @@ internal class NewDownloadState(
 
     /** 点了提交但无有效链接：把空输入也标红。 */
     var showEmptyError by mutableStateOf(false)
+
+    /** 「下载到」所选远端目标的 [DispatchTarget.id]；null = 当前主机。 */
+    var targetId by mutableStateOf<String?>(null)
+
+    /** 远端保存目录（与 [saveDir] 各自保留，来回切换目标不互相覆盖）；空 = 目标设备默认目录。 */
+    var remoteSaveDir by mutableStateOf("")
+
+    /** 下发进行中的进度（已完成 to 总数）；null = 未在下发。 */
+    var dispatchProgress by mutableStateOf<Pair<Int, Int>?>(null)
+
+    /** 下发失败的内联说明（失败的链接留在文本框里供重试）。 */
+    var dispatchFailure by mutableStateOf<String?>(null)
     val advanced = AdvancedState()
 
     private val initialSaveDir = defaultSaveDir
@@ -131,7 +144,33 @@ internal class NewDownloadState(
     /** 有未提交内容：关闭前需要确认。 */
     val isDirty: Boolean
         get() = urlText.isNotBlank() || rename.isNotBlank() || saveDir != initialSaveDir || queueId != initialQueueId ||
+            targetId != null || remoteSaveDir.isNotBlank() ||
             advanced.modified(single = true, singleHttp = true).isNotEmpty()
+
+    /** 当前选中的远端目标；目标已不在候选里（登出 / 解除配对）时回落到当前主机。 */
+    fun target(targets: List<DispatchTarget>): DispatchTarget? = targetId?.let { id -> targets.firstOrNull { it.id == id } }
+
+    /**
+     * 下发条目：单条链接时重命名优先于 `out=`；空名交给目标设备推断。
+     * 只带链接 / 文件名，线程、队列与高级选项只对当前主机有意义，不随下发。
+     */
+    fun dispatchItems(): List<DispatchItem> {
+        val list = entries
+        val renamed = rename.trim()
+        return list.map { e ->
+            val name = when {
+                list.size == 1 && renamed.isNotEmpty() -> renamed
+                e.fileName.isNotEmpty() -> e.fileName
+                else -> external[e.url]?.fileName.orEmpty()
+            }
+            DispatchItem(e, name.ifEmpty { null })
+        }
+    }
+
+    /** 只保留这些链接（下发部分失败时留下失败项以便重试，成功的不会被重复下发）。 */
+    fun retain(kept: List<UrlEntry>) {
+        urlText = kept.joinToString("\n") { it.toText() }
+    }
 
     /** 追加文本（粘贴 / 导入）；已有内容逐字保留。 */
     fun appendText(text: String) {

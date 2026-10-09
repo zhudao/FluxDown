@@ -58,6 +58,8 @@ internal class RowText(c: Context) {
     val copyLink = c.str(R.string.mobileSwipeCopyLink)
     val delete = c.str(R.string.delete)
     val openDetails = c.str(R.string.mobileTaskDetail)
+    val conflictPending = c.str(R.string.fileConflictPending)
+    val conflictTooltip = c.str(R.string.fileConflictPendingTooltip)
 
     fun queued(pos: Int): String = queuedFmt.fill("pos" to pos)
 

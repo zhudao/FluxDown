@@ -205,7 +205,7 @@ async fn run_one_real_download(
         &progress_tx,
         &cancel,
         &speed_limiter,
-        &spec,
+        &std::sync::Arc::new(fluxdown_engine::downloader::DownloadSpec::new(spec)),
         &sink,
         etag,
         last_modified,

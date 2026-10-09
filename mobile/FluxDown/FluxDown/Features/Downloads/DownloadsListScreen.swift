@@ -28,6 +28,8 @@ struct DownloadsListScreen: View {
     @State private var clearIds: [String] = []
     @State private var confirmingClear = false
     @State private var pendingGroupDelete: GroupDeleteRequest?
+    /// 多选底栏「删除」待确认的任务（确认 alert 由该按钮挂载）。
+    @State private var pendingSelectionDelete: TaskDeleteRequest?
     /// 待确认「忽略插件重试」的任务（`daemon.plugin.ignoreRetry`）。
     @State private var ignoreRetryTaskId: String?
 
@@ -54,7 +56,6 @@ struct DownloadsListScreen: View {
             .safeAreaBar(edge: .top, spacing: 0) {
                 DownloadsFilterBar(model: model)
             }
-            .groupDeleteConfirmation($pendingGroupDelete)
             .alert(L("taskIgnorePluginRetryTitle"), isPresented: Binding(
                 get: { ignoreRetryTaskId != nil },
                 set: { if !$0 { ignoreRetryTaskId = nil } }
@@ -101,8 +102,13 @@ struct DownloadsListScreen: View {
             } else if !list.isEmpty {
                 ForEach(list.sections) { section in
                     Section {
-                        ForEach(section.items) { item in
-                            row(item, style: style, editing: editing)
+                        ForEach(section.rows) { entry in
+                            switch entry {
+                            case let .task(item):
+                                self.row(item, style: style, editing: editing)
+                            case let .remote(remote):
+                                DownloadsRemoteRow(task: remote.task, readOnly: model.chrome.isReadOnly)
+                            }
                         }
                     } header: {
                         sectionHeader(section)
@@ -118,6 +124,8 @@ struct DownloadsListScreen: View {
             }
         }
         .listStyle(.insetGrouped)
+        // 占位行 → 首个快照的真实行：随系统 List 行插删动画淡入，而不是硬切。
+        .fluxAnimation(.smooth, value: loading)
         .overlay {
             // 空态不放进列表行（行内按钮样式 / 行高会把 CUV 的按钮压成无字胶囊）：由系统布局居中。
             if !loading, list.isEmpty {
@@ -171,6 +179,7 @@ struct DownloadsListScreen: View {
                 .environment(actions)
                 .environment(\.fluxAccent, accent)
         }
+        .taskDeleteHost()
     }
 
     // MARK: 分区头
@@ -256,6 +265,7 @@ struct DownloadsListScreen: View {
         .contextMenu {
             if let groupId { groupMenuItems(groupId, name: name) }
         }
+        .groupDeleteConfirmation($pendingGroupDelete, groupId: groupId)
     }
 
     /// 组动作：详情 · 全部暂停 / 继续 · 删除（各自确认）。
@@ -286,7 +296,7 @@ struct DownloadsListScreen: View {
     private var bannerRows: some View {
         let chrome = model.chrome
         let pending = chrome.pendingSelection.flatMap { request in
-            container.router.sheet == .selection(requestId: request.requestId) ? nil : request
+            container.router.sheet == request.route ? nil : request
         }
         if chrome.showsOfflineBanner || pending != nil {
             Section {
@@ -311,13 +321,14 @@ struct DownloadsListScreen: View {
     private func selectionBanner(_ request: PendingSelection) -> some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let remaining = max(0, Int((Double(request.deadlineUnixMs) / 1000 - context.date.timeIntervalSince1970).rounded(.up)))
-            let title = request.taskName.isEmpty ? L(request.titleKey) : L(request.titleKey) + " · " + request.taskName
+            let heading = request.titleCount.map { L(request.titleKey, ["count": $0]) } ?? L(request.titleKey)
+            let title = request.taskName.isEmpty ? heading : heading + " · " + request.taskName
             Banner(
-                text: title + "\n" + L("selectionAutoDefaultIn", ["seconds": remaining]),
+                text: title + "\n" + L(request.countdownKey, ["seconds": remaining]),
                 tone: .info,
                 systemImage: "checklist",
                 action: BannerAction(title: L("mobileMenuSelect")) {
-                    container.router.sheet = .selection(requestId: request.requestId)
+                    container.router.sheet = request.route
                 }
             )
             .monospacedDigit()
@@ -394,9 +405,10 @@ struct DownloadsListScreen: View {
             ToolbarSpacer(.flexible, placement: .bottomBar)
             ToolbarItem(placement: .bottomBar) {
                 Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) {
-                    actions.confirmDelete(model.selectedTasks()) { model.isSelecting = false }
+                    pendingSelectionDelete = actions.deleteRequest(model.selectedTasks()) { model.isSelecting = false }
                 }
                 .disabled(model.selection.isEmpty)
+                .taskDeleteDialog($pendingSelectionDelete)
             }
         }
     }
@@ -479,5 +491,32 @@ private extension View {
         listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
+    }
+}
+
+/// 其他设备上执行的远程任务行（同 PC 下载页的远程行）：状态 / 进度由云端经 agent 实时推送，
+/// 控制（暂停 / 继续 / 取消 / 删除）走 `agent.remote.command`，与设备页共用 `DevicesModel` 的在途状态。
+/// 单独成视图：只有它读主机状态（目标设备名 / 在线），列表页 body 不随 10 Hz 状态重算。
+private struct DownloadsRemoteRow: View {
+    let task: RemoteTaskDto
+    let readOnly: Bool
+
+    @Environment(AppContainer.self) private var container
+
+    var body: some View {
+        let state = container.store.state
+        let devices = container.devices
+        let target = devices.target(for: task.toDevice, state: state)
+        RemoteTaskRow(
+            task: task,
+            targetName: target?.name ?? task.toDevice,
+            targetOnline: devices.presenceKnown(state) ? target?.online : nil,
+            busy: devices.isBusy(task),
+            readOnly: readOnly
+        ) { action, deleteFiles in
+            devices.issue(action, to: task, deleteFiles: deleteFiles)
+        }
+        // 远程行不参与多选（全选范围 / visibleIds 不含远程）。
+        .selectionDisabled()
     }
 }

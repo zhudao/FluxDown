@@ -179,6 +179,16 @@ struct NotificationPlanTests {
         #expect(spec.identifier == "sel.h.r1")
     }
 
+    @Test func fileConflictSpecNamesTheFileAndOffersRenameAsDefault() {
+        let spec = NotificationSpec.fileConflict(requestId: "r1", taskId: "t1", fileName: "a.zip", hostID: "h")
+        #expect(spec.category == NotificationIDs.fileConflict)
+        #expect(spec.title == L("fileConflictTitle"))
+        #expect(spec.body == L("mobileNotifFileConflictBody", ["name": "a.zip"]))
+        #expect(spec.identifier == "sel.h.r1")
+        #expect(spec.userInfo[NotificationIDs.keyRequest] == "r1")
+        #expect(NotificationIntent.foregroundPresentation(category: NotificationIDs.fileConflict) == [.banner, .list, .sound])
+    }
+
     @Test func intentParsing() {
         let task = [NotificationIDs.keyTask: "t", NotificationIDs.keyHost: "h"]
         let request = [NotificationIDs.keyRequest: "r", NotificationIDs.keyTask: "t", NotificationIDs.keyHost: "h"]

@@ -150,6 +150,10 @@ struct WebhookEditorSheet: View {
                         if isDirty { confirmDiscard = true } else { dismiss() }
                     }
                     .disabled(saving)
+                    .alert(L("mobileWebhookDiscardTitle"), isPresented: $confirmDiscard) {
+                        Button(L("mobileWebhookDiscard"), role: .destructive) { dismiss() }
+                        Button(L("mobileWebhookKeepEditing"), role: .cancel) {}
+                    }
                 }
                 if sizeClass != .regular {
                     ToolbarItem(placement: .principal) {
@@ -195,10 +199,6 @@ struct WebhookEditorSheet: View {
                     Spacer()
                     Button(L("confirm")) { focus = nil }
                 }
-            }
-            .confirmationDialog(L("mobileWebhookDiscardTitle"), isPresented: $confirmDiscard, titleVisibility: .visible) {
-                Button(L("mobileWebhookDiscard"), role: .destructive) { dismiss() }
-                Button(L("mobileWebhookKeepEditing"), role: .cancel) {}
             }
         }
         .presentationDetents([.large])

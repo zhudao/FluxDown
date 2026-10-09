@@ -7,10 +7,8 @@ import UIKit
 /// 局域网已配对设备 · 远程任务。账户 / 局域网 / 远程任务三组各自按主机能力（`agent.auth` / `agent.deviceLink` /
 /// `agent.remoteTasks`）整段显示或隐藏；内容层全部是系统 `List` 分组，不上玻璃（玻璃只来自系统导航栏 / Tab 栏 / 浮动按钮）。
 struct DevicesScreen: View {
-    @Environment(AppContainer.self) private var container
-
     var body: some View {
-        DevicesContent(container: container)
+        DevicesContent()
     }
 }
 
@@ -39,7 +37,7 @@ private nonisolated enum DevicesSheet: Identifiable {
 private struct DevicesContent: View {
     @Environment(AppContainer.self) private var container
     @Environment(\.dynamicTypeSize) private var typeSize
-    @State private var model: DevicesModel
+    private var model: DevicesModel { container.devices }
     @State private var path: [DevicesRoute] = []
 
     /// 正在切换到的主机 id；非空时其余主机行不可点。
@@ -57,10 +55,6 @@ private struct DevicesContent: View {
 
     /// 已信任设备分组最多直接显示的行数，其余进入「管理全部」。
     private static let cloudPreviewLimit = 5
-
-    init(container: AppContainer) {
-        _model = State(initialValue: DevicesModel(container: container))
-    }
 
     var body: some View {
         let state = container.store.state
@@ -151,31 +145,9 @@ private struct DevicesContent: View {
             }
             .fluxAnimation(.smooth, value: current.id)
             .sensoryFeedback(.selection, trigger: current.id)
-            .confirmationDialog(
-                pendingRemoval.map { Text(verbatim: L("mobileHostRemoveTitle", ["name": $0.displayName])) } ?? Text(verbatim: ""),
-                isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
-                titleVisibility: .visible,
-                presenting: pendingRemoval
-            ) { ref in
-                Button(L("mobileHostRemoveConfirm"), role: .destructive) {
-                    Task { await HostFlow.remove(ref, container: container) }
-                }
-            } message: { _ in
-                Text(L("mobileHostRemoveMessage"))
-            }
         }
-        .cloudDeviceDialogs(renaming: $renaming, deleting: $deleting)
+        .cloudDeviceRenameAlert(renaming: $renaming)
         .environment(model)
-        .confirmationDialog(
-            L("linkedDeviceRemoveTitle"),
-            isPresented: Binding(get: { pendingUnpair != nil }, set: { if !$0 { pendingUnpair = nil } }),
-            titleVisibility: .visible,
-            presenting: pendingUnpair
-        ) { device in
-            Button(L("linkedDeviceRemove"), role: .destructive) { unpair(device) }
-        } message: { device in
-            Text(L("linkedDeviceRemoveDesc", ["name": device.name]))
-        }
         .sheet(item: $sheet, onDismiss: sheetDismissed) { item in
             switch item {
             case .addDevice:
@@ -244,8 +216,10 @@ private struct DevicesContent: View {
 
         if case let .remote(_, _, endpoint) = ref {
             row
+                // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
+                    Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete) { pendingRemoval = ref }
+                        .tint(Color.fdStatusFailed)
                 }
                 .contextMenu {
                     Button(L("mobileDevicesSwitchHost"), systemImage: "arrow.left.arrow.right") { switchTo(ref) }
@@ -254,6 +228,17 @@ private struct DevicesContent: View {
                         container.toasts.show(text: L("webCopied"), tone: .success)
                     }
                     Button(L("mobileHostRemoveConfirm"), systemImage: FluxSymbol.delete, role: .destructive) { pendingRemoval = ref }
+                }
+                .alert(
+                    Text(verbatim: L("mobileHostRemoveTitle", ["name": ref.displayName])),
+                    isPresented: Binding(get: { pendingRemoval?.id == ref.id }, set: { if !$0 { pendingRemoval = nil } })
+                ) {
+                    Button(L("mobileHostRemoveConfirm"), role: .destructive) {
+                        Task { await HostFlow.remove(ref, container: container) }
+                    }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("mobileHostRemoveMessage"))
                 }
         } else {
             row
@@ -434,11 +419,13 @@ private struct DevicesContent: View {
                 NavigationLink(value: DevicesRoute.linkDevice(fingerprint: device.fingerprint)) {
                     LinkDeviceRow(name: device.name, platform: device.platform, online: device.online)
                 }
+                // 解除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     if !readOnly {
-                        Button(L("linkedDeviceRemove"), systemImage: "minus.circle", role: .destructive) {
+                        Button(L("linkedDeviceRemove"), systemImage: "minus.circle") {
                             pendingUnpair = device
                         }
+                        .tint(Color.fdStatusFailed)
                     }
                 }
                 .contextMenu {
@@ -447,6 +434,18 @@ private struct DevicesContent: View {
                             pendingUnpair = device
                         }
                     }
+                }
+                .alert(
+                    L("linkedDeviceRemoveTitle"),
+                    isPresented: Binding(
+                        get: { pendingUnpair?.fingerprint == device.fingerprint },
+                        set: { if !$0 { pendingUnpair = nil } }
+                    )
+                ) {
+                    Button(L("linkedDeviceRemove"), role: .destructive) { unpair(device) }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("linkedDeviceRemoveDesc", ["name": device.name]))
                 }
             }
             if case let .failed(error) = model.linkPhase {

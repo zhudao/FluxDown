@@ -155,6 +155,7 @@ pub(crate) async fn run_with(
     // 不等 daemon 就绪就开 Gateway：首个快照先带偏好 / 外壳状态（`daemon_connected=false`），
     // 界面据此立即决定主题、语言与启动时是否只驻留托盘；daemon 连上后由投影任务替换
     // daemon 快照并发布 `DaemonConnectionChanged(true)`，与运行期断线重连同一路径。
+    let update_target = crate::update::install::detect(server.is_some());
     let initial = AgentSnapshot {
         daemon_connected: false,
         session: state
@@ -167,6 +168,7 @@ pub(crate) async fn run_with(
         linked_devices: crate::link::public_devices(&state),
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(host.availability, &state.preferences),
+        update: crate::update::initial_status(&update_target),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -342,8 +344,17 @@ pub(crate) async fn run_with(
         diagnostics.with_desktop_checks(notifier.clone())
     });
     let update = Arc::new(crate::update::UpdateService::new(
-        fluxdown_protocol::APP_VERSION,
+        crate::update::UpdateParts {
+            events: events.clone(),
+            data_dir: store.data_dir().to_path_buf(),
+            target: update_target,
+            request_restart: {
+                let lifecycle = lifecycle.clone();
+                Box::new(move || lifecycle.request_restart())
+            },
+        },
     ));
+    update.start(cancel.clone(), true);
     let cloud = Arc::new(cloud_api);
     let gateway_service = Arc::new(
         GatewayService::new(
@@ -765,23 +776,30 @@ async fn initialize_device_identity(
         }
         changed = true;
     }
-    finalize_device_identity(state, store, std::env::consts::OS, changed).await
+    finalize_device_identity(state, store, std::env::consts::OS, None, changed).await
 }
 
 /// 设备身份的共同收尾（桌面 / server / 嵌入式共用）：设备名、平台名、凭证与账号归属自检。
+///
+/// `host_device_name` 是宿主给出的系统设备名（移动端经 UniFFI 传入；桌面 / server 为 `None`，
+/// 改为探测主机名）。设备名缺失、非法或仍是占位名 `FluxDown` 时才重新解析，用户改过的名字不动。
 pub(crate) async fn finalize_device_identity(
     state: &mut AgentState,
     store: &StateStore,
     platform: &str,
+    host_device_name: Option<&str>,
     mut changed: bool,
 ) -> Result<(), crate::state::StateError> {
     let valid_name = {
         let length = state.device_name.trim().chars().count();
         (1..=64).contains(&length)
     };
-    if !valid_name {
-        state.device_name = crate::device_identity::detect_device_name().await;
-        changed = true;
+    if !valid_name || crate::device_identity::is_placeholder_device_name(&state.device_name) {
+        let name = crate::device_identity::resolve_device_name(host_device_name).await;
+        if name != state.device_name {
+            state.device_name = name;
+            changed = true;
+        }
     }
     if state.platform.is_empty() {
         state.platform = platform.to_owned();
@@ -1242,6 +1260,46 @@ mod tests {
             if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
                 tracing::warn!(path = %dir.display(), error = %error, "remove fixed bind test directory");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn host_device_name_replaces_missing_or_placeholder_names_but_not_user_names() {
+        let dir = gateway_test_dir("device_name");
+        let store = crate::state::StateStore::open(dir.clone())
+            .await
+            .expect("open store");
+        for (current, expected) in [
+            ("", "Pixel 9 Pro"),
+            ("FluxDown", "Pixel 9 Pro"),
+            ("书房手机", "书房手机"),
+        ] {
+            let mut state = AgentState {
+                device_id: "device-1".to_owned(),
+                device_name: current.to_owned(),
+                platform: "android".to_owned(),
+                ..AgentState::default()
+            };
+            store.save(&state).await.expect("seed identity");
+            super::finalize_device_identity(
+                &mut state,
+                &store,
+                "android",
+                Some("  Pixel 9 Pro\n"),
+                false,
+            )
+            .await
+            .expect("finalize identity");
+            assert_eq!(state.device_name, expected, "starting from {current:?}");
+            assert_eq!(
+                store.load().await.expect("reload identity").device_name,
+                expected,
+                "persisted from {current:?}"
+            );
+        }
+        drop(store);
+        if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
+            tracing::warn!(path = %dir.display(), error = %error, "remove device name test directory");
         }
     }
 }

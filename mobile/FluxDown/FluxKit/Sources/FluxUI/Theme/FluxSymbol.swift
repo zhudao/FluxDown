@@ -66,6 +66,17 @@ public nonisolated enum FluxSymbol {
     public static let importFile = "square.and.arrow.down"
     public static let externalLink = "arrow.up.right"
 
+    // MARK: 文件已存在（询问对话框 / 批量菜单）
+
+    /// 另存为新文件名（编号重命名）。
+    public static let conflictRename = "doc.badge.plus"
+    /// 完成后替换旧文件。
+    public static let conflictOverwrite = "arrow.triangle.2.circlepath"
+    /// 跳过下载并沿用已有文件。
+    public static let conflictSkip = "forward.end"
+    /// 取消下载（任务保持暂停）。
+    public static let conflictCancel = "xmark.circle"
+
     // MARK: 主机 / 连接 / 同步
 
     /// 远端主机（NAS / 服务器上的 `fluxdown-agent --server`）；`server.rack` 留给 eD2K 服务器设置，避免同屏重名。

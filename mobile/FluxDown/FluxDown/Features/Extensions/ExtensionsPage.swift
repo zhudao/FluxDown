@@ -98,17 +98,6 @@ private struct ExtensionsContent: View {
         } message: {
             Text(missingMessage)
         }
-        .confirmationDialog(
-            L("pluginUninstallTitle"),
-            isPresented: Binding(get: { uninstallTarget != nil }, set: { if !$0 { uninstallTarget = nil } }),
-            titleVisibility: .visible,
-            presenting: uninstallTarget
-        ) { plugin in
-            Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: { plugin in
-            Text(L("pluginUninstallMsg", ["name": plugin.name]))
-        }
     }
 
     private static let packageTypes: [UTType] = {
@@ -142,8 +131,10 @@ private struct ExtensionsContent: View {
                         yanked: PluginMarket.installedVersionYanked(model.marketEntries, plugin: plugin)
                     )
                 }
+                // 卸载只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete, role: .destructive) { uninstallTarget = plugin }
+                    Button(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete) { uninstallTarget = plugin }
+                        .tint(Color.fdStatusFailed)
                         .disabled(readOnly)
                     if !plugin.loadFailed, !plugin.settings.isEmpty {
                         Button(L("pluginSettingsTooltip"), systemImage: "gearshape") { model.sheet = .settings(plugin.identity) }
@@ -166,6 +157,18 @@ private struct ExtensionsContent: View {
                 }
                 .contextMenu {
                     pluginMenu(plugin, readOnly: readOnly)
+                }
+                .alert(
+                    L("pluginUninstallTitle"),
+                    isPresented: Binding(
+                        get: { uninstallTarget?.identity == plugin.identity },
+                        set: { if !$0 { uninstallTarget = nil } }
+                    )
+                ) {
+                    Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("pluginUninstallMsg", ["name": plugin.name]))
                 }
             }
         } header: {

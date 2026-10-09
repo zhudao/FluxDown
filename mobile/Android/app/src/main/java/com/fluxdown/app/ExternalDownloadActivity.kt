@@ -1,6 +1,7 @@
 package com.fluxdown.app
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -12,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -30,9 +32,11 @@ import com.fluxdown.app.service.DownloadServiceController
 import com.fluxdown.app.shell.FluxAppRoot
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.ui.isLocalDirWritable
+import com.fluxdown.app.feature.newtask.TorrentImport
 import com.fluxdown.core.capture.ExternalDownload
 import com.fluxdown.core.capture.ExternalIntake
 import com.fluxdown.core.capture.SilentCapture
+import com.fluxdown.core.capture.TorrentFile
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.model.HostRef
 import com.fluxdown.core.protocol.HostMethod
@@ -46,6 +50,7 @@ import com.fluxdown.fluxui.overlay.rememberFluxOverlayState
 import com.fluxdown.fluxui.theme.FluxTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -59,6 +64,9 @@ private const val READY_TIMEOUT_MS = 8_000L
 
 /** Sheet 退场动画（`FluxMotion.snap` 弹簧）走完再结束任务，避免弹窗被直接截断。 */
 private const val SHEET_EXIT_MS = 250L
+
+/** 种子建完后保留窗口的时长：让成功 / 失败 toast 先展示完再结束任务。 */
+private const val TOAST_LINGER_MS = 1_800L
 
 /**
  * 外部下载唤起入口（同 Flutter 版同名 Activity；类名与 manifest 中两个 http(s) 别名都不可改——浏览器可能按
@@ -76,6 +84,10 @@ class ExternalDownloadActivity : ComponentActivity() {
     /** 按到达顺序串行处理（解析可能较重：长 Cookie / 请求头 JSON）。 */
     private val intents = Channel<Intent>(Channel.UNLIMITED)
 
+    /** 待导入的 `.torrent`（VIEW content / file URI）：由舞台逐个提交，完成后回调 [onTorrentDone]。 */
+    private val torrents = mutableStateListOf<PendingTorrent>()
+    private var closeJob: Job? = null
+
     /** 免打扰建任务失败的原因：交给组合层 toast 后清空。 */
     private var silentFailure by mutableStateOf<HostException?>(null)
 
@@ -87,10 +99,15 @@ class ExternalDownloadActivity : ComponentActivity() {
         intents.trySend(intent)
         lifecycleScope.launch {
             for (next in intents) {
+                if (withContext(Dispatchers.IO) { isTorrentView(next) }) {
+                    closeJob?.cancel()
+                    next.data?.let { torrents.add(PendingTorrent(it)) }
+                    continue
+                }
                 val request = withContext(Dispatchers.Default) { parse(next) }
                 when {
                     request != null -> dispatch(container, request)
-                    navigator.sheet == null -> finishAndRemoveTask()
+                    navigator.sheet == null && torrents.isEmpty() -> finishAndRemoveTask()
                 }
             }
         }
@@ -98,8 +115,10 @@ class ExternalDownloadActivity : ComponentActivity() {
             FluxAppRoot(container, navigator) {
                 ExternalDownloadStage(
                     failure = silentFailure,
+                    torrents = torrents,
                     onFailureShown = { silentFailure = null },
                     onSubmitted = { keepLocalDownloadsAlive(container) },
+                    onTorrentDone = ::onTorrentDone,
                     onClosed = ::finishAndRemoveTask,
                 )
             }
@@ -110,6 +129,24 @@ class ExternalDownloadActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         intents.trySend(intent)
+    }
+
+    /** 种子建完：窗口只为它而开时，留出 toast 展示时间再结束；其间又来新的唤起则取消。 */
+    private fun onTorrentDone(done: PendingTorrent) {
+        torrents.remove(done)
+        closeJob?.cancel()
+        closeJob = lifecycleScope.launch {
+            delay(TOAST_LINGER_MS)
+            if (navigator.sheet == null && torrents.isEmpty()) finishAndRemoveTask()
+        }
+    }
+
+    /** VIEW 一个 content / file 种子：MIME 为 `application/x-bittorrent`，或（octet-stream 兜底）文件名以 `.torrent` 结尾。 */
+    private fun isTorrentView(intent: Intent): Boolean {
+        if (intent.action != Intent.ACTION_VIEW) return false
+        val uri = intent.data ?: return false
+        if (uri.scheme != "content" && uri.scheme != "file") return false
+        return intent.type == TorrentFile.MIME_TYPE || TorrentFile.isTorrentFileName(TorrentImport.displayName(this, uri))
     }
 
     override fun onDestroy() {
@@ -180,12 +217,17 @@ class ExternalDownloadActivity : ComponentActivity() {
     }
 }
 
+/** 待导入的种子；按引用区分（同一 URI 连续唤起两次也各处理一次）。 */
+private class PendingTorrent(val uri: Uri)
+
 /** 透明舞台：只有「新建下载」Sheet 与浮层（对话框 / toast）；Sheet 关闭后结束窗口。 */
 @Composable
 private fun ExternalDownloadStage(
     failure: HostException?,
+    torrents: List<PendingTorrent>,
     onFailureShown: () -> Unit,
     onSubmitted: () -> Unit,
+    onTorrentDone: (PendingTorrent) -> Unit,
     onClosed: () -> Unit,
 ) {
     val container = LocalAppContainer.current
@@ -217,7 +259,23 @@ private fun ExternalDownloadStage(
             opened = true
         } else if (opened) {
             delay(SHEET_EXIT_MS)
-            close()
+            if (torrents.isEmpty()) close()
         }
+    }
+    // 种子逐个提交（默认目录 / 默认队列，同 iOS `openFromSystem`）；每个结束即回调，由 Activity 决定何时关窗。
+    val head = torrents.firstOrNull()
+    LaunchedEffect(head) {
+        if (head == null) return@LaunchedEffect
+        TorrentImport.submit(
+            context = context,
+            container = container,
+            overlays = overlays,
+            errorText = actions::errorText,
+            uris = listOf(head.uri),
+            saveDir = "",
+            queueId = "",
+            startPaused = false,
+        ).let { if (it > 0) onSubmitted() }
+        onTorrentDone(head)
     }
 }

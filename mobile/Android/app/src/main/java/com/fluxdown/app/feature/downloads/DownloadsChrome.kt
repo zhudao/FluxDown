@@ -70,7 +70,7 @@ fun DownloadsRailContext() {
             )
             if (selected && visibility.categories) RailCategoryItems(view, nested = true)
         }
-    } else if (visibility.categories && facets.categories.isNotEmpty()) {
+    } else if (visibility.categories && (facets.categories.isNotEmpty() || facets.remoteCount > 0 || filter.remoteOnly)) {
         FluxRailHeader(text = stringResource(R.string.sidebarCategory))
         RailCategoryItems(view, nested = false)
     }
@@ -108,6 +108,20 @@ private fun RailCategoryItems(view: DownloadsView, nested: Boolean) {
             },
             selected = catSelected,
             count = pill.count,
+            sub = nested,
+        )
+    }
+    // 「远程任务」：只看其他设备上的远程任务（与分类单选互斥）
+    if (view.facets.remoteCount > 0 || filter.remoteOnly) {
+        FluxRailItem(
+            label = stringResource(R.string.remoteTasksGroup),
+            onClick = {
+                haptics.tick()
+                view.setRemoteOnly(!filter.remoteOnly)
+            },
+            icon = FluxIcons.Cloud,
+            selected = filter.remoteOnly,
+            count = view.facets.remoteCount,
             sub = nested,
         )
     }

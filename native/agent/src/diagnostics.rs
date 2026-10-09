@@ -165,6 +165,9 @@ pub struct DiagnosticsService {
     startup: Option<DaemonStartupProbe>,
     /// 桌面宿主的系统集成探测（开机自启、系统通知）；headless / 测试宿主为 `None`。
     desktop: Option<DesktopProbe>,
+    /// 嵌入宿主（移动端进程内 agent）：没有 TCP 网关、NMH IPC 与兼容 HTTP API，也不跑在会休眠的
+    /// 机械盘上，`app_listener` / `local_server` / `disk_sleep` 不适用。
+    embedded: bool,
     /// 修复串行执行：多个界面连接同时点修复时不会叠出多个授权对话框，也不会交错改写注册。
     repair_lock: Mutex<()>,
 }
@@ -200,6 +203,7 @@ impl DiagnosticsService {
             api_token,
             startup: None,
             desktop: None,
+            embedded: false,
             repair_lock: Mutex::new(()),
         }
     }
@@ -228,20 +232,40 @@ impl DiagnosticsService {
         self
     }
 
+    /// 嵌入宿主：省略网关监听、兼容 HTTP API 与硬盘休眠检查（这些设施在进程内宿主不存在）。
+    #[must_use]
+    pub fn for_embedded_host(mut self) -> Self {
+        self.embedded = true;
+        self
+    }
+
     /// 运行全部探测并生成报告。
     pub async fn run(&self) -> Result<DiagnosticsReportDto, DiagnosticsError> {
         let gateway = self.state.lock().await.gateway.clone();
         let data_dir = self.store.data_dir().to_path_buf();
         let opted_out = self.events.inspect(opted_out_associations);
-        let disk_sleep = self.events.inspect(disk_sleep_blockers);
+        let disk_sleep = if self.embedded {
+            None
+        } else {
+            self.events.inspect(disk_sleep_blockers)
+        };
         let category_dirs = self.events.inspect(category_probe_targets);
         let sync_probe = tokio::task::spawn_blocking(move || probe_sync(&data_dir, &opted_out))
             .await
             .map_err(join_error)?;
-        let (daemon, listener, local_server, daemon_startup, permissions, desktop, nmh_launch) = tokio::join!(
+        let gateway_probes = async {
+            if self.embedded {
+                None
+            } else {
+                Some(tokio::join!(
+                    probe_listener(gateway.port),
+                    probe_local_server(&gateway)
+                ))
+            }
+        };
+        let (daemon, gateway_checks, daemon_startup, permissions, desktop, nmh_launch) = tokio::join!(
             self.probe_daemon(),
-            probe_listener(gateway.port),
-            probe_local_server(&gateway),
+            gateway_probes,
             self.probe_daemon_startup(),
             self.probe_permissions(category_dirs),
             self.probe_desktop(),
@@ -251,8 +275,10 @@ impl DiagnosticsService {
         let mut checks = sync_probe.nmh;
         checks.extend(nmh_launch);
 
-        checks.push(listener);
-        checks.push(local_server);
+        if let Some((listener, local_server)) = gateway_checks {
+            checks.push(listener);
+            checks.push(local_server);
+        }
         checks.push(daemon.check);
         if let Some(check) = daemon_startup {
             checks.push(check);
@@ -474,7 +500,7 @@ impl DiagnosticsService {
                 if let Some(describe) = self.daemon_describe().await {
                     let field = |key: &str| describe.get(key).and_then(Value::as_u64).unwrap_or(0);
                     let version = describe
-                        .pointer("/service/version")
+                        .pointer("/service/serviceVersion")
                         .and_then(Value::as_str)
                         .unwrap_or("?");
                     detail.push_str(&format!(

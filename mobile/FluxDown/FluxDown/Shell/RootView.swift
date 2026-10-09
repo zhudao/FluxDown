@@ -106,6 +106,7 @@ struct RootView: View {
         case .addHost: AddHostSheet()
         case let .moveToQueue(ids): MoveToQueueSheet(taskIds: ids)
         case let .selection(requestId): SelectionRequestSheet(requestId: requestId)
+        case .fileConflicts: FileConflictSheet()
         case .search: GlobalSearchScreen()
         case .queues: QueueManagerSheet()
         }
@@ -118,16 +119,24 @@ struct RootView: View {
         let pending = container.store.state.selections
         router.dismissedSelections.formIntersection(pending.map(\.requestId))
         if let next = pending.first(where: { !router.dismissedSelections.contains($0.requestId) }) {
-            router.sheet = .selection(requestId: next.requestId)
+            router.sheet = next.fileConflict == nil ? .selection(requestId: next.requestId) : .fileConflicts
         }
     }
 
     /// 选择请求 Sheet 被划走而主机仍在等待：不再自动弹出（下载页横幅可重新打开；到期按默认处理）。
     private func sheetDismissed() {
         defer { presented = nil }
-        guard case let .selection(requestId)? = presented,
-              container.store.state.selections.contains(where: { $0.requestId == requestId }) else { return }
-        container.router.dismissedSelections.insert(requestId)
+        let pending = container.store.state.selections
+        switch presented {
+        case let .selection(requestId)?:
+            guard pending.contains(where: { $0.requestId == requestId }) else { return }
+            container.router.dismissedSelections.insert(requestId)
+        case .fileConflicts?:
+            // 「稍后决定」：当前所有待答的文件已存在请求都不再自动弹出（之后新到的会重新弹出整个列表）。
+            container.router.dismissedSelections.formUnion(pending.fileConflicts.map(\.requestId))
+        default:
+            break
+        }
     }
 
     /// N4：`magnet:` / `ed2k://` / `fluxdown://…?url=` 唤起 → 预填「新建下载」；

@@ -359,12 +359,13 @@ struct RssItemsScreen: View {
                 Button(L("copyUrl"), systemImage: FluxSymbol.copy) { rss.copyLink(source) }
             }
             Section {
-                Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source) }
+                Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source, from: .itemsMenu) }
                     .disabled(readOnly)
             }
         } label: {
             Label(L("moreActions"), systemImage: FluxSymbol.more)
         }
+        .rssDeleteConfirmation(rss, source: source, origin: .itemsMenu)
     }
 
     /// 选择模式的底部工具栏（系统 `.bottomBar`：只渲染一层 Liquid Glass）。

@@ -169,6 +169,8 @@ struct PreferencesProtocolTests {
         #expect(rejected("bt_seed_limit_operator", "xor"))
         #expect(accepted("appearance.theme_mode", "dark") == "dark")
         #expect(rejected("appearance.theme_mode", "auto"))
+        #expect(accepted("file_exists_behavior", " ask ") == "ask")
+        #expect(rejected("file_exists_behavior", "prompt"))
     }
 
     @Test func textRulesAndReadOnlyKeys() {

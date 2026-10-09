@@ -193,6 +193,9 @@ export const METHOD = {
   AGENT_DIAGNOSTICS_LOG_PATHS: 'agent.diagnostics.logPaths',
   AGENT_DIAGNOSTICS_EXPORT_LOGS: 'agent.diagnostics.exportLogs',
   AGENT_UPDATE_CHECK: 'agent.update.check',
+  AGENT_UPDATE_DOWNLOAD: 'agent.update.download',
+  AGENT_UPDATE_INSTALL: 'agent.update.install',
+  AGENT_UPDATE_CANCEL: 'agent.update.cancel',
   /** 完成后关机；无活跃任务时拒绝（invalidArgument）。 */
   AGENT_POWER_ARM: 'agent.power.arm',
   AGENT_POWER_DISARM: 'agent.power.disarm',

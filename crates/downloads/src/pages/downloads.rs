@@ -96,6 +96,8 @@ pub struct DownloadHostActions {
     pub open_queue_manager: Option<PlainOpener>,
     /// 侧栏「设备」区标题上的「添加设备」入口；`None` 时不显示按钮。
     pub open_add_device: Option<PlainOpener>,
+    /// 任务表「待确认」角标点击：打开 / 置前聚合的「文件已存在」窗口。
+    pub open_file_conflicts: Option<PlainOpener>,
     /// `Some(id)` 编辑现有分类，`None` 新建。
     pub open_category_editor: Option<CategoryEditorOpener>,
     /// 完成后关机的只读状态投影（`None` = Resident 未装配）。
@@ -370,6 +372,13 @@ impl DownloadView {
             })
             .unwrap_or(fallback)
         })
+    }
+
+    /// 角标点击入口：交给宿主打开 / 置前「文件已存在」窗口。
+    pub(crate) fn open_file_conflicts(&self, window: &mut Window, cx: &mut App) {
+        if let Some(open) = self.host.open_file_conflicts.as_ref() {
+            open(window, cx);
+        }
     }
 
     /// 只有恰好一个任务被交互式开始时通知宿主（批量不逐个弹窗）。

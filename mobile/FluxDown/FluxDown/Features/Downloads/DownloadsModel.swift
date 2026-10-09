@@ -18,12 +18,30 @@ nonisolated enum StatusFolder: CaseIterable, Hashable {
         case .paused: status == .paused
         }
     }
+
+    /// 其他设备上的远程任务按 GPUI `DownloadTaskView::remote` 的状态映射归入文件夹：等待接单 / 已接单 /
+    /// 未知 / 下载中 → 下载中，失败 / 已取消 → 失败。
+    func accepts(_ status: RemoteTaskStatus) -> Bool {
+        switch self {
+        case .all: true
+        case .active:
+            switch status {
+            case .pending, .accepted, .downloading, .unknown: true
+            case .paused, .completed, .failed, .canceled: false
+            }
+        case .completed: status == .completed
+        case .failed: status == .failed || status == .canceled
+        case .paused: status == .paused
+        }
+    }
 }
 
-/// 列表筛选：状态文件夹 · 分类 · 队列范围 · 搜索词。
+/// 列表筛选：状态文件夹 · 分类 / 仅远程任务（互斥）· 队列范围 · 搜索词。
 nonisolated struct DownloadsFilter: Hashable {
     var folder: StatusFolder = .all
     var categoryId: String?
+    /// 只看其他设备上的远程任务；与 `categoryId` 互斥（由 `DownloadsModel` 维护）。
+    var remoteOnly = false
     /// 已规范化的队列 id（主队列 = `TaskQueue.main`）；nil = 全部队列。
     var queueId: String?
     var query: String = ""
@@ -82,6 +100,8 @@ nonisolated struct TaskItem: Identifiable, Equatable {
     /// >0 → 「排队 #n」。
     let queuePosition: Int
     let boosted: Bool
+    /// 有待答的「文件已存在」询问（任务在等用户决定，行上显示「待确认」角标）。
+    let awaitingDecision: Bool
     let category: TaskCategory?
     let queue: TaskQueue?
     /// 来源站点（去 `www.` 与端口）；BT / eD2K 哨兵无 host → 空串。
@@ -116,6 +136,37 @@ nonisolated struct DoneOfTotal: Equatable {
     let total: Int
 }
 
+/// 其他设备上的远程任务行（同 PC 下载页的远程行）。排序 / 分组 / 分类用到的投影在派生时一次算好，行视图只读 `task`。
+nonisolated struct RemoteRow: Identifiable, Equatable {
+    let task: RemoteTaskDto
+    /// `createdAt`（ISO-8601）解析出的 Unix 秒；解析失败 = 0。
+    let createdAt: Int64
+    /// 按显示名解析的分类 id；无分类 = nil。
+    let categoryId: String?
+    /// 来源站点（url 的 host，去 `www.` 与端口）；无 host = 空串。
+    let site: String
+
+    var id: String { task.id }
+}
+
+/// 列表里的一行：本机任务或远程任务。`id` 全局唯一（远程行加 `remote:` 前缀，避免与本机任务 id 相撞）。
+nonisolated enum DownloadsRow: Identifiable, Equatable {
+    case task(TaskItem)
+    case remote(RemoteRow)
+
+    var id: String {
+        switch self {
+        case let .task(item): item.id
+        case let .remote(row): "remote:" + row.id
+        }
+    }
+
+    /// 本机任务；远程行 = nil。
+    var item: TaskItem? {
+        if case let .task(item) = self { item } else { nil }
+    }
+}
+
 nonisolated struct DownloadsSection: Identifiable, Equatable {
     nonisolated enum Kind: Equatable {
         /// 「传输中」：右侧实时汇总下行速度 + 任务数。
@@ -135,14 +186,15 @@ nonisolated struct DownloadsSection: Identifiable, Equatable {
     /// 仅 `.inFlight`：汇总下行速度。
     let downSpeed: Int64
     let collapsed: Bool
-    /// 折叠时为空。
-    let items: [TaskItem]
+    /// 折叠时为空。本机行与远程行按排序穿插。
+    let rows: [DownloadsRow]
 }
 
-/// 派生出的列表：分区 + 可见任务 id（全选范围）+ 总任务数（区分「无任务」与「筛选后为空」）。
+/// 派生出的列表：分区 + 可见任务 id（全选范围，只含本机任务）+ 总任务数（区分「无任务」与「筛选后为空」）。
 nonisolated struct DownloadsList: Equatable {
     let sections: [DownloadsSection]
     let visibleIds: [String]
+    /// 本机任务 + 远程任务总数（区分「无任务」与「筛选后为空」）。
     let taskTotal: Int
     let loaded: Bool
 
@@ -163,19 +215,22 @@ nonisolated struct QueueFacet: Equatable, Identifiable {
     var id: String { queue.queueId }
 }
 
-/// 分面：文件夹计数（队列 / 搜索范围内）· 当前文件夹内的分类计数 · 各队列任务数。
+/// 分面：文件夹计数（队列 / 搜索范围内）· 当前文件夹内的分类计数 · 各队列任务数 · 远程任务数。
 nonisolated struct Facets: Equatable {
     /// 按 `StatusFolder.allCases` 顺序。
     let folderCounts: [Int]
     let categories: [CategoryPill]
     let queues: [QueueFacet]
-    /// 当前筛选结果行数。
+    /// 范围（队列 / 搜索 / 任务组）与当前文件夹内的远程任务数（分类筛选之前）。
+    let remoteCount: Int
+    /// 当前筛选结果行数（本机 + 远程）。
     let matching: Int
 
     static let initial = Facets(
         folderCounts: Array(repeating: 0, count: StatusFolder.allCases.count),
         categories: [],
         queues: [],
+        remoteCount: 0,
         matching: 0
     )
 

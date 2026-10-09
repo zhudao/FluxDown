@@ -58,7 +58,7 @@ fun FluxSelect(
             },
     ) {
         if (leadingIcon != null) FluxIcon(leadingIcon, null, size = 18.dp, tint = c.inkMuted)
-        Box(Modifier.weight(1f).padding(vertical = 14.dp), contentAlignment = Alignment.CenterStart) {
+        Box(Modifier.weight(1f).padding(vertical = FieldTextPadding), contentAlignment = Alignment.CenterStart) {
             FluxText(shown, style = style, color = if (value == null) c.inkFaint else c.ink)
         }
         FluxIcon(FluxIcons.ChevronsUpDown, null, size = 18.dp, tint = c.inkMuted)

@@ -81,7 +81,7 @@ final class GroupDetailModel {
             nowMs: Int64(Date().timeIntervalSince1970 * 1000),
             interactionMs: 0
         )
-        let nextItems = result.list.sections.flatMap(\.items)
+        let nextItems = result.list.sections.flatMap(\.rows).compactMap(\.item)
         if nextItems != items { items = nextItems }
 
         if state.isReadOnly != isReadOnly { isReadOnly = state.isReadOnly }
@@ -203,7 +203,6 @@ private struct GroupDetailPage: View {
         .toolbarVisibility(sizeClass == .compact ? .hidden : .automatic, for: .tabBar)
         .toolbar { toolbarContent }
         .suppressesBottomAccessory("groupDetail")
-        .groupDeleteConfirmation($pendingDelete) { navigation?.closeGroup(group.groupId) }
     }
 
     // MARK: 信息卡
@@ -253,6 +252,7 @@ private struct GroupDetailPage: View {
                 .environment(actions)
                 .environment(\.fluxAccent, accent)
         }
+        .taskDeleteHost()
     }
 
     // MARK: 工具栏
@@ -290,6 +290,7 @@ private struct GroupDetailPage: View {
             } label: {
                 Label(L("moreActions"), systemImage: FluxSymbol.more)
             }
+            .groupDeleteConfirmation($pendingDelete, groupId: group.groupId) { navigation?.closeGroup(group.groupId) }
         }
         ToolbarItem(placement: .bottomBar) {
             Button(L("groupPauseAll"), systemImage: FluxSymbol.pause) {

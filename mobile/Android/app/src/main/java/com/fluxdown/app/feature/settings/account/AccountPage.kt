@@ -256,11 +256,14 @@ internal fun AccountPage() {
     }
 
     val logoutText = str(R.string.accountLogout)
+    val logoutTitle = str(R.string.accountLogoutConfirmTitle)
+    val logoutMessage = str(R.string.accountLogoutConfirmMessage)
     val cancelText = str(R.string.cancel)
     fun confirmLogout() {
         overlays.showDialog(
             FluxDialogSpec(
-                title = logoutText,
+                title = logoutTitle,
+                message = logoutMessage,
                 icon = FluxIcons.LogOut,
                 buttons = listOf(
                     FluxDialogButton(cancelText),

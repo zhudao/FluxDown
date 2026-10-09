@@ -63,6 +63,7 @@ import com.fluxdown.app.feature.devices.GlyphTile
 import com.fluxdown.app.feature.devices.localizedName
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.LocalNavigator
+import com.fluxdown.app.nav.Route
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
@@ -120,9 +121,6 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-/** 同时抓取的订阅数上限（R1：下拉“全部抓取” ≤ 4 并发）。 */
-private const val REFRESH_PARALLELISM = 4
-
 /** 相对时间重算周期：仅前台，纯本地（无轮询请求）。 */
 private const val CLOCK_TICK_MS = 30_000L
 
@@ -134,10 +132,6 @@ private const val CLOCK_TICK_MS = 30_000L
 fun RssScreen() {
     val container = LocalAppContainer.current
     val nav = LocalNavigator.current
-    val overlays = LocalFluxOverlays.current
-    val actions = LocalTaskActions.current
-    val haptics = FluxTheme.haptics
-    val appContext = LocalContext.current.applicationContext
     val space = FluxTheme.space
     val host = hostState()
     val hostRef by container.host.collectAsStateWithLifecycle()
@@ -146,9 +140,7 @@ fun RssScreen() {
     val unread by remember { derivedStateOf { sources.sumOf { it.unreadCount } } }
     val failing by remember { derivedStateOf { sources.count { it.failCount > 0 } } }
 
-    val controller = remember(container, overlays, haptics, actions, appContext) {
-        RssController(container.appScope, { container.session }, container.store, overlays, haptics, appContext, actions)
-    }
+    val controller = rememberRssController()
     val nowSec by rememberNowSeconds()
     val nowMin = nowSec / 60
 
@@ -180,11 +172,6 @@ fun RssScreen() {
                     )
                 },
                 actions = {
-                    FluxGlassIconButton(
-                        icon = FluxIcons.Plus,
-                        contentDescription = str(R.string.rssAddSource),
-                        onClick = { nav.openSheet(SheetRoute.RssEditor()) },
-                    )
                     if (sources.isNotEmpty()) {
                         FluxGlassIconButton(
                             icon = FluxIcons.RefreshCw,
@@ -243,6 +230,9 @@ fun RssScreen() {
                     onRefresh = { controller.refresh(source) },
                     onToggle = { controller.toggle(source) },
                     onEdit = { nav.openSheet(SheetRoute.RssEditor(sourceId = source.sourceId)) },
+                    onOpen = { nav.push(Route.RssItems(source.sourceId)) },
+                    onMarkRead = { controller.markAllRead(listOf(source)) },
+                    onCopy = { controller.copyLink(source) },
                     modifier = Modifier.fluxFlowIn(index + 3, gate, source.sourceId),
                 )
             }
@@ -267,10 +257,19 @@ private fun SummaryCard(unread: Int, feeds: Int, failing: Int, modifier: Modifie
     )
 }
 
+/** 整小时（≥ 60 且被 60 整除）显示「每 N 小时」，否则「每 N 分钟」。 */
+@Composable
+internal fun rssIntervalText(source: RssSource): String =
+    if (source.intervalMinutes >= 60 && source.intervalMinutes % 60 == 0) {
+        str(R.string.rssEveryHours, "n" to source.intervalMinutes / 60)
+    } else {
+        str(R.string.rssEveryMinutes, "n" to source.intervalMinutes)
+    }
+
 // ── 订阅行 ──────────────────────────────────────────────────────────────
 
 @Stable
-private class RectBox {
+internal class RectBox {
     var rect: Rect = Rect.Zero
 }
 
@@ -283,6 +282,9 @@ private fun FeedRow(
     onRefresh: () -> Unit,
     onToggle: () -> Unit,
     onEdit: () -> Unit,
+    onOpen: () -> Unit,
+    onMarkRead: () -> Unit,
+    onCopy: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val c = FluxTheme.colors
@@ -295,17 +297,8 @@ private fun FeedRow(
     val title = source.name.ifBlank { source.url }
     val host = remember(source.url) { Uri.parse(source.url).host ?: source.url }
 
-    val interval = if (source.intervalMinutes >= 60 && source.intervalMinutes % 60 == 0) {
-        str(R.string.rssEveryHours, "n" to source.intervalMinutes / 60)
-    } else {
-        str(R.string.rssEveryMinutes, "n" to source.intervalMinutes)
-    }
-    val statusText = when {
-        refreshing -> str(R.string.rssRefreshing)
-        failed -> str(R.string.rssFailedTimes, "n" to source.failCount)
-        source.lastSuccessAt > 0 -> str(R.string.rssLastFetch, "when" to relativeAgo(nowMin * 60 - source.lastSuccessAt))
-        else -> str(R.string.rssNeverFetched)
-    }
+    val interval = rssIntervalText(source)
+    val statusText = rssStatusText(source, refreshing, nowMin)
     val modeText = str(if (source.autoDownload) R.string.rssAutoDownloadOn else R.string.rssCollectMode)
     val statusTone = when {
         refreshing -> MetaTone.Accent
@@ -339,6 +332,17 @@ private fun FeedRow(
             onClick = onToggle,
             icon = if (source.enabled) FluxIcons.PowerOff else FluxIcons.Power,
         ),
+        FluxMenuItem.Action(
+            label = str(R.string.rssMarkAllRead),
+            onClick = onMarkRead,
+            icon = FluxIcons.CheckCheck,
+            enabled = source.unreadCount > 0,
+        ),
+        FluxMenuItem.Action(
+            label = str(R.string.copyUrl),
+            onClick = onCopy,
+            icon = FluxIcons.Copy,
+        ),
     )
     val rectBox = remember { RectBox() }
     val openMenu = { overlays.showMenu(rectBox.rect, menuItems, header = title) }
@@ -371,7 +375,7 @@ private fun FeedRow(
                     .fillMaxWidth()
                     .alpha(if (source.enabled) 1f else 0.45f)
                     .onGloballyPositioned { rectBox.rect = it.boundsInRoot() }
-                    .fluxPressable(onClick = openMenu, onLongClick = openMenu, role = Role.Button)
+                    .fluxPressable(onClick = onOpen, onLongClick = openMenu, role = Role.Button)
                     .semantics(mergeDescendants = true) { contentDescription = description }
                     .heightIn(min = 72.dp)
                     .padding(horizontal = margin, vertical = 10.dp),
@@ -419,7 +423,7 @@ private fun FeedRow(
 }
 
 @Composable
-private fun relativeAgo(deltaSec: Long): String {
+internal fun relativeAgo(deltaSec: Long): String {
     val d = deltaSec.coerceAtLeast(0)
     return when {
         d < 60 -> str(R.string.rssJustNow)
@@ -427,6 +431,15 @@ private fun relativeAgo(deltaSec: Long): String {
         d < 86_400 -> str(R.string.rssHoursAgo, "n" to d / 3_600)
         else -> str(R.string.rssDaysAgo, "n" to d / 86_400)
     }
+}
+
+/** 订阅状态行首段：抓取中 / 失败次数 / 上次抓取时间 / 从未抓取（订阅行与条目流摘要共用）。 */
+@Composable
+internal fun rssStatusText(source: RssSource, refreshing: Boolean, nowMin: Long): String = when {
+    refreshing -> str(R.string.rssRefreshing)
+    source.failCount > 0 -> str(R.string.rssFailedTimes, "n" to source.failCount)
+    source.lastSuccessAt > 0 -> str(R.string.rssLastFetch, "when" to relativeAgo(nowMin * 60 - source.lastSuccessAt))
+    else -> str(R.string.rssNeverFetched)
 }
 
 /** 抓取中的 16 点轨道（单 Canvas；相位在绘制阶段读取，不触发重组；Reduce motion 静止）。 */
@@ -468,7 +481,7 @@ private fun FeedOrbit(color: Color, modifier: Modifier = Modifier) {
 
 /** 前台时每 30s 更新一次“现在”（只改本地时钟，用于相对时间；后台不运行）。 */
 @Composable
-private fun rememberNowSeconds(): State<Long> {
+internal fun rememberNowSeconds(): State<Long> {
     val owner = LocalLifecycleOwner.current
     val now = remember { mutableLongStateOf(System.currentTimeMillis() / 1_000) }
     LaunchedEffect(owner) {
@@ -482,92 +495,3 @@ private fun rememberNowSeconds(): State<Long> {
     return now
 }
 
-// ── 动作 ────────────────────────────────────────────────────────────────
-
-/**
- * 订阅动作：只读拦截 + 触感 + toast。命令在应用级作用域里执行（离开本页不取消，结果仍有回执）。
- * [busy] = 正在抓取的订阅（行内显示点阵轨道，慢请求的反馈）。
- */
-@Stable
-private class RssController(
-    private val scope: CoroutineScope,
-    private val session: () -> HostSession,
-    private val store: HostStore,
-    private val overlays: FluxOverlayState,
-    private val haptics: FluxHaptics,
-    private val context: Context,
-    private val actions: TaskActions,
-) {
-    val busy = SnapshotStateSet<String>()
-
-    private fun s(id: Int, vararg args: Pair<String, Any?>) = context.str(id, *args)
-
-    private fun guard(): Boolean {
-        if (!store.state.value.isReadOnly) return true
-        haptics.reject()
-        overlays.toast(s(R.string.localServiceDisconnected), FluxToastKind.Error, FluxIcons.WifiOff)
-        return false
-    }
-
-    /** @return true = 抓取成功。 */
-    private suspend fun fetch(source: RssSource): Boolean {
-        busy.add(source.sourceId)
-        return try {
-            session().refreshRssSource(source.sourceId)
-            true
-        } catch (e: HostException) {
-            haptics.reject()
-            overlays.toast(actions.errorText(e), FluxToastKind.Error)
-            false
-        } finally {
-            busy.remove(source.sourceId)
-        }
-    }
-
-    fun refresh(source: RssSource) {
-        if (!guard() || source.sourceId in busy) return
-        scope.launch {
-            if (fetch(source)) {
-                overlays.toast(s(R.string.mobileRssRefreshed, "name" to source.name.ifBlank { source.url }), FluxToastKind.Success)
-            }
-        }
-    }
-
-    fun refreshAll(sources: List<RssSource>) {
-        if (!guard()) return
-        val targets = sources.filter { it.enabled && it.sourceId !in busy }
-        if (targets.isEmpty()) {
-            overlays.toast(s(R.string.mobileRssNothingToRefresh), FluxToastKind.Info)
-            return
-        }
-        scope.launch {
-            val gate = Semaphore(REFRESH_PARALLELISM)
-            val results = coroutineScope { targets.map { src -> async { gate.withPermit { fetch(src) } } }.awaitAll() }
-            val ok = results.count { it }
-            val failed = results.size - ok
-            haptics.confirm()
-            overlays.toast(
-                s(R.string.mobileRssRefreshSummary, "ok" to ok, "failed" to failed),
-                if (failed == 0) FluxToastKind.Success else FluxToastKind.Warn,
-            )
-        }
-    }
-
-    fun toggle(source: RssSource) {
-        if (!guard()) return
-        val enable = !source.enabled
-        scope.launch {
-            try {
-                session().setRssSourceEnabled(source.sourceId, enable)
-                haptics.confirm()
-                overlays.toast(
-                    s(if (enable) R.string.mobileRssEnabledToast else R.string.mobileRssDisabledToast),
-                    FluxToastKind.Info,
-                )
-            } catch (e: HostException) {
-                haptics.reject()
-                overlays.toast(actions.errorText(e), FluxToastKind.Error)
-            }
-        }
-    }
-}

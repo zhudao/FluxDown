@@ -56,10 +56,7 @@ private struct CloudDeviceDetail: View {
             container.toasts.show(text: L("mobileDeviceGone"), tone: .info, systemImage: "minus.circle")
             dismiss()
         }
-        .cloudDeviceDialogs(renaming: $renaming, deleting: $deleting) { _ in
-            leaving = true
-            dismiss()
-        }
+        .cloudDeviceRenameAlert(renaming: $renaming)
     }
 
     private func detailList(_ record: CloudDeviceRecord, state: HostState) -> some View {
@@ -113,6 +110,10 @@ private struct CloudDeviceDetail: View {
                     Label(L("accountDeviceDeleteAction"), systemImage: FluxSymbol.delete)
                 }
                 .disabled(readOnly)
+                .cloudDeviceDeleteConfirmation(record, deleting: $deleting) { _ in
+                    leaving = true
+                    dismiss()
+                }
             } footer: {
                 if readOnly {
                     Text(L("localServiceDisconnected"))
@@ -132,7 +133,7 @@ private struct CloudDeviceDetail: View {
             }
         }
         .sheet(isPresented: $showDispatch) {
-            DispatchSheet(target: .cloud(record, presenceKnown: presenceKnown))
+            DispatchSheet(target: DispatchTarget(cloud: record, presenceKnown: presenceKnown))
         }
     }
 
@@ -248,6 +249,15 @@ private struct LinkDeviceDetail: View {
                     }
                 }
                 .disabled(readOnly || unpairing)
+                .alert(
+                    L("linkedDeviceRemoveTitle"),
+                    isPresented: $confirmingUnpair
+                ) {
+                    Button(L("linkedDeviceRemove"), role: .destructive) { unpair(info) }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("linkedDeviceRemoveDesc", ["name": info.name]))
+                }
             } footer: {
                 if readOnly {
                     Text(L("localServiceDisconnected"))
@@ -263,16 +273,7 @@ private struct LinkDeviceDetail: View {
             }
         }
         .sheet(isPresented: $showDispatch) {
-            DispatchSheet(target: .link(info))
-        }
-        .confirmationDialog(
-            L("linkedDeviceRemoveTitle"),
-            isPresented: $confirmingUnpair,
-            titleVisibility: .visible
-        ) {
-            Button(L("linkedDeviceRemove"), role: .destructive) { unpair(info) }
-        } message: {
-            Text(L("linkedDeviceRemoveDesc", ["name": info.name]))
+            DispatchSheet(target: DispatchTarget(link: info))
         }
     }
 

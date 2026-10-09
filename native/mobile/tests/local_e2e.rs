@@ -192,6 +192,7 @@ impl Dirs {
             data_dir: self.data().display().to_string(),
             save_dir: self.save().display().to_string(),
             platform: "test".to_owned(),
+            device_name: None,
         }
     }
 }
@@ -550,6 +551,7 @@ async fn open_local_rejects_an_empty_data_dir() {
             data_dir: "   ".to_owned(),
             save_dir: String::new(),
             platform: "test".to_owned(),
+            device_name: None,
         })
         .await;
     assert!(

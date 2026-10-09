@@ -84,7 +84,8 @@ final class LocalActivityMonitor {
                 // 本机主机已在运行时复用同一个（目录参数被忽略）。
                 let session = try await FluxBridge.openLocal(
                     dataDir: LocalPaths.dataDirectory.path,
-                    saveDir: LocalPaths.documents.path
+                    saveDir: LocalPaths.documents.path,
+                    deviceName: LocalDevice.name
                 )
                 guard let self, !Task.isCancelled else {
                     session.close()

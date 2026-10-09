@@ -77,9 +77,6 @@ struct AccountPage: View {
             if loggedOut, sheet?.requiresSession == true { sheet = nil }
             errorText = nil
         }
-        .confirmationDialog(L("accountLogout"), isPresented: $confirmingLogout, titleVisibility: .visible) {
-            Button(L("accountLogout"), role: .destructive, action: logout)
-        }
         .sensoryFeedback(.success, trigger: refreshCount)
         .sensoryFeedback(.success, trigger: copyCount)
     }
@@ -326,6 +323,13 @@ struct AccountPage: View {
                 }
             }
             .disabled(readOnly || loggingOut)
+            // 退出登录确认 alert 由触发按钮挂载。
+            .alert(L("accountLogoutConfirmTitle"), isPresented: $confirmingLogout) {
+                Button(L("accountLogout"), role: .destructive, action: logout)
+                Button(L("cancel"), role: .cancel) {}
+            } message: {
+                Text(L("accountLogoutConfirmMessage"))
+            }
         }
     }
 

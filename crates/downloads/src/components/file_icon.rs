@@ -109,23 +109,67 @@ pub(crate) fn task_file_icon(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let Some(choice) = active_icon_packs(cx).resolve(&task.name_fold, task.kind) else {
+    resolved_file_icon(
+        &task.name_fold,
+        task.kind,
+        |physical| SystemIconKey::for_task(task, physical),
+        task.is_file_missing(),
+        size,
+        window,
+        cx,
+    )
+}
+
+/// 只有文件名、没有任务行时的图标（「文件已存在」窗口：目标文件尚无本机任务产物）：
+/// 与任务表同一图标链，系统图标按扩展名取。
+pub(crate) fn name_file_icon(
+    lower_name: &str,
+    kind: FileKind,
+    extension: &SharedString,
+    size: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    resolved_file_icon(
+        lower_name,
+        kind,
+        |physical| SystemIconKey {
+            extension: extension.clone(),
+            path: None,
+            revision: 0,
+            size: physical,
+        },
+        false,
+        size,
+        window,
+        cx,
+    )
+}
+
+fn resolved_file_icon(
+    lower_name: &str,
+    kind: FileKind,
+    system_key: impl FnOnce(u32) -> SystemIconKey,
+    dimmed: bool,
+    size: Pixels,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(choice) = active_icon_packs(cx).resolve(lower_name, kind) else {
         return div().flex_none().size(size).into_any_element();
     };
     let fallback = match choice {
         FileIconChoice::Pack(icon) => icon,
         FileIconChoice::System { fallback } => {
             let physical = (f32::from(size) * window.scale_factor()).ceil() as u32;
-            let key = SystemIconKey::for_task(task, physical);
+            let key = system_key(physical);
             match window.use_asset::<SystemIconAsset>(&key, cx) {
                 None => return div().flex_none().size(size).into_any_element(),
                 Some(Some(image)) => {
                     return img(image)
                         .flex_none()
                         .size(size)
-                        .when(task.is_file_missing(), |this| {
-                            this.opacity(MISSING_FILE_OPACITY)
-                        })
+                        .when(dimmed, |this| this.opacity(MISSING_FILE_OPACITY))
                         .into_any_element();
                 }
                 Some(None) => fallback,
@@ -137,9 +181,7 @@ pub(crate) fn task_file_icon(
     let color = theme.tokens().colors.muted_foreground;
     div()
         .flex_none()
-        .when(task.is_file_missing(), |this| {
-            this.opacity(MISSING_FILE_OPACITY)
-        })
+        .when(dimmed, |this| this.opacity(MISSING_FILE_OPACITY))
         .child(pack_icon(&fallback, dark, size, color, window, cx))
         .into_any_element()
 }

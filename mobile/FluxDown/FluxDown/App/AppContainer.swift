@@ -18,6 +18,8 @@ final class AppContainer {
     let viewPrefs = ViewPrefsStore()
     let toasts = ToastCenter()
     let router = AppRouter()
+    /// 设备 / 远程任务的数据与动作（设备页与下载列表的远程行共用：命令在途状态只有一份）。
+    @ObservationIgnored private(set) lazy var devices = DevicesModel(container: self)
 
     /// 本机 + 已保存的远端主机（本机恒为首项）。
     private(set) var hosts: [HostRef]
@@ -183,7 +185,8 @@ final class AppContainer {
                 try prepareLocalDirectories()
                 let session = try await FluxBridge.openLocal(
                     dataDir: LocalPaths.dataDirectory.path,
-                    saveDir: LocalPaths.documents.path
+                    saveDir: LocalPaths.documents.path,
+                    deviceName: LocalDevice.name
                 )
                 return .success(session)
             case let .remote(id, _, endpoint):

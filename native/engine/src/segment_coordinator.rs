@@ -1343,7 +1343,7 @@ struct WorkerSpawnCtx {
     seg_states: Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     db: Db,
     speed_limiter: SpeedLimiter,
-    spec: crate::downloader::RequestSpec,
+    spec: Arc<crate::downloader::DownloadSpec>,
     etag: String,
     last_modified: String,
     sync_gate: FileSyncGate,
@@ -1425,7 +1425,7 @@ pub async fn run_coordinated_download(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    spec: &crate::downloader::RequestSpec,
+    spec: &Arc<crate::downloader::DownloadSpec>,
     sink: &dyn EventSink,
     etag: &str,
     last_modified: &str,
@@ -4522,7 +4522,7 @@ fn spawn_worker(
     seg_states: Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     db: Db,
     speed_limiter: SpeedLimiter,
-    spec: crate::downloader::RequestSpec,
+    spec: Arc<crate::downloader::DownloadSpec>,
     etag: String,
     last_modified: String,
     sync_gate: FileSyncGate,
@@ -4786,7 +4786,7 @@ async fn do_segment_with_retry(
     db: &Db,
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
-    spec: &crate::downloader::RequestSpec,
+    spec: &crate::downloader::DownloadSpec,
     expected_etag: &str,
     expected_last_modified: &str,
     sync_gate: &FileSyncGate,
@@ -5012,7 +5012,7 @@ async fn do_segment(
     db: &Db,
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
-    spec: &crate::downloader::RequestSpec,
+    spec: &crate::downloader::DownloadSpec,
     expected_etag: &str,
     expected_last_modified: &str,
     sync_gate: &FileSyncGate,
@@ -5036,10 +5036,6 @@ async fn do_segment(
     } else {
         format!("bytes={}-{}", actual_start, seg_end)
     };
-    let mut req = crate::downloader::build_request(client, url, reqwest::Method::GET, spec);
-    if !plain_first {
-        req = req.header("Range", &range);
-    }
     // 等响应头与 cancel、头超时竞速：惩罚型/停滞服务器可能接受 TCP 连接后长时间
     // 不回响应头（client 只有 connect_timeout，响应头无超时），不竞速则删除/取消
     // 被卡住、尾段一条沉默连接拖住整个任务。超时只覆盖等头阶段，不限制 body 速度。
@@ -5048,17 +5044,33 @@ async fn do_segment(
     } else {
         RESPONSE_HEADER_TIMEOUT
     };
-    let resp = tokio::select! {
-        _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
-        r = tokio::time::timeout(header_timeout, req.send()) => match r {
-            Ok(r) => r?,
-            Err(_) => {
-                return Err(DownloadError::Other(format!(
-                    "segment {seg_idx} stalled: no response headers received within {}s",
-                    header_timeout.as_secs()
-                )));
+    // hint 模式跳过了探测，反机器人质询只能在真实请求上首次暴露：换中性 UA 重发
+    // 同一请求（`escape_bot_challenge` 保证每个请求最多重发一次，循环必然收敛）。
+    let mut used = spec.current();
+    let resp = loop {
+        let mut req = crate::downloader::build_request(client, url, reqwest::Method::GET, used);
+        if !plain_first {
+            req = req.header("Range", &range);
+        }
+        let resp = tokio::select! {
+            _ = cancel.cancelled() => return Err(DownloadError::Cancelled),
+            r = tokio::time::timeout(header_timeout, req.send()) => match r {
+                Ok(r) => r?,
+                Err(_) => {
+                    return Err(DownloadError::Other(format!(
+                        "segment {seg_idx} stalled: no response headers received within {}s",
+                        header_timeout.as_secs()
+                    )));
+                }
+            },
+        };
+        match spec.escape_bot_challenge(used, &resp, db, task_id).await {
+            Some(neutral) => {
+                drop(resp);
+                used = neutral;
             }
-        },
+            None => break resp,
+        }
     };
     let resp = resp.error_for_status()?;
 
@@ -5936,7 +5948,7 @@ mod tests {
             &tx,
             &CancellationToken::new(),
             &SpeedLimiter::new(0),
-            &spec,
+            &Arc::new(crate::downloader::DownloadSpec::new(spec)),
             &NoopSink,
             "",
             "",
@@ -6081,13 +6093,15 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create fixture directory");
         let dest = dir.join("f.fdownloading");
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-        let spec = crate::downloader::RequestSpec {
-            method: reqwest::Method::GET,
-            cookies: String::new(),
-            referrer: String::new(),
-            extra_headers: std::collections::HashMap::new(),
-            body: None,
-        };
+        let spec = Arc::new(crate::downloader::DownloadSpec::new(
+            crate::downloader::RequestSpec {
+                method: reqwest::Method::GET,
+                cookies: String::new(),
+                referrer: String::new(),
+                extra_headers: std::collections::HashMap::new(),
+                body: None,
+            },
+        ));
         let pool = crate::cdn::NodePool::single(
             reqwest::Client::builder()
                 .no_proxy()

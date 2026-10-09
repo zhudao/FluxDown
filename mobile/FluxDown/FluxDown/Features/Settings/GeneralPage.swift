@@ -10,7 +10,7 @@ struct GeneralPage: View {
     @Environment(AppContainer.self) private var container
 
     @State private var categoryTarget: GeneralCategoryTarget?
-    @State private var confirmReset = false
+
 
     var body: some View {
         let readOnly = store.state.isReadOnly
@@ -19,7 +19,7 @@ struct GeneralPage: View {
             systemSection(readOnly: readOnly)
             downloadsViewSection(readOnly: readOnly)
             entriesSection(readOnly: readOnly)
-            CategoriesSection(editing: $categoryTarget, confirmReset: $confirmReset, readOnly: readOnly)
+            CategoriesSection(editing: $categoryTarget, readOnly: readOnly)
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -34,13 +34,6 @@ struct GeneralPage: View {
                 onSave: { categories.save($0) },
                 onDelete: target.existing.map { entry in { categories.delete(entry) } }
             )
-        }
-        .confirmationDialog(L("resetBuiltinCategories"), isPresented: $confirmReset, titleVisibility: .visible) {
-            Button(L("resetBuiltinCategories"), role: .destructive) {
-                GeneralCategoryStore(editor: editor, toasts: container.toasts).resetBuiltin()
-            }
-        } message: {
-            Text(L("resetAllCategoriesConfirm"))
         }
     }
 

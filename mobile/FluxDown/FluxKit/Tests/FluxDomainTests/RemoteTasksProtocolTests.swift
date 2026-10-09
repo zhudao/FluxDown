@@ -184,4 +184,48 @@ struct RemoteTasksProtocolTests {
         #expect(DeviceRules.currentDeviceId(session: nil, devices: devices) == "me")
         #expect(DeviceRules.currentDeviceId(session: nil, devices: []) == nil)
     }
+
+    @Test func dispatchTargetsSkipCurrentDedupeAndDisambiguate() {
+        let cloud = [
+            CloudDevice(deviceId: "me-1", name: "Me", platform: "ios", isOnline: true, isCurrent: true, appVersion: nil),
+            CloudDevice(
+                deviceId: "pc-aa11", name: " Office ", platform: "windows", isOnline: false, isCurrent: false,
+                appVersion: nil, defaultSaveDir: "  ", pathStyle: nil
+            ),
+            CloudDevice(deviceId: "pc-aa11", name: "dup", platform: nil, isOnline: true, isCurrent: false, appVersion: nil),
+            CloudDevice(deviceId: "", name: "no id", platform: nil, isOnline: true, isCurrent: false, appVersion: nil),
+            CloudDevice(
+                deviceId: "nas-bb22", name: "office", platform: "linux", isOnline: true, isCurrent: false,
+                appVersion: nil, defaultSaveDir: " /srv/dl ", pathStyle: .windows
+            ),
+        ]
+        let link = [
+            LinkDevice(fingerprint: "fp:cc-33", name: "", platform: nil, online: true, defaultSaveDir: "/x", pathStyle: .posix),
+            LinkDevice(fingerprint: "", name: "ghost", platform: nil, online: true),
+        ]
+        let targets = DeviceRules.dispatchTargets(cloud: cloud, link: link, cloudPresenceKnown: true, localReady: true)
+        #expect(targets.map(\.id) == ["cloud:pc-aa11", "cloud:nas-bb22", "link:fp:cc-33"])
+        // 同名（忽略大小写与首尾空白）追加短码；空名用短码。
+        #expect(targets.map(\.name) == ["Office · aa11", "office · bb22", "cc33"])
+        #expect(targets.map(\.online) == [false, true, true])
+        // 空白目录读作无；自报风格优先于平台推断。
+        #expect(targets[0].defaultSaveDir == nil)
+        #expect(targets[0].pathStyle == .windows)
+        #expect(targets[1].defaultSaveDir == "/srv/dl")
+        #expect(targets[1].pathStyle == .windows)
+        #expect(targets[0].isCloud && targets[0].isOffline)
+        #expect(!targets[2].isCloud && !targets[2].isOffline)
+    }
+
+    @Test func dispatchTargetPresenceUnknownUntilTrusted() {
+        let cloud = [CloudDevice(deviceId: "pc", name: "PC", platform: nil, isOnline: false, isCurrent: false, appVersion: nil)]
+        let link = [LinkDevice(fingerprint: "fp", name: "Mac", platform: "macos", online: false)]
+        // 云端 presence 不可信：云设备在线未知（不当作离线），局域网设备仍按本地探测。
+        let cloudUnknown = DeviceRules.dispatchTargets(cloud: cloud, link: link, cloudPresenceKnown: false, localReady: true)
+        #expect(cloudUnknown.map(\.online) == [nil, false])
+        #expect(!cloudUnknown[0].isOffline)
+        // 本地服务未就绪：两类都未知。
+        let notReady = DeviceRules.dispatchTargets(cloud: cloud, link: link, cloudPresenceKnown: true, localReady: false)
+        #expect(notReady.map(\.online) == [nil, nil])
+    }
 }

@@ -29,8 +29,11 @@
  *     Icon-App-76x76@{1x,2x}.png     Icon-App-83.5x83.5@2x.png
  *     Icon-App-1024x1024@1x.png
  *
- *   android/app/src/main/res/
+ *   android/app/src/main/res/ + mobile/Android/app/src/main/res/
  *     mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png
+ *
+ *   mobile/FluxDown/FluxDown/Assets.xcassets/LaunchMark.imageset/
+ *     LaunchMark@{2x,3x}.png（原生 iOS 启动画面：logo 白色箭头，112pt）
  *
  *   fluxDown/public/icon/
  *     {16,32,48,128}.png  {16,32,48,128}-disabled.png
@@ -445,6 +448,39 @@ async function main() {
       );
     }
     totalCount += Object.keys(iosIcons).length;
+  }
+
+  // 原生 iOS 启动画面标记（Info.plist UILaunchScreen.UIImageName = LaunchMark，112pt）：
+  // 只有 logo 的箭头，改用方块底的品牌蓝着色（底色由 LaunchBackground 随系统明暗），保留 400 单位画框以便揭幕按同一几何接续。
+  // 改尺寸须同步 FluxDownApp 的 `.launchReveal(markSide:)`。
+  console.log("\n📁 mobile/FluxDown/FluxDown/Assets.xcassets/LaunchMark.imageset/");
+  {
+    const logo = readFileSync(SVG_SRC, "utf8");
+    const brand = /<rect\b[^>]*\bfill="([^"]+)"/.exec(logo)?.[1] ?? "#3B82F6";
+    const arrowOnly = Buffer.from(
+      logo
+        .replace(/<rect\b[^>]*\/>/, "")
+        .replace(/(<path\b[^>]*\bfill=")[^"]+"/, `$1${brand}"`),
+    );
+    const launchMark: Record<string, number> = {
+      "LaunchMark@2x.png": 224,
+      "LaunchMark@3x.png": 336,
+    };
+    for (const [filename, pixelSize] of Object.entries(launchMark)) {
+      const buf = await sharp(arrowOnly, { density: 300 })
+        .resize(pixelSize, pixelSize, {
+          kernel: sharp.kernel.lanczos3,
+          fit: "contain",
+          background: { r: 0, g: 0, b: 0, alpha: 0 },
+        })
+        .png({ compressionLevel: 9 })
+        .toBuffer();
+      await saveFile(
+        `mobile/FluxDown/FluxDown/Assets.xcassets/LaunchMark.imageset/${filename}`,
+        buf,
+      );
+    }
+    totalCount += Object.keys(launchMark).length;
   }
 
   // ──────────────────────────────────────────

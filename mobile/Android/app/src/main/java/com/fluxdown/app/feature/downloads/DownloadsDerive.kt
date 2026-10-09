@@ -4,6 +4,8 @@ import com.fluxdown.app.R
 import com.fluxdown.app.data.GroupBy
 import com.fluxdown.app.data.SortKey
 import com.fluxdown.app.data.ViewPrefs
+import com.fluxdown.app.feature.newtask.UrlEntry
+import com.fluxdown.app.feature.newtask.inferName
 import com.fluxdown.app.ui.TaskVisualState
 import com.fluxdown.app.ui.visualState
 import com.fluxdown.core.format.Format
@@ -12,8 +14,16 @@ import com.fluxdown.core.model.CategoryIndex
 import com.fluxdown.core.model.Queue
 import com.fluxdown.core.model.Segment
 import com.fluxdown.core.model.Task
+import com.fluxdown.core.model.TaskProtocol
 import com.fluxdown.core.model.TaskRuntime
 import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.protocol.AgentSessionDto
+import com.fluxdown.core.protocol.HostCapability
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.Json
+import com.fluxdown.core.protocol.RemoteTaskDto
+import com.fluxdown.core.protocol.RemoteTaskRules
+import com.fluxdown.core.protocol.has
 import com.fluxdown.core.store.HostState
 import com.fluxdown.fluxui.data.FlowSegmentUi
 import com.fluxdown.fluxui.data.FlowStripState
@@ -49,11 +59,44 @@ internal class DeriveCache {
     var sortSig = 0
     var lastReorderMs = 0L
     var lastPos: Map<String, Int> = emptyMap()
+
+    // 远程任务只在分区 / 会话 / 名册 / 分类变化时重建（派生按 10 Hz 运行）
+    var remoteRaw: String? = null
+    var sessionRaw: String? = null
+    var remoteCloud: Any? = null
+    var remote: List<RemoteItem> = emptyList()
 }
 
-private class Group(val key: String, val label: GroupLabel, val items: List<TaskItem>, val extra: String? = null)
+/**
+ * 其他设备上执行的远程任务（同 iOS `DownloadsViewModel.remoteTasks`）：主机声明 `agent.remoteTasks` 能力时，
+ * 取 `agent.remoteTasks` 分区并去掉目标为本机的镜像（本地已有真实任务）。本机 id 取会话设备，其次名册 `isCurrent`。
+ */
+private fun remoteItems(s: HostState, cache: DeriveCache): List<RemoteItem> {
+    if (!s.has(HostCapability.agentRemoteTasks)) return emptyList()
+    val raw = s.sections[HostSection.agentRemoteTasks]
+    val session = s.sections[HostSection.agentSession]
+    if (raw == cache.remoteRaw && session == cache.sessionRaw && s.cloudDevices === cache.remoteCloud) return cache.remote
+    val current = AgentSessionDto.fromJson(Json.parseOrNull(session))?.device?.deviceId?.takeIf { it.isNotEmpty() }
+        ?: s.cloudDevices.firstOrNull { it.isCurrent }?.deviceId
+    cache.remoteRaw = raw
+    cache.sessionRaw = session
+    cache.remoteCloud = s.cloudDevices
+    cache.remote = RemoteTaskRules.visible(RemoteTaskDto.listFromJson(Json.parseOrNull(raw)), current).map { t ->
+        val name = t.fileName.ifEmpty { inferName(UrlEntry(t.url)) }
+        RemoteItem(
+            task = t,
+            name = name,
+            category = cache.categoryByName.getOrPut(name) { cache.index.categoryOf(name) },
+            site = siteOfUrl(t.url),
+            createdSec = t.createdAtSeconds,
+        )
+    }
+    return cache.remote
+}
 
-private class StatusBucket(val key: String, val res: Int, val accepts: (TaskStatus) -> Boolean)
+private class Group(val key: String, val label: GroupLabel, val items: List<DownloadItem>, val extra: String? = null)
+
+private class StatusBucket(val key: String, val res: Int, val bucket: Int)
 
 internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interactionMs: Long): DeriveResult {
     val s = input.state
@@ -65,6 +108,8 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
         cache.index = CategoryIndex(s.categories)
         cache.categoryByName.clear()
         cache.items.clear()
+        cache.remoteRaw = null
+        cache.remoteCloud = null
     }
     val index = cache.index
     val queuesById = HashMap<String, Queue>(s.queues.size * 2)
@@ -78,32 +123,47 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
         for (it in all) ids += it.id
         cache.items.keys.retainAll(ids)
     }
+    val remoteAll = remoteItems(s, cache)
 
-    // 2. 范围（队列 / 搜索）→ 文件夹计数
+    // 2. 范围（队列 / 搜索）→ 文件夹计数。远程任务：队列是本机概念，限定队列时不出现；搜索按名称 / URL
     val query = f.query.trim().lowercase()
-    val scoped = ArrayList<TaskItem>(all.size)
+    val scoped = ArrayList<DownloadItem>(all.size + remoteAll.size)
     for (it in all) {
         if (f.queueId != null && normQueue(it.task.queueId) != f.queueId) continue
         if (query.isNotEmpty() && !matchesQuery(it, query)) continue
         scoped += it
     }
+    if (f.queueId == null) {
+        for (r in remoteAll) {
+            if (query.isNotEmpty() && !r.name.lowercase().contains(query) && !r.task.url.lowercase().contains(query)) continue
+            scoped += r
+        }
+    }
     val folderCounts = IntArray(StatusFolder.entries.size)
-    for (it in scoped) for (fo in StatusFolder.entries) if (fo.accepts(it.task.status)) folderCounts[fo.ordinal]++
+    for (it in scoped) for (fo in StatusFolder.entries) if (fo.accepts(it)) folderCounts[fo.ordinal]++
 
-    // 3. 文件夹内 → 分类计数 → 分类筛选
-    val inFolder = scoped.filter { f.folder.accepts(it.task.status) }
+    // 3. 文件夹内 → 分类计数（含远程）→ 分类 / 「远程任务」筛选
+    val inFolder = scoped.filter { f.folder.accepts(it) }
     val catCounts = HashMap<String, Int>()
-    for (it in inFolder) it.category?.let { c -> catCounts[c.id] = (catCounts[c.id] ?: 0) + 1 }
-    val selectedCat = f.categoryId?.takeIf { id -> index.ordered.any { it.id == id && !it.isAll } }
+    var remoteCount = 0
+    for (it in inFolder) {
+        if (it is RemoteItem) remoteCount++
+        it.category?.let { c -> catCounts[c.id] = (catCounts[c.id] ?: 0) + 1 }
+    }
+    val selectedCat = if (f.remoteOnly) null else f.categoryId?.takeIf { id -> index.ordered.any { it.id == id && !it.isAll } }
     val pills = ArrayList<CategoryPill>()
     for (c in index.ordered) {
         if (c.isAll || !c.visible) continue
         val n = catCounts[c.id] ?: 0
         if (n > 0 || c.id == selectedCat) pills += CategoryPill(c, n)
     }
-    val rows = if (selectedCat == null) inFolder else inFolder.filter { it.category?.id == selectedCat }
+    val rows = when {
+        f.remoteOnly -> inFolder.filter { it is RemoteItem }
+        selectedCat != null -> inFolder.filter { it.category?.id == selectedCat }
+        else -> inFolder
+    }
 
-    // 4. 排序（进度 / 速度键节流重排）
+    // 4. 排序：本地与远程同一个比较器（进度 / 速度键节流重排）
     var retryAt = 0L
     var ordered = rows.sortedWith(comparatorFor(p))
     val dynamic = p.sortKey == SortKey.Progress || p.sortKey == SortKey.Speed
@@ -124,7 +184,7 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
     cache.sortSig = sig
     cache.lastPos = HashMap<String, Int>(ordered.size * 2).also { m -> ordered.forEachIndexed { i, it -> m[it.id] = i } }
 
-    // 5. 分区 / 分组 → 扁平条目
+    // 5. 分区 / 分组 → 扁平条目（远程行与本地行穿插；只有本地行进多选范围）
     val entries = ArrayList<ListEntry>(ordered.size + 8)
     val visible = ArrayList<String>(ordered.size)
     if (p.groupBy == GroupBy.None) {
@@ -135,8 +195,7 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
             entries += GroupHeaderEntry(g.key, g.label, g.items.size, g.extra, closed)
             if (!closed) {
                 g.items.forEachIndexed { i, it ->
-                    entries += RowEntry(it, RowZone.Card, first = i == 0, last = i == g.items.lastIndex)
-                    visible += it.id
+                    entries += rowEntry(it, RowZone.Card, first = i == 0, last = i == g.items.lastIndex, visible)
                 }
             }
         }
@@ -151,11 +210,25 @@ internal fun derive(input: DeriveInput, cache: DeriveCache, nowMs: Long, interac
     val queueFacets = s.queues.sortedBy { it.position }.map { QueueFacet(it, queueCounts[normQueue(it.queueId)] ?: 0) }
 
     return DeriveResult(
-        list = DownloadsList(entries, visible, s.tasks.size, loaded = true),
-        facets = Facets(folderCounts.asList(), pills, queueFacets, ordered.size),
+        list = DownloadsList(entries, visible, s.tasks.size + remoteAll.size, loaded = true),
+        facets = Facets(folderCounts.asList(), pills, queueFacets, ordered.size, remoteCount),
         retryAtMs = retryAt,
     )
 }
+
+private fun StatusFolder.accepts(it: DownloadItem): Boolean = when (it) {
+    is TaskItem -> accepts(it.task.status)
+    is RemoteItem -> accepts(it.task.status)
+}
+
+private fun rowEntry(it: DownloadItem, zone: RowZone, first: Boolean, last: Boolean, visible: MutableList<String>): ListEntry =
+    when (it) {
+        is TaskItem -> {
+            visible += it.id
+            RowEntry(it, zone, first, last)
+        }
+        is RemoteItem -> RemoteRowEntry(it, zone, first, last)
+    }
 
 // ── 行模型 ────────────────────────────────────────────────────────────────
 
@@ -198,8 +271,9 @@ private fun itemFor(t: Task, s: HostState, cache: DeriveCache, queuesById: Map<S
 }
 
 /** 来源站点：originUrl ‖ url 的 host（去 www. 与端口）；BT / eD2K 哨兵无 host → 空串。 */
-internal fun siteOf(t: Task): String {
-    val raw = t.originUrl.ifEmpty { t.url }
+internal fun siteOf(t: Task): String = siteOfUrl(t.originUrl.ifEmpty { t.url })
+
+internal fun siteOfUrl(raw: String): String {
     if (raw.startsWith("magnet:") || raw.startsWith("torrent-file://") || raw.startsWith("ed2k://")) return ""
     return raw.substringAfter("://", "")
         .substringBefore('/').substringBefore('?').substringAfterLast('@').substringBefore(':')
@@ -253,85 +327,65 @@ private fun Segment.toUi(live: Boolean): FlowSegmentUi {
     )
 }
 
-// ── 排序 ──────────────────────────────────────────────────────────────────
+// ── 排序（本地与远程同一个比较器，键见 [DownloadItem]）──────────────────────
 
-/** 智能排序档（§3.9）：优先下载 → 活跃 → 排队 → 失败 → 暂停 → 完成。 */
-private fun tier(it: TaskItem): Int {
-    val st = it.task.status
-    return when {
-        it.boosted && (st == TaskStatus.Downloading || st == TaskStatus.Pending) -> 0
-        st == TaskStatus.Downloading || st == TaskStatus.Preparing -> 1
-        st == TaskStatus.Pending -> 2
-        st == TaskStatus.Failed -> 3
-        st == TaskStatus.Paused -> 4
-        else -> 5
-    }
-}
-
-private fun comparatorFor(p: ViewPrefs): Comparator<TaskItem> {
-    val byId = Comparator<TaskItem> { a, b -> a.id.compareTo(b.id) }
+private fun comparatorFor(p: ViewPrefs): Comparator<DownloadItem> {
+    val byId = Comparator<DownloadItem> { a, b -> a.id.compareTo(b.id) }
     if (p.sortKey == SortKey.Smart) {
-        return Comparator<TaskItem> { a, b ->
-            val ta = tier(a)
-            val tb = tier(b)
+        return Comparator<DownloadItem> { a, b ->
+            val ta = a.sortTier
+            val tb = b.sortTier
             if (ta != tb) {
                 ta - tb
             } else {
-                val c = a.task.createdAt.compareTo(b.task.createdAt)
+                val c = a.createdSec.compareTo(b.createdSec)
                 if (ta <= 2) c else -c
             }
         }.then(byId)
     }
-    val key: Comparator<TaskItem> = when (p.sortKey) {
-        SortKey.Created -> Comparator<TaskItem> { a, b -> a.task.createdAt.compareTo(b.task.createdAt) }
-        SortKey.Name -> Comparator<TaskItem> { a, b -> String.CASE_INSENSITIVE_ORDER.compare(a.task.fileName, b.task.fileName) }
-        SortKey.Size -> Comparator<TaskItem> { a, b -> a.task.totalBytes.compareTo(b.task.totalBytes) }
-        SortKey.Progress -> Comparator<TaskItem> { a, b -> (a.task.progress ?: -1f).compareTo(b.task.progress ?: -1f) }
-        SortKey.Speed -> Comparator<TaskItem> { a, b -> a.speedDown.compareTo(b.speedDown) }
-        else -> Comparator<TaskItem> { a, b -> tier(a) - tier(b) }
+    val key: Comparator<DownloadItem> = when (p.sortKey) {
+        SortKey.Created -> Comparator { a, b -> a.createdSec.compareTo(b.createdSec) }
+        SortKey.Name -> Comparator { a, b -> String.CASE_INSENSITIVE_ORDER.compare(a.sortName, b.sortName) }
+        SortKey.Size -> Comparator { a, b -> a.sizeBytes.compareTo(b.sizeBytes) }
+        SortKey.Progress -> Comparator { a, b -> (a.sortProgress ?: -1f).compareTo(b.sortProgress ?: -1f) }
+        SortKey.Speed -> Comparator { a, b -> a.sortSpeed.compareTo(b.sortSpeed) }
+        else -> Comparator { a, b -> a.sortTier - b.sortTier }
     }
     val directed = if (p.ascending) key else key.reversed()
     return directed
-        .then(Comparator<TaskItem> { a, b -> b.task.createdAt.compareTo(a.task.createdAt) })
+        .then(Comparator { a, b -> b.createdSec.compareTo(a.createdSec) })
         .then(byId)
 }
 
 // ── 分区 / 分组 ───────────────────────────────────────────────────────────
 
-private fun isInflight(st: TaskStatus) = st == TaskStatus.Pending || st == TaskStatus.Downloading || st == TaskStatus.Preparing
-
-private fun sectioned(rows: List<TaskItem>, folder: StatusFolder, out: MutableList<ListEntry>, visible: MutableList<String>) {
-    val inflight = rows.filter { isInflight(it.task.status) }
-    val history = rows.filter { !isInflight(it.task.status) }
+private fun sectioned(rows: List<DownloadItem>, folder: StatusFolder, out: MutableList<ListEntry>, visible: MutableList<String>) {
+    val inflight = rows.filter { it.inflight }
+    val history = rows.filter { !it.inflight }
     if (inflight.isNotEmpty()) {
-        out += FlowHeaderEntry(inflight.size, inflight.sumOf { it.speedDown })
-        inflight.forEachIndexed { i, it ->
-            out += RowEntry(it, RowZone.Flow, first = false, last = i == inflight.lastIndex)
-            visible += it.id
-        }
+        // 汇总速度只算本机任务：远程行的速度是另一台设备的吞吐
+        out += FlowHeaderEntry(inflight.size, inflight.sumOf { (it as? TaskItem)?.speedDown ?: 0L })
+        inflight.forEachIndexed { i, it -> out += rowEntry(it, RowZone.Flow, first = false, last = i == inflight.lastIndex, visible) }
     }
     if (history.isNotEmpty()) {
         val named = folder.takeIf { it == StatusFolder.Completed || it == StatusFolder.Failed || it == StatusFolder.Paused }
         out += HistoryHeaderEntry(history.size, named)
-        history.forEachIndexed { i, it ->
-            out += RowEntry(it, RowZone.History, first = i == 0, last = i == history.lastIndex)
-            visible += it.id
-        }
+        history.forEachIndexed { i, it -> out += rowEntry(it, RowZone.History, first = i == 0, last = i == history.lastIndex, visible) }
     }
 }
 
-private fun groupsFor(rows: List<TaskItem>, by: GroupBy, s: HostState, index: CategoryIndex, nowMs: Long): List<Group> = when (by) {
+private fun groupsFor(rows: List<DownloadItem>, by: GroupBy, s: HostState, index: CategoryIndex, nowMs: Long): List<Group> = when (by) {
     GroupBy.None -> emptyList()
     GroupBy.Status -> {
         val order = listOf(
-            StatusBucket("status:1", R.string.statusDownloading) { it == TaskStatus.Downloading },
-            StatusBucket("status:0", R.string.statusPending) { it == TaskStatus.Pending || it == TaskStatus.Preparing },
-            StatusBucket("status:4", R.string.statusError) { it == TaskStatus.Failed },
-            StatusBucket("status:2", R.string.statusPaused) { it == TaskStatus.Paused },
-            StatusBucket("status:3", R.string.statusCompleted) { it == TaskStatus.Completed || it == TaskStatus.Unknown },
+            StatusBucket("status:1", R.string.statusDownloading, 0),
+            StatusBucket("status:0", R.string.statusPending, 1),
+            StatusBucket("status:4", R.string.statusError, 2),
+            StatusBucket("status:2", R.string.statusPaused, 3),
+            StatusBucket("status:3", R.string.statusCompleted, 4),
         )
         order.mapNotNull { b ->
-            val items = rows.filter { b.accepts(it.task.status) }
+            val items = rows.filter { it.statusBucket == b.bucket }
             if (items.isEmpty()) null else Group(b.key, GroupLabel(res = b.res), items)
         }
     }
@@ -345,9 +399,9 @@ private fun groupsFor(rows: List<TaskItem>, by: GroupBy, s: HostState, index: Ca
             today.minusDays(30).atStartOfDay(zone).toEpochSecond(),
         )
         val labels = intArrayOf(R.string.today, R.string.yesterday, R.string.thisWeek, R.string.thisMonth, R.string.older)
-        val buckets = Array(5) { ArrayList<TaskItem>() }
+        val buckets = Array(5) { ArrayList<DownloadItem>() }
         for (it in rows) {
-            val sec = it.task.createdAt
+            val sec = it.createdSec
             val b = when {
                 sec >= bounds[0] -> 0
                 sec >= bounds[1] -> 1
@@ -373,7 +427,8 @@ private fun groupsFor(rows: List<TaskItem>, by: GroupBy, s: HostState, index: Ca
         out
     }
     GroupBy.Queue -> {
-        val byQueue = rows.groupBy { normQueue(it.task.queueId) }
+        // 队列是本机概念：远程行单独一组放最后
+        val byQueue = rows.filterIsInstance<TaskItem>().groupBy { normQueue(it.task.queueId) }
         val out = ArrayList<Group>()
         val used = HashSet<String>()
         for (q in s.queues.sortedBy { it.position }) {
@@ -383,6 +438,8 @@ private fun groupsFor(rows: List<TaskItem>, by: GroupBy, s: HostState, index: Ca
             out += Group("queue:$k", GroupLabel(queue = q), items)
         }
         for ((k, items) in byQueue) if (k !in used) out += Group("queue:$k", GroupLabel(text = k), items)
+        val remote = rows.filter { it is RemoteItem }
+        if (remote.isNotEmpty()) out += Group("queue:remote", GroupLabel(res = R.string.remoteTasksGroup), remote)
         out
     }
     GroupBy.Site -> {
@@ -390,11 +447,17 @@ private fun groupsFor(rows: List<TaskItem>, by: GroupBy, s: HostState, index: Ca
         val named = bySite.filterKeys { it.isNotEmpty() }.toSortedMap(String.CASE_INSENSITIVE_ORDER)
         val out = ArrayList<Group>()
         for ((site, items) in named) out += Group("site:$site", GroupLabel(text = site), items)
-        bySite[""]?.let { out += Group("site:", GroupLabel(res = R.string.viewSiteBt), it) }
+        bySite[""]?.let { hostless ->
+            // 无 host：磁力 / 种子归「BT · 磁力」，其余（eD2K 等）归「—」（同 iOS）
+            val (bt, other) = hostless.partition { it.isBt() }
+            if (bt.isNotEmpty()) out += Group("site:", GroupLabel(res = R.string.viewSiteBt), bt)
+            if (other.isNotEmpty()) out += Group("site:-", GroupLabel(text = "—"), other)
+        }
         out
     }
     GroupBy.Group -> {
-        val byGroup = rows.groupBy { it.task.groupId }
+        // 任务组是本机概念：远程行归「未分组」
+        val byGroup = rows.filterIsInstance<TaskItem>().groupBy { it.task.groupId }
         val out = ArrayList<Group>()
         for (g in s.groups.sortedBy { it.name.lowercase() }) {
             val items = byGroup[g.groupId] ?: continue
@@ -402,8 +465,13 @@ private fun groupsFor(rows: List<TaskItem>, by: GroupBy, s: HostState, index: Ca
             out += Group("group:${g.groupId}", GroupLabel(text = g.name), items, extra = "$done/${items.size}")
         }
         val known = s.groups.mapTo(HashSet()) { it.groupId }
-        val loose = rows.filter { it.task.groupId.isEmpty() || it.task.groupId !in known }
+        val loose = rows.filter { it !is TaskItem || it.task.groupId.isEmpty() || it.task.groupId !in known }
         if (loose.isNotEmpty()) out += Group("group:none", GroupLabel(res = R.string.ungroupedTasks), loose)
         out
     }
+}
+
+private fun DownloadItem.isBt(): Boolean = when (this) {
+    is TaskItem -> task.protocol == TaskProtocol.Bt
+    is RemoteItem -> task.url.startsWith("magnet:") || task.url.startsWith("torrent-file://")
 }

@@ -233,12 +233,56 @@ pub struct VariantOptionDto {
     pub total_bytes: i64,
 }
 
+/// `FileExistsAction`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum FileExistsActionDto {
+    Rename,
+    Overwrite,
+    Skip,
+}
+
+impl From<proto::FileExistsAction> for FileExistsActionDto {
+    fn from(action: proto::FileExistsAction) -> Self {
+        match action {
+            proto::FileExistsAction::Rename => Self::Rename,
+            proto::FileExistsAction::Overwrite => Self::Overwrite,
+            proto::FileExistsAction::Skip => Self::Skip,
+        }
+    }
+}
+
+impl From<FileExistsActionDto> for proto::FileExistsAction {
+    fn from(action: FileExistsActionDto) -> Self {
+        match action {
+            FileExistsActionDto::Rename => Self::Rename,
+            FileExistsActionDto::Overwrite => Self::Overwrite,
+            FileExistsActionDto::Skip => Self::Skip,
+        }
+    }
+}
+
 /// `SelectionKind`。
 #[derive(Clone, Debug, PartialEq, uniffi::Enum)]
 pub enum SelectionKindDto {
-    Hls { options: Vec<HlsOptionDto> },
-    Bt { files: Vec<BtFileDto> },
-    Variant { options: Vec<VariantOptionDto> },
+    Hls {
+        options: Vec<HlsOptionDto>,
+    },
+    Bt {
+        files: Vec<BtFileDto>,
+    },
+    Variant {
+        options: Vec<VariantOptionDto>,
+    },
+    /// 保存目录里已有同名文件；字段由主机算好。
+    FileExists {
+        file_name: String,
+        save_dir: String,
+        existing_size: Option<u64>,
+        existing_modified_unix_ms: Option<i64>,
+        incoming_size: Option<i64>,
+        rename_preview: String,
+        actions: Vec<FileExistsActionDto>,
+    },
 }
 
 /// `SelectionOutcome`。
@@ -247,6 +291,7 @@ pub enum SelectionOutcomeDto {
     Hls { index: i32 },
     Bt { indices: Vec<i32> },
     Variant { index: i32 },
+    FileExists { action: FileExistsActionDto },
     Cancelled,
 }
 
@@ -288,6 +333,23 @@ impl From<&proto::SelectionKind> for SelectionKindDto {
                     })
                     .collect(),
             },
+            proto::SelectionKind::FileExists {
+                file_name,
+                save_dir,
+                existing_size,
+                existing_modified_unix_ms,
+                incoming_size,
+                rename_preview,
+                actions,
+            } => Self::FileExists {
+                file_name: file_name.clone(),
+                save_dir: save_dir.clone(),
+                existing_size: *existing_size,
+                existing_modified_unix_ms: *existing_modified_unix_ms,
+                incoming_size: *incoming_size,
+                rename_preview: rename_preview.clone(),
+                actions: actions.iter().copied().map(Into::into).collect(),
+            },
         }
     }
 }
@@ -300,6 +362,9 @@ impl From<&proto::SelectionOutcome> for SelectionOutcomeDto {
                 indices: indices.clone(),
             },
             proto::SelectionOutcome::Variant { index } => Self::Variant { index: *index },
+            proto::SelectionOutcome::FileExists { action } => Self::FileExists {
+                action: (*action).into(),
+            },
             proto::SelectionOutcome::Cancelled => Self::Cancelled,
         }
     }
@@ -311,6 +376,9 @@ impl From<SelectionOutcomeDto> for proto::SelectionOutcome {
             SelectionOutcomeDto::Hls { index } => Self::Hls { index },
             SelectionOutcomeDto::Bt { indices } => Self::Bt { indices },
             SelectionOutcomeDto::Variant { index } => Self::Variant { index },
+            SelectionOutcomeDto::FileExists { action } => Self::FileExists {
+                action: action.into(),
+            },
             SelectionOutcomeDto::Cancelled => Self::Cancelled,
         }
     }
@@ -390,6 +458,16 @@ impl From<&proto::RssSourceDto> for RssSourceDto {
     }
 }
 
+/// 设备自报的路径风格 → wire 名（`windows` / `posix`）；未上报或本端不认识为 `None`，
+/// 由客户端按 `platform` 推断（同 `CloudDevice::effective_path_style`）。
+fn path_style_wire(style: Option<proto::PathStyle>) -> Option<String> {
+    match style? {
+        proto::PathStyle::Windows => Some("windows".to_owned()),
+        proto::PathStyle::Posix => Some("posix".to_owned()),
+        proto::PathStyle::Unknown => None,
+    }
+}
+
 /// 云端已信任设备（`CloudDevice` 子集）。
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct CloudDeviceDto {
@@ -399,6 +477,10 @@ pub struct CloudDeviceDto {
     pub is_online: bool,
     pub is_current: bool,
     pub app_version: Option<String>,
+    /// 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。
+    pub default_save_dir: Option<String>,
+    /// 见 [`path_style_wire`]。
+    pub path_style: Option<String>,
 }
 
 impl From<&proto::CloudDevice> for CloudDeviceDto {
@@ -410,6 +492,8 @@ impl From<&proto::CloudDevice> for CloudDeviceDto {
             is_online: device.is_online,
             is_current: device.is_current,
             app_version: device.app_version.clone(),
+            default_save_dir: device.default_save_dir.clone(),
+            path_style: path_style_wire(device.path_style),
         }
     }
 }
@@ -421,6 +505,10 @@ pub struct LinkDeviceDto {
     pub name: String,
     pub platform: Option<String>,
     pub online: bool,
+    /// 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。
+    pub default_save_dir: Option<String>,
+    /// 见 [`path_style_wire`]。
+    pub path_style: Option<String>,
 }
 
 impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
@@ -430,6 +518,8 @@ impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
             name: device.name.clone(),
             platform: device.platform.clone(),
             online: device.online,
+            default_save_dir: device.default_save_dir.clone(),
+            path_style: path_style_wire(device.path_style),
         }
     }
 }

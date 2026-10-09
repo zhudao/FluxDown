@@ -57,8 +57,14 @@ import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import com.fluxdown.fluxui.theme.fluxPressable
 
+/** 字段框最小高度（单行输入 / 选择器共用）。 */
+internal val FieldMinHeight = 44.dp
+
+/** 字段框内文字的上下留白：15sp 正文 × 1.35 行高 ≈ 20dp，加上下 12dp 恰为 [FieldMinHeight]。 */
+internal val FieldTextPadding = 12.dp
+
 /**
- * 字段外框（FluxField / FluxSelect 共用）：标签行（micro +6% + 计数）→ 框（min 52 · r16 · glass2 + hairline + 高光）→ 提示行。
+ * 字段外框（FluxField / FluxSelect 共用）：标签行（micro +6% + 计数）→ 框（min 44 · r12 · glass2 + hairline + 高光）→ 提示行。
  * 聚焦：底 → glass3、边框 accent@80%、1dp 外环 accent@70%（键盘焦点另加 §10.6 实色环）；错误：coral 边框 + 外环。
  * [boxModifier] 作用于框本身（可点击 / 点按聚焦），位于背景绘制之前，所以按压缩放会连背景一起缩放。
  */
@@ -78,7 +84,7 @@ internal fun FieldFrame(
     val c = FluxTheme.colors
     val t = FluxTheme.type
     val motion = FluxTheme.motion
-    val shape = FluxTheme.shapes.control
+    val shape = FluxTheme.shapes.tile
     var focused by remember { mutableStateOf(false) }
     val focusAnim = animateFloatAsState(if (focused && enabled) 1f else 0f, motion.of(motion.fluid), label = "field-focus")
     val hasError = error != null
@@ -88,7 +94,7 @@ internal fun FieldFrame(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 4.dp, end = 4.dp, bottom = 7.dp),
+                    .padding(start = 4.dp, end = 4.dp, bottom = 6.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.Bottom,
             ) {
@@ -134,8 +140,8 @@ internal fun FieldFrame(
                             }
                         }
                     }
-                    .heightIn(min = 52.dp)
-                    .padding(start = 16.dp, end = if (trailing != null) 2.dp else 16.dp),
+                    .heightIn(min = FieldMinHeight)
+                    .padding(start = 14.dp, end = if (trailing != null) 4.dp else 14.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -153,7 +159,7 @@ internal fun FieldFrame(
                     warning != null -> c.amberText
                     else -> c.inkFaint
                 },
-                modifier = Modifier.padding(start = 6.dp, end = 6.dp, top = 6.dp),
+                modifier = Modifier.padding(start = 6.dp, end = 6.dp, top = 5.dp),
             )
         }
     }
@@ -161,7 +167,7 @@ internal fun FieldFrame(
 
 /**
  * 输入框（§12.21）：基于 `BasicTextField`，聚焦 accent 环，光标 `accentHi`，占位符 `inkFaint`。
- * 标签 / 输入 / 提示都可换行，输入框只设 `min 52dp`。[mono] = 等宽 13.5（URL / 路径 / 哈希）。
+ * 标签 / 输入 / 提示都可换行，输入框只设 `min 44dp`。[mono] = 等宽 13.5（URL / 路径 / 哈希）。
  * [error] 非空时进入错误态并替换提示；[warning] 为琥珀色非阻断提示（如“已调整为 n”）。
  * [rows] = 多行时的最少行数（最多 8 行后内部滚动）。[trailing] 建议放 [FluxFieldAction]。
  */
@@ -242,7 +248,7 @@ fun FluxField(
             visualTransformation = visualTransformation,
             cursorBrush = cursor,
             decorationBox = { inner ->
-                Box(Modifier.padding(vertical = 14.dp)) {
+                Box(Modifier.padding(vertical = FieldTextPadding)) {
                     if (value.isEmpty() && placeholder != null) {
                         FluxText(placeholder, style = inputStyle, color = c.inkFaint, maxLines = if (singleLine) 1 else rows)
                     }
@@ -254,7 +260,7 @@ fun FluxField(
     }
 }
 
-/** 字段尾部的 36dp 圆形小按钮（清除 / 显隐密码 / 粘贴），命中区 48dp，按压 `scale .9`。 */
+/** 字段尾部的 32dp 圆形小按钮（清除 / 显隐密码 / 粘贴），命中区 40dp（不撑高 44dp 字段框），按压 `scale .9`。 */
 @Composable
 fun FluxFieldAction(
     icon: ImageVector,
@@ -265,12 +271,12 @@ fun FluxFieldAction(
     val c = FluxTheme.colors
     Box(
         modifier
-            .size(48.dp)
+            .size(40.dp)
             .fluxPressable(onClick = onClick, scale = 0.9f, role = Role.Button)
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
             FluxIcon(icon, null, size = 18.dp, tint = c.inkMuted)
         }
     }

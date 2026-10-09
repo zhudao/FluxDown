@@ -14,12 +14,20 @@ object FluxBridge {
     // 首次访问才加载 libfluxdown_mobile.so（JNA）并建 tokio 运行时：下面的入口都切到 IO，避免卡主线程。
     private val core: FluxCore by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { FluxCore() }
 
-    /** 启动（幂等）进程内 daemon + 内嵌 agent 并返回会话。[dataDir] = 引擎数据目录，[saveDir] = 默认下载目录。 */
-    suspend fun openLocal(dataDir: String, saveDir: String, platform: String): HostPort = withContext(Dispatchers.IO) {
-        guarded {
-            RustHostSession(core.openLocal(LocalHostConfig(dataDir = dataDir, saveDir = saveDir, platform = platform)))
+    /**
+     * 启动（幂等）进程内 daemon + 内嵌 agent 并返回会话。[dataDir] = 引擎数据目录，[saveDir] = 默认下载目录，
+     * [deviceName] = 系统设备名（本机设备名缺失或仍是占位名时用作云端默认名；`null` 回落主机名探测）。
+     */
+    suspend fun openLocal(dataDir: String, saveDir: String, platform: String, deviceName: String?): HostPort =
+        withContext(Dispatchers.IO) {
+            guarded {
+                RustHostSession(
+                    core.openLocal(
+                        LocalHostConfig(dataDir = dataDir, saveDir = saveDir, platform = platform, deviceName = deviceName),
+                    ),
+                )
+            }
         }
-    }
 
     /** 连接远端 `fluxdown-agent --server`（完成连接 + 鉴权 + 握手 + 首个快照才返回）；[endpoint] 接受 `http(s)://` / `ws(s)://`。 */
     suspend fun openRemote(endpoint: String, accessKey: String): HostPort = withContext(Dispatchers.IO) {

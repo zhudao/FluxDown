@@ -216,7 +216,14 @@ pub const AGENT_DIAGNOSTICS_RUN: &str = "agent.diagnostics.run";
 pub const AGENT_DIAGNOSTICS_REPAIR: &str = "agent.diagnostics.repair";
 pub const AGENT_DIAGNOSTICS_LOG_PATHS: &str = "agent.diagnostics.logPaths";
 pub const AGENT_DIAGNOSTICS_EXPORT_LOGS: &str = "agent.diagnostics.exportLogs";
+/// 检查渠道最新版本：`{channel?}` → `UpdateStatusDto`（同时经 `UpdateChanged` 推送）。
 pub const AGENT_UPDATE_CHECK: &str = "agent.update.check";
+/// 后台下载并校验更新包（幂等）；不可一键更新时拒绝（`Unsupported`）。
+pub const AGENT_UPDATE_DOWNLOAD: &str = "agent.update.download";
+/// 一键「更新并重启」：包未就绪时先下载，就绪后替换程序并重启服务；返回 `UpdateStatusDto`。
+pub const AGENT_UPDATE_INSTALL: &str = "agent.update.install";
+/// 取消进行中的下载与待安装请求，返回 `UpdateStatusDto`。
+pub const AGENT_UPDATE_CANCEL: &str = "agent.update.cancel";
 /// 完成后关机：`{delaySecs}`；无活跃任务时拒绝（`InvalidArgument`）。
 pub const AGENT_POWER_ARM: &str = "agent.power.arm";
 pub const AGENT_POWER_DISARM: &str = "agent.power.disarm";
@@ -420,6 +427,9 @@ pub const ALL_METHODS: &[&str] = &[
     AGENT_DIAGNOSTICS_LOG_PATHS,
     AGENT_DIAGNOSTICS_EXPORT_LOGS,
     AGENT_UPDATE_CHECK,
+    AGENT_UPDATE_DOWNLOAD,
+    AGENT_UPDATE_INSTALL,
+    AGENT_UPDATE_CANCEL,
     AGENT_POWER_ARM,
     AGENT_POWER_DISARM,
     SERVICE_EVENT,

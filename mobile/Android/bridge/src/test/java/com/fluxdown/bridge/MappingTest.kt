@@ -3,7 +3,9 @@ package com.fluxdown.bridge
 import com.fluxdown.core.host.HostErrorCode
 import com.fluxdown.core.host.HostEvent
 import com.fluxdown.core.host.HostSignal
+import com.fluxdown.core.model.FileExistsAction
 import com.fluxdown.core.model.SeedingStatus
+import com.fluxdown.core.model.SelectionKind
 import com.fluxdown.core.model.SelectionOutcome
 import com.fluxdown.core.model.TaskStatus
 import org.junit.Assert.assertEquals
@@ -94,9 +96,37 @@ class MappingTest {
             SelectionOutcome.Hls(2),
             SelectionOutcome.Bt(listOf(0, 3)),
             SelectionOutcome.Variant(1),
+            SelectionOutcome.FileExists(FileExistsAction.Rename),
+            SelectionOutcome.FileExists(FileExistsAction.Overwrite),
+            SelectionOutcome.FileExists(FileExistsAction.Skip),
             SelectionOutcome.Cancelled,
         )
         for (outcome in outcomes) assertEquals(outcome, outcome.toDto().toCore())
+    }
+
+    @Test
+    fun fileExistsKindKeepsEveryField() {
+        val dto = SelectionKindDto.FileExists(
+            fileName = "a.bin",
+            saveDir = "/data/dl",
+            existingSize = 1_048_576uL,
+            existingModifiedUnixMs = 1_700_000_000_000L,
+            incomingSize = null,
+            renamePreview = "a (1).bin",
+            actions = listOf(FileExistsActionDto.RENAME, FileExistsActionDto.OVERWRITE),
+        )
+        assertEquals(
+            SelectionKind.FileExists(
+                fileName = "a.bin",
+                saveDir = "/data/dl",
+                existingSize = 1_048_576L,
+                existingModifiedUnixMs = 1_700_000_000_000L,
+                incomingSize = null,
+                renamePreview = "a (1).bin",
+                actions = listOf(FileExistsAction.Rename, FileExistsAction.Overwrite),
+            ),
+            dto.toCore(),
+        )
     }
 
     private fun task(status: Int, seeding: Int) = TaskDto(

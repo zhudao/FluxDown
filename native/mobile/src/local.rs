@@ -40,6 +40,9 @@ pub struct LocalHostConfig {
     pub save_dir: String,
     /// 设备平台名：`android` / `ios`。
     pub platform: String,
+    /// 系统设备名（Android「设备名称」或厂商 + 机型、iOS `UIDevice.name`），用于云端设备列表里的
+    /// 默认名；`None` / 空白时回落主机名探测。只在本机设备名缺失或仍是占位名时生效，用户改过的不动。
+    pub device_name: Option<String>,
 }
 
 type DaemonTask = JoinHandle<Result<(), String>>;
@@ -62,6 +65,10 @@ impl LocalHost {
             return Err(FluxError::invalid_argument("data_dir is empty"));
         }
         let data_dir = PathBuf::from(data_dir);
+        let agent_data_dir = data_dir.join("agent");
+        // 先于 daemon 装订阅者：同进程的 daemon / agent 事件都落到 `<agent>/logs/agent.log`
+        // （诊断「日志目录」检查与日志导出读这里）；移动端没有可读的 stderr。
+        fluxdown_agent::logging::init_embedded(&agent_data_dir, &data_dir);
         let host_cancel = CancellationToken::new();
 
         let (ready_tx, ready_rx) = oneshot::channel::<DaemonReady>();
@@ -97,11 +104,12 @@ impl LocalHost {
 
         let agent = match start_embedded(
             EmbeddedConfig {
-                agent_data_dir: data_dir.join("agent"),
+                agent_data_dir,
                 engine_data_dir: data_dir,
                 daemon_url: format!("ws://{}/rpc", ready.addr),
                 daemon_token: ready.token,
                 client_platform: config.platform.clone(),
+                client_device_name: config.device_name.clone(),
                 enable_link: false,
             },
             host_cancel.child_token(),

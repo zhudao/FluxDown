@@ -33,6 +33,20 @@ nonisolated enum RssEditorTarget: Identifiable, Hashable {
     }
 }
 
+/// 订阅删除确认的触发位置：确认 alert 由触发视图挂载，且同一订阅可同时出现在列表行与条目页菜单（iPad 两栏）。
+nonisolated enum RssDeleteOrigin {
+    /// R1 订阅列表行（滑动 / 上下文菜单）。
+    case feedList
+    /// R2 条目页工具栏「更多」菜单。
+    case itemsMenu
+}
+
+/// 待确认的订阅删除。
+nonisolated struct RssDeleteRequest {
+    let source: RssSource
+    let origin: RssDeleteOrigin
+}
+
 /// 订阅动作的唯一分发点（R1 行 / 菜单 / R2 工具栏共用）：只读拦截 + Toast + 抓取中状态。
 @MainActor
 @Observable
@@ -44,8 +58,8 @@ final class RssModel {
     /// 正在标记已读的订阅。
     private(set) var markingRead: Set<String> = []
     var editor: RssEditorTarget?
-    /// 待确认删除的订阅（`confirmationDialog`）。
-    var pendingDelete: RssSource?
+    /// 待确认删除的订阅（alert，由 `origin` 对应的触发视图挂载，见 `rssDeleteConfirmation`）。
+    var pendingDelete: RssDeleteRequest?
     var failingOnly = false
     var unreadOnly = false
     var sort: RssFeedSort = .manual
@@ -219,9 +233,9 @@ final class RssModel {
         }
     }
 
-    func requestDelete(_ source: RssSource) {
+    func requestDelete(_ source: RssSource, from origin: RssDeleteOrigin) {
         guard actions.guardWritable() else { return }
-        pendingDelete = source
+        pendingDelete = RssDeleteRequest(source: source, origin: origin)
     }
 
     func confirmDelete(_ source: RssSource) {

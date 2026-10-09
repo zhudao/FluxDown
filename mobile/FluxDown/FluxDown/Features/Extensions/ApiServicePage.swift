@@ -187,7 +187,6 @@ private struct ApiServiceContent: View {
     @Environment(AppContainer.self) private var container
     @State private var model: ApiServiceModel
     @State private var gateway = SectionMemo<GatewayStatusDto>(empty: GatewayStatusDto())
-    @State private var confirmRegenerate = false
     @State private var confirmForget = false
 
     init(container: AppContainer) {
@@ -207,29 +206,23 @@ private struct ApiServiceContent: View {
         SettingsPage(title: L("settingsCatApiService"), showsReadOnlyBanner: true) {
             hostSection
             addressSection(status)
-            TokenSection(model: model, configured: status.userTokenConfigured, readOnly: readOnly, confirmRegenerate: $confirmRegenerate)
+            TokenSection(model: model, configured: status.userTokenConfigured, readOnly: readOnly)
             featuresSection(status, readOnly: readOnly)
             Section {
                 Button(role: .destructive) { confirmForget = true } label: {
                     Label(L("mobileApiForgetHost"), systemImage: "rectangle.portrait.and.arrow.right")
+                }
+                .alert(L("mobileApiForgetHost"), isPresented: $confirmForget) {
+                    Button(L("mobileApiForgetHost"), role: .destructive) { Task { await model.forgetHost() } }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("mobileApiForgetHostDesc"))
                 }
             } footer: {
                 Text(L("mobileApiForgetHostDesc"))
             }
         }
         .onChange(of: status) { _, new in model.reconcile(new) }
-        .confirmationDialog(L("apiServiceTokenGenerate"), isPresented: $confirmRegenerate, titleVisibility: .visible) {
-            Button(L("apiServiceTokenGenerate")) { Task { await model.regenerate() } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: {
-            Text(L("apiServiceTokenDesc"))
-        }
-        .confirmationDialog(L("mobileApiForgetHost"), isPresented: $confirmForget, titleVisibility: .visible) {
-            Button(L("mobileApiForgetHost"), role: .destructive) { Task { await model.forgetHost() } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: {
-            Text(L("mobileApiForgetHostDesc"))
-        }
     }
 
     // MARK: 分组
@@ -424,9 +417,8 @@ private struct TokenSection: View {
     let model: ApiServiceModel
     let configured: Bool
     let readOnly: Bool
-    @Binding var confirmRegenerate: Bool
-
     @Environment(AppContainer.self) private var container
+    @State private var confirmRegenerate = false
     @State private var draft = ""
     @State private var issue: String?
     @State private var copied = false
@@ -495,6 +487,12 @@ private struct TokenSection: View {
                 Label(L("apiServiceTokenGenerate"), systemImage: FluxSymbol.syncing)
             }
             .disabled(readOnly || busy)
+            .alert(L("apiServiceTokenGenerate"), isPresented: $confirmRegenerate) {
+                Button(L("apiServiceTokenGenerate")) { Task { await model.regenerate() } }
+                Button(L("cancel"), role: .cancel) {}
+            } message: {
+                Text(L("apiServiceTokenDesc"))
+            }
         } header: {
             Text(L("apiServiceToken"))
         } footer: {

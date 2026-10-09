@@ -23,6 +23,7 @@ use crate::{agent_client::AgentClient, app::Desktop};
 mod bounds;
 pub use bounds::RememberedWindow;
 
+pub mod file_conflict;
 pub mod group_detail;
 pub mod main;
 pub mod new_download;
@@ -40,6 +41,8 @@ pub enum WindowKey {
     NewDownload,
     QueueManager,
     Selection(String),
+    /// 所有待确认的「文件已存在」请求聚合在这一个窗口里。
+    FileConflicts,
     TaskDetail(String),
     GroupDetail(String),
     /// 独立下载进度 / 完成窗口（每任务一个）。

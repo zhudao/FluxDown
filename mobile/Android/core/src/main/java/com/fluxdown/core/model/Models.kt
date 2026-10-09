@@ -155,7 +155,24 @@ sealed interface SelectionKind {
     data class Hls(val options: List<HlsOption>) : SelectionKind
     data class Bt(val files: List<BtFile>) : SelectionKind
     data class Variant(val options: List<VariantOption>) : SelectionKind
+
+    /** 保存目录里已有同名普通文件（`file_exists_behavior = ask`）；字段由主机算好。 */
+    data class FileExists(
+        val fileName: String,
+        val saveDir: String,
+        /** null = 无法读取已有文件的大小。 */
+        val existingSize: Long?,
+        val existingModifiedUnixMs: Long?,
+        /** null = 新下载的总大小未知。 */
+        val incomingSize: Long?,
+        /** 选「重命名」时实际会用的文件名。 */
+        val renamePreview: String,
+        /** 本次允许的动作（协议不支持跳过时不含 [FileExistsAction.Skip]）。 */
+        val actions: List<FileExistsAction>,
+    ) : SelectionKind
 }
+
+enum class FileExistsAction { Rename, Overwrite, Skip }
 
 data class HlsOption(val index: Int, val bandwidth: Long, val width: Long, val height: Long)
 data class BtFile(val index: Int, val path: String, val size: Long)
@@ -173,6 +190,7 @@ sealed interface SelectionOutcome {
     data class Hls(val index: Int) : SelectionOutcome
     data class Bt(val indices: List<Int>) : SelectionOutcome
     data class Variant(val index: Int) : SelectionOutcome
+    data class FileExists(val action: FileExistsAction) : SelectionOutcome
     data object Cancelled : SelectionOutcome
 }
 
@@ -222,6 +240,10 @@ data class CloudDevice(
     val isOnline: Boolean,
     val isCurrent: Boolean,
     val appVersion: String?,
+    /** 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。 */
+    val defaultSaveDir: String? = null,
+    /** 设备自报的路径风格 wire 名（`windows` / `posix`）；null = 未上报，按 [platform] 推断。 */
+    val pathStyle: String? = null,
 )
 
 /** 局域网已配对设备（`LinkDeviceInfo` 子集）。 */
@@ -230,4 +252,8 @@ data class LinkDevice(
     val name: String,
     val platform: String?,
     val online: Boolean,
+    /** 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。 */
+    val defaultSaveDir: String? = null,
+    /** 设备自报的路径风格 wire 名（`windows` / `posix`）；null = 未上报，按 [platform] 推断。 */
+    val pathStyle: String? = null,
 )

@@ -50,6 +50,8 @@ nonisolated enum SheetRoute: Identifiable, Hashable {
     case moveToQueue([String])
     /// X1–X3：引擎发起的选择请求（由 shell 依据 `HostState.selections` 排队呈现）。
     case selection(requestId: String)
+    /// X4：文件已存在询问（所有待答的 `fileExists` 请求聚合在同一个 Sheet）。
+    case fileConflicts
     /// G1：全局搜索（各根页右上角按钮）。
     case search
     /// D7 / D8：队列管理。
@@ -62,6 +64,7 @@ nonisolated enum SheetRoute: Identifiable, Hashable {
         case .addHost: "addHost"
         case let .moveToQueue(ids): "move:\(ids.joined(separator: ","))"
         case let .selection(requestId): "selection:\(requestId)"
+        case .fileConflicts: "fileConflicts"
         case .search: "search"
         case .queues: "queues"
         }

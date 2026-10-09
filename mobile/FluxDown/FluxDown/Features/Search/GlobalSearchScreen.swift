@@ -14,10 +14,14 @@ struct GlobalSearchButton: View {
 }
 
 /// G1 全局搜索（= PC 命令面板）：任务（文件名）· 命令 · 设置（每个分类页 + 每个设置行，与设置首页搜索共用 `SettingsIndex`）。
-/// 各根页右上角 `magnifyingglass` 按钮以 `.search` Sheet 呈现，
-/// 自带 `NavigationStack`、自动聚焦的 `.searchable`、关闭按钮；选中结果 = 先收起 Sheet 再导航 / 执行命令。
-/// 系统 `.searchable` + `.searchScopes` 承载输入与范围条；结果是内容层的分组列表，不上玻璃。
-/// 匹配与排序见 `SearchMatcher`（逐条移植 Android `CommandSearch.kt`）。
+/// 各根页右上角 `magnifyingglass` 按钮以 `.search` Sheet 呈现；选中结果 = 先收起 Sheet 再导航 / 执行命令。
+///
+/// 顶部是自带的搜索栏（玻璃胶囊输入框 + 关闭钮，`safeAreaBar` 吸顶），**不用系统 `.searchable`**：
+/// Sheet 里的 `.searchable(isPresented: true)` 只能在呈现完成后才激活，系统先按「导航栏 + 抽屉搜索框」布局，
+/// 激活时再把导航栏收起、搜索框上移并换出取消钮——首帧版式与最终版式不同，呈现后必然卡一下再跳。
+/// 自带搜索栏首帧即最终版式，键盘只是随后升起，不再有二次布局。
+/// 范围条（全部 / 任务 / 命令 / 设置）在输入后出现，与系统 `searchScopes` 的显示时机一致。
+/// 结果是内容层的分组列表，不上玻璃。匹配与排序见 `SearchMatcher`（逐条移植 Android `CommandSearch.kt`）。
 struct GlobalSearchScreen: View {
     @Environment(AppContainer.self) private var container
     @Environment(TaskActions.self) private var actions
@@ -26,8 +30,7 @@ struct GlobalSearchScreen: View {
 
     @State private var query = ""
     @State private var scope: SearchScope = .all
-    /// 搜索激活态：初值 true = Sheet 一出现即进入搜索（无中间的「未激活」帧）。
-    @State private var searchActive = true
+    @FocusState private var fieldFocused: Bool
 
     var body: some View {
         let state = container.store.state
@@ -39,71 +42,105 @@ struct GlobalSearchScreen: View {
             settings: settingEntries()
         )
         let tokens = SearchMatcher.tokens(query)
-        NavigationStack {
-            List {
-                if !results.shownTasks.isEmpty {
-                    Section {
-                        ForEach(results.shownTasks, id: \.item.taskId) { hit in
-                            TaskHitRow(task: hit.item, title: highlighted(hit.item.fileName, tokens: tokens)) {
-                                finish()
-                                container.router.showTask(hit.item.taskId)
-                            }
+        List {
+            if !results.shownTasks.isEmpty {
+                Section {
+                    ForEach(results.shownTasks, id: \.item.taskId) { hit in
+                        TaskHitRow(task: hit.item, title: highlighted(hit.item.fileName, tokens: tokens)) {
+                            finish()
+                            container.router.showTask(hit.item.taskId)
                         }
-                        if scope == .all, results.taskHits.count > results.shownTasks.count {
-                            Button(L("mobileSearchShowAllTasks", ["n": results.taskHits.count])) { scope = .tasks }
-                        }
-                    } header: {
-                        sectionHeader(L("searchGroupTasks"), count: results.searching ? results.taskHits.count : nil)
                     }
-                }
-                if !results.shownCommands.isEmpty {
-                    Section {
-                        ForEach(results.shownCommands, id: \.item.id) { hit in
-                            entryRow(hit.item, tokens: tokens, chevron: false)
-                        }
-                    } header: {
-                        sectionHeader(L("mobileSearchGroupCommands"), count: nil)
+                    if scope == .all, results.taskHits.count > results.shownTasks.count {
+                        Button(L("mobileSearchShowAllTasks", ["n": results.taskHits.count])) { scope = .tasks }
                     }
-                }
-                if !results.shownSettings.isEmpty {
-                    Section {
-                        ForEach(results.shownSettings, id: \.item.id) { hit in
-                            entryRow(hit.item, tokens: tokens, chevron: true)
-                        }
-                    } header: {
-                        sectionHeader(L("searchGroupSettings"), count: nil)
-                    }
+                } header: {
+                    sectionHeader(L("searchGroupTasks"), count: results.searching ? results.taskHits.count : nil)
                 }
             }
-            .listStyle(.insetGrouped)
-            .scrollDismissesKeyboard(.interactively)
-            .overlay {
-                if results.isEmpty { emptyState(searching: results.searching) }
-            }
-            // 无标题、无自绘关闭钮：搜索一呈现即激活（导航栏让位给搜索框），关闭 = 搜索框旁系统的关闭钮 / 下滑。
-            // 之前「标题 + 自绘 ✕」在激活瞬间被系统收起、换成搜索框的 ✕，于是出现一次「出现 → 消失」的闪动。
-            .toolbar(removing: .title)
-            .navigationTitle(L("mobileSearchTitle"))
-            .navigationBarTitleDisplayMode(.inline)
-            .searchable(
-                text: $query,
-                isPresented: $searchActive,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: L("searchPlaceholder")
-            )
-            .searchScopes($scope) {
-                ForEach(SearchScope.allCases, id: \.self) { item in
-                    scopeLabel(item, count: results.count(for: item)).tag(item)
+            if !results.shownCommands.isEmpty {
+                Section {
+                    ForEach(results.shownCommands, id: \.item.id) { hit in
+                        entryRow(hit.item, tokens: tokens, chevron: false)
+                    }
+                } header: {
+                    sectionHeader(L("mobileSearchGroupCommands"), count: nil)
                 }
             }
-            .onSubmit(of: .search) { runFirst(results.first) }
-            // 用户点搜索框的关闭钮 = 结束搜索 = 收起 Sheet。只在当前 Sheet 仍是搜索时收起：
-            // 选中结果后 Sheet 已被替换为新建 / 活动面板等，本视图拆除时的失活回调不得把新 Sheet 一并关掉。
-            .onChange(of: searchActive) { _, active in
-                if !active { finish() }
+            if !results.shownSettings.isEmpty {
+                Section {
+                    ForEach(results.shownSettings, id: \.item.id) { hit in
+                        entryRow(hit.item, tokens: tokens, chevron: true)
+                    }
+                } header: {
+                    sectionHeader(L("searchGroupSettings"), count: nil)
+                }
             }
         }
+        .listStyle(.insetGrouped)
+        .scrollDismissesKeyboard(.interactively)
+        .overlay {
+            if results.isEmpty { emptyState(searching: results.searching) }
+        }
+        .safeAreaBar(edge: .top, spacing: 0) {
+            searchBar(results: results)
+        }
+        .fluxAnimation(.smooth, value: results.searching)
         .presentationDetents([.large])
+        // 呈现即聚焦：版式不随聚焦变化，键盘升起与 Sheet 上滑并行即可。
+        .task { fieldFocused = true }
+    }
+
+    // MARK: 搜索栏
+
+    private func searchBar(results: SearchResults) -> some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: FluxSymbol.search)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    TextField(L("mobileSearchTitle"), text: $query, prompt: Text(L("searchPlaceholder")))
+                        .focused($fieldFocused)
+                        .submitLabel(.search)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .onSubmit { runFirst(results.first) }
+                    if !query.isEmpty {
+                        Button(L("mobileSiteAuthSearchClear"), systemImage: "xmark.circle.fill") {
+                            query = ""
+                            fieldFocused = true
+                        }
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.secondary)
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .glassEffect(.regular.interactive(), in: .capsule)
+
+                Button(L("close"), systemImage: FluxSymbol.close, role: .close) { finish() }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.glass)
+                    .buttonBorderShape(.circle)
+                    .controlSize(.large)
+                    .keyboardShortcut(.cancelAction)
+            }
+            if results.searching {
+                Picker(L("mobileSearchTitle"), selection: $scope) {
+                    ForEach(SearchScope.allCases, id: \.self) { item in
+                        scopeLabel(item, count: results.count(for: item)).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 16)
+        .padding(.bottom, 8)
     }
 
     // MARK: 条目

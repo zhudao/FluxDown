@@ -28,7 +28,9 @@ use gpui_component::{
 
 use crate::{
     batch::{MAX_IN_FLIGHT, coalesce_commands, retry_copy, retry_delay},
-    components::{file_icon::task_file_icon, task_drag::DraggedTasks},
+    components::{
+        conflict_badge::conflict_badge, file_icon::task_file_icon, task_drag::DraggedTasks,
+    },
     controller::DownloadsCommand,
     model::{
         CategoryIndex, DownloadFilter, DownloadTaskView, RowId, RowKey, SidebarSelection,
@@ -1780,15 +1782,27 @@ impl DownloadTableDelegate {
             .justify_center()
             .when(relaxed, |this| this.gap(theme.tokens().spacing.xs))
             .font_features(tabular_numbers())
-            .child(
+            .child(if task.conflict_pending {
+                h_flex()
+                    .min_w_0()
+                    .child(conflict_badge(
+                        task.key.task_id(),
+                        relaxed,
+                        &self.strings,
+                        self.host.as_ref(),
+                        cx,
+                    ))
+                    .into_any_element()
+            } else {
                 div()
                     .min_w_0()
                     .truncate()
                     .text_size(label_style.size)
                     .line_height(label_style.line_height)
                     .text_color(task_status_color(task, cx))
-                    .child(self.status_label(task)),
-            )
+                    .child(self.status_label(task))
+                    .into_any_element()
+            })
             .when_some(detail.filter(|_| two_line), |this, detail| {
                 this.child(
                     div()
@@ -1800,9 +1814,12 @@ impl DownloadTableDelegate {
                         .child(detail),
                 )
             })
-            .when_some(tooltip, |this, tooltip| {
-                this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            })
+            .when_some(
+                tooltip.filter(|_| !task.conflict_pending),
+                |this, tooltip| {
+                    this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                },
+            )
             .into_any_element()
     }
 

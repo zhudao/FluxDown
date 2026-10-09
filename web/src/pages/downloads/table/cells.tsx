@@ -3,7 +3,8 @@
 import { LoaderCircle } from 'lucide-react'
 import { cn } from '../../../lib/cn'
 import { FileIcon } from '../../../lib/icon-pack'
-import { Icon } from '../../../ui'
+import { Badge, Icon, Tooltip } from '../../../ui'
+import { reopenFileConflicts } from '../dialogs/fileConflict'
 import { percentLabel, sourceSite } from '../model/task'
 import type { DownloadTaskView } from '../model/task'
 import type { ViewDensity } from '../model/viewPrefs'
@@ -30,14 +31,14 @@ export function KindGlyph({ view, className, tile = false }: { view: DownloadTas
   return tile ? <div className="flex size-8 items-center justify-center rounded-md bg-progress-track">{glyph}</div> : glyph
 }
 
-export function FileCell({ t, view, density }: { t: Translate; view: DownloadTaskView; density: ViewDensity }) {
-  if (density === 'relaxed') return <RelaxedFileCell t={t} view={view} />
+export function FileCell({ t, view, density, conflict }: { t: Translate; view: DownloadTaskView; density: ViewDensity; conflict: boolean }) {
+  if (density === 'relaxed') return <RelaxedFileCell t={t} view={view} conflict={conflict} />
   const twoLine = density !== 'compact'
   const site = sourceSite(view)
   const category = kindLabel(t, view.kind)
   return (
     <div className="flex min-w-0 flex-col justify-center">
-      <FileName t={t} view={view} className="text-sm" />
+      <FileName t={t} view={view} className="text-sm" conflict={conflict} />
       {twoLine && !view.metadataPending ? (
         <div className="truncate text-xs text-text-tertiary">{site === '' ? category : `${category} · ${site}`}</div>
       ) : null}
@@ -45,13 +46,40 @@ export function FileCell({ t, view, density }: { t: Translate; view: DownloadTas
   )
 }
 
-function FileName({ t, view, className }: { t: Translate; view: DownloadTaskView; className: string }) {
+/** 「待确认」角标（任务有待选的「文件已存在」）：点击重新打开冲突对话框，不触发行选中。 */
+export function ConflictBadge({ t }: { t: Translate }) {
   return (
+    <Tooltip content={t('fileConflictPendingTooltip')}>
+      <button
+        type="button"
+        aria-label={t('fileConflictPendingTooltip')}
+        onClick={(event) => {
+          event.stopPropagation()
+          reopenFileConflicts()
+        }}
+        onDoubleClick={(event) => event.stopPropagation()}
+        className="shrink-0 rounded-full"
+      >
+        <Badge tone="warning">{t('fileConflictPending')}</Badge>
+      </button>
+    </Tooltip>
+  )
+}
+
+function FileName({ t, view, className, conflict }: { t: Translate; view: DownloadTaskView; className: string; conflict: boolean }) {
+  const name = (
     <div
       className={cn('truncate', className, view.metadataPending ? 'text-muted-foreground' : 'text-foreground')}
       title={view.metadataPending ? undefined : view.name}
     >
       {view.metadataPending ? t('statusPreparing') : view.name}
+    </div>
+  )
+  if (!conflict) return name
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      <div className="min-w-0 flex-1">{name}</div>
+      <ConflictBadge t={t} />
     </div>
   )
 }
@@ -60,11 +88,11 @@ function FileName({ t, view, className }: { t: Translate; view: DownloadTaskView
  * 宽松密度主列（移植 task_table.rs 的 `render_relaxed_file_cell`）：文件名 / 通栏进度条 /
  * 元信息三行；完成态不画进度条。大小、进度、速度、剩余时间列在此密度下并入本列。
  */
-function RelaxedFileCell({ t, view }: { t: Translate; view: DownloadTaskView }) {
+function RelaxedFileCell({ t, view, conflict }: { t: Translate; view: DownloadTaskView; conflict: boolean }) {
   const showBar = view.state !== 'completed' && !view.metadataPending
   return (
     <div className="flex min-w-0 flex-col justify-center gap-[var(--fx-spacing-xs)]">
-      <FileName t={t} view={view} className="text-sm font-medium" />
+      <FileName t={t} view={view} className="text-sm font-medium" conflict={conflict} />
       {showBar ? <SegmentProgress runtime={view.runtime} progress={view.progress} state={view.state} /> : null}
       {view.metadataPending ? null : <div className="tabular truncate text-xs text-text-tertiary">{relaxedMeta(t, view)}</div>}
     </div>

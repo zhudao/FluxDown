@@ -108,7 +108,7 @@ fun FluxStepper(
         return true
     }
 
-    val shape = remember { RoundedCornerShape(24.dp) }
+    val shape = remember { RoundedCornerShape(20.dp) }
     val valueStyle = remember(t) {
         t.weight(t.body, 600, mono = true).copy(letterSpacing = (-0.01f).em, fontFeatureSettings = "tnum", textAlign = TextAlign.Center)
     }
@@ -121,7 +121,7 @@ fun FluxStepper(
         modifier
             .alpha(if (enabled) 1f else 0.5f)
             .fluxGlass(FluxGlass.G2, shape, kind = FluxGlassKind.Flat, strongLine = false)
-            .heightIn(min = 48.dp)
+            .heightIn(min = 40.dp)
             .semantics(mergeDescendants = true) {
                 contentDescription = label
                 stateDescription = format(value)
@@ -136,7 +136,7 @@ fun FluxStepper(
         Box(
             Modifier
                 .widthIn(min = 54.dp)
-                .heightIn(min = 48.dp)
+                .heightIn(min = 40.dp)
                 .then(
                     if (editable && enabled && !editing) {
                         Modifier.clickable(interactionSource = null, indication = null) { editing = true }
@@ -191,7 +191,7 @@ private fun StepButton(icon: ImageVector, enabled: Boolean, onStep: (repeat: Boo
     val stepState = rememberUpdatedState(onStep)
     Box(
         Modifier
-            .heightIn(min = 48.dp)
+            .heightIn(min = 40.dp)
             .widthIn(min = 46.dp)
             .alpha(if (enabled) 1f else 0.3f)
             .indication(source, press)

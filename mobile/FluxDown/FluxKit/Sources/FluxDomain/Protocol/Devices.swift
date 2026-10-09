@@ -222,3 +222,121 @@ public enum DeviceRules {
         return .explicit(dir)
     }
 }
+
+/// 远程下发目标：云账号其他设备（经 FluxCloud）或局域网已配对设备（直连）。设备页下发与新建下载「下载到」共用，
+/// 镜像 `crates/downloads/src/model/devices.rs::DeviceEntry`。
+public struct DispatchTarget: Sendable, Hashable, Identifiable {
+    public enum Kind: Sendable, Hashable { case cloud, link }
+
+    public var kind: Kind
+    /// 云设备 `deviceId`（`RemoteDispatchParams.toDevice`）/ 已配对设备指纹（`LinkDispatchParams.fingerprint`）。
+    public var deviceId: String
+    public var name: String
+    /// 在线状态；nil = 未知（云端 presence 不可信 / 本地服务未就绪）。
+    public var online: Bool?
+    /// 目标自报的默认下载目录（已去首尾空白；空 = nil）。
+    public var defaultSaveDir: String?
+    /// 目标的有效路径风格（自报 → 平台推断）；未知为 nil。
+    public var pathStyle: PathStyle?
+
+    public init(
+        kind: Kind, deviceId: String, name: String, online: Bool?, defaultSaveDir: String?, pathStyle: PathStyle?
+    ) {
+        self.kind = kind
+        self.deviceId = deviceId
+        self.name = name
+        self.online = online
+        let dir = defaultSaveDir?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.defaultSaveDir = dir.isEmpty ? nil : dir
+        self.pathStyle = pathStyle
+    }
+
+    /// 云端完整记录（设备页）；presence 不可信时在线状态记为未知。
+    public init(cloud record: CloudDeviceRecord, presenceKnown: Bool) {
+        self.init(
+            kind: .cloud,
+            deviceId: record.deviceId,
+            name: record.name,
+            online: presenceKnown ? record.isOnline : nil,
+            defaultSaveDir: record.defaultSaveDir,
+            pathStyle: record.effectivePathStyle
+        )
+    }
+
+    /// 局域网已配对设备完整信息（设备页）。
+    public init(link info: LinkDeviceInfo) {
+        self.init(
+            kind: .link,
+            deviceId: info.fingerprint,
+            name: info.name,
+            online: info.online,
+            defaultSaveDir: info.defaultSaveDir,
+            pathStyle: info.effectivePathStyle
+        )
+    }
+
+    /// 选择键：`cloud:<deviceId>` / `link:<fingerprint>`（同 GPUI `DispatchTarget::to_pref`）。
+    public var id: String { (kind == .cloud ? "cloud:" : "link:") + deviceId }
+
+    public var isCloud: Bool { kind == .cloud }
+
+    /// 已知离线：云设备由云端排队、上线后执行；局域网设备直连送不到。
+    public var isOffline: Bool { online == false }
+}
+
+extension DeviceRules {
+    /// 「下载到」候选（`crates/downloads/src/model/devices.rs::other_devices`）：云设备去掉本机与空 id、
+    /// 已配对设备去掉空指纹，各自按 id 去重；名称为空用短码，多台同名（忽略大小写与首尾空白）时全部追加 ` · 短码`。
+    ///
+    /// - `cloudPresenceKnown`：云端在线状态可信（``CloudPresence/isKnown(_:localReady:)``），否则云设备在线未知；
+    /// - `localReady`：本地服务已就绪，否则局域网设备在线未知。
+    public static func dispatchTargets(
+        cloud: [CloudDevice],
+        link: [LinkDevice],
+        cloudPresenceKnown: Bool,
+        localReady: Bool
+    ) -> [DispatchTarget] {
+        var seenCloud = Set<String>()
+        var seenLink = Set<String>()
+        var targets: [DispatchTarget] = []
+        for device in cloud where !device.isCurrent && !device.deviceId.isEmpty {
+            guard seenCloud.insert(device.deviceId).inserted else { continue }
+            targets.append(DispatchTarget(
+                kind: .cloud,
+                deviceId: device.deviceId,
+                name: device.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                online: cloudPresenceKnown && localReady ? device.isOnline : nil,
+                defaultSaveDir: device.defaultSaveDir,
+                pathStyle: device.effectivePathStyle
+            ))
+        }
+        for device in link where !device.fingerprint.isEmpty {
+            guard seenLink.insert(device.fingerprint).inserted else { continue }
+            targets.append(DispatchTarget(
+                kind: .link,
+                deviceId: device.fingerprint,
+                name: device.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                online: localReady ? device.online : nil,
+                defaultSaveDir: device.defaultSaveDir,
+                pathStyle: device.effectivePathStyle
+            ))
+        }
+        var counts: [String: Int] = [:]
+        for target in targets { counts[target.name.lowercased(), default: 0] += 1 }
+        for index in targets.indices {
+            let name = targets[index].name
+            if name.isEmpty {
+                targets[index].name = shortCode(targets[index].deviceId)
+            } else if counts[name.lowercased(), default: 0] > 1 {
+                targets[index].name = "\(name) · \(shortCode(targets[index].deviceId))"
+            }
+        }
+        return targets
+    }
+
+    /// 设备 id 的短码（末 4 位 ASCII 字母数字），用于同名设备消歧。
+    static func shortCode(_ id: String) -> String {
+        let alnum = id.unicodeScalars.filter { $0.isASCII && CharacterSet.alphanumerics.contains($0) }
+        return String(String.UnicodeScalarView(alnum.suffix(4)))
+    }
+}

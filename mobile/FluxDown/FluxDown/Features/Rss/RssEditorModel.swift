@@ -137,8 +137,12 @@ final class RssEditorModel {
         return validatedRequest == request
     }
 
-    /// 基本页签其余字段何时可见：编辑直接可见；新建须验证通过。
+    /// 页签与基本页签其余字段何时可见（同 Android `RssEditorSheet`）：编辑直接可见；
+    /// 新建须先验证通过，之后才能进入过滤规则 / 高级页签。
     var showsDetails: Bool { isEditing || isValidated }
+
+    /// 实际呈现的页签：验证未通过（含改动 Cookie / UA / 代理使验证失效）时固定在基本页签。
+    var visibleTab: Tab { showsDetails ? tab : .basic }
 
     var isValidating: Bool { validation == .running }
     var canValidate: Bool { !isValidating && !saving && !request.url.isEmpty }

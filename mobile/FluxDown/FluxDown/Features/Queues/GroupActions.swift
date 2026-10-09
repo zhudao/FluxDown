@@ -74,27 +74,33 @@ nonisolated struct GroupDeleteRequest: Identifiable, Equatable {
 }
 
 extension View {
-    /// 组删除确认对话框：`request` 非 nil 时呈现，确认后执行删除并回调 `onDeleted`。
+    /// 组删除确认对话框，挂在触发它的视图上：
+    /// `request` 非 nil 且指向 `groupId` 时呈现，确认后执行删除并回调 `onDeleted`。
+    /// 同一个 `request` 可被多个组的触发视图共用——各自只响应自己的 `groupId`；`groupId` 为 nil（非真实任务组）恒不呈现。
     func groupDeleteConfirmation(
         _ request: Binding<GroupDeleteRequest?>,
+        groupId: String?,
         onDeleted: (@MainActor () -> Void)? = nil
     ) -> some View {
-        modifier(GroupDeleteConfirmation(request: request, onDeleted: onDeleted))
+        modifier(GroupDeleteConfirmation(request: request, groupId: groupId, onDeleted: onDeleted))
     }
 }
 
 private struct GroupDeleteConfirmation: ViewModifier {
     @Binding var request: GroupDeleteRequest?
+    let groupId: String?
     let onDeleted: (@MainActor () -> Void)?
 
     @Environment(TaskActions.self) private var actions
     @Environment(ToastCenter.self) private var toasts
 
     func body(content: Content) -> some View {
-        content.confirmationDialog(
+        content.alert(
             request.map { $0.withFiles ? L("groupDeleteWithFiles") : L("groupDelete") } ?? "",
-            isPresented: Binding(get: { request != nil }, set: { if !$0 { request = nil } }),
-            titleVisibility: .visible,
+            isPresented: Binding(
+                get: { groupId != nil && request?.groupId == groupId },
+                set: { if !$0 { request = nil } }
+            ),
             presenting: request
         ) { pending in
             Button(pending.withFiles ? L("groupDeleteWithFiles") : L("groupDelete"), role: .destructive) {
@@ -145,6 +151,7 @@ private struct TaskRowSwipeActions: ViewModifier {
     let readOnly: Bool
 
     @Environment(TaskActions.self) private var actions
+    @Environment(\.confirmTaskDelete) private var confirmDelete
     @Environment(\.fluxAccent) private var accent
 
     func body(content: Content) -> some View {
@@ -181,7 +188,7 @@ private struct TaskRowSwipeActions: ViewModifier {
     @ViewBuilder
     private var trailing: some View {
         // 删除 → 对话框（保留文件 / 连同文件）；全滑同样走对话框，不会无确认删除。
-        Button(L("delete"), systemImage: FluxSymbol.delete) { actions.confirmDelete([item.task]) }
+        Button(L("delete"), systemImage: FluxSymbol.delete) { confirmDelete?.confirm([item.task]) }
             .tint(Color.fdStatusFailed)
         Button(L("mobileSwipeCopyLink"), systemImage: FluxSymbol.copy) { actions.copyLink(item.task) }
             .tint(Color.fdStatusPaused)

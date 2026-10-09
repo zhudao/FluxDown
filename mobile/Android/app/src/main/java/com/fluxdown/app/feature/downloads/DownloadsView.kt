@@ -21,9 +21,11 @@ import com.fluxdown.app.data.ViewPrefs
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
 import com.fluxdown.core.protocol.FilterBarVisibility
+import com.fluxdown.core.protocol.HostSection
 import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
+import com.fluxdown.core.model.FileConflicts
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.store.Connection
 import com.fluxdown.core.store.HostState
@@ -102,6 +104,17 @@ class DownloadsView internal constructor(private val container: AppContainer) {
     var connecting by mutableStateOf(true)
         private set
 
+    /** 有待选 fileExists 的任务（行「待确认」角标；每个行只读自己 id 的成员关系，集合变化才重组对应行）。 */
+    var conflictTaskIds by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    /** 远程任务的目标设备名 / 在线状态（按 deviceId；名册或云端连接变化才更新）。 */
+    internal var remoteTargets by mutableStateOf<Map<String, RemoteTarget>>(emptyMap())
+        private set
+
+    /** 远程任务命令与行内过渡态。 */
+    internal val remoteCommands = RemoteCommands(container)
+
     internal val wave = WaveBuffer()
 
     /** 最近一次指针活动（动态排序键重排节流用）。 */
@@ -111,11 +124,17 @@ class DownloadsView internal constructor(private val container: AppContainer) {
     private val refresh = MutableStateFlow(0)
 
     fun setFolder(f: StatusFolder) {
-        filter = filter.copy(folder = f, categoryId = null)
+        filter = filter.copy(folder = f, categoryId = null, remoteOnly = false)
     }
 
+    /** 选分类同时取消「远程任务」（芯片行单选）。 */
     fun setCategory(id: String?) {
-        filter = filter.copy(categoryId = id)
+        filter = filter.copy(categoryId = id, remoteOnly = if (id != null) false else filter.remoteOnly)
+    }
+
+    /** 只看远程任务；打开时清除分类（芯片行单选）。 */
+    fun setRemoteOnly(on: Boolean) {
+        filter = filter.copy(remoteOnly = on, categoryId = if (on) null else filter.categoryId)
     }
 
     /** [id] 为 null 清除队列范围；与当前相同则同样清除（Rail 再点取消）。 */
@@ -162,7 +181,17 @@ class DownloadsView internal constructor(private val container: AppContainer) {
                 if (!v.status && filter.folder != StatusFolder.All) setFolder(StatusFolder.All)
                 if (!v.queues && filter.queueId != null) setQueue(null)
                 if (!v.categories && filter.categoryId != null) setCategory(null)
+                if (!v.categories && filter.remoteOnly) setRemoteOnly(false)
             }
+        }
+        launch {
+            container.store.state.map { FileConflicts.taskIds(it.selections) }.distinctUntilChanged().collect { conflictTaskIds = it }
+        }
+        launch {
+            container.store.state
+                .map { Triple(it.cloudDevices, it.sections[HostSection.agentCloudConnection], it.connection == Connection.Live) }
+                .distinctUntilChanged()
+                .collect { (devices, connection, live) -> remoteTargets = RemoteTarget.index(devices, connection, live) }
         }
         launch {
             container.store.state.map { it.speedHistory }.distinctUntilChanged().collect { wave.update(it) }

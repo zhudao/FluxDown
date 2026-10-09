@@ -26,9 +26,9 @@ mod flow_tests;
 mod testkit;
 
 pub use dto::{
-    BtFileDto, CategoryDto, CloudDeviceDto, CreateTaskRequestDto, GroupDto, HlsOptionDto,
-    HostEventDto, HostInfoDto, HostSignalDto, HostSnapshotDto, LinkDeviceDto, QueueDto,
-    RssSourceDto, RuntimeStatsDto, SegmentDto, SelectionKindDto, SelectionOutcomeDto,
+    BtFileDto, CategoryDto, CloudDeviceDto, CreateTaskRequestDto, FileExistsActionDto, GroupDto,
+    HlsOptionDto, HostEventDto, HostInfoDto, HostSignalDto, HostSnapshotDto, LinkDeviceDto,
+    QueueDto, RssSourceDto, RuntimeStatsDto, SegmentDto, SelectionKindDto, SelectionOutcomeDto,
     SelectionRequestDto, TaskDto, TaskRuntimeDto, VariantOptionDto,
 };
 pub use error::{ErrorCodeDto, FluxError, HostErrorDto};

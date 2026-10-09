@@ -9,6 +9,7 @@ mod sections;
 mod store;
 mod theme_library;
 mod ui;
+pub mod update_view;
 mod view;
 mod webhook_view;
 

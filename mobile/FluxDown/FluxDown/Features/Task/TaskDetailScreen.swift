@@ -225,6 +225,7 @@ private struct TaskDetailPage: View {
             } label: {
                 Label(L("moreActions"), systemImage: FluxSymbol.more)
             }
+            .taskDeleteHost()
         }
         if let secondary = secondaryAction {
             ToolbarItem(placement: .bottomBar) {

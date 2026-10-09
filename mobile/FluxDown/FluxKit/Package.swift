@@ -52,6 +52,10 @@ let package = Package(
             swiftSettings: [.defaultIsolation(MainActor.self)]
         ),
         .testTarget(name: "FluxDomainTests", dependencies: ["FluxDomain"]),
-        .testTarget(name: "FluxBridgeTests", dependencies: ["FluxBridge", "FluxDomain"]),
+        .testTarget(
+            name: "FluxBridgeTests",
+            dependencies: ["FluxBridge", "FluxDomain", "FluxRustBindings"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

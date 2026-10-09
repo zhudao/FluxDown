@@ -153,15 +153,15 @@ private fun SearchField(
 
     Row(
         modifier
-            .height(52.dp)
+            .height(44.dp)
             // Real + 壳内 backdrop = null ⇒ 不透明 glassSolid3；聚焦只加 accent 描边
             .fluxGlass(FluxGlass.G3, shape, kind = FluxGlassKind.Real, strongLine = true)
             .then(if (focused) Modifier.border(1.dp, c.accent.copy(alpha = 0.7f), shape) else Modifier)
-            .padding(start = 16.dp, end = if (query.isEmpty()) 16.dp else 4.dp),
+            .padding(start = 14.dp, end = if (query.isEmpty()) 14.dp else 4.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        FluxIcon(FluxIcons.Search, null, size = 20.dp, tint = c.inkMuted)
+        FluxIcon(FluxIcons.Search, null, size = 18.dp, tint = c.inkMuted)
         Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
             if (query.isEmpty()) {
                 FluxText(placeholder, style = type.body, color = c.inkFaint, maxLines = 1)
@@ -185,7 +185,7 @@ private fun SearchField(
                 FluxIcons.X,
                 "清除",
                 { onQueryChange("") },
-                visualSize = 32.dp,
+                visualSize = 28.dp,
                 iconSize = 16.dp,
                 glass = false,
             )

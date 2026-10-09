@@ -80,7 +80,7 @@ import type {
   SyncStatusDto,
   TtlResult,
   UpdateCheckParams,
-  UpdateCheckResultDto,
+  UpdateStatusDto,
   VerifyCodeParams,
 } from '../protocol';
 
@@ -251,8 +251,10 @@ const diagnostics = {
 };
 
 const update = {
-  check: (params?: UpdateCheckParams) =>
-    call<UpdateCheckResultDto>(METHOD.AGENT_UPDATE_CHECK, params),
+  check: (params?: UpdateCheckParams) => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_CHECK, params),
+  download: () => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_DOWNLOAD),
+  install: () => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_INSTALL),
+  cancel: () => call<UpdateStatusDto>(METHOD.AGENT_UPDATE_CANCEL),
 };
 
 const power = {

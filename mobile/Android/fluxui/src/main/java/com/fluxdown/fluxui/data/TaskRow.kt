@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -47,6 +48,8 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
+import com.fluxdown.fluxui.controls.FluxTag
+import com.fluxdown.fluxui.controls.Tone
 import com.fluxdown.fluxui.icons.FluxIcon
 import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.theme.FileCategory
@@ -135,6 +138,7 @@ fun FluxColors.buildTaskMeta(block: TaskMetaBuilder.() -> Unit): AnnotatedString
  * @param horizontalPadding D1「传输中」分区内 18，「历史」20，其余 16。
  * @param contentDescription 整行朗读文案（建议“{名}，{状态}，{p}%，{速度}，剩余 {ETA}，{大小}”）；缺省为 名称 + 元信息。
  * @param customActions 长按菜单全集 + 滑动动作（TalkBack 不需要长按 / 滑动）。
+ * @param badge 元信息行前的琥珀色角标（如「待确认」）；[onBadgeClick] 非空时角标可点（行本身的点击不变）。
  *
  * 点击：行 = 打开详情；长按 = 菜单（LONG_PRESS 触感）；图块 = 进入 / 切换多选；环 = 主操作。
  * 按压为 glass2 底（fluid 弹簧），整行不缩放以免列表抖动。
@@ -162,6 +166,8 @@ fun TaskRow(
     contentDescription: String? = null,
     onClickLabel: String? = null,
     customActions: List<CustomAccessibilityAction> = emptyList(),
+    badge: String? = null,
+    onBadgeClick: (() -> Unit)? = null,
 ) {
     val colors = FluxTheme.colors
     val type = FluxTheme.type
@@ -172,7 +178,7 @@ fun TaskRow(
     val nameStyle = remember(type, compact) { taskNameStyle(type, compact) }
     val metaStyle = remember(type, colors) { type.mono.copy(color = colors.inkMuted) }
     val metaLines = if (type.fontScale >= 1.5f) 2 else 1
-    val cd = contentDescription ?: remember(fileName, meta) { "$fileName, ${meta.text}" }
+    val cd = contentDescription ?: remember(fileName, meta, badge) { listOfNotNull(fileName, badge, meta.text).joinToString(", ") }
 
     val interaction = remember { MutableInteractionSource() }
     val press = rememberPressAnim(interaction)
@@ -221,13 +227,34 @@ fun TaskRow(
             )
         },
         meta = {
-            BasicText(
-                meta,
-                modifier = Modifier.clearAndSetSemantics { },
-                style = metaStyle,
-                maxLines = metaLines,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (badge == null) {
+                BasicText(
+                    meta,
+                    modifier = Modifier.clearAndSetSemantics { },
+                    style = metaStyle,
+                    maxLines = metaLines,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FluxTag(
+                        badge,
+                        if (onBadgeClick != null) {
+                            Modifier.fluxPressable(onClick = onBadgeClick, scale = 1f, role = Role.Button)
+                        } else {
+                            Modifier
+                        },
+                        tone = Tone.Amber,
+                    )
+                    BasicText(
+                        meta,
+                        modifier = Modifier.weight(1f, fill = false).clearAndSetSemantics { },
+                        style = metaStyle,
+                        maxLines = metaLines,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
         },
         ring = {
             RingControl(

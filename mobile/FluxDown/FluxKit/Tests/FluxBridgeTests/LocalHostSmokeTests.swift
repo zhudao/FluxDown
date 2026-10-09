@@ -20,7 +20,7 @@ struct LocalHostSmokeTests {
             try? FileManager.default.removeItem(at: root)
         }
         let saveDir = root.appendingPathComponent("downloads").path
-        let host = try await FluxBridge.openLocal(dataDir: root.appendingPathComponent("data").path, saveDir: saveDir)
+        let host = try await FluxBridge.openLocal(dataDir: root.appendingPathComponent("data").path, saveDir: saveDir, deviceName: nil)
         var signals = host.signals.makeAsyncIterator()
         defer { host.close() }
 
@@ -59,7 +59,8 @@ struct LocalHostSmokeTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let host = try await FluxBridge.openLocal(
             dataDir: root.appendingPathComponent("data").path,
-            saveDir: root.appendingPathComponent("downloads").path
+            saveDir: root.appendingPathComponent("downloads").path,
+            deviceName: nil
         )
         var signals = host.signals.makeAsyncIterator()
         guard case let .snapshot(snapshot)? = await signals.next() else {
@@ -92,7 +93,8 @@ struct LocalHostSmokeTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let host = try await FluxBridge.openLocal(
             dataDir: root.appendingPathComponent("data").path,
-            saveDir: root.appendingPathComponent("downloads").path
+            saveDir: root.appendingPathComponent("downloads").path,
+            deviceName: nil
         )
         let store = HostStore(publishInterval: .milliseconds(10))
         store.attach(host)

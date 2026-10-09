@@ -65,7 +65,7 @@ public enum SettingsCatalog {
         SettingField(key: key, store: .preference, kind: kind, defaultWire: def)
     }
 
-    public static let fileExistsBehaviors = ["rename", "overwrite", "skip"]
+    public static let fileExistsBehaviors = ["rename", "overwrite", "skip", "ask"]
     public static let fileMissingActions = ["keep", "delete"]
     public static let btSeedTimeUnits = ["minutes", "hours", "days"]
     public static let btSeedLimitOperators = ["or", "and"]

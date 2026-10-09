@@ -53,7 +53,7 @@ class TaskActions(
     private fun s(id: Int, vararg args: Pair<String, Any?>) = context.str(id, *args)
 
     /** 只读（断连宽限后）拒绝写操作：toast(error) + REJECT。 */
-    private fun guard(): Boolean {
+    fun guard(): Boolean {
         if (!store.state.value.isReadOnly) return true
         haptics.reject()
         overlays.toast(s(R.string.localServiceDisconnected), FluxToastKind.Error, FluxIcons.WifiOff)

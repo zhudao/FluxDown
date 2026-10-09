@@ -54,8 +54,9 @@ import com.fluxdown.fluxui.theme.fluxPressable
  * | Redownload | 满环 inkFaint | RotateCw |
  * | Seeding | mint | Check（mintText） |
  * | Open | 轨道 inkFaint，无进度弧 | ExternalLink（inkMuted） |
+ * | More | 轨道 inkFaint，无进度弧 | Ellipsis（inkMuted）：没有主操作时打开动作菜单 |
  */
-enum class RingKind { Pause, Play, Retry, Redownload, Seeding, Open, Spinning, Queued }
+enum class RingKind { Pause, Play, Retry, Redownload, Seeding, Open, Spinning, Queued, More }
 
 /** 环钮尺寸：sm 32 / md 36 / lg 52（viewBox 36，半径 16，描边 2 按比例缩放）。 */
 enum class RingSize(val dp: Dp) { Sm(32.dp), Md(36.dp), Lg(52.dp) }
@@ -77,13 +78,14 @@ private fun ringLook(kind: RingKind, c: FluxColors): RingLook = when (kind) {
     RingKind.Retry -> RingLook(c.coral, false, c.hairlineStrong, c.ink, true)
     RingKind.Redownload -> RingLook(c.inkFaint, false, c.inkFaint, c.inkMuted, false)
     RingKind.Seeding -> RingLook(c.mint, false, c.hairlineStrong, c.mintText, true)
-    RingKind.Open -> RingLook(c.inkFaint, false, c.inkFaint, c.inkMuted, false)
+    RingKind.Open, RingKind.More -> RingLook(c.inkFaint, false, c.inkFaint, c.inkMuted, false)
 }
 
 private fun ringIcon(kind: RingKind): ImageVector? = when (kind) {
     RingKind.Retry, RingKind.Redownload -> FluxIcons.RotateCw
     RingKind.Seeding -> FluxIcons.Check
     RingKind.Open -> FluxIcons.ExternalLink
+    RingKind.More -> FluxIcons.Ellipsis
     else -> null
 }
 

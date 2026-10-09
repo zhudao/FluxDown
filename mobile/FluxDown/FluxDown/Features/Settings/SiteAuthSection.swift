@@ -62,6 +62,12 @@ struct SiteAuthSection: View {
                 isRunning: model.isClearing
             ) { confirmClear = true }
                 .disabled(readOnly || model.entries.isEmpty)
+                .alert(L("settingsSiteAuthClearAll"), isPresented: $confirmClear) {
+                    Button(L("settingsSiteAuthClearAll"), role: .destructive) { clearAll() }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("mobileSiteAuthClearConfirm", ["n": model.entries.count]))
+                }
                 .settingsRow(NetworkRow.siteAuthClear.id)
         } footer: {
             if !container.isLocalHost {
@@ -74,12 +80,7 @@ struct SiteAuthSection: View {
         .sheet(item: $sheet) { target in
             SiteAuthEditSheet(target: target, model: model) { successTick += 1 }
         }
-        .confirmationDialog(L("settingsSiteAuthClearAll"), isPresented: $confirmClear, titleVisibility: .visible) {
-            Button(L("settingsSiteAuthClearAll"), role: .destructive) { clearAll() }
-            Button(L("cancel"), role: .cancel) {}
-        } message: {
-            Text(L("mobileSiteAuthClearConfirm", ["n": model.entries.count]))
-        }
+        
     }
 
     // MARK: 行

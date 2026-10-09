@@ -120,6 +120,7 @@ struct DownloadPage: View {
                     .init(id: "rename", label: L("fileExistsRename")),
                     .init(id: "overwrite", label: L("fileExistsOverwrite")),
                     .init(id: "skip", label: L("fileExistsSkip")),
+                    .init(id: "ask", label: L("fileExistsAsk")),
                 ],
                 fallback: "rename"
             )

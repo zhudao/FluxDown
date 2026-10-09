@@ -134,6 +134,26 @@ extension RuntimeStatsDto {
     }
 }
 
+extension FileExistsActionDto {
+    var domain: FileExistsAction {
+        switch self {
+        case .rename: .rename
+        case .overwrite: .overwrite
+        case .skip: .skip
+        }
+    }
+}
+
+extension FileExistsAction {
+    var dto: FileExistsActionDto {
+        switch self {
+        case .rename: .rename
+        case .overwrite: .overwrite
+        case .skip: .skip
+        }
+    }
+}
+
 extension SelectionKindDto {
     var domain: SelectionKind {
         switch self {
@@ -153,6 +173,16 @@ extension SelectionKindDto {
                     totalBytes: $0.totalBytes
                 )
             })
+        case let .fileExists(fileName, saveDir, existingSize, existingModifiedUnixMs, incomingSize, renamePreview, actions):
+            .fileExists(FileConflict(
+                fileName: fileName,
+                saveDir: saveDir,
+                existingSize: existingSize,
+                existingModifiedUnixMs: existingModifiedUnixMs,
+                incomingSize: incomingSize,
+                renamePreview: renamePreview,
+                actions: actions.map(\.domain)
+            ))
         }
     }
 }
@@ -163,6 +193,7 @@ extension SelectionOutcomeDto {
         case let .hls(index): .hls(index: index)
         case let .bt(indices): .bt(indices: indices)
         case let .variant(index): .variant(index: index)
+        case let .fileExists(action): .fileExists(action: action.domain)
         case .cancelled: .cancelled
         }
     }
@@ -174,6 +205,7 @@ extension SelectionOutcome {
         case let .hls(index): .hls(index: index)
         case let .bt(indices): .bt(indices: indices)
         case let .variant(index): .variant(index: index)
+        case let .fileExists(action): .fileExists(action: action.dto)
         case .cancelled: .cancelled
         }
     }
@@ -227,14 +259,23 @@ extension CloudDeviceDto {
             platform: platform,
             isOnline: isOnline,
             isCurrent: isCurrent,
-            appVersion: appVersion
+            appVersion: appVersion,
+            defaultSaveDir: defaultSaveDir,
+            pathStyle: pathStyle.map(PathStyle.init(wire:))
         )
     }
 }
 
 extension LinkDeviceDto {
     var domain: LinkDevice {
-        LinkDevice(fingerprint: fingerprint, name: name, platform: platform, online: online)
+        LinkDevice(
+            fingerprint: fingerprint,
+            name: name,
+            platform: platform,
+            online: online,
+            defaultSaveDir: defaultSaveDir,
+            pathStyle: pathStyle.map(PathStyle.init(wire:))
+        )
     }
 }
 

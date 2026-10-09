@@ -39,7 +39,7 @@ struct AllDevicesScreen: View {
             }
         }
         .fluxAnimation(.smooth, value: rows.map(\.id))
-        .cloudDeviceDialogs(renaming: $renaming, deleting: $deleting)
+        .cloudDeviceRenameAlert(renaming: $renaming)
     }
 
     /// 空态放在 `overlay`（不放进 List 行里被压成固定行高）。

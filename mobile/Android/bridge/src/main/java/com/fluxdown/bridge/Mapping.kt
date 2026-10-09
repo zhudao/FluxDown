@@ -8,6 +8,7 @@ import com.fluxdown.core.host.HostSnapshot
 import com.fluxdown.core.model.BtFile
 import com.fluxdown.core.model.Category
 import com.fluxdown.core.model.CloudDevice
+import com.fluxdown.core.model.FileExistsAction
 import com.fluxdown.core.model.HlsOption
 import com.fluxdown.core.model.HostInfo
 import com.fluxdown.core.model.LinkDevice
@@ -222,12 +223,34 @@ internal fun SelectionKindDto.toCore(): SelectionKind = when (this) {
             VariantOption(it.index, it.label, it.container, it.bandwidth, it.width, it.height, it.totalBytes)
         },
     )
+    is SelectionKindDto.FileExists -> SelectionKind.FileExists(
+        fileName = fileName,
+        saveDir = saveDir,
+        existingSize = existingSize?.toLong(),
+        existingModifiedUnixMs = existingModifiedUnixMs,
+        incomingSize = incomingSize,
+        renamePreview = renamePreview,
+        actions = actions.map { it.toCore() },
+    )
+}
+
+internal fun FileExistsActionDto.toCore(): FileExistsAction = when (this) {
+    FileExistsActionDto.RENAME -> FileExistsAction.Rename
+    FileExistsActionDto.OVERWRITE -> FileExistsAction.Overwrite
+    FileExistsActionDto.SKIP -> FileExistsAction.Skip
+}
+
+internal fun FileExistsAction.toDto(): FileExistsActionDto = when (this) {
+    FileExistsAction.Rename -> FileExistsActionDto.RENAME
+    FileExistsAction.Overwrite -> FileExistsActionDto.OVERWRITE
+    FileExistsAction.Skip -> FileExistsActionDto.SKIP
 }
 
 internal fun SelectionOutcomeDto.toCore(): SelectionOutcome = when (this) {
     is SelectionOutcomeDto.Hls -> SelectionOutcome.Hls(index)
     is SelectionOutcomeDto.Bt -> SelectionOutcome.Bt(indices)
     is SelectionOutcomeDto.Variant -> SelectionOutcome.Variant(index)
+    is SelectionOutcomeDto.FileExists -> SelectionOutcome.FileExists(action.toCore())
     is SelectionOutcomeDto.Cancelled -> SelectionOutcome.Cancelled
 }
 
@@ -235,6 +258,7 @@ internal fun SelectionOutcome.toDto(): SelectionOutcomeDto = when (this) {
     is SelectionOutcome.Hls -> SelectionOutcomeDto.Hls(index)
     is SelectionOutcome.Bt -> SelectionOutcomeDto.Bt(indices)
     is SelectionOutcome.Variant -> SelectionOutcomeDto.Variant(index)
+    is SelectionOutcome.FileExists -> SelectionOutcomeDto.FileExists(action.toDto())
     SelectionOutcome.Cancelled -> SelectionOutcomeDto.Cancelled
 }
 
@@ -258,6 +282,8 @@ internal fun CloudDeviceDto.toCore() = CloudDevice(
     isOnline = isOnline,
     isCurrent = isCurrent,
     appVersion = appVersion,
+    defaultSaveDir = defaultSaveDir,
+    pathStyle = pathStyle,
 )
 
 internal fun LinkDeviceDto.toCore() = LinkDevice(
@@ -265,6 +291,8 @@ internal fun LinkDeviceDto.toCore() = LinkDevice(
     name = name,
     platform = platform,
     online = online,
+    defaultSaveDir = defaultSaveDir,
+    pathStyle = pathStyle,
 )
 
 internal fun CategoryDto.toCore() = Category(

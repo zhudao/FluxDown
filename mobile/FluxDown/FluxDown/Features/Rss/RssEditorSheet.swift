@@ -3,8 +3,8 @@ import FluxUI
 import SwiftUI
 
 /// R3 订阅编辑器（sheet · large）：基本 / 过滤规则 / 高级三个页签。
-/// 新建须先验证 feed（`daemon.rss.validate`，慢方法：按钮转圈、不阻塞其它输入），通过后才显示其余基本字段；
-/// 编辑模式全部直接可见，底部有「删除订阅」。有未保存修改时拦截下拉关闭并确认。
+/// 新建须先验证 feed（`daemon.rss.validate`，慢方法：按钮转圈、不阻塞其它输入）：验证前只显示地址与影响验证请求的
+/// Cookie / UA / 代理，通过后才显示页签与其余字段（同 Android）；编辑模式全部直接可见，底部有「删除订阅」。有未保存修改时拦截下拉关闭并确认。
 /// 过滤规则由主机引擎求值，这里只收集规则字段，不做客户端预览。
 struct RssEditorSheet: View {
     @Environment(AppContainer.self) private var container
@@ -40,19 +40,6 @@ struct RssEditorSheet: View {
         .interactiveDismissDisabled(model.isDirty || model.saving)
         .presentationDetents([.large])
         .presentationSizing(.form)
-        .confirmationDialog(L("mobileRssDiscardTitle"), isPresented: $confirmDiscard, titleVisibility: .visible) {
-            Button(L("mobileDiscard"), role: .destructive) { dismiss() }
-            Button(L("mobileRssKeepEditing"), role: .cancel) {}
-        }
-        .confirmationDialog(
-            L("rssDeleteSource"),
-            isPresented: $confirmDelete,
-            titleVisibility: .visible
-        ) {
-            Button(L("rssDeleteSource"), role: .destructive) { delete() }
-        } message: {
-            Text(L("rssDeleteConfirmDesc", ["name": displayName]))
-        }
     }
 
     // MARK: 骨架
@@ -73,7 +60,7 @@ struct RssEditorSheet: View {
             }
         case .ready:
             Form {
-                if let error = model.error, error.tab == model.tab {
+                if let error = model.error, error.tab == model.visibleTab {
                     Section {
                         Label(error.message, systemImage: FluxSymbol.failure)
                             .font(.footnote)
@@ -81,7 +68,7 @@ struct RssEditorSheet: View {
                             .accessibilityAddTraits(.isStaticText)
                     }
                 }
-                switch model.tab {
+                switch model.visibleTab {
                 case .basic: basicTab
                 case .filter: filterTab
                 case .advanced: advancedTab
@@ -89,15 +76,17 @@ struct RssEditorSheet: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .safeAreaBar(edge: .top, spacing: 0) {
-                Picker(L("rssTabBasic"), selection: $model.tab) {
-                    ForEach(RssEditorModel.Tab.allCases) { tab in
-                        Text(L(tab.titleKey)).tag(tab)
+                if model.showsDetails {
+                    Picker(L("rssTabBasic"), selection: $model.tab) {
+                        ForEach(RssEditorModel.Tab.allCases) { tab in
+                            Text(L(tab.titleKey)).tag(tab)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .padding(.horizontal)
-                .padding(.vertical, 8)
             }
             .fluxAnimation(.smooth, value: model.showsDetails)
         }
@@ -110,6 +99,10 @@ struct RssEditorSheet: View {
                 if model.isDirty { confirmDiscard = true } else { dismiss() }
             }
             .disabled(model.saving)
+            .alert(L("mobileRssDiscardTitle"), isPresented: $confirmDiscard) {
+                Button(L("mobileDiscard"), role: .destructive) { dismiss() }
+                Button(L("mobileRssKeepEditing"), role: .cancel) {}
+            }
         }
         ToolbarItem(placement: .confirmationAction) {
             if model.saving {
@@ -162,10 +155,11 @@ struct RssEditorSheet: View {
             validationRow
         } header: {
             Text(L("rssUrlLabel"))
-        } footer: {
-            if !model.isEditing, !model.isValidated {
-                Text(L("rssEditorAuthHint"))
-            }
+        }
+
+        // 新建验证前只露出会进入验证请求的字段（Cookie / UA / 代理）；通过后它们回到「高级」页签
+        if !model.showsDetails {
+            requestSection(titled: true)
         }
 
         if model.showsDetails {
@@ -227,6 +221,15 @@ struct RssEditorSheet: View {
                 Section {
                     Button(L("rssDeleteSource"), role: .destructive) { confirmDelete = true }
                         .disabled(model.saving)
+                        .alert(
+                            L("rssDeleteSource"),
+                            isPresented: $confirmDelete
+                        ) {
+                            Button(L("rssDeleteSource"), role: .destructive) { delete() }
+                            Button(L("cancel"), role: .cancel) {}
+                        } message: {
+                            Text(L("rssDeleteConfirmDesc", ["name": displayName]))
+                        }
                 }
             }
         }
@@ -235,16 +238,9 @@ struct RssEditorSheet: View {
     @ViewBuilder
     private var validationRow: some View {
         switch model.validation {
-        case .idle:
+        // 进行中只由「验证」按钮自身转圈 + 文案表达，这里不再重复一行
+        case .idle, .running:
             EmptyView()
-        case .running:
-            Label {
-                Text(L("rssWizardValidating"))
-            } icon: {
-                ProgressView()
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
         case let .passed(title, itemCount):
             if model.isValidated {
                 Label {
@@ -328,6 +324,28 @@ struct RssEditorSheet: View {
 
     @ViewBuilder
     private var advancedTab: some View {
+        requestSection(titled: false)
+
+        Section {
+            labeledField("rssMaxPerFetchLabel") {
+                TextField(String(RssSourceDetail.defaultMaxPerFetch), text: $model.form.maxPerFetch)
+                    .keyboardType(.numberPad)
+            }
+            if !maxPerFetchValid {
+                Label(L("rssInvalidNumber"), systemImage: FluxSymbol.failure)
+                    .font(.footnote)
+                    .foregroundStyle(Color.fdStatusFailedText)
+            }
+        }
+
+        Section {
+            toggleRow("rssSendRefererLabel", "rssSendRefererDesc", $model.form.sendReferer)
+            toggleRow("rssNotifyLabel", "rssNotifyDesc", $model.form.notifyOnDownload)
+        }
+    }
+
+    /// 影响验证请求的字段：新建验证前在基本页签（带「高级」小标题），其余时候在高级页签。
+    private func requestSection(titled: Bool) -> some View {
         Section {
             labeledField("rssCookiesLabel") {
                 TextField(L("rssCookiesHint"), text: $model.form.cookies)
@@ -352,25 +370,10 @@ struct RssEditorSheet: View {
                     .submitLabel(.next)
                     .onChange(of: model.form.proxyUrl) { model.requestFieldChanged() }
             }
+        } header: {
+            if titled { Text(L("rssTabAdvanced")) }
         } footer: {
             Text(L("rssEditorAuthHint"))
-        }
-
-        Section {
-            labeledField("rssMaxPerFetchLabel") {
-                TextField(String(RssSourceDetail.defaultMaxPerFetch), text: $model.form.maxPerFetch)
-                    .keyboardType(.numberPad)
-            }
-            if !maxPerFetchValid {
-                Label(L("rssInvalidNumber"), systemImage: FluxSymbol.failure)
-                    .font(.footnote)
-                    .foregroundStyle(Color.fdStatusFailedText)
-            }
-        }
-
-        Section {
-            toggleRow("rssSendRefererLabel", "rssSendRefererDesc", $model.form.sendReferer)
-            toggleRow("rssNotifyLabel", "rssNotifyDesc", $model.form.notifyOnDownload)
         }
     }
 

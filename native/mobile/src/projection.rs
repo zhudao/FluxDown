@@ -207,6 +207,7 @@ impl Projection {
             | AgentEvent::PendingCapturesChanged(_)
             | AgentEvent::ShellChanged(_)
             | AgentEvent::PowerChanged(_)
+            | AgentEvent::UpdateChanged(_)
             | AgentEvent::CaptureTasksStarted(_)
             | AgentEvent::SessionRevoked(_) => {
                 apply_agent_event(&mut self.snapshot, event);

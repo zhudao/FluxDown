@@ -15,6 +15,8 @@ enum class AppTab { Downloads, Rss, Devices, Settings }
 /** 推入页。medium / expanded 档下 [TaskDetail] 进入右侧详情栏（paneable）。 */
 sealed interface Route {
     data class TaskDetail(val taskId: String) : Route
+    /** R2：某订阅的条目流（订阅页点按订阅行进入）。 */
+    data class RssItems(val sourceId: String) : Route
     /** [arg]：子页参数（如插件详情的插件标识）；分类根页为空。 */
     data class Settings(val page: SettingsPage, val arg: String = "") : Route
 }
@@ -70,6 +72,21 @@ class AppNavigator {
 
     /** 下滑列表时坞收为迷你态（多选 / Sheet 打开时锁定为展开）。 */
     var dockMini by mutableStateOf(false)
+
+    /**
+     * 「稍后决定」：被用户划走 / 关闭的那批 fileExists 请求 id（不向主机答复，请求照常等到超时）。
+     * 新请求到达、回到前台或点任务行「待确认」角标都会重新弹出。
+     */
+    var deferredFileConflicts by mutableStateOf<Set<String>>(emptySet())
+        private set
+
+    fun deferFileConflicts(ids: Set<String>) {
+        deferredFileConflicts = ids
+    }
+
+    fun reopenFileConflicts() {
+        if (deferredFileConflicts.isNotEmpty()) deferredFileConflicts = emptySet()
+    }
 
     val top: Route? get() = stack.lastOrNull()
 

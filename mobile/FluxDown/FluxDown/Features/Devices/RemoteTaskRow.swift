@@ -55,9 +55,12 @@ struct RemoteTaskRow: View {
             trailing
         }
         .padding(.vertical, 2)
+        // 滑动删除只弹确认框：不能用 `role: .destructive`，否则 List 会立即动画移除该行，
+        // 数据源仍有这一行 → UICollectionView 行数不一致崩溃（同本地任务行，用红色 tint 代替）。
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if allows(.delete) {
-                Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmingDelete = true }
+                Button(L("delete"), systemImage: FluxSymbol.delete) { confirmingDelete = true }
+                    .tint(Color.fdStatusFailed)
             }
             if allows(.cancel) {
                 Button(L("cancel"), systemImage: "xmark.circle") { issue(.cancel, false) }
@@ -83,12 +86,13 @@ struct RemoteTaskRow: View {
                 Button(L("delete"), systemImage: FluxSymbol.delete, role: .destructive) { confirmingDelete = true }
             }
         }
-        .confirmationDialog(L("deleteTask"), isPresented: $confirmingDelete, titleVisibility: .visible) {
+        .alert(L("deleteTask"), isPresented: $confirmingDelete) {
             Button(L("deleteTask"), role: .destructive) { issue(.delete, false) }
             // 目标离线时无法让它删除文件，只能删记录：不提供「同时删除文件」。
             if targetOnline != false {
                 Button(L("deleteTaskAndFile"), role: .destructive) { issue(.delete, true) }
             }
+            Button(L("cancel"), role: .cancel) {}
         } message: {
             Text(displayName)
         }
@@ -106,9 +110,7 @@ struct RemoteTaskRow: View {
         return !RemoteTaskRules.canIssue(action, to: task, targetOnline: targetOnline)
     }
 
-    private var displayName: String {
-        task.fileName.isEmpty ? inferName(UrlEntry(url: task.url)) : task.fileName
-    }
+    private var displayName: String { task.displayName }
 
     private var errorText: String? {
         guard let error = task.error?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty else { return nil }
@@ -218,5 +220,12 @@ struct RemoteStatusChip: View {
         case .unknown:
             StatusBadge(text: L("mobileRemoteStatusUnknown"), tone: .neutral, systemImage: "questionmark.circle")
         }
+    }
+}
+
+extension RemoteTaskDto {
+    /// 显示名：云端未带文件名时按 URL 推断（与新建下载同一规则）。
+    var displayName: String {
+        fileName.isEmpty ? inferName(UrlEntry(url: url)) : fileName
     }
 }

@@ -30,10 +30,16 @@ public enum FluxBridge {
     /// - Parameters:
     ///   - dataDir: 应用私有数据目录（引擎 DB、agent 状态）。
     ///   - saveDir: 默认保存目录（仅在库里尚无 `default_save_dir` 时播种）。
-    public static func openLocal(dataDir: String, saveDir: String) async throws(HostError) -> any FluxDomain.HostSession {
+    ///   - deviceName: 系统设备名（`UIDevice.name`），本机设备名缺失或仍是占位名时用作云端默认名；
+    ///     `nil` 回落主机名探测。
+    public static func openLocal(
+        dataDir: String,
+        saveDir: String,
+        deviceName: String?
+    ) async throws(HostError) -> any FluxDomain.HostSession {
         let core = try instance()
         do {
-            let config = LocalHostConfig(dataDir: dataDir, saveDir: saveDir, platform: platform)
+            let config = LocalHostConfig(dataDir: dataDir, saveDir: saveDir, platform: platform, deviceName: deviceName)
             return RustHostSession(try await core.openLocal(config: config))
         } catch {
             throw hostError(error)

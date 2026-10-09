@@ -288,7 +288,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
  "wl-clipboard-rs",
  "x11rb",
 ]
@@ -2748,6 +2748,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2821,6 +2831,7 @@ dependencies = [
  "base64 0.22.1",
  "block2 0.6.2",
  "directories",
+ "flate2",
  "fluxdown_api",
  "fluxdown_link",
  "fluxdown_logfile",
@@ -2829,6 +2840,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "gtk",
+ "hex 0.4.3",
  "image",
  "keepawake",
  "mimalloc",
@@ -2841,7 +2853,9 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tao",
+ "tar",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -2853,6 +2867,7 @@ dependencies = [
  "windows 0.61.3",
  "windows-sys 0.59.0",
  "winreg",
+ "zip",
 ]
 
 [[package]]
@@ -7923,7 +7938,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9936,6 +9951,17 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
 
 [[package]]
 name = "target-lexicon"

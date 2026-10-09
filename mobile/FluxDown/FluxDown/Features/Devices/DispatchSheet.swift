@@ -4,48 +4,6 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// V3a 下发目标：云端受信任设备（经 FluxCloud）或局域网已配对设备（直连）。持有下发时刻的设备快照。
-enum DispatchTarget {
-    case cloud(CloudDeviceRecord, presenceKnown: Bool)
-    case link(LinkDeviceInfo)
-
-    var name: String {
-        switch self {
-        case let .cloud(record, _): record.name
-        case let .link(info): info.name
-        }
-    }
-
-    /// 保存目录按目标设备的路径风格校验（自报 → 平台推断；未知则只要求非空）。
-    var pathStyle: PathStyle? {
-        switch self {
-        case let .cloud(record, _): record.effectivePathStyle
-        case let .link(info): info.effectivePathStyle
-        }
-    }
-
-    var defaultSaveDir: String? {
-        let dir: String? = switch self {
-        case let .cloud(record, _): record.defaultSaveDir
-        case let .link(info): info.defaultSaveDir
-        }
-        guard let dir = dir?.trimmingCharacters(in: .whitespacesAndNewlines), !dir.isEmpty else { return nil }
-        return dir
-    }
-
-    /// 已知离线：云端 presence 已知且设备离线（云端排队，上线后执行）/ 局域网设备探测为离线（直连送不到）。
-    var isOffline: Bool {
-        switch self {
-        case let .cloud(record, presenceKnown): presenceKnown && !record.isOnline
-        case let .link(info): !info.online
-        }
-    }
-
-    var isCloud: Bool {
-        if case .cloud = self { true } else { false }
-    }
-}
-
 /// 一次下发（可能多条链接）的结果汇总（对齐 GPUI `DispatchSummary`）：成功数、失败数、第一条错误。
 struct DispatchSummary {
     var successes = 0
@@ -54,7 +12,90 @@ struct DispatchSummary {
     var failedEntries: [UrlEntry] = []
 }
 
-/// V3a 下发表单的状态与提交：每条链接一次 dispatch（顺序执行，避免一次性压垮对端），全部结束后汇总。
+/// 下发的一条链接；`fileName` 为 nil 时由目标设备按 URL 推断。
+struct DispatchItem {
+    var entry: UrlEntry
+    var fileName: String?
+}
+
+/// 逐条下发并汇总（设备页下发表单与新建下载「下载到」共用）：顺序执行，避免一次性压垮对端。
+/// 目标只接收链接 / 文件名 / 保存目录；`saveDir` 为 nil = 目标设备默认目录。
+@MainActor
+enum Dispatcher {
+    static func run(
+        _ items: [DispatchItem],
+        to target: DispatchTarget,
+        saveDir: String?,
+        agent: AgentAPI,
+        progress: (Int) -> Void = { _ in }
+    ) async -> DispatchSummary {
+        var summary = DispatchSummary()
+        for (index, item) in items.enumerated() {
+            do throws(HostError) {
+                try await dispatch(item, to: target, saveDir: saveDir, agent: agent)
+                summary.successes += 1
+            } catch {
+                summary.failures += 1
+                summary.failedEntries.append(item.entry)
+                if summary.firstError == nil { summary.firstError = error }
+            }
+            progress(index + 1)
+        }
+        return summary
+    }
+
+    private static func dispatch(
+        _ item: DispatchItem,
+        to target: DispatchTarget,
+        saveDir: String?,
+        agent: AgentAPI
+    ) async throws(HostError) {
+        let url = item.entry.url
+        switch target.kind {
+        case .cloud:
+            _ = try await agent.remoteDispatch(
+                RemoteDispatchParams(toDevice: target.deviceId, url: url, fileName: item.fileName, saveDir: saveDir)
+            )
+        case .link:
+            _ = try await agent.linkDispatch(
+                LinkDispatchParams(fingerprint: target.deviceId, url: url, fileName: item.fileName, saveDir: saveDir)
+            )
+        }
+    }
+
+    /// 结果提示：全部成功 → 成功 Toast 并返回 nil；否则返回内联失败说明（部分失败另出警告 Toast）。
+    static func announce(_ summary: DispatchSummary, target: DispatchTarget, toasts: ToastCenter) -> String? {
+        let device = target.name
+        if summary.failures == 0 {
+            let text: String
+            if target.isCloud, target.isOffline {
+                text = L("downloadToDispatchedOffline", ["count": summary.successes, "device": device])
+            } else if summary.successes == 1 {
+                text = L("dispatchedToDevice", ["device": device])
+            } else {
+                text = L("downloadToDispatched", ["count": summary.successes, "device": device])
+            }
+            toasts.show(text: text, tone: .success)
+            FluxHaptic.success.play()
+            return nil
+        }
+        let reason = summary.firstError.map { AccountText.error($0, context: target.isCloud ? .general : .pairing) }
+            ?? L("dispatchFailed")
+        if summary.successes > 0 {
+            let partial = L(
+                "downloadToPartial",
+                ["ok": summary.successes, "failed": summary.failures, "device": device]
+            )
+            toasts.show(text: partial, tone: .warning)
+            FluxHaptic.warning.play()
+            return partial + "\n" + reason
+        }
+        FluxHaptic.error.play()
+        return reason
+    }
+}
+
+/// V3a 下发表单的状态与提交：每条链接一次 dispatch，全部结束后汇总。
 @MainActor
 @Observable
 final class DispatchModel {
@@ -100,66 +141,15 @@ final class DispatchModel {
 
         let typedName = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
         let single = entries.count == 1
-        var summary = DispatchSummary()
-        for entry in entries {
+        let items = entries.map { entry in
             let name = single && !typedName.isEmpty ? typedName : entry.fileName
-            do throws(HostError) {
-                try await dispatch(url: entry.url, fileName: name.isEmpty ? nil : name, saveDir: dir)
-                summary.successes += 1
-            } catch {
-                summary.failures += 1
-                summary.failedEntries.append(entry)
-                if summary.firstError == nil { summary.firstError = error }
-            }
-            done += 1
+            return DispatchItem(entry: entry, fileName: name.isEmpty ? nil : name)
         }
-        return report(summary)
-    }
-
-    private func dispatch(url: String, fileName: String?, saveDir: String?) async throws(HostError) {
-        switch target {
-        case let .cloud(record, _):
-            _ = try await container.agent.remoteDispatch(
-                RemoteDispatchParams(toDevice: record.deviceId, url: url, fileName: fileName, saveDir: saveDir)
-            )
-        case let .link(info):
-            _ = try await container.agent.linkDispatch(
-                LinkDispatchParams(fingerprint: info.fingerprint, url: url, fileName: fileName, saveDir: saveDir)
-            )
-        }
-    }
-
-    private func report(_ summary: DispatchSummary) -> Bool {
-        let device = target.name
-        if summary.failures == 0 {
-            let text: String
-            if target.isCloud, target.isOffline {
-                text = L("downloadToDispatchedOffline", ["count": summary.successes, "device": device])
-            } else if summary.successes == 1 {
-                text = L("dispatchedToDevice", ["device": device])
-            } else {
-                text = L("downloadToDispatched", ["count": summary.successes, "device": device])
-            }
-            container.toasts.show(text: text, tone: .success)
-            FluxHaptic.success.play()
-            return true
-        }
-        let reason = summary.firstError.map { AccountText.error($0, context: target.isCloud ? .general : .pairing) }
-            ?? L("dispatchFailed")
+        let summary = await Dispatcher.run(items, to: target, saveDir: dir, agent: container.agent) { done = $0 }
+        guard let failure = Dispatcher.announce(summary, target: target, toasts: container.toasts) else { return true }
         // 只保留失败的链接，成功的不会被重复下发。
         urlText = summary.failedEntries.map { $0.toText() }.joined(separator: "\n")
-        if summary.successes > 0 {
-            let partial = L(
-                "downloadToPartial",
-                ["ok": summary.successes, "failed": summary.failures, "device": device]
-            )
-            container.toasts.show(text: partial, tone: .warning)
-            failure = partial + "\n" + reason
-            FluxHaptic.warning.play()
-        } else {
-            failure = reason
-            FluxHaptic.error.play()
-        }
+        self.failure = failure
         return false
     }
 }

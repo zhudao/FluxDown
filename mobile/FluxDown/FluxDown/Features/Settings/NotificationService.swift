@@ -158,6 +158,7 @@ nonisolated enum NotificationIDs {
     static let completedOpenShare = "fluxdown.completed.openShare"
     static let failed = "fluxdown.failed"
     static let selection = "fluxdown.selection"
+    static let fileConflict = "fluxdown.fileConflict"
     static let test = "fluxdown.test"
 
     static let actionOpen = "fluxdown.action.open"
@@ -243,6 +244,19 @@ extension NotificationSpec {
             ]
         )
     }
+
+    /// 文件已存在询问通知：`fileName` 取询问里的文件名（任务不一定还在表里）；动作「自动重命名」= 默认答复。
+    static func fileConflict(requestId: String, taskId: String, fileName: String, hostID: String) -> NotificationSpec {
+        NotificationSpec(
+            identifier: "sel.\(hostID).\(requestId)", threadID: "fluxdown.\(hostID).\(taskId)",
+            title: L("fileConflictTitle"),
+            body: L("mobileNotifFileConflictBody", ["name": fileName]),
+            category: NotificationIDs.fileConflict,
+            userInfo: [
+                NotificationIDs.keyRequest: requestId, NotificationIDs.keyTask: taskId, NotificationIDs.keyHost: hostID,
+            ]
+        )
+    }
 }
 
 /// 用户对通知的响应。
@@ -275,7 +289,7 @@ nonisolated enum NotificationIntent: Equatable, Sendable {
     /// 前台展示策略：只有失败 / 选择请求在前台弹横幅（完成已经体现在列表里，前台不重复打扰）。
     static func foregroundPresentation(category: String) -> UNNotificationPresentationOptions {
         switch category {
-        case NotificationIDs.failed, NotificationIDs.selection, NotificationIDs.test: [.banner, .list, .sound]
+        case NotificationIDs.failed, NotificationIDs.selection, NotificationIDs.fileConflict, NotificationIDs.test: [.banner, .list, .sound]
         default: []
         }
     }
@@ -378,12 +392,15 @@ final class NotificationService: NSObject {
         let open = UNNotificationAction(identifier: NotificationIDs.actionOpen, title: L("mobileNotifActionOpen"), options: [.foreground])
         let share = UNNotificationAction(identifier: NotificationIDs.actionShare, title: L("mobileNotifActionShare"), options: [.foreground])
         let useDefault = UNNotificationAction(identifier: NotificationIDs.actionUseDefault, title: L("mobileNotifActionUseDefault"), options: [])
+        // 文件已存在：默认答复恒为「重命名」，按钮直接写明（同一动作标识，另一类别里用不同标题）。
+        let renameDefault = UNNotificationAction(identifier: NotificationIDs.actionUseDefault, title: L("fileExistsRename"), options: [])
         center.setNotificationCategories([
             UNNotificationCategory(identifier: NotificationIDs.completed, actions: [], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationIDs.completedOpen, actions: [open], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationIDs.completedOpenShare, actions: [open, share], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationIDs.failed, actions: [], intentIdentifiers: [], options: []),
             UNNotificationCategory(identifier: NotificationIDs.selection, actions: [useDefault], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: NotificationIDs.fileConflict, actions: [renameDefault], intentIdentifiers: [], options: []),
         ])
     }
 
@@ -424,8 +441,12 @@ final class NotificationService: NSObject {
         // 选择请求：App 在前台时壳层已自动弹出请求 Sheet，只在不活跃时通知。
         if !delta.newSelections.isEmpty, UIApplication.shared.applicationState != .active {
             for request in state.selections where delta.newSelections.contains(request.requestId) {
-                let name = state.task(request.taskId)?.fileName ?? ""
-                post(NotificationSpec.selection(requestId: request.requestId, taskId: request.taskId, fileName: name, hostID: hostID))
+                if let conflict = request.fileConflict {
+                    post(NotificationSpec.fileConflict(requestId: request.requestId, taskId: request.taskId, fileName: conflict.fileName, hostID: hostID))
+                } else {
+                    let name = state.task(request.taskId)?.fileName ?? ""
+                    post(NotificationSpec.selection(requestId: request.requestId, taskId: request.taskId, fileName: name, hostID: hostID))
+                }
             }
         }
     }
@@ -534,13 +555,13 @@ final class NotificationService: NSObject {
         case let .openSelection(requestId, hostID):
             guard await ensureHost(hostID) else { return }
             await waitUntilLive()
-            guard container.store.state.selections.contains(where: { $0.requestId == requestId }) else {
+            guard let request = container.store.state.selections.first(where: { $0.requestId == requestId }) else {
                 container.router.tab = .downloads
                 return
             }
             container.router.dismissedSelections.remove(requestId)
             container.router.tab = .downloads
-            container.router.sheet = .selection(requestId: requestId)
+            container.router.sheet = request.fileConflict == nil ? .selection(requestId: requestId) : .fileConflicts
         case let .shareTask(taskId, hostID):
             guard await ensureHost(hostID) else { return }
             await waitUntilLive()

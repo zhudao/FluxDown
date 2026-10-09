@@ -48,7 +48,7 @@ sealed interface Normalized {
 }
 
 object SettingsCatalog {
-    val fileExistsBehaviors = listOf("rename", "overwrite", "skip")
+    val fileExistsBehaviors = listOf("rename", "overwrite", "skip", "ask")
     val fileMissingActions = listOf("keep", "delete")
     val btSeedTimeUnits = listOf("minutes", "hours", "days")
     val btSeedLimitOperators = listOf("or", "and")

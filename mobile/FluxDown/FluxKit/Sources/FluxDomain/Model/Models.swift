@@ -322,6 +322,7 @@ public enum SelectionKind: Sendable, Hashable {
     case hls([HlsOption])
     case bt([BtFile])
     case variant([VariantOption])
+    case fileExists(FileConflict)
 }
 
 public struct HlsOption: Sendable, Hashable {
@@ -382,6 +383,7 @@ public enum SelectionOutcome: Sendable, Hashable {
     case hls(index: Int32)
     case bt(indices: [Int32])
     case variant(index: Int32)
+    case fileExists(action: FileExistsAction)
     case cancelled
 }
 
@@ -478,17 +480,28 @@ public struct CloudDevice: Sendable, Hashable, Identifiable {
     public var isOnline: Bool
     public var isCurrent: Bool
     public var appVersion: String?
+    /// 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。
+    public var defaultSaveDir: String?
+    /// 设备自报的路径风格；nil = 未上报（按 `platform` 推断，见 ``effectivePathStyle``）。
+    public var pathStyle: PathStyle?
 
-    public init(deviceId: String, name: String, platform: String?, isOnline: Bool, isCurrent: Bool, appVersion: String?) {
+    public init(
+        deviceId: String, name: String, platform: String?, isOnline: Bool, isCurrent: Bool, appVersion: String?,
+        defaultSaveDir: String? = nil, pathStyle: PathStyle? = nil
+    ) {
         self.deviceId = deviceId
         self.name = name
         self.platform = platform
         self.isOnline = isOnline
         self.isCurrent = isCurrent
         self.appVersion = appVersion
+        self.defaultSaveDir = defaultSaveDir
+        self.pathStyle = pathStyle
     }
 
     public var id: String { deviceId }
+
+    public var effectivePathStyle: PathStyle? { PathStyle.effective(reported: pathStyle, platform: platform) }
 }
 
 /// 局域网已配对设备（`LinkDeviceInfo` 子集）。
@@ -497,13 +510,24 @@ public struct LinkDevice: Sendable, Hashable, Identifiable {
     public var name: String
     public var platform: String?
     public var online: Bool
+    /// 设备自报的默认下载目录（远程下发不填保存目录时目标使用它）。
+    public var defaultSaveDir: String?
+    /// 设备自报的路径风格；nil = 未上报（按 `platform` 推断，见 ``effectivePathStyle``）。
+    public var pathStyle: PathStyle?
 
-    public init(fingerprint: String, name: String, platform: String?, online: Bool) {
+    public init(
+        fingerprint: String, name: String, platform: String?, online: Bool,
+        defaultSaveDir: String? = nil, pathStyle: PathStyle? = nil
+    ) {
         self.fingerprint = fingerprint
         self.name = name
         self.platform = platform
         self.online = online
+        self.defaultSaveDir = defaultSaveDir
+        self.pathStyle = pathStyle
     }
 
     public var id: String { fingerprint }
+
+    public var effectivePathStyle: PathStyle? { PathStyle.effective(reported: pathStyle, platform: platform) }
 }

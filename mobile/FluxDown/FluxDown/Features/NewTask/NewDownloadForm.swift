@@ -95,6 +95,10 @@ final class NewDownloadForm {
     var showEmptyError = false
     /// 进行中的清单预解析（N5）：非 nil 时禁用提交，关闭 Sheet 时取消。
     var probe: ManifestProbe?
+    /// 「下载到」所选远端目标的 ``DispatchTarget/id``；nil = 当前主机。
+    var targetId: String?
+    /// 远端保存目录（与 `saveDir` 各自保留，来回切换目标不互相覆盖）；空 = 目标设备默认目录。
+    var remoteSaveDir = ""
     let advanced = AdvancedState()
 
     @ObservationIgnored private let initialSaveDir: String
@@ -136,7 +140,31 @@ final class NewDownloadForm {
             || !rename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || saveDir != initialSaveDir
             || queueId != initialQueueId
+            || targetId != nil
+            || !remoteSaveDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !advanced.modified(single: true, singleHttp: true).isEmpty
+    }
+
+    /// 当前选中的远端目标；目标已不在候选里（登出 / 解除配对）时回落到当前主机。
+    func target(in targets: [DispatchTarget]) -> DispatchTarget? {
+        guard let targetId else { return nil }
+        return targets.first { $0.id == targetId }
+    }
+
+    /// 下发条目：单条链接时重命名优先于 `out=`；空名交给目标设备推断。
+    /// 只带链接 / 文件名，线程、队列与高级选项只对当前主机有意义，不随下发。
+    func dispatchItems() -> [DispatchItem] {
+        let list = entries
+        let renamed = rename.trimmingCharacters(in: .whitespacesAndNewlines)
+        return list.map { entry in
+            let name = list.count == 1 && !renamed.isEmpty ? renamed : entry.fileName
+            return DispatchItem(entry: entry, fileName: name.isEmpty ? nil : name)
+        }
+    }
+
+    /// 只保留这些链接（下发部分失败时留下失败项以便重试，成功的不会被重复下发）。
+    func retain(_ entries: [UrlEntry]) {
+        urlText = entries.map { $0.toText() }.joined(separator: "\n")
     }
 
     /// 追加文本（粘贴 / 导入）；已有内容逐字保留。

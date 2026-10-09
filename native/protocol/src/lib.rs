@@ -37,7 +37,8 @@ pub use agent::{
     PlatformUrlProtocolParams, PowerArmParams, PowerStatusDto, ReleaseNoteDto, RemoteCommandAction,
     RemoteCommandParams, RemoteDispatchParams, RemoteDispatchResult, RemoteTaskDto,
     RemoteTaskStatus, ShellStatusDto, SyncLocalOnlyParams, SyncStatusDto, TrayUnavailableReason,
-    UpdateCheckParams, UpdateCheckResultDto,
+    UpdateCheckParams, UpdateFailure, UpdateInstallKind, UpdateManualReason, UpdatePhase,
+    UpdateStatusDto,
 };
 pub use daemon::{
     ApiInfo, BtFileDto, CdnConfigApplyParams, CdnNodeDto, CdnReportAckParams, CdnReportLeaseDto,
@@ -47,7 +48,7 @@ pub use daemon::{
     CreateGroupResponse, CreateQueueRequest, CreateTaskRequest, CreatedTask, DaemonConfigPatch,
     DaemonConfigSnapshot, DaemonCreateTaskParams, DaemonDeleteTasksParams, DaemonRuntimeStatsDto,
     DaemonTaskIdsParams, DiagnosticsProbeParams, DiagnosticsProbeResult, DownloadRequest,
-    Ed2kServerSubRefreshResponse, FileMissingUpdateDto, FsEntry, FsListResponse,
+    Ed2kServerSubRefreshResponse, FileExistsAction, FileMissingUpdateDto, FsEntry, FsListResponse,
     GatewayMigrationExport, GroupDto, GroupItemRequest, HlsQualityOptionDto, InstallFfmpegRequest,
     InstallPluginDevRequest, InstalledPlugin, LATER_QUEUE_ID, LinkAuth, LinkCodeResponse,
     LinkDeviceInfo, LinkDeviceTaskRequest, LinkDevicesResponse, LinkDiscoveredPeer,
@@ -88,10 +89,10 @@ pub use event::{
     apply_daemon_event, merge_webhook_deliveries,
 };
 pub use rpc::{
-    APP_VERSION, CLOSE_REASON_SERVICE_QUIT, ClientHello, JSONRPC_VERSION, MIN_PROTOCOL_VERSION,
-    PROTOCOL_VERSION, RequestId, RpcFailureResponse, RpcIncoming, RpcNotification, RpcRequest,
-    RpcResponse, RpcSuccessResponse, ServiceHello, ServiceRole, negotiate_protocol,
-    validate_first_request,
+    APP_VERSION, CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART, ClientHello,
+    JSONRPC_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, RequestId, RpcFailureResponse,
+    RpcIncoming, RpcNotification, RpcRequest, RpcResponse, RpcSuccessResponse, ServiceHello,
+    ServiceRole, negotiate_protocol, validate_first_request,
 };
 pub use settings::{
     CUSTOM_THEMES_KEY, FILE_ICON_PACK_KEY, MAX_CUSTOM_THEME_ID_LEN, MAX_SYNC_VALUE_BYTES,

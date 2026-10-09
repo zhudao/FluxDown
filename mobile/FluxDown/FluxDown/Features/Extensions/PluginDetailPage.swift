@@ -121,13 +121,13 @@ struct PluginDetailPage: View {
                     Label(L("pluginUninstallTooltip"), systemImage: FluxSymbol.delete)
                 }
                 .disabled(busy)
+                .alert(L("pluginUninstallTitle"), isPresented: $confirmUninstall) {
+                    Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(L("pluginUninstallMsg", ["name": plugin.name]))
+                }
             }
-        }
-        .confirmationDialog(L("pluginUninstallTitle"), isPresented: $confirmUninstall, titleVisibility: .visible) {
-            Button(L("pluginUninstallTooltip"), role: .destructive) { Task { await model.uninstall(plugin) } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: {
-            Text(L("pluginUninstallMsg", ["name": plugin.name]))
         }
     }
 

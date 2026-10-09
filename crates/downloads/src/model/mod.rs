@@ -2,6 +2,7 @@ pub(crate) mod categories;
 pub(crate) mod counts;
 pub(crate) mod devices;
 pub(crate) mod dispatch;
+pub(crate) mod file_conflict;
 pub(crate) mod file_rescan;
 pub(crate) mod manifest;
 pub(crate) mod new_download;
@@ -322,6 +323,8 @@ pub(crate) struct DownloadTaskView {
     pub(crate) save_dir: String,
     pub(crate) group_id: String,
     pub(crate) error_message: String,
+    /// 该任务有待确认的「文件已存在」请求（任务表「待确认」角标）。
+    pub(crate) conflict_pending: bool,
     pub(crate) file_missing: bool,
     pub(crate) seeding_status: i32,
     pub(crate) uploaded_bytes: i64,
@@ -463,6 +466,7 @@ impl DownloadTaskView {
             save_dir: String::new(),
             group_id: String::new(),
             error_message: String::new(),
+            conflict_pending: false,
             file_missing: false,
             seeding_status: 0,
             uploaded_bytes: 0,

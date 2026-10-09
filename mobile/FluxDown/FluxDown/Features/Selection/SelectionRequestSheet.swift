@@ -71,143 +71,10 @@ private struct SelectionHost: View {
         case let .variant(options):
             VariantSelectionView(request: request, options: options, task: task, resolver: resolver, close: { dismiss() })
                 .id(request.requestId)
+        case .fileExists:
+            // 聚合进 `.fileConflicts` 路由（`FileConflictSheet`），不会以单请求 Sheet 呈现。
+            EmptyView()
         }
-    }
-}
-
-/// 答复成功后关闭 Sheet 的回调（在主 actor 上执行，可跨 Task 传递）。
-private typealias SelectionClose = @MainActor @Sendable () -> Void
-
-// MARK: - 答复
-
-/// 经 `HostSession.resolveSelection` 答复；去重、只读拦截与错误 toast 集中在这里。
-@MainActor
-@Observable
-private final class SelectionResolver {
-    @ObservationIgnored private unowned let container: AppContainer
-    @ObservationIgnored private var inFlight = Set<String>()
-    @ObservationIgnored private var ours = Set<String>()
-
-    init(container: AppContainer) {
-        self.container = container
-    }
-
-    func wasOurs(_ requestId: String) -> Bool { ours.contains(requestId) }
-
-    /// - Parameters:
-    ///   - successToast: 答复成功后的提示；nil 不提示。
-    ///   - userInitiated: 用户操作才受只读拦截；倒计时自动答复照常尝试。
-    func resolve(
-        _ request: SelectionRequest,
-        _ outcome: SelectionOutcome,
-        successToast: String?,
-        userInitiated: Bool,
-        onSuccess: @escaping SelectionClose
-    ) {
-        let toasts = container.toasts
-        if userInitiated, container.store.state.isReadOnly {
-            FluxHaptic.error.play()
-            toasts.show(text: L("localServiceDisconnected"), tone: .error, systemImage: FluxSymbol.offline)
-            return
-        }
-        let id = request.requestId
-        guard inFlight.insert(id).inserted else { return }
-        ours.insert(id) // 先登记：请求消失的事件可能先于本任务恢复到达
-        let session = container.session
-        Task {
-            defer { inFlight.remove(id) }
-            do throws(HostError) {
-                try await session.resolveSelection(id, outcome: outcome)
-                FluxHaptic.success.play()
-                if let successToast { toasts.show(text: successToast, tone: .success, systemImage: "checkmark.circle") }
-                onSuccess()
-            } catch {
-                // 请求已不在待处理列表（引擎超时自行按默认项处理 / 其它设备先答复）：不算失败。
-                if container.store.state.selections.contains(where: { $0.requestId == id }) {
-                    ours.remove(id)
-                    FluxHaptic.error.play()
-                    toasts.show(text: ErrorText.describe(error), tone: .error)
-                }
-            }
-        }
-    }
-
-    /// 取消：任务保持暂停。
-    func cancel(_ request: SelectionRequest, onSuccess: @escaping SelectionClose) {
-        resolve(request, .cancelled, successToast: L("mobileSelectionCancelled"), userInitiated: true, onSuccess: onSuccess)
-    }
-
-    /// 倒计时到期：按默认项答复。
-    func applyDefault(_ request: SelectionRequest, onSuccess: @escaping SelectionClose) {
-        resolve(request, request.defaultChoice, successToast: L("mobileSelectionAutoApplied"), userInitiated: false, onSuccess: onSuccess)
-    }
-}
-
-// MARK: - 共用 UI
-
-/// 倒计时基准：首次出现时固定 `total`，环按 deadline 重算（重建视图不会重置）。
-private struct SelectionTiming {
-    let deadline: Date
-    let total: TimeInterval
-
-    init(_ request: SelectionRequest) {
-        deadline = Date(timeIntervalSince1970: TimeInterval(request.deadlineUnixMs) / 1000)
-        total = max(deadline.timeIntervalSinceNow, 1)
-    }
-}
-
-/// 任务行：类别图标 + 等宽文件名 + 协议徽标。
-private struct SelectionTaskRow: View {
-    let task: DownloadTask?
-
-    var body: some View {
-        if let task {
-            HStack(spacing: 12) {
-                KindIcon(kind: task.protocol == .bt ? .torrent : FileKind.from(fileName: task.fileName), size: 36)
-                Text(task.fileName)
-                    .font(.subheadline.monospaced())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 8)
-                ProtocolBadge(text: tag(task.protocol))
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(tag(task.protocol)), \(task.fileName)")
-        }
-    }
-
-    private func tag(_ p: TaskProtocol) -> String { TaskDetailFormat.protocolTag(p) }
-}
-
-/// 底部栏：左侧倒计时环 + 文案，右侧主操作。使用系统 `.bottomBar` 工具栏——系统只渲染一层 Liquid Glass，
-/// 在 medium（玻璃）/ large（不透明）Sheet 里都不会出现玻璃叠玻璃。
-private struct SelectionBar<Primary: View>: ToolbarContent {
-    let timing: SelectionTiming
-    let onExpire: () -> Void
-    @ViewBuilder let primary: Primary
-
-    var body: some ToolbarContent {
-        ToolbarItem(placement: .bottomBar) {
-            HStack(spacing: 8) {
-                CountdownRing(
-                    deadline: timing.deadline,
-                    total: timing.total,
-                    label: { L("selectionAutoDefaultIn", ["seconds": $0]) },
-                    onExpire: onExpire
-                )
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let seconds = max(0, Int(timing.deadline.timeIntervalSince(context.date).rounded(.up)))
-                    Text(L("selectionAutoDefaultIn", ["seconds": seconds]))
-                        .font(.footnote)
-                        .monospacedDigit()
-                        .lineLimit(2)
-                        .foregroundStyle(seconds <= 5 ? Color.fdStatusWarningText : Color.secondary)
-                }
-                .accessibilityHidden(true)
-            }
-        }
-        ToolbarSpacer(.flexible, placement: .bottomBar)
-        ToolbarItem(placement: .bottomBar) { primary }
     }
 }
 
@@ -253,6 +120,10 @@ private struct BtSelectionView: View {
 
     private var selectedBytes: Int64 { selected.reduce(0) { $0 + (sizes[$1] ?? 0) } }
     private var dirty: Bool { selected != initial }
+    /// 只有清单里有目录时文件行才需要让出折叠箭头的位置（箭头 32 + 间距 8）；纯文件清单左对齐。
+    private var chevronGutter: CGFloat {
+        tree.children.contains { if case .folder = $0 { true } else { false } } ? 40 : 0
+    }
 
     var body: some View {
         let rows = flattenBtTree(tree, collapsed: collapsed)
@@ -281,6 +152,12 @@ private struct BtSelectionView: View {
                     Button(L("cancel"), systemImage: FluxSymbol.close) {
                         if dirty { showDiscard = true } else { resolver.cancel(request, onSuccess: close) }
                     }
+                    .alert(L("mobileSelectionDiscardTitle"), isPresented: $showDiscard) {
+                        Button(L("mobileDiscard"), role: .destructive) { resolver.cancel(request, onSuccess: close) }
+                        Button(L("mobileKeepEditing"), role: .cancel) {}
+                    } message: {
+                        Text(L("mobileSelectionDiscardMessage"))
+                    }
                 }
             }
             .toolbar {
@@ -303,12 +180,6 @@ private struct BtSelectionView: View {
                 }
             }
         }
-        .confirmationDialog(L("mobileSelectionDiscardTitle"), isPresented: $showDiscard, titleVisibility: .visible) {
-            Button(L("mobileDiscard"), role: .destructive) { resolver.cancel(request, onSuccess: close) }
-            Button(L("mobileKeepEditing"), role: .cancel) {}
-        } message: {
-            Text(L("mobileSelectionDiscardMessage"))
-        }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
@@ -325,7 +196,7 @@ private struct BtSelectionView: View {
             }
             Spacer()
             Text(L("selectedCount", ["n": selected.count]) + " · " + sizeText)
-                .font(.footnote.monospaced())
+                .font(.footnote.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -394,7 +265,7 @@ private struct BtSelectionView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.leading, indent + 40)
+            .padding(.leading, indent + chevronGutter)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(name)
             .accessibilityValue(Format.bytes(file.size).description)

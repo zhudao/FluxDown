@@ -47,6 +47,9 @@ pub struct EmbeddedConfig {
     pub daemon_token: String,
     /// 设备平台名（`android` / `ios`），首次启动时写入设备身份。
     pub client_platform: String,
+    /// 宿主读到的系统设备名（Android「设备名称」/ 机型、iOS `UIDevice.name`）。设备名缺失或仍是
+    /// 占位名时用它命名本机；`None` / 空白则回落主机名探测（移动端沙盒通常得到占位名 `FluxDown`）。
+    pub client_device_name: Option<String>,
     /// 是否装配局域网互联服务（只有出站发现 / 配对，宿主不开放监听端口）。
     pub enable_link: bool,
 }
@@ -95,6 +98,7 @@ pub async fn start_embedded(
         daemon_url,
         daemon_token,
         client_platform,
+        client_device_name,
         enable_link,
     } = config;
     let daemon_address = daemon_socket_address(&daemon_url)
@@ -114,7 +118,14 @@ pub async fn start_embedded(
     if new_device {
         state.device_id = uuid::Uuid::new_v4().to_string();
     }
-    finalize_device_identity(&mut state, &store, &client_platform, new_device).await?;
+    finalize_device_identity(
+        &mut state,
+        &store,
+        &client_platform,
+        client_device_name.as_deref(),
+        new_device,
+    )
+    .await?;
 
     // 子令牌：启动失败或 daemon 致命错误只停止本 agent，不波及宿主的取消令牌。
     let cancel = cancel.child_token();
@@ -142,6 +153,7 @@ pub async fn start_embedded(
         linked_devices: crate::link::public_devices(&state),
         remote_tasks: state.remote_tasks.clone(),
         shell: crate::shell::shell_status(availability, &state.preferences),
+        update: crate::update::initial_status(&crate::update::unsupported_target()),
         ..AgentSnapshot::default()
     };
     let events = AgentEventHub::new(initial);
@@ -224,22 +236,26 @@ pub async fn start_embedded(
         events.clone(),
         shell.clone(),
     ));
-    // 兼容 API 不存在：开关恒关、令牌为空，诊断只做与网关无关的探测。
+    // 兼容 API 不存在：开关恒关、令牌为空，诊断省略网关 / 兼容 API / 硬盘休眠检查。
     let api_switches = Arc::new(fluxdown_api::server::ApiRuntimeSwitches::new(
         false, false, false, false, false,
     ));
     let api_token = fluxdown_api::auth::TokenCell::new("");
-    let diagnostics = Arc::new(crate::diagnostics::DiagnosticsService::new(
-        daemon.clone(),
-        daemon_config,
+    let diagnostics = Arc::new(
+        crate::diagnostics::DiagnosticsService::new(
+            daemon.clone(),
+            daemon_config,
+            events.clone(),
+            shared_state.clone(),
+            store.clone(),
+            api_switches.clone(),
+            api_token.clone(),
+        )
+        .for_embedded_host(),
+    );
+    let update = Arc::new(crate::update::UpdateService::unsupported(
         events.clone(),
-        shared_state.clone(),
-        store.clone(),
-        api_switches.clone(),
-        api_token.clone(),
-    ));
-    let update = Arc::new(crate::update::UpdateService::new(
-        fluxdown_protocol::APP_VERSION,
+        store.data_dir().to_path_buf(),
     ));
     let mut gateway = GatewayService::new(
         daemon.clone(),
@@ -264,7 +280,9 @@ pub async fn start_embedded(
         },
     )
     // 与 headless 宿主相同的能力面：桌面平台集成与宿主诊断修复返回 Unsupported。
-    .with_server_mode(true);
+    .with_server_mode(true)
+    // 只有同进程 App 能连到嵌入式网关：日志导出写入 App 自己给出的沙盒路径。
+    .with_local_log_export();
     if let Some(link) = &link {
         gateway = gateway.with_link(link.clone());
     }

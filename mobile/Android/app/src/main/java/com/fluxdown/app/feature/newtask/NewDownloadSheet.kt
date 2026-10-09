@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
 import com.fluxdown.app.actions.LocalTaskActions
+import com.fluxdown.core.capture.TorrentFile
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.shell.LocalAppContainer
@@ -48,7 +49,16 @@ import com.fluxdown.app.ui.fileCategory
 import com.fluxdown.app.ui.label
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.model.CategoryIndex
+import com.fluxdown.core.model.HostRef
 import com.fluxdown.core.model.TaskProtocol
+import com.fluxdown.core.protocol.CloudConnectionDto
+import com.fluxdown.core.protocol.CloudPresence
+import com.fluxdown.core.protocol.DeviceRules
+import com.fluxdown.core.protocol.DispatchTarget
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.Json
+import com.fluxdown.core.protocol.PathStyle
+import com.fluxdown.core.store.Connection
 import com.fluxdown.fluxui.controls.ButtonSize
 import com.fluxdown.fluxui.controls.ButtonVariant
 import com.fluxdown.fluxui.controls.FluxButton
@@ -130,6 +140,18 @@ private fun NewDownloadSheetImpl(visible: Boolean, route: SheetRoute.NewDownload
     var advancedOpen by remember { mutableStateOf(false) }
     val dismiss by rememberUpdatedState(onDismiss)
     val submitted by rememberUpdatedState(onSubmitted)
+
+    // 「下载到」候选：云账号其他设备 + 局域网已配对设备（快照实时投影；输入不变不重算）
+    val host = hostState()
+    val cloudDevices by remember { derivedStateOf { host.value.cloudDevices } }
+    val linkDevices by remember { derivedStateOf { host.value.linkDevices } }
+    val live by remember { derivedStateOf { host.value.connection == Connection.Live } }
+    val connectionRaw by remember { derivedStateOf { host.value.sections[HostSection.agentCloudConnection] } }
+    val targets = remember(cloudDevices, linkDevices, live, connectionRaw) {
+        val connection = CloudConnectionDto.fromJson(Json.parseOrNull(connectionRaw))
+        DeviceRules.dispatchTargets(cloudDevices, linkDevices, CloudPresence.isKnown(connection, live), live)
+    }
+    val target = form.target(targets)
 
     val s = Strings(
         discardTitle = str(R.string.mobileDiscardTitle),
@@ -220,15 +242,72 @@ private fun NewDownloadSheetImpl(visible: Boolean, route: SheetRoute.NewDownload
         }
     }
 
+    /** 「下载到」其他设备：逐条下发链接 / 文件名 / 保存目录；全部成功关闭，有失败时只把失败的链接留在文本框里。 */
+    fun submitRemote(target: DispatchTarget) {
+        if (form.submitting) return
+        if (container.store.state.value.isReadOnly) {
+            haptics.reject()
+            overlays.toast(s.readOnly, FluxToastKind.Error, FluxIcons.WifiOff)
+            return
+        }
+        if (form.entries.isEmpty()) {
+            haptics.reject()
+            form.showEmptyError = true
+            return
+        }
+        val saveDir = when (val check = DeviceRules.checkSaveDir(form.remoteSaveDir, target.pathStyle)) {
+            DeviceRules.SaveDirCheck.Invalid -> {
+                haptics.reject()
+                return
+            }
+            DeviceRules.SaveDirCheck.UseDefault -> null
+            is DeviceRules.SaveDirCheck.Explicit -> check.dir
+        }
+        val items = form.dispatchItems()
+        val session = container.session
+        form.submitting = true
+        form.dispatchFailure = null
+        form.dispatchProgress = 0 to items.size
+        container.appScope.launch {
+            val summary = Dispatcher.run(items, target, saveDir, session) { done -> form.dispatchProgress = done to items.size }
+            form.dispatchProgress = null
+            form.submitting = false
+            val outcome = Dispatcher.outcome(context, summary, target)
+            when {
+                outcome.failure == null -> {
+                    haptics.confirm()
+                    outcome.toast?.let { overlays.toast(it, FluxToastKind.Success, FluxIcons.Send) }
+                    dismiss()
+                }
+                else -> {
+                    haptics.reject()
+                    if (outcome.partial) outcome.toast?.let { overlays.toast(it, FluxToastKind.Warn) }
+                    form.retain(summary.failedEntries)
+                    form.dispatchFailure = outcome.failure
+                }
+            }
+        }
+    }
+
     FluxSheet(
         visible = visible,
         onDismissRequest = ::requestClose,
         detent = FluxSheetDetent.Full,
         title = str(R.string.newDownload),
         header = { FluxSheetHeader(title = str(R.string.newDownload), onClose = ::requestClose) },
-        footer = { NewDownloadFooter(form, ::submit) },
+        footer = {
+            NewDownloadFooter(form, target, ::submit, onSubmitRemote = { target?.let(::submitRemote) })
+        },
     ) {
-        NewDownloadContent(form, onOpenAdvanced = { advancedOpen = true })
+        NewDownloadContent(
+            form, targets, target,
+            onOpenAdvanced = { advancedOpen = true },
+            // 本机建了任务：拉起前台服务；表单里没有待提交的链接时关闭（同 iOS `importTorrents`）
+            onTorrentImported = {
+                submitted()
+                if (form.urlText.isBlank()) dismiss()
+            },
+        )
     }
 
     FluxSheet(
@@ -276,7 +355,13 @@ private fun checksumValid(form: NewDownloadState): Boolean = !form.single || che
 // ── N1 正文 ───────────────────────────────────────────────────────────────
 
 @Composable
-private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Unit) {
+private fun NewDownloadContent(
+    form: NewDownloadState,
+    targets: List<DispatchTarget>,
+    target: DispatchTarget?,
+    onOpenAdvanced: () -> Unit,
+    onTorrentImported: () -> Unit,
+) {
     val container = LocalAppContainer.current
     val overlays = LocalFluxOverlays.current
     val haptics = FluxTheme.haptics
@@ -285,7 +370,7 @@ private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Uni
     val context = LocalContext.current
     val host = hostState()
     val hostRef by container.host.collectAsStateWithLifecycle()
-    val remoteHost = hostRef is com.fluxdown.core.model.HostRef.Remote
+    val remoteHost = hostRef is HostRef.Remote
 
     val queues by remember { derivedStateOf { host.value.queues } }
     val categories by remember { derivedStateOf { host.value.categories } }
@@ -317,6 +402,39 @@ private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Uni
                 val (merged, added) = appendEntries(form.urlText, found)
                 form.urlText = merged
                 overlays.toast(importFound.fill("count" to added), FluxToastKind.Success, FluxIcons.FileText)
+            }
+        }
+    }
+    var importingTorrent by remember { mutableStateOf(false) }
+    val taskActions = LocalTaskActions.current
+    val torrentLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris: List<Uri> ->
+        if (uris.isEmpty() || importingTorrent || form.submitting) return@rememberLauncherForActivityResult
+        if (!form.saveDirValid) {
+            haptics.reject()
+            return@rememberLauncherForActivityResult
+        }
+        // 本机主机：目录不可写在提交前拦住（同 `submit`）
+        if (container.host.value is HostRef.Local && !com.fluxdown.app.ui.isLocalDirWritable(form.saveDir)) {
+            haptics.reject()
+            overlays.toast(context.str(R.string.mobileSaveDirNotWritable, "dir" to form.saveDir.trim()), FluxToastKind.Error)
+            return@rememberLauncherForActivityResult
+        }
+        val queues = container.store.state.value.queues
+        val queueId = (queues.firstOrNull { it.queueId == form.queueId } ?: queues.firstOrNull())?.queueId ?: form.queueId
+        importingTorrent = true
+        container.appScope.launch {
+            val created = try {
+                TorrentImport.submit(
+                    context, container, overlays, taskActions::errorText, uris, form.saveDir, queueId, startPaused = false,
+                )
+            } finally {
+                importingTorrent = false
+            }
+            if (created > 0) {
+                haptics.confirm()
+                onTorrentImported()
+            } else {
+                haptics.reject()
             }
         }
     }
@@ -382,6 +500,23 @@ private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Uni
                 fullWidth = true,
                 enabled = !busy,
             )
+            FluxButton(
+                str(R.string.openTorrentFile),
+                { torrentLauncher.launch(arrayOf(TorrentFile.MIME_TYPE, "application/octet-stream")) },
+                size = ButtonSize.Sm,
+                icon = FluxIcons.FileUp,
+                fullWidth = true,
+                enabled = !busy && !importingTorrent && target == null,
+            )
+            // 种子只能在当前主机建任务：「下载到」选了其他设备时禁用并说明（同 iOS `torrentButton(remote:)`）
+            if (target != null) {
+                FluxText(
+                    str(R.string.downloadToTorrentLocalOnly),
+                    style = type.sm,
+                    color = c.inkFaint,
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                )
+            }
         }
 
         // 预览：前 3 条
@@ -418,6 +553,16 @@ private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Uni
                     slim = true,
                 )
             }
+        }
+
+        // 下载到：当前主机 / 云账号其他设备 / 局域网已配对设备
+        if (targets.isNotEmpty()) {
+            TargetSelect(form, targets, target, hostRef, enabled = !busy)
+        }
+        if (target != null) {
+            // 下发只带链接 / 文件名 / 保存目录：线程、队列与高级选项只对当前主机有意义（同 iOS / GPUI）
+            RemoteDestination(form, target, enabled = !busy)
+            return@Column
         }
 
         // 保存目录
@@ -525,6 +670,130 @@ private fun NewDownloadContent(form: NewDownloadState, onOpenAdvanced: () -> Uni
     }
 }
 
+/** 「下载到」选择：当前主机（本机 / 远端主机名）+ 远端目标；下方提示随所选目标变化（同 iOS `targetSection`）。 */
+@Composable
+private fun TargetSelect(
+    form: NewDownloadState,
+    targets: List<DispatchTarget>,
+    selected: DispatchTarget?,
+    hostRef: HostRef,
+    enabled: Boolean,
+) {
+    val hostLabel = when (hostRef) {
+        is HostRef.Local -> str(R.string.thisDevice)
+        is HostRef.Remote -> hostRef.displayName.trim().ifEmpty { str(R.string.webDownloadToServer) }
+    }
+    val online = str(R.string.deviceOnline)
+    val offline = str(R.string.deviceOffline)
+    val unknown = str(R.string.devicePresenceUnknown)
+    val localTag = str(R.string.deviceLocalTag)
+    val offlineCloud = str(R.string.downloadToOfflineHint)
+    val offlineLink = str(R.string.errReasonPeerOffline)
+    val optionsIgnored = str(R.string.downloadToRemoteOptionsIgnored)
+    val hostHint = str(R.string.downloadToHint)
+
+    fun status(t: DispatchTarget): String = when (t.online) {
+        true -> online
+        false -> offline
+        null -> unknown
+    }
+
+    /** 同 GPUI `target_label`：云设备 `状态`，已配对设备 `局域网 · 状态`。 */
+    fun detail(t: DispatchTarget): String = if (t.isCloud) status(t) else "$localTag · ${status(t)}"
+
+    fun choose(id: String?) {
+        form.targetId = id
+        form.dispatchFailure = null
+    }
+
+    val items = buildList {
+        add(
+            FluxMenuItem.Action(
+                label = hostLabel,
+                onClick = { choose(null) },
+                icon = if (hostRef is HostRef.Local) FluxIcons.Smartphone else FluxIcons.Server,
+                checked = selected == null,
+            ),
+        )
+        add(FluxMenuItem.Divider)
+        targets.forEach { t ->
+            add(
+                FluxMenuItem.Action(
+                    label = t.name,
+                    onClick = { choose(t.id) },
+                    icon = if (t.isCloud) FluxIcons.Cloud else FluxIcons.Wifi,
+                    hint = detail(t),
+                    checked = t.id == selected?.id,
+                ),
+            )
+        }
+    }
+    // 目标非在线：云设备离线由云端排队，局域网设备离线送不到，状态未知如实说明
+    val hint = if (selected == null) {
+        hostHint
+    } else {
+        val presence = when (selected.online) {
+            true -> null
+            false -> if (selected.isCloud) offlineCloud else offlineLink
+            null -> unknown
+        }
+        listOfNotNull(presence, optionsIgnored).joinToString("\n")
+    }
+    MenuSelect(
+        value = selected?.let { "${it.name} · ${detail(it)}" } ?: hostLabel,
+        label = str(R.string.downloadTo),
+        hint = hint,
+        leadingIcon = when {
+            selected == null -> if (hostRef is HostRef.Local) FluxIcons.Smartphone else FluxIcons.Server
+            selected.isCloud -> FluxIcons.Cloud
+            else -> FluxIcons.Wifi
+        },
+        items = items,
+        enabled = enabled,
+    )
+}
+
+/** 远端目标的保存目录（目标设备上的路径，按其路径风格校验；留空 = 目标设备默认目录）+ 重命名 + 下发进度 / 失败说明。 */
+@Composable
+private fun RemoteDestination(form: NewDownloadState, target: DispatchTarget, enabled: Boolean) {
+    val invalid = DeviceRules.checkSaveDir(form.remoteSaveDir, target.pathStyle) == DeviceRules.SaveDirCheck.Invalid
+    FluxField(
+        value = form.remoteSaveDir,
+        onValueChange = { form.remoteSaveDir = it },
+        label = str(R.string.saveDir),
+        placeholder = target.defaultSaveDir?.let { str(R.string.downloadToRemoteDirDefault, "dir" to it) }
+            ?: str(R.string.downloadToRemoteDirUseDefault),
+        hint = str(R.string.downloadToRemoteDirHint),
+        error = if (invalid) str(R.string.downloadToPathInvalid, "example" to PathStyle.example(target.pathStyle)) else null,
+        mono = true,
+        keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.None,
+            autoCorrectEnabled = false,
+            keyboardType = KeyboardType.Uri,
+        ),
+        enabled = enabled,
+    )
+    if (form.single) {
+        FluxField(
+            value = form.rename,
+            onValueChange = { form.rename = it },
+            label = str(R.string.renameTask),
+            placeholder = str(R.string.autoDetectFilename),
+            enabled = enabled,
+        )
+    }
+    val progress = form.dispatchProgress
+    val failure = form.dispatchFailure
+    when {
+        progress != null -> FluxBanner(
+            text = str(R.string.mobileDispatchSending, "done" to progress.first, "total" to progress.second),
+            kind = FluxBannerKind.Info,
+            slim = true,
+        )
+        failure != null -> FluxBanner(text = failure, kind = FluxBannerKind.Error, slim = true)
+    }
+}
+
 private fun threadItem(label: String, checked: Boolean, onClick: () -> Unit) =
     FluxMenuItem.Action(label = label, onClick = onClick, checked = checked)
 
@@ -598,7 +867,12 @@ private fun readText(context: Context, uri: Uri): String? = runCatching {
 // ── 页脚 ──────────────────────────────────────────────────────────────────
 
 @Composable
-private fun NewDownloadFooter(form: NewDownloadState, submit: (startPaused: Boolean, queueId: String) -> Unit) {
+private fun NewDownloadFooter(
+    form: NewDownloadState,
+    target: DispatchTarget?,
+    submit: (startPaused: Boolean, queueId: String) -> Unit,
+    onSubmitRemote: () -> Unit,
+) {
     val overlays = LocalFluxOverlays.current
     val c = FluxTheme.colors
     val type = FluxTheme.type
@@ -607,6 +881,21 @@ private fun NewDownloadFooter(form: NewDownloadState, submit: (startPaused: Bool
     val count = form.entries.size
     val selected = queues.firstOrNull { it.queueId == form.queueId } ?: queues.firstOrNull()
     val startLabel = if (count > 1) str(R.string.startBatchDownload, "count" to count) else str(R.string.startDownload)
+    if (target != null) {
+        // 下发只有「立即开始」：没有队列，也没有稍后下载（同 iOS / GPUI）
+        FluxSheetFooter {
+            FluxButton(
+                startLabel,
+                onSubmitRemote,
+                modifier = Modifier.weight(1f),
+                variant = ButtonVariant.Primary,
+                icon = FluxIcons.ArrowDown,
+                enabled = !form.submitting,
+                loading = form.submitting,
+            )
+        }
+        return
+    }
     val later = str(R.string.downloadLater)
     val caption = selected?.let { str(R.string.laterIntoQueueTooltip, "name" to it.label()) }
 

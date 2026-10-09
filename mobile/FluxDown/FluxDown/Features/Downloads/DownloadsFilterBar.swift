@@ -3,7 +3,7 @@ import FluxUI
 import SwiftUI
 
 /// 吸顶筛选区（02-downloads §3.1 / §3.2）：状态范围条（`GlassScopeBar`，唯一的玻璃件）+ 范围 / 分类芯片行（内容层，不上玻璃）。
-/// 选中「状态 + 分类」= 交集；状态计数忽略分类，分类计数 = 当前状态 ∩ 该分类。
+/// 选中「状态 + 分类」= 交集；状态计数忽略分类，分类计数 = 当前状态 ∩ 该分类。分类芯片之后是「远程任务」芯片（与分类互斥，只看其他设备上的任务）。
 /// 各部分的显隐由云同步偏好 `ui.show_sidebar_status|queues|category`（通用设置「下载页显示」）决定。
 struct DownloadsFilterBar: View {
     let model: DownloadsModel
@@ -13,7 +13,7 @@ struct DownloadsFilterBar: View {
     var body: some View {
         let visibility = FilterBarVisibility(container.store.state.preferences)
         Group {
-            if visibility.isEmpty(hasCategories: !model.facets.categories.isEmpty, hasScopeChip: showsScopeChip(visibility)) {
+            if visibility.isEmpty(hasCategories: !model.facets.categories.isEmpty || showsRemoteChip, hasScopeChip: showsScopeChip(visibility)) {
                 EmptyView()
             } else {
                 VStack(spacing: 8) {
@@ -29,6 +29,7 @@ struct DownloadsFilterBar: View {
                                     ForEach(model.facets.categories) { pill in
                                         categoryChip(pill)
                                     }
+                                    if showsRemoteChip { remoteChip }
                                 }
                             }
                             .padding(.horizontal)
@@ -44,7 +45,10 @@ struct DownloadsFilterBar: View {
         .onChange(of: visibility, initial: true) { _, now in
             if !now.status, model.filter.folder != .all { model.setFolder(.all) }
             if !now.queues, model.filter.queueId != nil { model.setQueue(nil) }
-            if !now.categories, model.filter.categoryId != nil { model.setCategory(nil) }
+            if !now.categories {
+                if model.filter.categoryId != nil { model.setCategory(nil) }
+                if model.filter.remoteOnly { model.setRemoteOnly(false) }
+            }
         }
     }
 
@@ -65,7 +69,7 @@ struct DownloadsFilterBar: View {
     }
 
     private func showsChips(_ visibility: FilterBarVisibility) -> Bool {
-        (visibility.categories && !model.facets.categories.isEmpty) || showsScopeChip(visibility)
+        (visibility.categories && (!model.facets.categories.isEmpty || showsRemoteChip)) || showsScopeChip(visibility)
     }
 
     private func showsScopeChip(_ visibility: FilterBarVisibility) -> Bool {
@@ -149,6 +153,25 @@ struct DownloadsFilterBar: View {
             model.setCategory(selected ? nil : pill.category.id)
         } label: {
             FilterChip(title: pill.category.displayName, count: pill.count, dot: pill.category.tint, selected: selected)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .sensoryFeedback(.selection, trigger: selected)
+    }
+
+    // MARK: 远程任务芯片
+
+    /// 其他设备上的远程任务：有远程任务（当前范围 / 状态内）或已选中时显示，跟在分类芯片后；与分类互斥。
+    private var showsRemoteChip: Bool {
+        model.facets.remoteCount > 0 || model.filter.remoteOnly
+    }
+
+    private var remoteChip: some View {
+        let selected = model.filter.remoteOnly
+        return Button {
+            model.setRemoteOnly(!selected)
+        } label: {
+            FilterChip(title: L("remoteTasksGroup"), count: model.facets.remoteCount, systemImage: FluxSymbol.cloud, selected: selected)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])

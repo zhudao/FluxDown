@@ -73,17 +73,6 @@ private struct WebhookContent: View {
             case let .edit(endpoint): WebhookEditorSheet(existing: endpoint, model: model)
             }
         }
-        .confirmationDialog(
-            L("webhookRowDeleteConfirm"),
-            isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }),
-            titleVisibility: .visible,
-            presenting: deleteTarget
-        ) { endpoint in
-            Button(L("webhookRowDelete"), role: .destructive) { Task { await model.remove(endpoint) } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: { endpoint in
-            Text(endpoint.name)
-        }
     }
 
     // MARK: 端点
@@ -108,6 +97,18 @@ private struct WebhookContent: View {
                     onTest: { Task { await model.test(endpoint) } },
                     onDelete: { deleteTarget = endpoint }
                 )
+                .alert(
+                    L("webhookRowDeleteConfirm"),
+                    isPresented: Binding(
+                        get: { deleteTarget?.id == endpoint.id },
+                        set: { if !$0 { deleteTarget = nil } }
+                    )
+                ) {
+                    Button(L("webhookRowDelete"), role: .destructive) { Task { await model.remove(endpoint) } }
+                    Button(L("cancel"), role: .cancel) {}
+                } message: {
+                    Text(endpoint.name)
+                }
             }
             Button {
                 editing = .new
@@ -244,8 +245,10 @@ private struct WebhookEndpointRow: View {
             .disabled(readOnly)
             if testing { ProgressView() }
         }
+        // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-            Button(L("webhookRowDelete"), systemImage: FluxSymbol.delete, role: .destructive, action: onDelete)
+            Button(L("webhookRowDelete"), systemImage: FluxSymbol.delete, action: onDelete)
+                .tint(Color.fdStatusFailed)
                 .disabled(readOnly)
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {

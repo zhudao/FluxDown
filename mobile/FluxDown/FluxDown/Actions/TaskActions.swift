@@ -4,16 +4,14 @@ import SwiftUI
 import UIKit
 
 /// 需要确认 / 输入的任务对话框（由根视图的 `.taskActionDialogs()` 统一呈现）。
+/// 删除确认不在此列：它由触发视图挂载的 alert 承担（见 `taskDeleteHost()`）。
 nonisolated enum TaskDialog: Identifiable {
-    /// 删除确认：保留文件 / 连同文件（PC 同两档）。
-    case delete([DownloadTask], onDone: (@MainActor () -> Void)?)
     case redownload(DownloadTask)
     case rename(DownloadTask)
     case changeUrl(DownloadTask)
 
     var id: String {
         switch self {
-        case let .delete(tasks, _): "delete:" + tasks.map(\.taskId).joined(separator: ",")
         case let .redownload(task): "redownload:" + task.taskId
         case let .rename(task): "rename:" + task.taskId
         case let .changeUrl(task): "url:" + task.taskId
@@ -111,6 +109,11 @@ final class TaskActions {
         container.router.sheet = .moveToQueue(ids)
     }
 
+    /// 重新打开「文件已存在」对话框（任务行「待确认」角标）。
+    func openFileConflicts() {
+        container.router.sheet = .fileConflicts
+    }
+
     func moveToQueueNow(_ ids: [String], queueId: String, queueName: String) {
         run(onSuccess: { [toasts] in
             toasts.show(text: L("mobileMovedToQueueNamed", ["name": queueName]), tone: .success, systemImage: FluxSymbol.done)
@@ -121,9 +124,10 @@ final class TaskActions {
 
     // MARK: 删除 / 重新下载
 
-    func confirmDelete(_ tasks: [DownloadTask], onDone: (@MainActor () -> Void)? = nil) {
-        guard !tasks.isEmpty, guardWritable() else { return }
-        dialog = .delete(tasks, onDone: onDone)
+    /// 构造删除确认请求（只读拦截 + 空集过滤）；由触发视图的 `taskDeleteDialog` 呈现。
+    func deleteRequest(_ tasks: [DownloadTask], onDone: (@MainActor () -> Void)? = nil) -> TaskDeleteRequest? {
+        guard !tasks.isEmpty, guardWritable() else { return nil }
+        return TaskDeleteRequest(tasks: tasks, onDone: onDone)
     }
 
     func delete(_ ids: [String], withFiles: Bool, onDone: (@MainActor () -> Void)? = nil) {

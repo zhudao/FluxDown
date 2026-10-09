@@ -2,7 +2,7 @@ import FluxDomain
 import FluxUI
 
 /// 主机切换 / 移除的唯一分发点（设备页与添加主机共用，同 Android `HostActions`）：给出 Toast，
-/// 串行化由 `AppContainer.switchHost` 保证；确认框只用于移除（由调用方的 `confirmationDialog` 承担）。
+/// 串行化由 `AppContainer.switchHost` 保证；确认框只用于移除（由调用方的 `.alert` 承担）。
 @MainActor
 enum HostFlow {
     /// 主机连接失败 → 用户可读文案：先按 code（Unauthorized / Timeout / Unavailable / ProtocolIncompatible），其余回退通用失败。

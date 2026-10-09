@@ -67,6 +67,7 @@ impl Daemon {
             daemon_url: format!("ws://{}/rpc", self.ready.addr),
             daemon_token: self.ready.token.clone(),
             client_platform: "android".to_owned(),
+            client_device_name: None,
             enable_link: false,
         }
     }
@@ -363,6 +364,64 @@ async fn shutdown_closes_event_streams_and_releases_the_agent_data_directory() {
     daemon.stop().await;
 }
 
+/// 嵌入宿主没有 TCP 网关 / NMH IPC / 兼容 HTTP API，也不跑在机械盘上：这些检查不得出现
+/// （否则在手机上恒报异常，或探到同机别的程序的 17800 端口）；daemon 版本取自 hello 的
+/// `serviceVersion`；本机日志导出（App 给出的沙盒路径）可用，server 模式的拒绝不适用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn embedded_diagnostics_skip_gateway_checks_and_export_logs_locally() {
+    let daemon = Daemon::start("diagnostics").await;
+    let agent = start_embedded(daemon.agent_config("agent"), CancellationToken::new())
+        .await
+        .expect("start embedded agent");
+    let connection = connect(&agent).await;
+
+    let (_, report) = success(
+        connection
+            .call(call_request(
+                RequestId::Integer(1),
+                method::AGENT_DIAGNOSTICS_RUN,
+                None,
+            ))
+            .await,
+    );
+    let checks = report["checks"].as_array().expect("checks array");
+    let ids: Vec<&str> = checks
+        .iter()
+        .filter_map(|check| check["id"].as_str())
+        .collect();
+    for absent in ["app_listener", "local_server", "disk_sleep"] {
+        assert!(!ids.contains(&absent), "{absent} must be omitted: {ids:?}");
+    }
+    let daemon_check = checks
+        .iter()
+        .find(|check| check["id"] == json!("daemon"))
+        .expect("daemon check present");
+    assert_eq!(daemon_check["level"], json!("ok"));
+    let detail = daemon_check["detail"].as_str().expect("daemon detail");
+    assert!(
+        detail.contains(&format!("(v{};", fluxdown_protocol::APP_VERSION)),
+        "daemon version comes from serviceVersion: {detail}"
+    );
+
+    let target = daemon.root.join("export").join("logs.zip");
+    let (_, exported) = success(
+        connection
+            .call(call_request(
+                RequestId::Integer(2),
+                method::AGENT_DIAGNOSTICS_EXPORT_LOGS,
+                Some(json!({ "targetPath": target.display().to_string() })),
+            ))
+            .await,
+    );
+    assert!(exported["bytes"].as_u64().is_some_and(|bytes| bytes > 0));
+    let bytes = std::fs::read(exported["path"].as_str().expect("export path")).expect("zip");
+    assert!(bytes.starts_with(b"PK"), "export is a zip archive");
+
+    drop(connection);
+    agent.shutdown().await;
+    daemon.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_loopback_daemon_endpoint_is_refused_without_side_effects() {
     let root = std::env::temp_dir().join(format!(
@@ -377,6 +436,7 @@ async fn non_loopback_daemon_endpoint_is_refused_without_side_effects() {
             daemon_url: "ws://203.0.113.7:17801/rpc".to_owned(),
             daemon_token: "token".to_owned(),
             client_platform: "android".to_owned(),
+            client_device_name: None,
             enable_link: false,
         },
         CancellationToken::new(),

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,6 +30,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.fluxdown.app.R
 import com.fluxdown.app.i18n.str
@@ -122,6 +124,8 @@ internal fun BtSelectionSheet(ui: SelectionUi, kind: SelectionKind.Bt) {
     val tree = remember(kind) { buildBtTree(kind.files) }
     val sizes = remember(kind) { kind.files.associate { it.index to it.size } }
     val allIndices = remember(kind) { kind.files.map { it.index } }
+    // 只有清单里有目录时文件行才需要让出折叠箭头的位置；纯文件清单左对齐，不留空白。
+    val chevronGutter = remember(tree) { if (tree.children.any { it is BtFolderNode }) CHEVRON_GUTTER else 0.dp }
     val initial = remember(request.requestId) {
         val d = (request.defaultChoice as? SelectionOutcome.Bt)?.indices.orEmpty().filter { it in sizes }
         if (d.isEmpty()) allIndices.toSet() else d.toSet()
@@ -204,7 +208,7 @@ internal fun BtSelectionSheet(ui: SelectionUi, kind: SelectionKind.Bt) {
             Spacer(Modifier.weight(1f))
             FluxText(
                 str(R.string.selectedCount, "n" to count) + " · " + sizeText,
-                style = type.monoS,
+                style = type.sm,
                 color = c.inkMuted,
                 maxLines = 1,
             )
@@ -213,7 +217,7 @@ internal fun BtSelectionSheet(ui: SelectionUi, kind: SelectionKind.Bt) {
         LazyColumn(
             Modifier
                 .fillMaxWidth()
-                .height(listHeight)
+                .heightIn(max = listHeight)
                 .clip(FluxTheme.shapes.card)
                 .background(c.glass1),
         ) {
@@ -227,11 +231,14 @@ internal fun BtSelectionSheet(ui: SelectionUi, kind: SelectionKind.Bt) {
                             if (folderState(node, selected) == ToggleableState.On) selected.removeAll(node.indices.toSet()) else selected.addAll(node.indices)
                         },
                         onToggleCollapse = { if (!collapsed.add(node.path)) collapsed.remove(node.path) },
+                        isLast = node === rows.lastOrNull(),
                     )
                     is BtFileNode -> FileRow(
                         node = node,
                         checked = node.file.index in selected,
                         icon = fileTileIcon(index.categoryOf(node.name).fileCategory()),
+                        gutter = chevronGutter,
+                        isLast = node === rows.lastOrNull(),
                         onToggle = { if (!selected.add(node.file.index)) selected.remove(node.file.index) },
                     )
                 }
@@ -252,6 +259,9 @@ private fun folderState(node: BtFolderNode, selected: Set<Int>): ToggleableState
 
 private fun indent(depth: Int) = (16 + min(depth, 4) * 16).dp
 
+/** 目录行折叠箭头槽（32dp）+ 行内间距（10dp）：文件行勾选框与同层目录的勾选框对齐。 */
+private val CHEVRON_GUTTER = 42.dp
+
 @Composable
 private fun FolderRow(
     node: BtFolderNode,
@@ -259,6 +269,7 @@ private fun FolderRow(
     collapsed: Boolean,
     onToggleSelect: () -> Unit,
     onToggleCollapse: () -> Unit,
+    isLast: Boolean,
 ) {
     val c = FluxTheme.colors
     val type = FluxTheme.type
@@ -276,11 +287,11 @@ private fun FolderRow(
                 }
                 .padding(start = indent(node.depth), end = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Box(
                 Modifier
-                    .size(width = 36.dp, height = 50.dp)
+                    .size(width = 32.dp, height = 50.dp)
                     .clickable(role = Role.Button, onClickLabel = expandLabel, onClick = onToggleCollapse),
                 contentAlignment = Alignment.Center,
             ) {
@@ -297,7 +308,7 @@ private fun FolderRow(
             FluxText(node.name, style = type.body, color = c.ink, maxLines = 1, modifier = Modifier.weight(1f))
             FluxText(Format.bytes(node.size).toString(), style = type.monoS, color = c.inkFaint, maxLines = 1)
         }
-        FluxDivider(startInset = indent(node.depth))
+        if (!isLast) FluxDivider(startInset = indent(node.depth))
     }
 }
 
@@ -306,6 +317,8 @@ private fun FileRow(
     node: BtFileNode,
     checked: Boolean,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    gutter: Dp,
+    isLast: Boolean,
     onToggle: () -> Unit,
 ) {
     val c = FluxTheme.colors
@@ -326,7 +339,7 @@ private fun FileRow(
                     haptics.tick()
                     onToggle()
                 }
-                .padding(start = indent(node.depth) + 42.dp, end = 14.dp),
+                .padding(start = indent(node.depth) + gutter, end = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -335,6 +348,6 @@ private fun FileRow(
             FluxText(node.name, style = type.body, color = c.ink, maxLines = 1, modifier = Modifier.weight(1f))
             FluxText(Format.bytes(node.file.size).toString(), style = type.monoS, color = c.inkFaint, maxLines = 1)
         }
-        FluxDivider(startInset = indent(node.depth) + 42.dp)
+        if (!isLast) FluxDivider(startInset = indent(node.depth) + gutter)
     }
 }

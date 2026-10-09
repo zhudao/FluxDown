@@ -60,8 +60,10 @@ import com.fluxdown.app.feature.newtask.MoveToQueueSheet
 import com.fluxdown.app.feature.newtask.NewDownloadSheet
 import com.fluxdown.app.feature.rss.RssEditorSheet
 import com.fluxdown.app.feature.rss.RssEditorTarget
+import com.fluxdown.app.feature.rss.RssItemsScreen
 import com.fluxdown.app.feature.rss.RssScreen
 import com.fluxdown.app.feature.search.CommandSearch
+import com.fluxdown.app.feature.selection.FileConflictHost
 import com.fluxdown.app.feature.selection.SelectionRequestSheet
 import com.fluxdown.app.feature.settings.ConfigEditor
 import com.fluxdown.app.feature.settings.LocalConfigEditor
@@ -79,6 +81,8 @@ import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.Route
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.service.DownloadServiceEffect
+import com.fluxdown.core.model.FileConflicts
+import com.fluxdown.core.model.SelectionKind
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.protocol.preferences
 import com.fluxdown.fluxui.chrome.FluxDock
@@ -140,11 +144,17 @@ fun AppShell() {
     // 根节点只读派生量：避免 10 Hz 的主机状态发布让整棵树重组
     val host = hostState()
     val failed by remember { derivedStateOf { host.value.tasks.any { it.status == TaskStatus.Failed } } }
-    val selection by remember { derivedStateOf { host.value.selections.firstOrNull() } }
+    // X1–X3 单请求 Sheet 只看非 fileExists 的请求；fileExists 聚合成一个对话框（FileConflictHost）
+    val selection by remember { derivedStateOf { host.value.selections.firstOrNull { it.kind !is SelectionKind.FileExists } } }
+    val fileConflicts by remember { derivedStateOf { FileConflicts.pending(host.value.selections) } }
     val windowClass = FluxTheme.windowClass
     val orb = rememberFluxOrbState()
     // 回到前台：文件跟踪重扫（10s 节流，对齐 RescanThrottle；空闲静默期间不轮询）
-    LifecycleEventEffect(Lifecycle.Event.ON_START) { container.rescanOnForeground() }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        container.rescanOnForeground()
+        // 仍在等待的 fileExists 询问：回到前台重新弹出（含点通知进入）
+        nav.reopenFileConflicts()
+    }
     // 本机有活跃 / 排队任务 → 前台服务（dataSync）；首次下载时请求通知权限
     DownloadServiceEffect()
     val portal = remember { FluxPortalState() }
@@ -186,6 +196,7 @@ fun AppShell() {
                 Sheets()
                 FluxPortalHost(portal)
                 SelectionRequestSheet(request = selection)
+                FileConflictHost(requests = fileConflicts, blocked = selection != null)
                 CommandSearch(visible = nav.searchOpen, onDismiss = nav::closeSearch)
                 FluxOverlayHost(overlays)
                 if (windowClass != FluxWindowClass.Expanded) FluxOrbFanLayer(orb)
@@ -297,6 +308,7 @@ private fun RouteContent(route: Route, inPane: Boolean) {
     val nav = LocalNavigator.current
     when (route) {
         is Route.TaskDetail -> TaskDetailScreen(taskId = route.taskId, inPane = inPane, onClose = { nav.pop() })
+        is Route.RssItems -> RssItemsScreen(sourceId = route.sourceId)
         is Route.Settings -> SettingsPageScreen(route.page, route.arg)
     }
 }

@@ -15,6 +15,26 @@ struct RssScreen: View {
     }
 }
 
+extension View {
+    /// 订阅删除确认框挂在触发它的视图上：
+    /// 仅当待删请求指向 `source` 且来自 `origin` 时呈现——列表行与条目页菜单可同时存在，各自只响应自己发起的请求。
+    func rssDeleteConfirmation(_ rss: RssModel, source: RssSource, origin: RssDeleteOrigin) -> some View {
+        alert(
+            L("rssDeleteSource"),
+            isPresented: Binding(
+                get: { rss.pendingDelete.map { $0.origin == origin && $0.source.sourceId == source.sourceId } ?? false },
+                set: { if !$0 { rss.pendingDelete = nil } }
+            ),
+            presenting: rss.pendingDelete
+        ) { request in
+            Button(L("rssDeleteSource"), role: .destructive) { rss.confirmDelete(request.source) }
+            Button(L("cancel"), role: .cancel) {}
+        } message: { request in
+            Text(L("rssDeleteConfirmDesc", ["name": RssFormat.title(of: request.source)]))
+        }
+    }
+}
+
 private struct RssContent: View {
     @Environment(AppContainer.self) private var container
     @Environment(TaskActions.self) private var actions
@@ -44,19 +64,6 @@ private struct RssContent: View {
         .task(id: container.router.pendingIntent) {
             guard container.router.pendingIntent == .newRssSource, await container.router.claim(.newRssSource) else { return }
             rss.openEditor(.create)
-        }
-        .confirmationDialog(
-            L("rssDeleteSource"),
-            isPresented: Binding(
-                get: { rss.pendingDelete != nil },
-                set: { if !$0 { rss.pendingDelete = nil } }
-            ),
-            titleVisibility: .visible,
-            presenting: rss.pendingDelete
-        ) { source in
-            Button(L("rssDeleteSource"), role: .destructive) { rss.confirmDelete(source) }
-        } message: { source in
-            Text(L("rssDeleteConfirmDesc", ["name": RssFormat.title(of: source)]))
         }
         .onChange(of: sources.map { "\($0.sourceId):\($0.unreadCount)" }, initial: true) {
             rss.trackUnread(sources)
@@ -214,9 +221,11 @@ private struct RssFeedsList: View {
                 }
             }
         }
+        // 删除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             if !readOnly {
-                Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source) }
+                Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete) { rss.requestDelete(source, from: .feedList) }
+                    .tint(Color.fdStatusFailed)
                 Button(L("rssManageTitle"), systemImage: "slider.horizontal.3") {
                     rss.openEditor(.edit(sourceId: source.sourceId))
                 }
@@ -238,9 +247,10 @@ private struct RssFeedsList: View {
             }
             .disabled(readOnly)
             Divider()
-            Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source) }
+            Button(L("rssDeleteSource"), systemImage: FluxSymbol.delete, role: .destructive) { rss.requestDelete(source, from: .feedList) }
                 .disabled(readOnly)
         }
+        .rssDeleteConfirmation(rss, source: source, origin: .feedList)
     }
 
     // MARK: 空 / 加载

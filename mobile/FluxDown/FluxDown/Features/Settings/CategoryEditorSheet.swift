@@ -56,6 +56,15 @@ struct CategoryEditorSheet: View {
                                 .frame(minHeight: 44, alignment: .leading)
                                 .contentShape(.rect)
                         }
+                        .alert(L("deleteCategory"), isPresented: $confirmDelete) {
+                            Button(L("delete"), role: .destructive) {
+                                onDelete?()
+                                dismiss()
+                            }
+                            Button(L("cancel"), role: .cancel) {}
+                        } message: {
+                            Text(L("deleteCategoryConfirm"))
+                        }
                     }
                 }
             }
@@ -67,6 +76,11 @@ struct CategoryEditorSheet: View {
                     Button(L("cancel")) {
                         if isDirty { confirmDiscard = true } else { dismiss() }
                     }
+                    .alert(L("mobileGeneralDiscardTitle"), isPresented: $confirmDiscard) {
+                        Button(L("mobileGeneralDiscard"), role: .destructive) { dismiss() }
+                        Button(L("mobileGeneralKeepEditing"), role: .cancel) {}
+                    }
+
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(L("confirm"), action: save)
@@ -75,20 +89,6 @@ struct CategoryEditorSheet: View {
             .fluxAnimation(.smooth, value: isRegex)
             .fluxAnimation(.smooth, value: error)
             .onChange(of: draft) { error = nil }
-            .confirmationDialog(L("deleteCategory"), isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button(L("delete"), role: .destructive) {
-                    onDelete?()
-                    dismiss()
-                }
-            } message: {
-                Text(L("deleteCategoryConfirm"))
-            }
-            .confirmationDialog(
-                L("mobileGeneralDiscardTitle"), isPresented: $confirmDiscard, titleVisibility: .visible
-            ) {
-                Button(L("mobileGeneralDiscard"), role: .destructive) { dismiss() }
-                Button(L("mobileGeneralKeepEditing"), role: .cancel) {}
-            }
             .sheet(isPresented: $showDirectoryPicker) {
                 RemoteDirectoryPicker(startPath: draft.saveDir) { draft.saveDir = $0 }
             }

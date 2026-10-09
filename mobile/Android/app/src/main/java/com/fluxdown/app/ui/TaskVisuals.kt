@@ -31,8 +31,9 @@ fun Category?.fileCategory(): FileCategory = when (this?.builtinType) {
 }
 
 /** 图块图标：分类图标；BT 且分类为 other 时用 magnet。自定义分类按其 icon 名映射。 */
-fun Category?.tileIcon(task: Task): ImageVector {
-    val bt = task.protocol == TaskProtocol.Bt
+fun Category?.tileIcon(task: Task): ImageVector = tileIcon(bt = task.protocol == TaskProtocol.Bt)
+
+fun Category?.tileIcon(bt: Boolean): ImageVector {
     if (this != null && builtinType == null) {
         return when (icon) {
             "library", "book" -> FluxIcons.Library

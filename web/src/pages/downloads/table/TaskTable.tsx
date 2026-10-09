@@ -29,6 +29,7 @@ import {
 import type { ColumnKind, ResolvedColumn, ViewDensity } from '../model/viewPrefs'
 import { useDownloads } from '../state'
 import type { VisibleRow } from '../state'
+import { useConflictTaskIds } from '../dialogs/fileConflict'
 import { FileCell, KindGlyph, ProgressCell, StatusCell } from './cells'
 import { formatEta } from './text'
 import type { Translate } from './text'
@@ -76,6 +77,7 @@ interface RowProps {
   view: DownloadTaskView
   columns: readonly LayoutColumn[]
   density: ViewDensity
+  conflict: boolean
   selected: boolean
   anySelected: boolean
   queueName: (queueId: string) => string
@@ -92,7 +94,7 @@ function renderCell(props: RowProps, column: LayoutColumn) {
   const downloading = view.state === 'downloading'
   switch (column.kind) {
     case 'file_name':
-      return <FileCell t={t} view={view} density={density} />
+      return <FileCell t={t} view={view} density={density} conflict={props.conflict} />
     case 'progress': {
       const barWidth = Math.max(0, column.width - 2 * CELL_PADDING_X - PROGRESS_LABEL_WIDTH - PROGRESS_GAP)
       return <ProgressCell view={view} barWidth={barWidth} />
@@ -270,6 +272,7 @@ function GroupHeaderRow({
 export function TaskTable() {
   const t = useT()
   const ctx = useDownloads()
+  const conflictTaskIds = useConflictTaskIds()
   const { rows, prefs, selected, visibleKeys, views, groupSummaries } = ctx
   const scrollRef = useRef<HTMLDivElement>(null)
   // 拖拽调宽中的临时宽度（松手后写回偏好）。
@@ -513,6 +516,7 @@ export function TaskTable() {
                     view={row.view}
                     columns={columns}
                     density={prefs.density}
+                    conflict={row.view.source === 'local' && conflictTaskIds.has(row.view.taskId)}
                     selected={selected.has(row.key)}
                     anySelected={ctx.multiSelect}
                     queueName={ctx.queueName}

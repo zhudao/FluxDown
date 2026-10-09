@@ -27,6 +27,7 @@ mod progress_windows;
 mod service_bootstrap;
 mod session;
 mod settings_port;
+mod update_notices;
 mod windows;
 
 use std::process::ExitCode;

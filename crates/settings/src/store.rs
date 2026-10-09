@@ -11,7 +11,7 @@ use fluxdown_protocol::{
     ConnPolicySummaryDto, DaemonConfigPatch, DaemonConfigSnapshot, DaemonEvent,
     DiagnosticsReportDto, ErrorReason, GatewayPatchParams, GatewayStatusDto,
     PlatformIntegrationDto, PluginDto, QueueDto, RpcErrorData, ServiceEvent, SettingOwner,
-    ShellStatusDto, SiteAuthEntryDto, SyncStatusDto, SystemProxyDto, UpdateCheckResultDto,
+    ShellStatusDto, SiteAuthEntryDto, SyncStatusDto, SystemProxyDto, UpdateStatusDto,
     WebhookDeliveryDto, method, setting_spec, setting_value_kind, value_to_daemon_config,
 };
 use gpui::{Context, SharedString};
@@ -127,7 +127,7 @@ pub struct SettingsStore {
     site_auth: Vec<SiteAuthEntryDto>,
     conn_policy: Option<ConnPolicySummaryDto>,
     system_proxy: Option<SystemProxyDto>,
-    update_check: Option<UpdateCheckResultDto>,
+    update: UpdateStatusDto,
     busy: BTreeSet<&'static str>,
     /// 同一 `action` 下具体是哪个按钮发起的（如某条修复 / 某个站点）；随 `action` 完成清除。
     busy_tags: BTreeMap<&'static str, SharedString>,
@@ -177,7 +177,7 @@ impl SettingsStore {
             site_auth: Vec::new(),
             conn_policy: None,
             system_proxy: None,
-            update_check: None,
+            update: UpdateStatusDto::default(),
             busy: BTreeSet::new(),
             busy_tags: BTreeMap::new(),
             last_error: None,
@@ -197,6 +197,7 @@ impl SettingsStore {
         self.shell.clone_from(&snapshot.shell);
         self.preferences.clone_from(&snapshot.preferences);
         self.sync.clone_from(&snapshot.sync);
+        self.update.clone_from(&snapshot.update);
         self.queues.clone_from(&snapshot.daemon.queues);
         self.plugins.clone_from(&snapshot.daemon.plugins);
         self.components.clone_from(&snapshot.daemon.components);
@@ -263,6 +264,7 @@ impl SettingsStore {
                 self.overlay_local_edits();
             }
             AgentEvent::SyncChanged(sync) => self.sync.clone_from(sync),
+            AgentEvent::UpdateChanged(update) => self.update.clone_from(update),
             AgentEvent::SessionChanged(session) => {
                 self.session.clone_from(session.as_ref());
                 if session.is_none() {
@@ -500,8 +502,8 @@ impl SettingsStore {
         self.system_proxy.as_ref()
     }
     #[must_use]
-    pub fn update_check(&self) -> Option<&UpdateCheckResultDto> {
-        self.update_check.as_ref()
+    pub fn update_status(&self) -> &UpdateStatusDto {
+        &self.update
     }
     #[must_use]
     pub fn transient(&self, key: &str) -> Option<&Value> {
@@ -1035,19 +1037,42 @@ impl SettingsStore {
     }
 
     pub fn check_update(&mut self, channel: Option<String>, cx: &mut Context<Self>) {
-        self.call_with(
+        self.call_update(
             "update",
             method::AGENT_UPDATE_CHECK,
             json!({ "channel": channel }),
             cx,
-            |this, result, _| {
-                if let Ok(value) = result
-                    && let Ok(dto) = serde_json::from_value::<UpdateCheckResultDto>(value)
-                {
-                    this.update_check = Some(dto);
-                }
-            },
         );
+    }
+
+    /// 「更新并重启」：包未就绪时 agent 先下载再安装；成功后 agent 随即整体重启，连接会被
+    /// `service-quit` 关闭，这类 `Unavailable` 属预期，不当作错误展示。
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        self.call_update("updateInstall", method::AGENT_UPDATE_INSTALL, json!({}), cx);
+    }
+
+    pub fn cancel_update(&mut self, cx: &mut Context<Self>) {
+        self.call_update("updateCancel", method::AGENT_UPDATE_CANCEL, json!({}), cx);
+    }
+
+    fn call_update(
+        &mut self,
+        action: &'static str,
+        method: &'static str,
+        params: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.call_with(action, method, params, cx, |this, result, _| match result {
+            Ok(value) => {
+                if let Ok(dto) = serde_json::from_value::<UpdateStatusDto>(value) {
+                    this.update = dto;
+                }
+            }
+            Err(error) if error.code == ApplicationErrorCode::Unavailable => {
+                this.last_error = None;
+            }
+            Err(_) => {}
+        });
     }
 
     /// 退出前把尚未发送的编辑立即打成 RPC future 交给调用方等待（不再走防抖）。

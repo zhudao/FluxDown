@@ -16,9 +16,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use fluxdown_protocol::method;
 use fluxdown_protocol::{
-    ApplicationErrorCode, CLOSE_REASON_SERVICE_QUIT, ClientHello, EventFrame, RpcErrorData,
-    RpcErrorObject, RpcNotification, RpcRequest, RpcResponse, ServiceHello, ServiceRole,
-    validate_first_request,
+    ApplicationErrorCode, ClientHello, EventFrame, RpcErrorData, RpcErrorObject, RpcNotification,
+    RpcRequest, RpcResponse, ServiceHello, ServiceRole, validate_first_request,
 };
 use futures_util::StreamExt;
 use reqwest::Method;
@@ -72,6 +71,8 @@ pub struct GatewayService {
     open_associations: crate::open_association::OpenAssociationGuard,
     local: GatewayShell,
     server_mode: bool,
+    /// 嵌入宿主：`exportLogs` 的目标路径由同进程 App 给出（应用沙盒内），server 模式下仍放行。
+    local_log_export: bool,
     link: Option<Arc<LinkService>>,
     gateway_patch_lock: tokio::sync::Mutex<()>,
     listener_control: restart::GatewayControl,
@@ -135,6 +136,7 @@ impl GatewayService {
             open_associations,
             local,
             server_mode: false,
+            local_log_export: false,
             link: None,
             gateway_patch_lock: tokio::sync::Mutex::new(()),
             listener_control: restart::GatewayControl::new(),
@@ -145,6 +147,13 @@ impl GatewayService {
     #[must_use]
     pub fn with_server_mode(mut self, enabled: bool) -> Self {
         self.server_mode = enabled;
+        self
+    }
+
+    /// 嵌入宿主（移动端进程内 agent）：只有同进程 App 能调用，放行写入 App 自选路径的日志导出。
+    #[must_use]
+    pub fn with_local_log_export(mut self) -> Self {
+        self.local_log_export = true;
         self
     }
 
@@ -205,7 +214,7 @@ impl GatewayService {
         {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
-        if self.server_mode && server_mode_denies(&request) {
+        if self.server_mode && server_mode_denies(&request, self.local_log_export) {
             return Err(RpcErrorData::new(ApplicationErrorCode::Unsupported, false));
         }
         match request.method.as_str() {
@@ -567,6 +576,19 @@ impl GatewayService {
                 diagnostics_value(self.diagnostics.export_logs(&params).await).and_then(to_value)
             }
             method::AGENT_UPDATE_CHECK => self.update_check(params_or_empty(request.params)).await,
+            method::AGENT_UPDATE_DOWNLOAD => self
+                .update
+                .download()
+                .await
+                .map_err(update_error)
+                .and_then(to_value),
+            method::AGENT_UPDATE_INSTALL => self
+                .update
+                .install()
+                .await
+                .map_err(update_error)
+                .and_then(to_value),
+            method::AGENT_UPDATE_CANCEL => to_value(self.update.cancel()),
             name if name.starts_with("daemon.") => {
                 self.daemon
                     .call::<serde_json::Value, serde_json::Value>(name, request.params)
@@ -1135,16 +1157,11 @@ impl GatewayService {
                 .unwrap_or("stable")
                 .to_owned(),
         };
-        match self.update.check(&channel).await {
-            Ok(result) => to_value(result),
-            Err(UpdateError::InvalidChannel(_)) => Err(invalid_field("channel")),
-            Err(UpdateError::Http(_) | UpdateError::Status(_)) => {
-                Err(RpcErrorData::new(ApplicationErrorCode::Unavailable, true))
-            }
-            Err(UpdateError::Client(_) | UpdateError::Decode(_)) => {
-                Err(RpcErrorData::new(ApplicationErrorCode::Internal, false))
-            }
-        }
+        self.update
+            .check(&channel)
+            .await
+            .map_err(update_error)
+            .and_then(to_value)
     }
 
     async fn platform_task(
@@ -1210,6 +1227,20 @@ fn pagination(params: &serde_json::Value) -> Result<(u32, u32), RpcErrorData> {
         .filter(|value| (1..=100).contains(value))
         .ok_or_else(|| invalid_field("pageSize"))?;
     Ok((page, page_size))
+}
+
+fn update_error(error: UpdateError) -> RpcErrorData {
+    match error {
+        UpdateError::InvalidChannel(_) => invalid_field("channel"),
+        UpdateError::Http(_) | UpdateError::Status(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+        }
+        UpdateError::Client(_) | UpdateError::Decode(_) => {
+            RpcErrorData::new(ApplicationErrorCode::Internal, false)
+        }
+        UpdateError::NoUpdate => RpcErrorData::new(ApplicationErrorCode::Conflict, false),
+        UpdateError::Manual(_) => RpcErrorData::new(ApplicationErrorCode::Unsupported, false),
+    }
 }
 
 fn invalid_field(field: &str) -> RpcErrorData {
@@ -1655,12 +1686,9 @@ async fn run_socket(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                // 完全退出时客户端必须停止重连 / 重拉；仅 agent 退出（SIGTERM）时允许重拉。
-                let reason = if service.local.lifecycle.quit_requested() {
-                    CLOSE_REASON_SERVICE_QUIT
-                } else {
-                    "agent-shutdown"
-                };
+                // 完全退出时客户端必须停止重连 / 重拉；仅 agent 退出（SIGTERM）时允许重拉；
+                // headless 服务器为更新重启时浏览器保持重连（见 `Lifecycle::close_reason`）。
+                let reason = service.local.lifecycle.close_reason();
                 if let Err(error) = socket.send(Message::Close(Some(CloseFrame {
                     code: 1001,
                     reason: reason.into(),
@@ -1848,9 +1876,9 @@ fn local_platform_method_allowed(method: &str) -> bool {
 /// headless 宿主不提供桌面集成：打开路径、写注册表 / 关联、请求管理员授权、打开系统设置与
 /// 测试通知的诊断动作，以及可写任意目标路径的日志导出。Web 的 Doctor 仍可用其余动作（刷新
 /// tracker / ed2k 服务器、修复托管组件执行权限等），日志导出走 `/api/web/logs/export`。
-fn server_mode_denies(request: &RpcRequest) -> bool {
+fn server_mode_denies(request: &RpcRequest, local_log_export: bool) -> bool {
     match request.method.as_str() {
-        method::AGENT_DIAGNOSTICS_EXPORT_LOGS => true,
+        method::AGENT_DIAGNOSTICS_EXPORT_LOGS => !local_log_export,
         method::AGENT_DIAGNOSTICS_REPAIR => request
             .params
             .as_ref()
@@ -2465,8 +2493,9 @@ mod tests {
                 api_switches.clone(),
                 api_token.clone(),
             ));
-            let update = Arc::new(crate::update::UpdateService::new(
-                fluxdown_protocol::APP_VERSION,
+            let update = Arc::new(crate::update::UpdateService::unsupported(
+                events.clone(),
+                dir.join("update-data"),
             ));
             let link = crate::link::LinkService::new(crate::link::LinkServiceParts {
                 events: events.clone(),

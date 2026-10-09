@@ -541,11 +541,12 @@ private fun ActionRow(
     val onMore: () -> Unit = { overlays.showMenu(moreBounds, actions.menuItems(task, model.boosted)) }
     val sideBySide = FluxTheme.type.fontScale < 1.5f
 
+    // weight 槽位里按钮必须 fullWidth，否则胶囊按内容收缩、居中，两侧留出大块空白。
     val primary: @Composable (Modifier) -> Unit = { m ->
-        FluxButton(primaryLabel, onPrimary, m, variant = ButtonVariant.Primary, icon = primaryIcon)
+        FluxButton(primaryLabel, onPrimary, m, variant = ButtonVariant.Primary, icon = primaryIcon, fullWidth = true)
     }
     val folder: @Composable (Modifier) -> Unit = { m ->
-        if (!remoteHost) FluxButton(folderLabel, onFolder, m, icon = FluxIcons.FolderOpen)
+        if (!remoteHost) FluxButton(folderLabel, onFolder, m, icon = FluxIcons.FolderOpen, fullWidth = true)
     }
     val icons: @Composable () -> Unit = {
         FluxIconButton(FluxIcons.Share2, shareLabel, { actions.shareLink(task) })
@@ -559,7 +560,7 @@ private fun ActionRow(
     if (sideBySide) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             primary(Modifier.weight(1f))
-            folder(Modifier)
+            folder(Modifier.weight(1f))
             icons()
         }
     } else {

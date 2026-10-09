@@ -349,6 +349,7 @@ private fun DownloadsListBody(
                         )
                     }
                     is RowEntry -> DownloadRow(e, st, index, gate, a11y)
+                    is RemoteRowEntry -> RemoteTaskRow(e, st, index, gate, a11y)
                 }
             }
         }
@@ -535,10 +536,11 @@ private fun FiltersBlock() {
         ScopeTab(f, f.label(), facets.count(f), hot = f == StatusFolder.Failed && facets.count(f) > 0)
     }
     val visibility = view.filterVisibility
-    val showCategories = visibility.categories && facets.categories.isNotEmpty()
+    val hasCategoryChips = facets.categories.isNotEmpty() || facets.remoteCount > 0 || filter.remoteOnly
+    val showCategories = visibility.categories && hasCategoryChips
     val showChips = showCategories || filter.hasScope
     // 状态条与芯片行都被隐藏时整块不占高度
-    val blockEmpty = visibility.isEmpty(hasCategories = facets.categories.isNotEmpty(), hasScopeChip = filter.hasScope)
+    val blockEmpty = visibility.isEmpty(hasCategories = hasCategoryChips, hasScopeChip = filter.hasScope)
     Column(Modifier.fillMaxWidth().padding(bottom = if (blockEmpty) 0.dp else 10.dp)) {
         if (visibility.status) {
             ScopeTabs(
@@ -572,6 +574,19 @@ private fun FiltersBlock() {
                             },
                             dot = c.category(cat.fileCategory()),
                             count = pill.count,
+                        )
+                    }
+                    // 「远程任务」：只看其他设备上的远程任务（与分类单选互斥）
+                    if (facets.remoteCount > 0 || filter.remoteOnly) {
+                        FluxPill(
+                            text = str(R.string.remoteTasksGroup),
+                            selected = filter.remoteOnly,
+                            onClick = {
+                                haptics.tick()
+                                view.setRemoteOnly(!filter.remoteOnly)
+                            },
+                            icon = FluxIcons.Cloud,
+                            count = facets.remoteCount,
                         )
                     }
                 }

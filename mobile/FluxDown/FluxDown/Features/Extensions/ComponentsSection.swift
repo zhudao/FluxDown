@@ -249,16 +249,6 @@ private struct ComponentCardBody: View {
                 await controller.fetchVersions()
             }
         }
-        .confirmationDialog(
-            L("componentsUninstallConfirmTitle", ["name": title]),
-            isPresented: $confirmUninstall,
-            titleVisibility: .visible
-        ) {
-            Button(L("componentsUninstallButton"), role: .destructive) { Task { await controller.uninstall() } }
-            Button(L("cancel"), role: .cancel) {}
-        } message: {
-            Text(L("componentsUninstallConfirmMsg", ["name": title]))
-        }
     }
 
     /// 版本列表只在「受支持且连接就绪」首次成立时懒拉一次，之后靠刷新按钮。
@@ -364,6 +354,15 @@ private struct ComponentCardBody: View {
                 if hasManaged {
                     Button(L("componentsUninstallButton"), role: .destructive) { confirmUninstall = true }
                         .disabled(busy)
+                        .alert(
+                            L("componentsUninstallConfirmTitle", ["name": title]),
+                            isPresented: $confirmUninstall
+                        ) {
+                            Button(L("componentsUninstallButton"), role: .destructive) { Task { await controller.uninstall() } }
+                            Button(L("cancel"), role: .cancel) {}
+                        } message: {
+                            Text(L("componentsUninstallConfirmMsg", ["name": title]))
+                        }
                 }
 
                 if controller.progress.installing {

@@ -2292,22 +2292,16 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // 完成期占名:与 HTTP/ED2K 相同的 create_new 不覆盖语义。原名被占用时
     // dedup 换名(overwrite 策略只对原名删除旧文件),并把最终文件名写回 DB。
     let avoid = sibling_avoid(p).await;
-    let chosen = claim_final_name(
-        &temp_path,
-        &save_dir,
-        &actual_name,
-        p.allow_overwrite,
-        &avoid,
-    )
-    .await
-    .map_err(|e| {
-        DownloadError::Other(format!(
-            "failed to rename {} -> {}: {}",
-            temp_path.display(),
-            dest_path.display(),
-            e
-        ))
-    })?;
+    let chosen = claim_final_name(&temp_path, &save_dir, &actual_name, &p.overwrite, &avoid)
+        .await
+        .map_err(|e| {
+            DownloadError::Other(format!(
+                "failed to rename {} -> {}: {}",
+                temp_path.display(),
+                dest_path.display(),
+                e
+            ))
+        })?;
     let dest_path = if chosen == actual_name {
         dest_path
     } else {
@@ -2357,7 +2351,7 @@ async fn run_hls_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     if let Some(mp4_path) = remux_ts_to_mp4(
         &dest_path,
         &p.task_id,
-        p.allow_overwrite,
+        &p.overwrite,
         is_fmp4,
         ffmpeg.as_deref(),
         &p.cancel_token,
@@ -2447,10 +2441,9 @@ fn remux_space_ok(avail: Option<u64>, file_len: u64) -> bool {
     }
 }
 
-/// `allow_overwrite`（config `file_exists_behavior` == "overwrite"）：为
-/// true 时,同名 `.mp4` 已作为普通最终文件存在不触发编号改名——保留原名,
-/// 占名遇 AlreadyExists 时删除旧文件后重试一次;目录/删除失败仍走既有
-/// 失败路径(保留 .ts)。
+/// `overwrite` 允许替换 `<stem>.mp4` 时:同名 `.mp4` 已作为普通最终文件存在
+/// 不触发编号改名——保留原名,占名遇 AlreadyExists 时删除旧文件后重试一次;
+/// 目录/删除失败仍走既有失败路径(保留 .ts)。
 ///
 /// `is_fmp4`(#682):播放列表带 EXT-X-MAP,`.ts` 里装的已经是分片 MP4
 /// (ftyp+moov+[moof+mdat]*),不做 TS→MP4 转换,跳过体积/空间预检,只按同一
@@ -2461,7 +2454,7 @@ fn remux_space_ok(avail: Option<u64>, file_len: u64) -> bool {
 async fn remux_ts_to_mp4(
     ts_path: &std::path::Path,
     task_id: &str,
-    allow_overwrite: bool,
+    overwrite: &crate::file_exists::OverwritePolicy,
     is_fmp4: bool,
     ffmpeg: Option<&std::path::Path>,
     cancel: &tokio_util::sync::CancellationToken,
@@ -2496,12 +2489,13 @@ async fn remux_ts_to_mp4(
     }
     let stem = ts_path.file_stem().and_then(|s| s.to_str())?;
     let desired_name = format!("{}.mp4", stem);
+    let allow_overwrite = overwrite.permits(&desired_name);
     let unique_name = dedup_filename(
         parent,
         &desired_name,
         &std::collections::HashSet::new(),
         &std::collections::HashSet::new(),
-        allow_overwrite,
+        overwrite,
     )
     .await;
     let mp4_path = parent.join(&unique_name);
@@ -3153,18 +3147,17 @@ async fn mux_video_audio(
     .await?;
 
     let avoid = sibling_avoid(p).await;
-    let chosen =
-        match claim_final_name(&mux_tmp, save_dir, &desired, p.allow_overwrite, &avoid).await {
-            Ok(name) => name,
-            Err(e) => {
-                if let Err(error) = tokio::fs::remove_file(&mux_tmp).await
-                    && error.kind() != std::io::ErrorKind::NotFound
-                {
-                    crate::logger::report_warning("hls-download", "remove_temporary_file", &error);
-                }
-                return Err(e);
+    let chosen = match claim_final_name(&mux_tmp, save_dir, &desired, &p.overwrite, &avoid).await {
+        Ok(name) => name,
+        Err(e) => {
+            if let Err(error) = tokio::fs::remove_file(&mux_tmp).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::logger::report_warning("hls-download", "remove_temporary_file", &error);
             }
-        };
+            return Err(e);
+        }
+    };
     let mp4_path = save_dir.join(&chosen);
     let mp4_size = tokio::fs::metadata(&mp4_path)
         .await
@@ -4733,8 +4726,15 @@ v360.m3u8\n\
         };
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let mp4 =
-            super::remux_ts_to_mp4(&ts, "t", false, false, Some(ffmpeg.as_path()), &cancel).await;
+        let mp4 = super::remux_ts_to_mp4(
+            &ts,
+            "t",
+            &crate::file_exists::OverwritePolicy::Never,
+            false,
+            Some(ffmpeg.as_path()),
+            &cancel,
+        )
+        .await;
 
         let Some(mp4) = mp4 else {
             panic!("ffmpeg remux must produce an mp4");

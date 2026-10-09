@@ -80,6 +80,7 @@ struct RowText {
 
     func status(_ item: TaskItem, fields: Set<CardField>) -> StatusLine {
         let task = item.task
+        if item.awaitingDecision { return StatusLine(text: t("fileConflictPending"), tone: .warning) }
         switch item.visual {
         case .downloading:
             var parts: [String] = []

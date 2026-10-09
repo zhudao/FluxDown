@@ -108,6 +108,28 @@
                     android:host="download"
                     android:scheme="fluxdown" />
             </intent-filter>
+
+            <!-- 「用 FluxDown 打开」.torrent：文件管理器 / 浏览器下载完成后的 content:// 或 file:// 种子。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/x-bittorrent" />
+            </intent-filter>
+
+            <!-- 兜底：部分文件管理器把种子标成 octet-stream。只认 .torrent 路径，避免劫持普通二进制文件。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:host="*" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:pathPattern=".*\\.torrent" />
+                <data android:pathPattern=".*\\..*\\.torrent" />
+            </intent-filter>
         </activity>
 
         <!-- http(s) 下载处理入口（X / Via / Firefox 等「外部下载器」按此匹配）：任意 MIME 的直链。

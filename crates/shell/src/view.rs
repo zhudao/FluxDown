@@ -1,15 +1,15 @@
 use std::rc::Rc;
 
 use fluxdown_ui_components::{
-    FluxIcon, SidebarState, activity_button as activity_bar_button, nav_icon_color,
-    toolbar_action_button,
+    FluxIcon, SidebarState, SlidingHighlight, activity_button as activity_bar_button,
+    color_transition, nav_icon_color, toolbar_action_button,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, AnyView, App, Context, Div, Entity, FontWeight, InteractiveElement as _,
+    AnyElement, AnyView, App, Bounds, Context, Div, Entity, FontWeight, InteractiveElement as _,
     IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, img, percentage, px,
+    StatefulInteractiveElement as _, Styled, Window, div, img, percentage, point, px, size,
 };
 use gpui_component::{Icon, TitleBar, h_flex, menu::AppMenuBar, tooltip::Tooltip, v_flex};
 
@@ -485,9 +485,16 @@ impl ShellView {
             .and_then(|route| route.title_bar.clone())
     }
 
-    fn route_button(&self, route: &ShellRoute, cx: &mut Context<Self>) -> AnyElement {
+    fn route_button(
+        &self,
+        route: &ShellRoute,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = self.active_route == Some(route.id);
         let icon_size = active_theme(cx).extended().icon.lg + ACTIVITY_ICON_EXTRA;
+        let icon_color =
+            color_transition(route.button_id, nav_icon_color(selected, cx), window, cx);
         let label = SharedString::from(self.translator.read(cx).text(route.label_key).to_owned());
         let tooltip_label = label.clone();
         let route_id = route.id;
@@ -504,11 +511,7 @@ impl ShellView {
                 activity_bar_button(
                     route.button_id,
                     label,
-                    route
-                        .icon
-                        .clone()
-                        .size(icon_size)
-                        .text_color(nav_icon_color(selected, cx)),
+                    route.icon.clone().size(icon_size).text_color(icon_color),
                     selected,
                     ACTIVITY_BUTTON_SIZE,
                     cx,
@@ -523,14 +526,42 @@ impl ShellView {
             .into_any_element()
     }
 
-    fn route_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let gap = active_theme(cx).tokens().spacing.xs;
-        v_flex().gap(gap).children(
-            self.routes
-                .iter()
-                .filter(|route| route.visible)
-                .map(|route| self.route_button(route, cx)),
-        )
+    /// 路由按钮列：选中底是一块随选中项滑动的底块（按钮自身不画选中底）。
+    fn route_buttons(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = active_theme(cx);
+        let gap = theme.tokens().spacing.xs;
+        let radius = theme.components().nav_item_radius;
+        let selected_color = theme.extended().colors.nav_selected;
+        let highlight = self
+            .routes
+            .iter()
+            .filter(|route| route.visible)
+            .position(|route| self.active_route == Some(route.id))
+            .map(|index| {
+                let inset = (ACTIVITY_RAIL_WIDTH - ACTIVITY_BUTTON_SIZE) / 2.;
+                let top = (ACTIVITY_TILE_HEIGHT + gap) * index as f32
+                    + (ACTIVITY_TILE_HEIGHT - ACTIVITY_BUTTON_SIZE) / 2.;
+                SlidingHighlight::new(
+                    "shell-activity-selection",
+                    Bounds::new(
+                        point(inset, top),
+                        size(ACTIVITY_BUTTON_SIZE, ACTIVITY_BUTTON_SIZE),
+                    ),
+                    selected_color,
+                )
+                .radius(radius)
+            });
+        let buttons: Vec<AnyElement> = self
+            .routes
+            .iter()
+            .filter(|route| route.visible)
+            .map(|route| self.route_button(route, window, cx))
+            .collect();
+        v_flex()
+            .relative()
+            .gap(gap)
+            .children(highlight)
+            .children(buttons)
     }
 
     fn action_button(&self, action: &ShellAction, cx: &mut Context<Self>) -> AnyElement {
@@ -600,7 +631,7 @@ impl ShellView {
                 .any(|action| action.optional && action.visible)
     }
 
-    fn render_activity_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn render_activity_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         if !self.has_visible_optional_item() {
             return None;
         }
@@ -619,7 +650,7 @@ impl ShellView {
                 .border_color(extended.colors.hairline)
                 .pt(spacing.sm)
                 .pb(spacing.sm)
-                .child(self.route_buttons(cx))
+                .child(self.route_buttons(window, cx))
                 .child(self.action_buttons(cx)),
         )
     }
@@ -653,7 +684,7 @@ impl Render for ShellView {
                     .flex_1()
                     .min_h_0()
                     .items_stretch()
-                    .children(self.render_activity_bar(cx))
+                    .children(self.render_activity_bar(window, cx))
                     .child(
                         div()
                             .h_full()

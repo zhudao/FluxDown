@@ -11,6 +11,8 @@ struct DeriveInput {
     let filter: DownloadsFilter
     /// 已折叠的分组键（仅在分组视图生效）。
     let collapsed: Set<String>
+    /// 其他设备上执行的远程任务（已去掉目标为本机的镜像）；组详情等本机专属视图不传。
+    var remote: [RemoteTaskDto] = []
 }
 
 struct DeriveResult {
@@ -32,12 +34,15 @@ struct DownloadsDeriver {
         let up: Int64
         let queuePosition: Int
         let boosted: Bool
+        let awaitingDecision: Bool
         let category: TaskCategory?
         let queue: TaskQueue?
         let item: TaskItem
     }
 
     private var entries: [String: Entry] = [:]
+    /// `createdAt`（ISO 字符串）→ Unix 秒的解析缓存（字符串不变则结果不变）。
+    private var createdCache: [String: Int64] = [:]
     private var categories: [TaskCategory] = []
     private var index = CategoryIndex(TaskCategory.builtin)
     private var categoryByName: [String: TaskCategory?] = [:]
@@ -68,9 +73,12 @@ struct DownloadsDeriver {
         for queue in s.queues { queuesById[normalizedQueueId(queue.queueId)] = queue }
 
         // 1. 行模型（输入未变化的复用同一值）
+        let conflictTasks = Set(s.selections.fileConflicts.map(\.taskId))
         var all: [TaskItem] = []
         all.reserveCapacity(s.tasks.count)
-        for task in s.tasks { all.append(item(for: task, state: s, queuesById: queuesById)) }
+        for task in s.tasks {
+            all.append(item(for: task, state: s, queuesById: queuesById, awaitingDecision: conflictTasks.contains(task.taskId)))
+        }
         if entries.count > all.count {
             let ids = Set(all.map(\.id))
             entries = entries.filter { ids.contains($0.key) }
@@ -86,18 +94,31 @@ struct DownloadsDeriver {
             if !query.isEmpty, !Self.matches(it, query: query) { continue }
             scoped.append(it)
         }
+        // 远程任务：队列 / 任务组是本机概念，限定时不出现；搜索、文件夹与分类同本地行（同 GPUI 下载页）。
+        let remoteScoped = f.groupId == nil && f.queueId == nil
+            ? input.remote.filter { query.isEmpty || Self.matches($0, query: query) }
+            : []
         var folderCounts = Array(repeating: 0, count: StatusFolder.allCases.count)
         for it in scoped {
             for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(it.task.status) {
                 folderCounts[i] += 1
             }
         }
+        for task in remoteScoped {
+            for (i, folder) in StatusFolder.allCases.enumerated() where folder.accepts(task.status) {
+                folderCounts[i] += 1
+            }
+        }
 
-        // 3. 文件夹内 → 分类计数 → 分类筛选
+        // 3. 文件夹内 → 分类计数 → 分类 / 仅远程筛选
         let inFolder = scoped.filter { f.folder.accepts($0.task.status) }
+        let remoteInFolder = remoteRows(remoteScoped.filter { f.folder.accepts($0.status) })
         var categoryCounts: [String: Int] = [:]
         for it in inFolder {
             if let category = it.category { categoryCounts[category.id, default: 0] += 1 }
+        }
+        for remote in remoteInFolder {
+            if let id = remote.categoryId { categoryCounts[id, default: 0] += 1 }
         }
         let selectedCategory = f.categoryId.flatMap { id in index.ordered.first { $0.id == id && !$0.isAll }?.id }
         var pills: [CategoryPill] = []
@@ -105,11 +126,24 @@ struct DownloadsDeriver {
             let n = categoryCounts[category.id] ?? 0
             if n > 0 || category.id == selectedCategory { pills.append(CategoryPill(category: category, count: n)) }
         }
-        let rows = selectedCategory.map { id in inFolder.filter { $0.category?.id == id } } ?? inFolder
+        // 行集合：仅远程 → 只有远程行；选了分类 → 本机 + 远程中属于该分类的；否则两者都在。
+        var rows: [DownloadsRow] = []
+        rows.reserveCapacity(inFolder.count + remoteInFolder.count)
+        if f.remoteOnly {
+            rows.append(contentsOf: remoteInFolder.map(DownloadsRow.remote))
+        } else if let id = selectedCategory {
+            rows.append(contentsOf: inFolder.lazy.filter { $0.category?.id == id }.map(DownloadsRow.task))
+            rows.append(contentsOf: remoteInFolder.lazy.filter { $0.categoryId == id }.map(DownloadsRow.remote))
+        } else {
+            rows.append(contentsOf: inFolder.map(DownloadsRow.task))
+            rows.append(contentsOf: remoteInFolder.map(DownloadsRow.remote))
+        }
 
-        // 4. 排序（进度 / 速度键节流重排）
+        // 4. 排序（本机与远程同一比较器；进度 / 速度键节流重排）
         var retryAt: Int64 = 0
-        var ordered = rows.sorted { Self.compare($0, $1, order: order) < 0 }
+        var ordered = rows.map(Self.sortEntry)
+            .sorted { Self.compare($0.key, $1.key, order: order) < 0 }
+            .map(\.row)
         let dynamic = order.sortKey == .progress || order.sortKey == .speed
         var hasher = Hasher()
         hasher.combine(f)
@@ -137,7 +171,7 @@ struct DownloadsDeriver {
         sortSignature = signature
         var positions: [String: Int] = [:]
         positions.reserveCapacity(ordered.count)
-        for (i, it) in ordered.enumerated() { positions[it.id] = i }
+        for (i, row) in ordered.enumerated() { positions[row.id] = i }
         lastPositions = positions
 
         // 5. 分区 / 分组
@@ -153,13 +187,13 @@ struct DownloadsDeriver {
                     id: group.key,
                     kind: .group,
                     title: group.title,
-                    count: group.items.count,
+                    count: group.rows.count,
                     doneOfTotal: group.doneOfTotal,
                     downSpeed: 0,
                     collapsed: closed,
-                    items: closed ? [] : group.items
+                    rows: closed ? [] : group.rows
                 ))
-                if !closed { visible.append(contentsOf: group.items.map(\.id)) }
+                if !closed { visible.append(contentsOf: group.rows.compactMap { $0.item?.id }) }
             }
         }
 
@@ -171,33 +205,86 @@ struct DownloadsDeriver {
             .map { QueueFacet(queue: $0, count: queueCounts[normalizedQueueId($0.queueId)] ?? 0) }
 
         return DeriveResult(
-            list: DownloadsList(sections: sections, visibleIds: visible, taskTotal: s.tasks.count, loaded: true),
-            facets: Facets(folderCounts: folderCounts, categories: pills, queues: queueFacets, matching: ordered.count),
+            list: DownloadsList(
+                sections: sections,
+                visibleIds: visible,
+                taskTotal: s.tasks.count + input.remote.count,
+                loaded: true
+            ),
+            facets: Facets(
+                folderCounts: folderCounts,
+                categories: pills,
+                queues: queueFacets,
+                remoteCount: remoteInFolder.count,
+                matching: ordered.count
+            ),
             retryAtMs: retryAt
         )
     }
 
+    /// 远程任务 → 行：一次算好创建时间（Unix 秒）/ 分类 / 站点，供排序、分类与分组共用。
+    private mutating func remoteRows(_ tasks: [RemoteTaskDto]) -> [RemoteRow] {
+        if createdCache.count > 4096 { createdCache.removeAll() }
+        return tasks.map { task in
+            let created: Int64
+            if let cached = createdCache[task.createdAt] {
+                created = cached
+            } else {
+                created = Self.createdSeconds(task.createdAt)
+                createdCache[task.createdAt] = created
+            }
+            return RemoteRow(
+                task: task,
+                createdAt: created,
+                categoryId: resolveCategory(task.displayName)?.id,
+                site: Self.site(ofUrl: task.url)
+            )
+        }
+    }
+
+    /// ISO-8601（带 / 不带小数秒）→ Unix 秒；解析失败 = 0。
+    static func createdSeconds(_ iso: String) -> Int64 {
+        guard let date = Self.isoFractional.date(from: iso) ?? Self.isoPlain.date(from: iso) else { return 0 }
+        return Int64(date.timeIntervalSince1970.rounded(.down))
+    }
+
+    private static let isoFractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let isoPlain: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    /// 按文件名解析分类（与本地行共用同一缓存）。
+    private mutating func resolveCategory(_ name: String) -> TaskCategory? {
+        if let cached = categoryByName[name] { return cached }
+        let category = index.categoryOf(name)
+        categoryByName[name] = .some(category)
+        return category
+    }
+
     // MARK: 行模型
 
-    private mutating func item(for task: DownloadTask, state s: HostState, queuesById: [String: TaskQueue]) -> TaskItem {
+    private mutating func item(
+        for task: DownloadTask, state s: HostState, queuesById: [String: TaskQueue], awaitingDecision: Bool
+    ) -> TaskItem {
         let speed = s.speeds[task.taskId]
         let down = speed?.down ?? 0
         let up = speed?.up ?? 0
         let runtime = s.runtime[task.taskId]
         let queuePosition = Int(s.queuePositions[task.taskId] ?? 0)
         let boosted = s.priorityTaskId == task.taskId
-        let category: TaskCategory?
-        if let cached = categoryByName[task.fileName] {
-            category = cached
-        } else {
-            category = index.categoryOf(task.fileName)
-            categoryByName[task.fileName] = .some(category)
-        }
+        let category = resolveCategory(task.fileName)
         let queue = queuesById[normalizedQueueId(task.queueId)]
 
         if let previous = entries[task.taskId],
            previous.task == task, previous.runtime == runtime, previous.down == down, previous.up == up,
-           previous.queuePosition == queuePosition, previous.boosted == boosted,
+           previous.queuePosition == queuePosition, previous.boosted == boosted, previous.awaitingDecision == awaitingDecision,
            previous.category == category, previous.queue == queue {
             return previous.item
         }
@@ -211,6 +298,7 @@ struct DownloadsDeriver {
             speedUp: up,
             queuePosition: queuePosition,
             boosted: boosted,
+            awaitingDecision: awaitingDecision,
             category: category,
             queue: queue,
             site: Self.site(of: task),
@@ -225,14 +313,18 @@ struct DownloadsDeriver {
         )
         entries[task.taskId] = Entry(
             task: task, runtime: runtime, down: down, up: up, queuePosition: queuePosition,
-            boosted: boosted, category: category, queue: queue, item: built
+            boosted: boosted, awaitingDecision: awaitingDecision, category: category, queue: queue, item: built
         )
         return built
     }
 
     /// 来源站点：originUrl ‖ url 的 host（去 `www.` 与端口）；BT / eD2K 哨兵无 host → 空串。
     static func site(of task: DownloadTask) -> String {
-        let raw = task.originUrl.isEmpty ? task.url : task.originUrl
+        site(ofUrl: task.originUrl.isEmpty ? task.url : task.originUrl)
+    }
+
+    /// url 的 host（去 `www.` 与端口）；BT / eD2K 哨兵与非 URL → 空串。
+    static func site(ofUrl raw: String) -> String {
         if raw.hasPrefix("magnet:") || raw.hasPrefix("torrent-file://") || raw.hasPrefix("ed2k://") { return "" }
         guard let scheme = raw.range(of: "://") else { return "" }
         var rest = raw[scheme.upperBound...].prefix { $0 != "/" }
@@ -249,6 +341,10 @@ struct DownloadsDeriver {
             || task.url.lowercased().contains(query)
             || task.originUrl.lowercased().contains(query)
             || item.site.lowercased().contains(query)
+    }
+
+    private static func matches(_ task: RemoteTaskDto, query: String) -> Bool {
+        task.displayName.lowercased().contains(query) || task.url.lowercased().contains(query)
     }
 
     /// 进度条：按真实字节区间投影；无分段退化为单条总进度。完成 / 做种 / 文件已删除行不显示（§3.5）。
@@ -311,6 +407,59 @@ struct DownloadsDeriver {
 
     // MARK: 排序
 
+    /// 本机与远程行共用的排序投影：比较器只看这些字段（远程行按契约投影，见 `sortKey(_: RemoteRow)`）。
+    private struct SortProjection {
+        let id: String
+        let tier: Int
+        /// Unix 秒。
+        let created: Int64
+        let name: String
+        /// 未知大小 = 0。
+        let size: Int64
+        /// nil = 无进度（排序时视为 -1）。
+        let progress: Double?
+        let speed: Int64
+    }
+
+    private struct SortEntry {
+        let row: DownloadsRow
+        let key: SortProjection
+    }
+
+    private static func sortEntry(_ row: DownloadsRow) -> SortEntry {
+        switch row {
+        case let .task(item): SortEntry(row: row, key: sortKey(item))
+        case let .remote(remote): SortEntry(row: row, key: sortKey(remote))
+        }
+    }
+
+    private static func sortKey(_ item: TaskItem) -> SortProjection {
+        SortProjection(
+            id: item.id,
+            tier: tier(item),
+            created: item.task.createdAt,
+            name: item.task.fileName,
+            size: item.task.totalBytes,
+            progress: item.task.progress,
+            speed: item.speedDown
+        )
+    }
+
+    /// 远程投影：档位见 `tier(_: RemoteTaskStatus)`；名称 = 显示名；大小 = `totalBytes ?? 0`；
+    /// 进度 = `progress`（未知状态无进度）；速度 = 非终态时的 `speed`，终态 0。
+    private static func sortKey(_ remote: RemoteRow) -> SortProjection {
+        let task = remote.task
+        return SortProjection(
+            id: task.id,
+            tier: tier(task.status),
+            created: remote.createdAt,
+            name: task.displayName,
+            size: task.totalBytes ?? 0,
+            progress: task.status.isUnknown ? nil : task.progress,
+            speed: task.status.isTerminal ? 0 : task.speed
+        )
+    }
+
     /// 智能排序档（§1.2）：优先下载 → 活跃 → 排队 → 失败 → 暂停 → 完成。
     static func tier(_ item: TaskItem) -> Int {
         let status = item.task.status
@@ -322,93 +471,108 @@ struct DownloadsDeriver {
         return 5
     }
 
+    /// 远程任务的智能排序档（永不 boosted）：下载中 1 · 等待接单 / 已接单 / 未知 2 · 失败 / 已取消 3 · 暂停 4 · 完成 5。
+    static func tier(_ status: RemoteTaskStatus) -> Int {
+        switch status {
+        case .downloading: 1
+        case .pending, .accepted, .unknown: 2
+        case .failed, .canceled: 3
+        case .paused: 4
+        case .completed: 5
+        }
+    }
+
     private static func three<T: Comparable>(_ a: T, _ b: T) -> Int { a < b ? -1 : (a > b ? 1 : 0) }
 
     /// 三态比较：<0 → a 在前。
-    static func compare(_ a: TaskItem, _ b: TaskItem, order: ViewOrder) -> Int {
+    private static func compare(_ a: SortProjection, _ b: SortProjection, order: ViewOrder) -> Int {
         if order.sortKey == .smart {
-            let ta = tier(a)
-            let tb = tier(b)
-            if ta != tb { return three(ta, tb) }
-            let byCreated = three(a.task.createdAt, b.task.createdAt)
+            if a.tier != b.tier { return three(a.tier, b.tier) }
+            let byCreated = three(a.created, b.created)
             // 活跃 / 排队档按添加顺序正序，历史档新 → 旧。
-            let directed = ta <= 2 ? byCreated : -byCreated
+            let directed = a.tier <= 2 ? byCreated : -byCreated
             return directed != 0 ? directed : three(a.id, b.id)
         }
         var key: Int
         switch order.sortKey {
         case .created, .smart:
-            key = three(a.task.createdAt, b.task.createdAt)
+            key = three(a.created, b.created)
         case .name:
-            switch a.task.fileName.caseInsensitiveCompare(b.task.fileName) {
+            switch a.name.caseInsensitiveCompare(b.name) {
             case .orderedAscending: key = -1
             case .orderedDescending: key = 1
             case .orderedSame: key = 0
             }
         case .size:
-            key = three(a.task.totalBytes, b.task.totalBytes)
+            key = three(a.size, b.size)
         case .progress:
-            key = three(a.task.progress ?? -1, b.task.progress ?? -1)
+            key = three(a.progress ?? -1, b.progress ?? -1)
         case .speed:
-            key = three(a.speedDown, b.speedDown)
+            key = three(a.speed, b.speed)
         case .status:
-            key = three(tier(a), tier(b))
+            key = three(a.tier, b.tier)
         }
         if !order.ascending { key = -key }
         if key != 0 { return key }
-        let newestFirst = three(b.task.createdAt, a.task.createdAt)
+        let newestFirst = three(b.created, a.created)
         return newestFirst != 0 ? newestFirst : three(a.id, b.id)
     }
 
     // MARK: 分区 / 分组
 
-    private static func isInflight(_ status: TaskStatus) -> Bool {
-        status == .pending || status == .downloading || status == .preparing
+    /// 「传输中」：本机 pending / downloading / preparing + 远程 pending / accepted / downloading / unknown
+    /// （同「下载中」文件夹的成员）。
+    private static func isInflight(_ row: DownloadsRow) -> Bool {
+        switch row {
+        case let .task(item): StatusFolder.active.accepts(item.task.status)
+        case let .remote(remote): StatusFolder.active.accepts(remote.task.status)
+        }
     }
 
     private static func sectioned(
-        _ rows: [TaskItem],
+        _ rows: [DownloadsRow],
         folder: StatusFolder,
         into sections: inout [DownloadsSection],
         visible: inout [String]
     ) {
-        let inflight = rows.filter { isInflight($0.task.status) }
-        let history = rows.filter { !isInflight($0.task.status) }
+        let inflight = rows.filter { isInflight($0) }
+        let history = rows.filter { !isInflight($0) }
         if !inflight.isEmpty {
             sections.append(DownloadsSection(
                 id: "flow", kind: .inFlight, title: .inFlight, count: inflight.count, doneOfTotal: nil,
-                downSpeed: inflight.reduce(0) { $0 + $1.speedDown }, collapsed: false, items: inflight
+                // 汇总速度只算本机：远程速度是别的设备的吞吐。
+                downSpeed: inflight.reduce(0) { $0 + ($1.item?.speedDown ?? 0) }, collapsed: false, rows: inflight
             ))
-            visible.append(contentsOf: inflight.map(\.id))
+            visible.append(contentsOf: inflight.compactMap { $0.item?.id })
         }
         if !history.isEmpty {
             let named: StatusFolder? = (folder == .completed || folder == .failed || folder == .paused) ? folder : nil
             sections.append(DownloadsSection(
                 id: "history", kind: .history, title: .history(named), count: history.count, doneOfTotal: nil,
-                downSpeed: 0, collapsed: false, items: history
+                downSpeed: 0, collapsed: false, rows: history
             ))
-            visible.append(contentsOf: history.map(\.id))
+            visible.append(contentsOf: history.compactMap { $0.item?.id })
         }
     }
 
     private struct Group {
         let key: String
         let title: SectionTitle
-        let items: [TaskItem]
+        let rows: [DownloadsRow]
         var doneOfTotal: DoneOfTotal?
 
-        init(key: String, title: SectionTitle, items: [TaskItem], doneOfTotal: DoneOfTotal? = nil) {
+        init(key: String, title: SectionTitle, rows: [DownloadsRow], doneOfTotal: DoneOfTotal? = nil) {
             self.key = key
             self.title = title
-            self.items = items
+            self.rows = rows
             self.doneOfTotal = doneOfTotal
         }
     }
 
     /// 按首次出现顺序分桶。
-    private static func bucketed(_ rows: [TaskItem], key: (TaskItem) -> String) -> [(key: String, items: [TaskItem])] {
+    private static func bucketed(_ rows: [DownloadsRow], key: (DownloadsRow) -> String) -> [(key: String, rows: [DownloadsRow])] {
         var order: [String] = []
-        var buckets: [String: [TaskItem]] = [:]
+        var buckets: [String: [DownloadsRow]] = [:]
         for row in rows {
             let k = key(row)
             if buckets[k] == nil { order.append(k) }
@@ -417,8 +581,60 @@ struct DownloadsDeriver {
         return order.map { ($0, buckets[$0] ?? []) }
     }
 
+    /// 状态分组键：本机 downloading → 1 · pending / preparing → 0 · failed → 4 · paused → 2 · completed / unknown → 3；
+    /// 远程 downloading → 1 · pending / accepted / unknown → 0 · failed / canceled → 4 · paused → 2 · completed → 3。
+    private static func statusKey(_ row: DownloadsRow) -> String {
+        switch row {
+        case let .task(item):
+            switch item.task.status {
+            case .downloading: "status:1"
+            case .pending, .preparing: "status:0"
+            case .failed: "status:4"
+            case .paused: "status:2"
+            case .completed, .unknown: "status:3"
+            }
+        case let .remote(remote):
+            switch remote.task.status {
+            case .downloading: "status:1"
+            case .pending, .accepted, .unknown: "status:0"
+            case .failed, .canceled: "status:4"
+            case .paused: "status:2"
+            case .completed: "status:3"
+            }
+        }
+    }
+
+    private static func createdAt(_ row: DownloadsRow) -> Int64 {
+        switch row {
+        case let .task(item): item.task.createdAt
+        case let .remote(remote): remote.createdAt
+        }
+    }
+
+    private static func categoryId(_ row: DownloadsRow) -> String {
+        switch row {
+        case let .task(item): item.category?.id ?? ""
+        case let .remote(remote): remote.categoryId ?? ""
+        }
+    }
+
+    private static func site(_ row: DownloadsRow) -> String {
+        switch row {
+        case let .task(item): item.site
+        case let .remote(remote): remote.site
+        }
+    }
+
+    /// 无 host 的行是否属于 BT / 磁力（本机看协议，远程看链接形态）。
+    private static func isBt(_ row: DownloadsRow) -> Bool {
+        switch row {
+        case let .task(item): item.task.protocol == .bt
+        case let .remote(remote): remote.task.url.hasPrefix("magnet:") || remote.task.url.hasPrefix("torrent-file://")
+        }
+    }
+
     private func groups(
-        for rows: [TaskItem],
+        for rows: [DownloadsRow],
         by groupBy: GroupBy,
         state s: HostState,
         now nowMs: Int64,
@@ -428,16 +644,17 @@ struct DownloadsDeriver {
         case .none:
             return []
         case .status:
-            let buckets: [(key: String, title: String, accepts: (TaskStatus) -> Bool)] = [
-                ("status:1", "statusDownloading", { $0 == .downloading }),
-                ("status:0", "statusPending", { $0 == .pending || $0 == .preparing }),
-                ("status:4", "statusError", { $0 == .failed }),
-                ("status:2", "statusPaused", { $0 == .paused }),
-                ("status:3", "statusCompleted", { $0 == .completed || $0 == .unknown }),
+            let buckets: [(key: String, title: String)] = [
+                ("status:1", "statusDownloading"),
+                ("status:0", "statusPending"),
+                ("status:4", "statusError"),
+                ("status:2", "statusPaused"),
+                ("status:3", "statusCompleted"),
             ]
+            let byStatus = Dictionary(grouping: rows, by: Self.statusKey)
             return buckets.compactMap { bucket in
-                let items = rows.filter { bucket.accepts($0.task.status) }
-                return items.isEmpty ? nil : Group(key: bucket.key, title: .key(bucket.title), items: items)
+                guard let items = byStatus[bucket.key] else { return nil }
+                return Group(key: bucket.key, title: .key(bucket.title), rows: items)
             }
         case .date:
             let now = Date(timeIntervalSince1970: TimeInterval(nowMs) / 1000)
@@ -447,67 +664,75 @@ struct DownloadsDeriver {
             }
             let bounds = [Int64(today.timeIntervalSince1970), start(daysAgo: 1), start(daysAgo: 7), start(daysAgo: 30)]
             let labels = ["today", "yesterday", "thisWeek", "thisMonth", "older"]
-            var buckets = Array(repeating: [TaskItem](), count: labels.count)
+            var buckets = Array(repeating: [DownloadsRow](), count: labels.count)
             for row in rows {
-                let created = row.task.createdAt
+                let created = Self.createdAt(row)
                 let b = bounds.firstIndex { created >= $0 } ?? labels.count - 1
                 buckets[b].append(row)
             }
             return buckets.enumerated().compactMap { i, items in
-                items.isEmpty ? nil : Group(key: "date:\(i)", title: .key(labels[i]), items: items)
+                items.isEmpty ? nil : Group(key: "date:\(i)", title: .key(labels[i]), rows: items)
             }
         case .type:
-            let byCategory = Dictionary(grouping: rows) { $0.category?.id ?? "" }
+            let byCategory = Dictionary(grouping: rows, by: Self.categoryId)
             var out: [Group] = []
             for category in index.ordered where !category.isAll {
                 guard let items = byCategory[category.id] else { continue }
-                out.append(Group(key: "type:\(category.id)", title: .category(category), items: items))
+                out.append(Group(key: "type:\(category.id)", title: .category(category), rows: items))
             }
-            if let none = byCategory[""] { out.append(Group(key: "type:none", title: .key("categoryOther"), items: none)) }
+            if let none = byCategory[""] { out.append(Group(key: "type:none", title: .key("categoryOther"), rows: none)) }
             return out
         case .queue:
-            let byQueue = Self.bucketed(rows) { normalizedQueueId($0.task.queueId) }
-            let lookup = Dictionary(uniqueKeysWithValues: byQueue.map { ($0.key, $0.items) })
+            // 远程任务没有本机队列：单独一组放最后。
+            let local = rows.filter { $0.item != nil }
+            let remote = rows.filter { $0.item == nil }
+            let byQueue = Self.bucketed(local) { normalizedQueueId($0.item?.task.queueId ?? "") }
+            let lookup = Dictionary(uniqueKeysWithValues: byQueue.map { ($0.key, $0.rows) })
             var used = Set<String>()
             var out: [Group] = []
             for queue in s.queues.sorted(by: { $0.position < $1.position }) {
                 let key = normalizedQueueId(queue.queueId)
                 guard let items = lookup[key] else { continue }
                 used.insert(key)
-                out.append(Group(key: "queue:\(key)", title: .queue(queue), items: items))
+                out.append(Group(key: "queue:\(key)", title: .queue(queue), rows: items))
             }
             for bucket in byQueue where !used.contains(bucket.key) {
-                out.append(Group(key: "queue:\(bucket.key)", title: .text(bucket.key), items: bucket.items))
+                out.append(Group(key: "queue:\(bucket.key)", title: .text(bucket.key), rows: bucket.rows))
             }
+            if !remote.isEmpty { out.append(Group(key: "queue:remote", title: .key("remoteTasksGroup"), rows: remote)) }
             return out
         case .site:
-            let bySite = Dictionary(grouping: rows) { $0.site }
+            let bySite = Dictionary(grouping: rows, by: Self.site)
             var out: [Group] = []
             for site in bySite.keys.filter({ !$0.isEmpty }).sorted(by: { $0.caseInsensitiveCompare($1) == .orderedAscending }) {
-                out.append(Group(key: "site:\(site)", title: .text(site), items: bySite[site] ?? []))
+                out.append(Group(key: "site:\(site)", title: .text(site), rows: bySite[site] ?? []))
             }
             if let hostless = bySite[""] {
                 // 无 host：磁力 / 种子归「BT · 磁力」，其余（eD2K 等）归「—」。
-                let bt = hostless.filter { $0.task.protocol == .bt }
-                let other = hostless.filter { $0.task.protocol != .bt }
-                if !bt.isEmpty { out.append(Group(key: "site:", title: .key("viewSiteBt"), items: bt)) }
-                if !other.isEmpty { out.append(Group(key: "site:-", title: .text(Format.dash), items: other)) }
+                let bt = hostless.filter(Self.isBt)
+                let other = hostless.filter { !Self.isBt($0) }
+                if !bt.isEmpty { out.append(Group(key: "site:", title: .key("viewSiteBt"), rows: bt)) }
+                if !other.isEmpty { out.append(Group(key: "site:-", title: .text(Format.dash), rows: other)) }
             }
             return out
         case .group:
-            let byGroup = Dictionary(grouping: rows) { $0.task.groupId }
+            // 远程任务不属于任何本机任务组：归「未分组」。
+            let byGroup = Dictionary(grouping: rows.compactMap(\.item)) { $0.task.groupId }
             var out: [Group] = []
             for group in s.groups.sorted(by: { $0.name.lowercased() < $1.name.lowercased() }) {
-                guard let items = byGroup[group.groupId] else { continue }
-                let done = items.filter { $0.task.status == .completed }.count
+                guard let members = byGroup[group.groupId] else { continue }
+                let done = members.filter { $0.task.status == .completed }.count
                 out.append(Group(
-                    key: "group:\(group.groupId)", title: .text(group.name), items: items,
-                    doneOfTotal: DoneOfTotal(done: done, total: items.count)
+                    key: "group:\(group.groupId)", title: .text(group.name), rows: members.map(DownloadsRow.task),
+                    doneOfTotal: DoneOfTotal(done: done, total: members.count)
                 ))
             }
             let known = Set(s.groups.map(\.groupId))
-            let loose = rows.filter { $0.task.groupId.isEmpty || !known.contains($0.task.groupId) }
-            if !loose.isEmpty { out.append(Group(key: "group:none", title: .key("ungroupedTasks"), items: loose)) }
+            let loose = rows.filter { row in
+                guard let item = row.item else { return true }
+                return item.task.groupId.isEmpty || !known.contains(item.task.groupId)
+            }
+            if !loose.isEmpty { out.append(Group(key: "group:none", title: .key("ungroupedTasks"), rows: loose)) }
             return out
         }
     }
