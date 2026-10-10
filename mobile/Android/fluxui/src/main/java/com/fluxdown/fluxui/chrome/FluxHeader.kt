@@ -76,7 +76,7 @@ fun FluxGlassIconButton(
                 if (on) {
                     Modifier
                         .background(c.accentLo, CircleShape)
-                        .border(0.5.dp, c.accent.copy(alpha = 0.40f), CircleShape)
+                        .border(0.5.dp, c.accent.copy(alpha = if (c.dark) 0.40f else 0.24f), CircleShape)
                 } else {
                     Modifier.fluxGlass(FluxGlass.G2, CircleShape, kind = FluxGlassKind.Flat)
                 },

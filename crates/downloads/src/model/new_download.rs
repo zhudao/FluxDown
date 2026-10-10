@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use fluxdown_protocol::CreateTaskRequest;
+use fluxdown_protocol::{CreateTaskRequest, MAX_TASK_SEGMENTS};
 
 /// 一条解析出的下载条目（aria2 风格：URL + 可选 `out=` / `checksum=` 选项行）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -373,8 +373,8 @@ pub(crate) fn ua_preset_value(key: &str) -> &'static str {
 
 /// 线程数下拉预设（`自动` 与 `自定义` 之间的固定档位）。
 pub(crate) const THREAD_PRESETS: &[i32] = &[4, 8, 16, 32, 64];
-/// 自定义线程数上限。
-pub(crate) const MAX_THREADS: i32 = 256;
+/// 自定义线程数上限（= 引擎单任务连接上限）。
+pub(crate) const MAX_THREADS: i32 = MAX_TASK_SEGMENTS;
 
 /// 线程数选择：自动 / 预设档位 / 自定义输入。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(ThreadChoice::from_segments(0), ThreadChoice::Auto);
         assert_eq!(ThreadChoice::from_segments(16), ThreadChoice::Preset(16));
         assert_eq!(ThreadChoice::from_segments(10), ThreadChoice::Custom);
-        assert_eq!(custom_segments("999"), 256);
+        assert_eq!(custom_segments("999"), 512);
         assert_eq!(custom_segments("0"), 0);
         assert_eq!(custom_segments("abc"), 0);
         assert_eq!(checksum_spec("md5", "  "), "");

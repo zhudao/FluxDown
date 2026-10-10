@@ -77,7 +77,16 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.observe(&translator, |_, _, cx| cx.notify()).detach();
+        // 搜索框占位只在创建时取一次文案：直接唤起设置窗口时语言可能尚未从偏好恢复，
+        // 语言变化后要同步重设。
+        cx.observe_in(&translator, window, |this, translator, window, cx| {
+            let placeholder = translator.read(cx).text("settingsSearchHint").to_owned();
+            this.search.update(cx, |search, cx| {
+                search.set_placeholder(placeholder, window, cx)
+            });
+            cx.notify();
+        })
+        .detach();
         cx.observe_in(&store, window, |this, store, window, cx| {
             let snapshot = store.read(cx);
             let translator = this.translator.read(cx);

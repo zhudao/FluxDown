@@ -3,10 +3,10 @@ package com.fluxdown.app.shell
 import android.content.ClipboardManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterExitState
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -101,6 +101,7 @@ import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxBackdrop
 import com.fluxdown.fluxui.material.FluxCanvas
 import com.fluxdown.fluxui.material.LocalFluxBackdrop
+import com.fluxdown.fluxui.material.LocalFlowInEnabled
 import com.fluxdown.fluxui.material.fluxBackdropSource
 import com.fluxdown.fluxui.overlay.FluxOverlayHost
 import com.fluxdown.fluxui.overlay.FluxPortalHost
@@ -219,8 +220,8 @@ private fun BoxScope.StatusScrim() {
     )
 }
 
-/** 页面栈状态：深度用于判定推入 / 返回方向。 */
-private data class PageKey(val depth: Int, val route: Route?)
+/** 页面栈状态：深度用于判定推入 / 返回方向；[tab] 区分各 Tab 根页（切换 Tab 时交叉淡入）。 */
+private data class PageKey(val depth: Int, val route: Route?, val tab: AppTab)
 
 /** compact / medium：顶层页 + 推入页；medium 档任务详情进右栏（不做推入）。 */
 @Composable
@@ -247,29 +248,43 @@ private fun ExpandedStage() {
     }
 }
 
-/** 推入页：新页自右滑入（fluid 弹簧），下层页缩小 + 淡出；返回反向。Reduce motion → 瞬时。 */
+/**
+ * 页面过渡（对齐 iOS 导航）：推入 = 新页整页不透明地自右滑入、盖在上层，下层页向左视差 30%；返回反向，
+ * 离场页保持在上层滑出。`page` 弹簧临界阻尼、无回弹；全程不缩放、不模糊、不淡化文字。
+ * Tab 切换（根页之间）= 短交叉淡入。入场期间关闭流入（[LocalFlowInEnabled]），页面一次到位。
+ * Reduce motion → 瞬时。
+ */
 @Composable
 private fun PageStack(modifier: Modifier, route: Route?, expanded: Boolean) {
     val nav = LocalNavigator.current
     val motion = FluxTheme.motion
     AnimatedContent(
-        targetState = PageKey(if (route == null) 0 else nav.stack.size, route),
+        targetState = PageKey(if (route == null) 0 else nav.stack.size, route, nav.tab),
         modifier = modifier,
-        contentKey = { it.route },
+        contentKey = { it.route ?: it.tab },
         transitionSpec = {
-            val push = targetState.depth >= initialState.depth
-            val slide = motion.of<IntOffset>(motion.fluid, IntOffset.VisibilityThreshold)
-            val fade = motion.of<Float>(motion.fluid)
-            (slideInHorizontally(slide) { w -> if (push) w else -w / 4 } + fadeIn(fade)) togetherWith
-                (slideOutHorizontally(slide) { w -> if (push) -w / 4 else w } + fadeOut(fade) + scaleOut(fade, targetScale = .94f))
+            val slide = motion.of<IntOffset>(motion.page, IntOffset.VisibilityThreshold)
+            val fade = motion.of<Float>(motion.page)
+            when {
+                targetState.depth == 0 && initialState.depth == 0 -> fadeIn(fade) togetherWith fadeOut(fade)
+                targetState.depth >= initialState.depth ->
+                    (slideInHorizontally(slide) { w -> w } togetherWith slideOutHorizontally(slide) { w -> -w * 3 / 10 })
+                        .apply { targetContentZIndex = 1f }
+                else ->
+                    (slideInHorizontally(slide) { w -> -w * 3 / 10 } togetherWith slideOutHorizontally(slide) { w -> w })
+                        .apply { targetContentZIndex = -1f }
+            }
         },
         label = "page",
     ) { key ->
         val r = key.route
+        val entering = transition.targetState == EnterExitState.Visible && transition.currentState != EnterExitState.Visible
         // 非首页（其余 Tab 根页与推入页）铺实色画布：推入 / 返回过渡中不与下层页透叠。
-        val home = r == null && nav.tab == AppTab.Downloads
-        Box(if (home) Modifier.fillMaxSize() else Modifier.fillMaxSize().background(FluxTheme.colors.canvas)) {
-            if (r == null) TabRoot(nav.tab, expanded) else RouteContent(r, inPane = false)
+        val home = r == null && key.tab == AppTab.Downloads
+        CompositionLocalProvider(LocalFlowInEnabled provides !entering) {
+            Box(if (home) Modifier.fillMaxSize() else Modifier.fillMaxSize().background(FluxTheme.colors.canvas)) {
+                if (r == null) TabRoot(key.tab, expanded) else RouteContent(r, inPane = false)
+            }
         }
     }
 }

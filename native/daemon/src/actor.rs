@@ -200,6 +200,10 @@ pub enum ActorOperation {
         user_agent: String,
         proxy_url: String,
     },
+    /// 剪贴板识别用的只读 HEAD 探测（off-actor）。
+    LinkProbe {
+        url: String,
+    },
     WebhookDeliveries,
     WebhookClear,
     WebhookSimulate,
@@ -226,6 +230,7 @@ pub enum ActorResult {
     #[cfg(feature = "plugins")]
     ResolvePreview(ResolvePreviewOutcome),
     RssValidation(Box<RssValidateOutcome>),
+    LinkProbe(fluxdown_protocol::LinkProbeResult),
     RssSources(Vec<RssSourceInfo>),
     WebhookDeliveries(Vec<fluxdown_engine::webhook::WebhookDelivery>),
     WebhookSimulation(usize),
@@ -632,6 +637,15 @@ async fn dispatch_operation(
                     .is_err()
                 {
                     tracing::debug!("RSS validation caller disconnected before result");
+                }
+            });
+        }
+        ActorOperation::LinkProbe { url } => {
+            let future = engine.manager.link_probe_future(url);
+            tokio::spawn(async move {
+                let result = link_probe_to_dto(future.await);
+                if ack.send(Ok(ActorResult::LinkProbe(result))).is_err() {
+                    tracing::debug!("link probe caller disconnected before result");
                 }
             });
         }
@@ -1052,6 +1066,7 @@ async fn execute_operation(
         | ActorOperation::RefreshEd2kServerSubscription
         | ActorOperation::RefreshEd2kNodes
         | ActorOperation::RssValidate { .. }
+        | ActorOperation::LinkProbe { .. }
         | ActorOperation::WebhookTest { .. }
         | ActorOperation::TestProxy { .. } => unreachable!("handled off actor"),
         ActorOperation::WebhookDeliveries => {
@@ -1313,6 +1328,25 @@ async fn commit_ed2k_refresh(
         updated_at,
         error: outcome.error,
     })
+}
+
+/// 引擎探测结果 → wire DTO（引擎不依赖 protocol，转换放在 daemon 边界）。
+fn link_probe_to_dto(
+    probe: fluxdown_engine::meta_prober::LinkProbe,
+) -> fluxdown_protocol::LinkProbeResult {
+    use fluxdown_engine::meta_prober::LinkVerdict;
+    use fluxdown_protocol::LinkProbeVerdict;
+    fluxdown_protocol::LinkProbeResult {
+        verdict: match probe.verdict {
+            LinkVerdict::Resource => LinkProbeVerdict::Resource,
+            LinkVerdict::NotResource => LinkProbeVerdict::NotResource,
+            LinkVerdict::Unknown => LinkProbeVerdict::Unknown,
+        },
+        final_url: probe.final_url,
+        file_name: probe.file_name,
+        mime: probe.mime,
+        total_bytes: probe.total_bytes,
+    }
 }
 
 fn now_unix_secs() -> i64 {

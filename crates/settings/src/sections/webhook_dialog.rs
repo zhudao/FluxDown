@@ -168,6 +168,15 @@ fn envelope_preview() -> String {
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }
 
+/// URL 字段说明文案键：ntfy 需带主题路径，钉钉需在机器人安全设置里加关键词 FluxDown，其余通用。
+pub(crate) fn url_hint_key(preset: &str) -> &'static str {
+    match preset {
+        "ntfy" => "webhookUrlHintNtfy",
+        "dingtalk" => "webhookUrlHintDingtalk",
+        _ => "webhookUrlHint",
+    }
+}
+
 /// URL 内联校验错误的文案键；`None` = 通过。空 URL 由保存按钮禁用兜底。
 pub(crate) fn url_error_key(raw: &str, allow_http: bool) -> Option<&'static str> {
     let raw = raw.trim();
@@ -633,14 +642,7 @@ impl WebhookDialog {
         );
         match error {
             Some(key) => field.child(field_error(self.t(key), cx)),
-            None => field.child(field_hint(
-                self.t(if self.preset == "ntfy" {
-                    "webhookUrlHintNtfy"
-                } else {
-                    "webhookUrlHint"
-                }),
-                cx,
-            )),
+            None => field.child(field_hint(self.t(url_hint_key(&self.preset)), cx)),
         }
     }
 
@@ -1233,6 +1235,15 @@ impl Render for WebhookDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_hint_follows_preset() {
+        assert_eq!(url_hint_key("ntfy"), "webhookUrlHintNtfy");
+        assert_eq!(url_hint_key("dingtalk"), "webhookUrlHintDingtalk");
+        for preset in ["custom", "wecom", "feishu", "serverchan", ""] {
+            assert_eq!(url_hint_key(preset), "webhookUrlHint", "{preset}");
+        }
+    }
 
     #[test]
     fn renders_placeholders_like_dart() {

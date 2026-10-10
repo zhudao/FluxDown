@@ -3162,6 +3162,7 @@ dependencies = [
  "gpui-base",
  "gpui-component",
  "gpui-pre",
+ "qrcodegen",
 ]
 
 [[package]]
@@ -3191,7 +3192,6 @@ dependencies = [
  "fluxdown_ui_theme",
  "gpui-component",
  "gpui-pre",
- "qrcodegen",
  "serde_json",
 ]
 

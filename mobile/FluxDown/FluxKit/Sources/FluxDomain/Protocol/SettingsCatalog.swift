@@ -80,7 +80,7 @@ public enum SettingsCatalog {
     public static let daemonFields: [SettingField] = [
         // 下载
         daemon("default_save_dir", .text, ""),
-        daemon("default_segments", .integer(min: 0, max: 64), "0"),
+        daemon("default_segments", .integer(min: 0, max: 512), "0"),
         daemon("auto_max_connections", .integer(min: 0, max: 128), "16"),
         daemon("cdn_multi_enabled", .bool, "false"),
         daemon("cdn_max_nodes", .integer(min: 0, max: 8), "0"),

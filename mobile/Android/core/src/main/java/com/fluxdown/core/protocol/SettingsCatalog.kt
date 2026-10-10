@@ -76,7 +76,7 @@ object SettingsCatalog {
     val daemonFields: List<SettingField> = listOf(
         // 下载
         daemon("default_save_dir", text, ""),
-        daemon("default_segments", int(0, 64), "0"),
+        daemon("default_segments", int(0, 512), "0"),
         daemon("auto_max_connections", int(0, 128), "16"),
         daemon("cdn_multi_enabled", bool, "false"),
         daemon("cdn_max_nodes", int(0, 8), "0"),

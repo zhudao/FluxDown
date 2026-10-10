@@ -450,8 +450,10 @@ fn dynamic_min_split_bytes(throughput_bps: f64) -> i64 {
     }
 }
 
-/// Maximum total number of segments (including dynamically created ones).
-const MAX_SEGMENTS: i32 = 64;
+/// Maximum number of concurrently active/pending segments (= connections) per
+/// task. 用户显式线程数的硬上限；与 `fluxdown_protocol::MAX_TASK_SEGMENTS` 一致。
+/// Auto 模式不受此值放大：advisor 与 [`HINT_UNCAP_MAX`] 仍各自封顶 64。
+const MAX_SEGMENTS: i32 = 512;
 
 // ---------------------------------------------------------------------------
 // 渐进启动 / 自适应连接调度
@@ -488,7 +490,7 @@ const RAMP_SOFT_PROBE_TASK_BUDGET: u32 = 6;
 
 /// hint 解封天花板：在无负面域名 cap、且存在正面 hint 时，允许把 `worker_cap`
 /// 抬到 `hint × 2`（下一档探索空间），但仍受此平台上限与 [`MAX_SEGMENTS`] 钳制。
-/// 移动端连接/电量更敏感，上限减半；桌面端与 `MAX_SEGMENTS` 对齐。
+/// 移动端连接/电量更敏感，上限减半；桌面端封顶 64（自动探索不进入高风险区间）。
 /// 证据门槛：仅当调用方显式允许（用户 Auto 默认档）且无未过期负面 cap 时生效；
 /// ramp 的 IMPROVE/Collapse/reject 反馈闭环全额保留，解封只放宽天花板不跳过评估。
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -1813,6 +1815,10 @@ pub async fn run_coordinated_download(
         }
         cap
     };
+    // 高线程任务（超出自动探索上限）在默认软限制下几个任务就会撞 EMFILE。
+    if worker_cap > HINT_UNCAP_MAX {
+        crate::proc::raise_nofile_limit_once();
+    }
     // 当前允许的活跃连接额度（ramp 控制变量，1..=worker_cap 内调整）。
     // 命中同域名正面起步提示时直接以已证明规模起步（消除重复爬坡）；
     // 首连接仍受下方 open-ended 单启动守卫约束，机队在首个 ramp tick 放出。
@@ -6680,13 +6686,13 @@ mod tests {
     }
 
     /// After Fix 1: completed segments do not count toward MAX_SEGMENTS.
-    /// 63 Completed + 1 Active of 10 MB should allow a split because
-    /// active_or_pending = 1 < MAX_SEGMENTS = 64.
+    /// MAX_SEGMENTS-1 Completed + 1 Active of 10 MB should allow a split because
+    /// active_or_pending = 1 < MAX_SEGMENTS.
     #[test]
     fn split_allowed_when_completed_segments_free_slots() {
         let total_bytes: i64 = 10_000_000;
         let mut segs = BTreeMap::new();
-        // 63 completed segments (minimal placeholder ranges).
+        // MAX_SEGMENTS-1 completed segments (minimal placeholder ranges).
         for i in 0..(MAX_SEGMENTS - 1) {
             segs.insert(i, make_seg(i, i as i64, i as i64, 1, SegState::Completed));
         }
@@ -6697,8 +6703,8 @@ mod tests {
         );
         let mut next_idx = MAX_SEGMENTS;
 
-        // With old code: segments.len() == 64 → None (workers retired).
-        // With fix: active_or_pending == 1 < 64 → should split successfully.
+        // With old code: segments.len() == MAX_SEGMENTS → None (workers retired).
+        // With fix: active_or_pending == 1 < MAX_SEGMENTS → should split successfully.
         let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(
             result.is_some(),
@@ -6724,7 +6730,7 @@ mod tests {
     }
 
     /// MAX_SEGMENTS still limits truly concurrent connections:
-    /// when 64 Active/Pending segments exist, no further split is allowed.
+    /// when MAX_SEGMENTS Active/Pending segments exist, no further split is allowed.
     #[test]
     fn split_blocked_when_max_active_segments_reached() {
         let mut segs = BTreeMap::new();
@@ -6742,7 +6748,7 @@ mod tests {
         }
         let mut next_idx = MAX_SEGMENTS;
 
-        // active_or_pending == 64 >= MAX_SEGMENTS → must still return None.
+        // active_or_pending == MAX_SEGMENTS → must still return None.
         let result = try_split_largest(&mut segs, &mut next_idx, MIN_SPLIT_BYTES);
         assert!(
             result.is_none(),

@@ -185,7 +185,8 @@ impl EventSink for RinfEventSink {
             | EngineEvent::RssSourcesChanged(_)
             | EngineEvent::RssItemsChanged { .. }
             | EngineEvent::RssFeedValidated { .. }
-            | EngineEvent::WebhookDeliveriesChanged(_) => {}
+            | EngineEvent::WebhookDeliveriesChanged(_)
+            | EngineEvent::TaskNotice(_) => {}
             // Flutter 继续消费 TaskProgress / SegmentProgress；活动由 JournalSink 落库，
             // 这两种扩展通知无需重复投影，也不能对每帧同步写日志。
             EngineEvent::TaskRuntimeChanged(_) | EngineEvent::TaskActivityAdded(_) => {}

@@ -1216,6 +1216,43 @@ pub struct LinkProbeRequest {
     pub port: u16,
 }
 
+/// `daemon.link.probe` 参数：待探测的下载链接。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkProbeParams {
+    pub url: String,
+}
+
+/// 链接探测判定：`"resource"` / `"notResource"` / `"unknown"`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum LinkProbeVerdict {
+    /// 确认是可下载资源。
+    Resource,
+    /// 确认是网页/文本/图片预览等非下载资源。
+    NotResource,
+    /// 网络错误、超时、非 2xx 或无 Content-Type，无法判定。
+    Unknown,
+}
+
+/// `daemon.link.probe` 结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkProbeResult {
+    pub verdict: LinkProbeVerdict,
+    /// 跟随重定向后的地址；未拿到响应时等于原 url。
+    pub final_url: String,
+    /// 可推断时的文件名，否则空。
+    pub file_name: String,
+    /// 小写 MIME essence（去参数），无则空。
+    pub mime: String,
+    /// 0 = 未知。
+    pub total_bytes: i64,
+}
+
 /// 发起配对请求体（`POST /api/v1/link/pair/begin`）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

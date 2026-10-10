@@ -387,6 +387,8 @@ pub(crate) struct SettingsRow {
     /// `None` 表示整行自渲染（[`Self::custom`]）。
     control: Option<Control>,
     full: Option<Renderer>,
+    /// 行下方的附加区（随值动态出现的提示等）；每帧调用，可返回空元素。
+    footer: Option<Renderer>,
     /// 显式高度权重；双列切分用。
     weight: Option<f32>,
 }
@@ -403,6 +405,7 @@ impl SettingsRow {
             vertical: false,
             control: Some(control),
             full: None,
+            footer: None,
             weight: None,
         }
     }
@@ -425,6 +428,7 @@ impl SettingsRow {
             full: Some(Rc::new(move |disabled, key, window, cx| {
                 render(disabled, key, window, cx).into_any_element()
             })),
+            footer: None,
             weight: None,
         }
     }
@@ -469,6 +473,19 @@ impl SettingsRow {
     #[must_use]
     pub(crate) fn explain(mut self, explain: Explain) -> Self {
         self.explain = Some(explain);
+        self
+    }
+
+    /// 行下方附加区：在标题 / 控件之下渲染（与本行同属一格，不额外加分隔线）。
+    #[must_use]
+    pub(crate) fn footer<F, E>(mut self, render: F) -> Self
+    where
+        E: IntoElement,
+        F: Fn(bool, &SharedString, &mut Window, &mut App) -> E + 'static,
+    {
+        self.footer = Some(Rc::new(move |disabled, key, window, cx| {
+            render(disabled, key, window, cx).into_any_element()
+        }));
         self
     }
 
@@ -600,25 +617,33 @@ impl SettingsRow {
                 this.child(meta_text(cx).child(description))
             });
 
+        let footer = self
+            .footer
+            .clone()
+            .map(|footer| footer(disabled, &key, window, cx));
         if self.vertical {
             row = row.child(
                 v_flex()
                     .w_full()
                     .gap(tokens.spacing.sm)
                     .child(label)
-                    .children(control.map(|control| div().w_full().child(control))),
+                    .children(control.map(|control| div().w_full().child(control)))
+                    .children(footer),
             );
         } else {
-            row = row.flex().items_center().min_h(row_min_height).child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(tokens.spacing.lg)
-                    // 标题列保底 160px；控件列可收缩，避免宽控件把描述挤成一列。
-                    .child(div().flex_1().min_w(title_min_width).child(label))
-                    .children(control.map(|control| div().min_w_0().child(control))),
-            );
+            let line = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(tokens.spacing.lg)
+                // 标题列保底 160px；控件列可收缩，避免宽控件把描述挤成一列。
+                .child(div().flex_1().min_w(title_min_width).child(label))
+                .children(control.map(|control| div().min_w_0().child(control)));
+            row = row
+                .flex()
+                .items_center()
+                .min_h(row_min_height)
+                .child(v_flex().w_full().child(line).children(footer));
         }
         row
     }

@@ -13,6 +13,8 @@
 //! 不在该布局内（开发期 `target/release` 平铺）时按同级目录解析。
 
 mod autostart;
+#[cfg(feature = "desktop")]
+mod clipboard_seq;
 mod file_association;
 mod file_icon;
 #[cfg(target_os = "macos")]
@@ -26,6 +28,8 @@ use std::process::Stdio;
 
 use fluxdown_protocol::PlatformIntegrationDto;
 
+#[cfg(feature = "desktop")]
+pub use clipboard_seq::clipboard_change_count;
 pub use file_icon::file_icon_png;
 
 /// 两次「为待确认交互拉起桌面程序」之间的最小间隔：断线重连抖动也不重复拉起。

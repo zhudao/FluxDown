@@ -680,6 +680,18 @@ impl DaemonService {
                     Err(error) => Err(actor_error(error)),
                 }
             }
+            method::DAEMON_LINK_PROBE => {
+                let request = parse_params::<fluxdown_protocol::LinkProbeParams>(params)?;
+                match self
+                    .actor
+                    .execute(ActorOperation::LinkProbe { url: request.url })
+                    .await
+                {
+                    Ok(ActorResult::LinkProbe(result)) => to_value(result),
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
             method::DAEMON_RUNTIME_STATS => to_value(self.runtime_stats().await),
             method::DAEMON_FS_LIST => {
                 let params = parse_optional_params::<FsListParams>(params)?;

@@ -4171,6 +4171,16 @@ impl DownloadManager {
             .unwrap_or_else(|| queue_id.to_string())
     }
 
+    /// 所有语义事件触发点的唯一出口：照旧交给自托管 webhook，同时经 EventSink
+    /// 发一条 [`EngineEvent::TaskNotice`] 供 agent 做云端推送（宿主不关心则忽略）。
+    /// 返回值沿用 [`crate::webhook::WebhookDispatcher::emit`]（投出的端点数）。
+    fn emit_task_event(&self, event: crate::webhook::WebhookEvent) -> usize {
+        let notice = crate::webhook::TaskNotice::from_event(&event);
+        let delivered = self.webhook.emit(event);
+        self.sink.emit(EngineEvent::TaskNotice(notice));
+        delivered
+    }
+
     /// 重算每个队列的占用情况，对**由占用转为空**的队列发一条 `queue.drained`。
     ///
     /// 必须在任务**进入**（`enqueue_persisted_task` / `resume_task_inner`）与
@@ -4194,8 +4204,7 @@ impl DownloadManager {
         self.occupied_queues = occupied;
         for queue_id in drained {
             let name = self.queue_display_name(&queue_id);
-            self.webhook
-                .emit(crate::webhook::WebhookEvent::queue_drained(queue_id, name));
+            self.emit_task_event(crate::webhook::WebhookEvent::queue_drained(queue_id, name));
         }
     }
 
@@ -5614,7 +5623,7 @@ impl DownloadManager {
             };
             if let Some(kind) = webhook_kind {
                 let event = self.webhook_event_from_task(kind, &task);
-                self.webhook.emit(event);
+                self.emit_task_event(event);
             }
         }
 
@@ -6858,7 +6867,7 @@ impl DownloadManager {
             },
             &queue_id,
         );
-        self.webhook.emit(created_event);
+        self.emit_task_event(created_event);
 
         // fail-closed：resolver_item 非空但未命中插件（或 plugins feature 关，
         // has_resolver 恒空）→ 任务直接置 error，绝不发起对 source_url 的下载
@@ -7473,7 +7482,7 @@ impl DownloadManager {
             },
             &queue_id,
         );
-        self.webhook.emit(started_event);
+        self.emit_task_event(started_event);
 
         self.generation += 1;
         let spawn_gen = self.generation;
@@ -7937,7 +7946,7 @@ impl DownloadManager {
             if pending.notify {
                 let event = self
                     .webhook_event_from_task(crate::webhook::WebhookEventKind::TaskPaused, &task);
-                self.webhook.emit(event);
+                self.emit_task_event(event);
             }
         }
 
@@ -8160,7 +8169,7 @@ impl DownloadManager {
         if let Ok(Some(task)) = self.db.load_task_by_id(task_id).await {
             let event =
                 self.webhook_event_from_task(crate::webhook::WebhookEventKind::TaskPaused, &task);
-            self.webhook.emit(event);
+            self.emit_task_event(event);
         }
     }
 
@@ -11793,6 +11802,31 @@ impl DownloadManager {
         )
     }
 
+    /// 剪贴板识别用的只读链接探测（`daemon.link.probe`）：只发一次 HEAD。
+    ///
+    /// client 与 meta-probe 同源（全局代理 / UA / Auto 路由）；返回的 future 可在 actor 之外
+    /// `await`。非 http(s) 链接不联网，直接 `Unknown`。
+    pub fn link_probe_future(
+        &self,
+        url: String,
+    ) -> impl Future<Output = crate::meta_prober::LinkProbe> + Send + use<> {
+        let client = self.task_http_context(&url, "", "", "", false).0;
+        async move {
+            let lower = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
+            if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+                return crate::meta_prober::LinkProbe {
+                    verdict: crate::meta_prober::LinkVerdict::Unknown,
+                    final_url: url,
+                    file_name: String::new(),
+                    mime: String::new(),
+                    total_bytes: 0,
+                };
+            }
+            let spec = crate::downloader::RequestSpec::empty_get();
+            crate::meta_prober::probe_link_kind(&url, &client, &spec).await
+        }
+    }
+
     /// RSS off-actor 回流的唯一入口（宿主 actor 的 `rss_rx` 分支调用）。
     ///
     /// 抓取结果先经 `RssManager` 完成去重/过滤/落库，再把「应下载」的条目
@@ -14437,6 +14471,164 @@ mod tests {
                 "remove creation failure fixture",
                 &error,
             );
+        }
+    }
+
+    /// 取出 sink 里收到的全部 `TaskNotice`（按到达顺序）。
+    fn collected_notices(sink: &RecordingSink) -> Vec<crate::webhook::TaskNotice> {
+        sink.events()
+            .into_iter()
+            .filter_map(|event| match event {
+                EngineEvent::TaskNotice(notice) => Some(notice),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn task_event_helper_emits_notice_with_unique_ids_and_keeps_webhook_return() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let mgr = sched_manager_with_sink(&db, 1, sink.clone());
+        insert_task_at_status(&db, "t-done", "/tmp", "done.bin", 3).await;
+        insert_task_at_status(&db, "t-fail", "/tmp", "fail.bin", 4).await;
+        let done = db
+            .load_task_by_id("t-done")
+            .await
+            .expect("load")
+            .expect("task");
+        let failed = db
+            .load_task_by_id("t-fail")
+            .await
+            .expect("load")
+            .expect("task");
+        use crate::webhook::WebhookEventKind as Kind;
+        let before = chrono::Utc::now().timestamp_millis();
+        // 没有任何端点订阅时 webhook.emit 返回 0（simulate 依赖该语义），helper 原样透传。
+        assert_eq!(
+            mgr.emit_task_event(mgr.webhook_event_from_task(Kind::TaskCompleted, &done)),
+            0
+        );
+        assert_eq!(
+            mgr.emit_task_event(mgr.webhook_event_from_task(Kind::TaskFailed, &failed)),
+            0
+        );
+        let notices = collected_notices(&sink);
+        assert_eq!(notices.len(), 2);
+        assert_eq!(notices[0].event, "task.completed");
+        assert_eq!(notices[1].event, "task.failed");
+        assert_ne!(notices[0].delivery_id, notices[1].delivery_id);
+        assert!(uuid::Uuid::parse_str(&notices[0].delivery_id).is_ok());
+        assert!(notices[0].timestamp_ms >= before);
+        let task = notices[0].task.as_ref().expect("task snapshot");
+        assert_eq!(task.id, "t-done");
+        assert_eq!(task.file_name, "done.bin");
+        assert_eq!(task.status, 3);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_trigger_points_emit_task_notice() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = sched_manager_with_sink(&db, 1, sink.clone());
+
+        // task.created：建任务即发。
+        let id = mgr
+            .create_task(NewTaskSpec {
+                url: "http://127.0.0.1:1/file.bin".to_string(),
+                save_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+                file_name: "file.bin".to_string(),
+                start_paused: true,
+                ..Default::default()
+            })
+            .await
+            .expect("create paused task");
+        let notices = collected_notices(&sink);
+        assert_eq!(notices.len(), 1, "created 应恰好一条");
+        assert_eq!(notices[0].event, "task.created");
+        assert_eq!(
+            notices[0].task.as_ref().map(|t| t.id.as_str()),
+            Some(id.as_str())
+        );
+
+        // task.paused：读回任务行后发。
+        mgr.emit_paused_webhook(&id).await;
+        let notices = collected_notices(&sink);
+        assert_eq!(
+            notices.last().map(|n| n.event.as_str()),
+            Some("task.paused")
+        );
+
+        // queue.drained：占用 → 空的边沿触发，无任务快照。
+        mgr.occupied_queues.insert("default".to_string());
+        mgr.sync_queue_occupancy();
+        let notices = collected_notices(&sink);
+        let drained = notices.last().expect("drained notice");
+        assert_eq!(drained.event, "queue.drained");
+        assert_eq!(drained.queue_id, "default");
+        assert!(drained.task.is_none());
+    }
+
+    /// `task.started`（真实建任务即启动）与 `task.completed` / `task.failed`（`on_task_done`
+    /// 终态点）都经同一个 helper 发出 `TaskNotice`。
+    #[tokio::test]
+    async fn started_completed_and_failed_trigger_points_emit_task_notice() {
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let sink = Arc::new(RecordingSink::new());
+        let mut mgr = sched_manager_with_sink(&db, 1, sink.clone());
+        mgr.set_max_auto_retries(0);
+
+        // task.started：未暂停的新任务在派发时发出（紧随 task.created）。
+        let id = mgr
+            .create_task(NewTaskSpec {
+                url: "http://127.0.0.1:1/never.bin".to_string(),
+                save_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+                file_name: "never.bin".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("create task");
+        let kinds: Vec<String> = collected_notices(&sink)
+            .into_iter()
+            .filter(|n| n.task.as_ref().is_some_and(|t| t.id == id))
+            .map(|n| n.event)
+            .collect();
+        assert_eq!(kinds, ["task.created", "task.started"]);
+
+        // task.completed / task.failed：on_task_done 的终态点（失败仅在放弃重试后发出）。
+        for (task_id, status, expected) in [
+            ("done-ok", 3, "task.completed"),
+            ("done-bad", 4, "task.failed"),
+        ] {
+            insert_task_at_status(&db, task_id, "/tmp", "x.bin", status).await;
+            mgr.active_tasks.insert(
+                task_id.to_string(),
+                ActiveTaskEntry {
+                    token: CancellationToken::new(),
+                    generation: 3,
+                    handle: None,
+                    is_bt: false,
+                    queue_id: String::new(),
+                },
+            );
+            mgr.on_task_done(&TaskDone {
+                task_id: task_id.to_string(),
+                generation: 3,
+                reserved_temp_path: None,
+                phase: TaskDonePhase::Finished,
+            })
+            .await;
+            let notice = collected_notices(&sink)
+                .into_iter()
+                .find(|n| n.event == expected && n.task.as_ref().is_some_and(|t| t.id == task_id))
+                .unwrap_or_else(|| panic!("{expected} notice for {task_id}"));
+            assert_eq!(notice.task.as_ref().map(|t| t.status), Some(status));
         }
     }
 

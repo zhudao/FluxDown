@@ -465,7 +465,13 @@ impl NewDownloadStrings {
             threads: shared(translator.text("threads")),
             threads_auto: shared(translator.text("auto")),
             threads_custom: shared(translator.text("customThreads")),
-            threads_custom_hint: shared(translator.text("customThreadsHint")),
+            threads_custom_hint: shared(&translator.text_with(
+                "customRangeHint",
+                &[
+                    ("min", "1"),
+                    ("max", &crate::model::new_download::MAX_THREADS.to_string()),
+                ],
+            )),
             rename: shared(translator.text("renameOptional")),
             rename_placeholder: shared(translator.text("autoDetectFilename")),
             advanced: shared(translator.text("taskProxyAdvanced")),

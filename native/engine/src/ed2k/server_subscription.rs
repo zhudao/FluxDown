@@ -22,10 +22,10 @@ use crate::logger::{log_error, log_info};
 
 /// 默认社区订阅源（`server.met`）。
 ///
-/// - `upd.emule-security.org` —— eMule Security Team 官方列表，社区最常用；仅 http。
+/// - `upd.emule-security.org` —— eMule Security Team 官方列表，社区最常用。
 /// - `shortypower.org` —— 长期维护的备用列表，https。
 const DEFAULT_SERVER_MET_URLS: &[&str] = &[
-    "http://upd.emule-security.org/server.met",
+    "https://upd.emule-security.org/server.met",
     "https://www.shortypower.org/server.met",
 ];
 

@@ -494,6 +494,8 @@ class S {
   String get detailFollowGlobal => _r('detailFollowGlobal');
   String get detailActionFolder => _r('detailActionFolder');
   String get detailActionCopyLink => _r('detailActionCopyLink');
+  String get detailActionShare => _r('detailActionShare');
+  String get detailActionMore => _r('detailActionMore');
 
   // ─────────────────────────────────────────────
   // NewDownloadDialog / QuickDownloadDialog

@@ -61,13 +61,6 @@ codegen-units = 16
 debug = "limited"
 split-debuginfo = "unpacked"
 
-# gpui-fast 的 compat 壳只做再导出，实际代码在同仓的 `gpui` / `gpui_platform` 包里。
-[profile.dev.package.gpui]
-opt-level = 3
-
-[profile.dev.package.gpui_platform]
-opt-level = 3
-
 # BT 数据面（逐字节 RC4、逐消息解析、MSE DH 大数运算）在 opt-level 0 下慢一个数量级：
 # 本地 loopback 实测 dev 基线 36.5 CPU·s/GB、吞吐封顶 165 MB/s；仅下面 5 个 crate
 # 开 O3 后 4.8 CPU·s/GB、854 MB/s。开发期跑 fluxdownd 下 BT 不再吃满多核。

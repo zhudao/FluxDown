@@ -31,8 +31,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -57,10 +55,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.util.lerp
 import com.fluxdown.fluxui.icons.FluxIcon
-import com.fluxdown.fluxui.material.FluxBlur
-import com.fluxdown.fluxui.material.FluxGlass
-import com.fluxdown.fluxui.material.FluxGlassKind
-import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -98,15 +92,17 @@ private val ItemGap = 4.dp
 private val MiniWidth = 64.dp
 
 /**
- * 浮动导航坞（01 §12.2）：Real 玻璃 G3（canvasMix .38）胶囊，选中项展开为“图标 + 文字”，
+ * 浮动导航坞（01 §12.2）：Real 玻璃 G3（canvasMix .15，比画布更亮）胶囊 + 强发丝线 + 两层向下投影
+ * （近处接触影 + 远处环境影，§5.5 浮动 chrome 例外），浮在内容之上有明确的层次；
+ * 选中项展开为“图标 + 文字”（accentLo 纯底 + accent 描边、accentHi 图标与文字），
  * 液态指示器两段弹簧（位置 `liquid`、宽度 `fluid`）。
  *
  * 本组件在父容器内**占满宽度、固定高 64**；坞本体宽 = 容器宽 − [reservedEnd]（球位 64 + 间距 12），
  * 迷你态宽 64。由应用负责摆放（左右 16、距底 26dp 等）。必须位于 `fluxBackdropSource` 之后的兄弟层。
  *
  * - [mini]：应用按滚动方向决定（向下 Δ>5dp 迷你，向上 / 顶部展开）；迷你态点击坞 → [onExpand]，不触发选中。
- * - [hidden]：推入页 / Expanded 隐藏（`alpha 0、translateY 30dp、blur 8`，退场结束后移出组合）。
- * - [selectionMode]：多选模式，坞淡出（`translateY 18、scale .94、blur 10`），由 [SelectionDock] 接替。
+ * - [hidden]：推入页 / Expanded 隐藏（`alpha 0、translateY 30dp`，退场结束后移出组合）。
+ * - [selectionMode]：多选模式，坞淡出（`translateY 18、scale .94`），由 [SelectionDock] 接替。
  * - 选中项宽 = `max(112dp, 52dp + 标签实测宽 + 8dp + 12dp)`；总宽放不下时退化为“全部仅图标”（见 §3.3）。
  * - 点击不同项触发 tick 触感；点击当前项同样回调 [onSelect]（应用可据此回顶并展开坞）。
  */
@@ -170,7 +166,6 @@ private fun DockBody(
     groupDescription: String,
     expandDescription: String,
 ) {
-    val colors = FluxTheme.colors
     val type = FluxTheme.type
     val motion = FluxTheme.motion
     val haptics = FluxTheme.haptics
@@ -217,9 +212,9 @@ private fun DockBody(
                 val p = measurable.measure(Constraints.fixed(w, DockHeight.roundToPx()))
                 layout(p.width, p.height) { p.place(0, 0) }
             }
-            .chromeFade(translateY = 30.dp, blur = 8.dp) { hideP.progress.value }
-            .chromeFade(translateY = 18.dp, scaleFrom = 0.94f, blur = 10.dp) { selP.progress.value }
-            .fluxGlass(FluxGlass.G3, shape, FluxBlur.Regular, FluxGlassKind.Real, canvasMix = 0.38f)
+            .chromeFade(translateY = 30.dp) { hideP.progress.value }
+            .chromeFade(translateY = 18.dp, scaleFrom = 0.94f) { selP.progress.value }
+            .floatingChromeSurface(shape)
             .clip(shape)
             .semantics {
                 isTraversalGroup = true
@@ -287,7 +282,7 @@ private fun DockBody(
     }
 }
 
-/** 液态指示器：`glass4` 纯色底 + 顶沿高光描边 + 发丝线（无渐变、无辉光）。 */
+/** 液态指示器：`accentLo` 纯底 + accent 发丝描边（选中态统一语义；无渐变、无辉光）。浅色描边更轻，免得像按钮外框。 */
 @Composable
 private fun DockIndicator() {
     val c = FluxTheme.colors
@@ -295,14 +290,12 @@ private fun DockIndicator() {
     Box(
         Modifier
             .drawWithCache {
-                val fill = c.glass4
-                val hl = Brush.verticalGradient(0f to c.highlight, 0.18f to Color.Transparent)
                 val outline = shape.createOutline(size, layoutDirection, this)
+                val line = c.accent.copy(alpha = if (c.dark) 0.30f else 0.20f)
                 val hw = 0.5.dp.toPx()
                 onDrawBehind {
-                    drawOutline(outline, fill)
-                    drawOutline(outline, hl, style = Stroke(hw))
-                    drawOutline(outline, c.hairlineStrong, style = Stroke(hw))
+                    drawOutline(outline, c.accentLo)
+                    drawOutline(outline, line, style = Stroke(hw))
                 }
             },
     )
@@ -368,7 +361,7 @@ private fun DockItemView(
                         }
                         .graphicsLayer { alpha = (sel.value * (1f - mini.value)).coerceIn(0f, 1f) },
                     style = labelStyle,
-                    color = c.ink,
+                    color = c.accentHi,
                     maxLines = 1,
                     overflow = TextOverflow.Clip,
                     softWrap = false,

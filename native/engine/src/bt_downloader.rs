@@ -594,12 +594,7 @@ impl SharedBtSession {
     ) -> Result<Self, DownloadError> {
         // BT 每个文件、每个 peer 常驻 FD；macOS GUI 启动的软限制仅 256，
         // 多文件种子或多任务会撞 EMFILE 并连带拖垮同进程的 SQLite/HTTP。
-        // 进程级只需提升一次，失败（硬限制更低等）不影响启动。
-        static NOFILE_LIMIT_ONCE: std::sync::Once = std::sync::Once::new();
-        NOFILE_LIMIT_ONCE.call_once(|| match librqbit::try_increase_nofile_limit() {
-            Ok(limit) => log_info!("[BT] RLIMIT_NOFILE soft limit raised to {limit}"),
-            Err(e) => log_info!("[BT] failed to raise RLIMIT_NOFILE: {e:#}"),
-        });
+        crate::proc::raise_nofile_limit_once();
         // Scale worker threads with CPU cores.  BT workload is mostly I/O-bound
         // so diminishing returns beyond 8 threads; capping here saves ~2 MB of
         // stack memory per thread avoided.

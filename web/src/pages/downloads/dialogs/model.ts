@@ -2,6 +2,7 @@
 // 移植自 crates/downloads/src/model/new_download.rs（规则与 Flutter new_download_dialog 逐条对齐）。
 
 import type { CreateTaskRequest } from '../../../lib/rpc'
+import { MAX_TASK_SEGMENTS } from '../../../lib/threadsRisk'
 
 /** 一条解析出的下载条目（aria2 风格：URL + 可选 `out=` / `checksum=` 选项行）。 */
 export interface UrlEntry {
@@ -211,7 +212,8 @@ export function uaPresetValue(key: string): string {
 
 /** 线程数下拉预设（「自动」与「自定义」之间的固定档位）。 */
 export const THREAD_PRESETS: readonly number[] = [4, 8, 16, 32, 64]
-export const MAX_THREADS = 256
+/** 自定义线程数上限（= 引擎单任务连接上限）。 */
+export const MAX_THREADS = MAX_TASK_SEGMENTS
 
 /** 线程选择：`auto` / 预设档位数字字符串 / `custom`。 */
 export type ThreadChoice = 'auto' | 'custom' | `${number}`

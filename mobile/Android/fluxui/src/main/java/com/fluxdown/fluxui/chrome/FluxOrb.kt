@@ -29,10 +29,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -402,8 +400,6 @@ private fun FanItem(
                 val s = 0.5f + 0.5f * raw
                 scaleX = s
                 scaleY = s
-                val b = 6.dp.toPx() * (1f - e)
-                renderEffect = if (b > 0.5f) BlurEffect(b, b, TileMode.Decal) else null
             }
             .fluxGlass(FluxGlass.Sheet, shape, FluxBlur.Thick, FluxGlassKind.Real)
             .drawWithCache {

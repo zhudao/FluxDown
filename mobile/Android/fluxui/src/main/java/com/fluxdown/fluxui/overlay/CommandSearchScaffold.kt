@@ -75,7 +75,6 @@ fun CommandSearchScaffold(
 ) {
     val motion = FluxTheme.motion
     val prog = rememberOverlayProgress()
-    val blurs = rememberEnterBlurs(10.dp)
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val keyboard = LocalSoftwareKeyboardController.current
@@ -109,7 +108,6 @@ fun CommandSearchScaffold(
                     val s = 1.02f - 0.02f * v
                     scaleX = s
                     scaleY = s
-                    renderEffect = blurs?.at(v)
                 }
                 .background(FluxTheme.colors.canvas)
                 .swallowTaps()

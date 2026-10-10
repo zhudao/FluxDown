@@ -86,6 +86,10 @@ fn tray_desc(shell: &ShellStatusDto, key: &'static str) -> &'static str {
 }
 
 fn system_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
+    let watching = ctx
+        .store
+        .read(cx)
+        .pref_bool("general.clipboard_watch", false);
     SettingsSection::new()
         .title(ctx.t("settingsGroupSystem"))
         .row(ctx.item(
@@ -93,6 +97,22 @@ fn system_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
             Some("clipboardWatchDesc"),
             ctx.pref_switch("general.clipboard_watch", false),
         ))
+        .row(
+            ctx.item(
+                "clipboardWatchProbe",
+                Some("clipboardWatchProbeDesc"),
+                ctx.pref_switch("general.clipboard_watch_probe", true),
+            )
+            .disabled(!watching),
+        )
+        .row(
+            ctx.item(
+                "clipboardWatchExtensions",
+                Some("clipboardWatchExtensionsDesc"),
+                ctx.pref_input("general.clipboard_watch_extensions", ""),
+            )
+            .disabled(!watching),
+        )
         .row(
             ctx.item(
                 "torrentFileAssociation",

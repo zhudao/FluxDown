@@ -22,8 +22,8 @@ class SettingsCatalogTest {
     fun normalizesLikeDaemon() {
         assertEquals("true", ok("bt_enable_dht", " 1 "))
         assertTrue(rejected("bt_enable_dht", "yes"))
-        assertEquals("64", ok("default_segments", "+64"))
-        assertTrue(rejected("default_segments", "65"))
+        assertEquals("512", ok("default_segments", "+512"))
+        assertTrue(rejected("default_segments", "513"))
         assertTrue(rejected("default_segments", "1.0"))
         assertTrue(rejected("default_segments", " "))
         assertEquals("-1", ok("max_auto_retries", "-1"))

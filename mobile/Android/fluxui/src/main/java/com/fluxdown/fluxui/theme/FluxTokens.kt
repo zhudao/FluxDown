@@ -66,17 +66,19 @@ class FluxMotion(val reduce: Boolean) {
     val fluid = FluxSpring(380f, 0.78f)
     val soft = FluxSpring(200f, 0.90f)
     val liquid = FluxSpring(520f, 0.66f)
-    val flow = FluxSpring(140f, 1.00f)
+    val flow = FluxSpring(320f, 1.00f)
+
+    /** 页面推入 / 返回、Tab 切换与滚动吸附：临界阻尼、无回弹（对齐 iOS 导航过渡的手感）。 */
+    val page = FluxSpring(420f, 1.00f)
     val press = FluxSpring(1400f, 0.60f)
 
     /** 一切动画规格经此取得：Reduce motion 时一律瞬时。 */
     fun <T> of(s: FluxSpring, visibilityThreshold: T? = null): FiniteAnimationSpec<T> =
         if (reduce) snap() else s.spec(visibilityThreshold)
 
-    val flowStaggerMs = 38L
-    val flowStaggerMax = 12
+    val flowStaggerMs = 22L
+    val flowStaggerMax = 8
     val flowTranslate = 8.dp
-    val flowBlur = 8.dp
     val longPressMs = 420L
     val orbHoldMs = 380L
 }

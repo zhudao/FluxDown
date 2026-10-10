@@ -274,6 +274,13 @@ pub enum EngineEvent {
     /// 宿主的活跃/排队计数看不到它们；据此判断「全部完成」类的联动（完成后关机、
     /// 空闲退出）时必须把它们算作仍有工作。数值不变时不发。
     RetryPendingChanged { count: u32 },
+
+    /// 任务生命周期语义事件（与 webhook 同源同触发点）——**只给云端推送用**。
+    ///
+    /// 每个触发点在 `webhook.emit` 之外再发一条，携带新生成的 `deliveryId`
+    /// 与毫秒时间戳；daemon 映射为 `DaemonEvent::TaskNotice`，只由 agent 消费，
+    /// 不转发给任何 UI。hub 等不关心的宿主直接忽略。
+    TaskNotice(crate::webhook::TaskNotice),
 }
 
 /// 引擎事件的接收端,由宿主实现并注入 [`crate::Engine`]。

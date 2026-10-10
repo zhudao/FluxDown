@@ -32,10 +32,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import com.fluxdown.fluxui.icons.FluxIcon
-import com.fluxdown.fluxui.material.FluxBlur
-import com.fluxdown.fluxui.material.FluxGlass
-import com.fluxdown.fluxui.material.FluxGlassKind
-import com.fluxdown.fluxui.material.fluxGlass
 import com.fluxdown.fluxui.theme.FluxScaleGroup
 import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
@@ -53,14 +49,14 @@ data class SelectionDockAction(
 )
 
 /**
- * 选择坞（01 §12.4）：多选模式下接替 [FluxDock] 的批量操作条，Real 玻璃 G3（canvasMix .30）。
+ * 选择坞（01 §12.4）：多选模式下接替 [FluxDock] 的批量操作条，与坞同一浮动表面（[floatingChromeSurface]）。
  *
  * 布局同 [FluxDock]：占满父容器宽度、高 64，本体宽 = 容器宽 − [reservedEnd]（右侧留给 [FluxOrb] 的“退出选择”球）；
  * Expanded 档浮在列表区底部居中时传 `reservedEnd = 0.dp` 并给 `modifier` 加 `widthIn(max = 560.dp)`。
  *
  * - 计数块：`mono 17 / 600` 数字（accentHi）+ micro 标签（[selectAllLabel] / 全选后 [deselectAllLabel]），点按 → [onToggleAll]。
  * - 动作：48×52（图标 22 + micro 文字），`fontScale ≥ 1.3` 只显示图标（描述保留）；放不下时横向滚动。
- * - 出入场：`translateY 18→0、scale .94→1、blur 10→0`（`liquid`）。
+ * - 出入场：`translateY 18→0、scale .94→1`（`liquid`）。
  * - a11y：计数块 `liveRegion = Polite` 播报“已选 N 项”。
  */
 @Composable
@@ -93,8 +89,8 @@ fun SelectionDock(
                 .padding(end = reservedEnd)
                 .fillMaxWidth()
                 .height(64.dp)
-                .chromeFade(translateY = 18.dp, scaleFrom = 0.94f, blur = 10.dp) { presence.progress.value }
-                .fluxGlass(FluxGlass.G3, shape, FluxBlur.Regular, FluxGlassKind.Real, canvasMix = 0.30f)
+                .chromeFade(translateY = 18.dp, scaleFrom = 0.94f) { presence.progress.value }
+                .floatingChromeSurface(shape)
                 .clip(shape)
                 .semantics {
                     isTraversalGroup = true

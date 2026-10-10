@@ -414,7 +414,7 @@ fn integer_range(key: &str) -> (i64, i64) {
         // Flutter `Color.toARGB32()`：无符号 32 位 ARGB。
         "appearance.custom_color" => (0, i64::from(u32::MAX)),
         "download.max_concurrent_tasks" => (1, 1024),
-        "download.default_segments" => (0, 64),
+        "download.default_segments" => (0, crate::daemon_config::MAX_TASK_SEGMENTS as i64),
         "download.auto_max_connections" => (0, 128),
         "download.cdn_max_nodes" => (0, 8),
         "download.max_auto_retries" => (-1, 20),

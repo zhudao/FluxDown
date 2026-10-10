@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { formEncode, generateSecret, renderPreview, urlErrorKey } from './template'
+import { formEncode, generateSecret, renderPreview, urlErrorKey, urlHintKey } from './template'
 
 describe('webhook template preview', () => {
   test('placeholders are substituted, unknown segments and stray braces are kept', () => {
@@ -39,5 +39,14 @@ describe('webhook secret', () => {
     expect(secret.startsWith('whsec_')).toBeTruthy()
     expect(/^[0-9a-f]{32}$/.test(secret.slice(6))).toBeTruthy()
     expect(generateSecret()).not.toBe(secret)
+  })
+})
+
+describe('webhook url hint', () => {
+  test('ntfy and dingtalk get their own hints, everything else the generic one', () => {
+    expect(urlHintKey('ntfy')).toBe('webhookUrlHintNtfy')
+    expect(urlHintKey('dingtalk')).toBe('webhookUrlHintDingtalk')
+    expect(urlHintKey('wecom')).toBe('webhookUrlHint')
+    expect(urlHintKey('custom')).toBe('webhookUrlHint')
   })
 })

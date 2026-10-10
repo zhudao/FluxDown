@@ -688,7 +688,13 @@ private fun EditorSheetImpl(
                 onValueChange = { form.url = it },
                 label = str(R.string.webhookFieldUrl),
                 placeholder = preset?.urlPlaceholder,
-                hint = str(if (form.preset == "ntfy") R.string.webhookUrlHintNtfy else R.string.webhookUrlHint),
+                hint = str(
+                    when (form.preset) {
+                        "ntfy" -> R.string.webhookUrlHintNtfy
+                        "dingtalk" -> R.string.webhookUrlHintDingtalk
+                        else -> R.string.webhookUrlHint
+                    },
+                ),
                 error = if (form.urlTouched) {
                     when (form.urlError) {
                         WebhookTemplate.UrlError.Invalid -> str(R.string.webhookUrlInvalid)

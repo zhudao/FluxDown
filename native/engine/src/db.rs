@@ -2816,7 +2816,8 @@ impl Db {
             .execute(&self.pool)
             .await?;
         }
-        self.migrate_idle_file_scan_default_off().await
+        self.migrate_idle_file_scan_default_off().await?;
+        self.migrate_ed2k_server_sub_https().await
     }
 
     /// 一次性迁移：`idle_file_scan` 曾以 "1" 播种却从未被 daemon 读取/暴露，
@@ -2835,6 +2836,33 @@ impl Db {
             sqlx::query(
                 "UPDATE config SET value = '0'
                  WHERE key = 'idle_file_scan' AND value IN ('1', 'true')",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 一次性迁移：`ed2k_server_sub_urls` 曾以明文
+    /// `http://upd.emule-security.org/server.met` 播种，该列表无校验和，
+    /// 明文传输可被中间人替换；同一端点 https 内容一致，改为 https。
+    /// 仅在迁移标记首次写入成功时改写，此后用户自行填写的 http 地址不再被覆盖。
+    async fn migrate_ed2k_server_sub_https(&self) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        let marked = sqlx::query(
+            "INSERT INTO config (key, value) VALUES ('migration_ed2k_server_sub_https', '1')
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if marked > 0 {
+            sqlx::query(
+                "UPDATE config
+                 SET value = REPLACE(value, 'http://upd.emule-security.org/server.met',
+                                     'https://upd.emule-security.org/server.met')
+                 WHERE key = 'ed2k_server_sub_urls'",
             )
             .execute(&mut *tx)
             .await?;
@@ -7585,6 +7613,50 @@ mod tests {
         assert_eq!(
             db.get_config("idle_file_scan").await.expect("read"),
             Some("true".to_owned())
+        );
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn ed2k_server_sub_legacy_http_migrates_once() {
+        let (db, dir) = open_test_db().await;
+        db.init_default_config("/tmp").await.expect("init");
+        let fresh = db
+            .get_config("ed2k_server_sub_urls")
+            .await
+            .expect("read")
+            .unwrap_or_default();
+        assert!(
+            !fresh.contains("http://"),
+            "default must be https only: {fresh}"
+        );
+        // 模拟旧库：明文默认值 + 用户追加的其他地址，尚无迁移标记。
+        db.delete_config("migration_ed2k_server_sub_https")
+            .await
+            .expect("drop marker");
+        db.set_config(
+            "ed2k_server_sub_urls",
+            "http://upd.emule-security.org/server.met\nhttp://example.com/server.met",
+        )
+        .await
+        .expect("legacy");
+        db.init_default_config("/tmp").await.expect("migrate");
+        assert_eq!(
+            db.get_config("ed2k_server_sub_urls").await.expect("read"),
+            Some(
+                "https://upd.emule-security.org/server.met\nhttp://example.com/server.met"
+                    .to_owned()
+            )
+        );
+        // 迁移后用户自行改回 http，再次启动不得被改写。
+        let user = "http://upd.emule-security.org/server.met";
+        db.set_config("ed2k_server_sub_urls", user)
+            .await
+            .expect("user");
+        db.init_default_config("/tmp").await.expect("restart");
+        assert_eq!(
+            db.get_config("ed2k_server_sub_urls").await.expect("read"),
+            Some(user.to_owned())
         );
         close_test_db(&db, dir).await;
     }
