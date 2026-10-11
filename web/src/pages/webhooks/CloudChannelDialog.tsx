@@ -1,5 +1,5 @@
 // 连接 / 编辑云端渠道对话框。
-// Telegram 新建走「绑定」：二维码 + 深链，2s 轮询绑定状态，成功自动关闭；邮件填名称 + 事件 + 来源设备。
+// Telegram 新建走「绑定」：二维码 + 深链，2s 轮询绑定状态，成功自动关闭；邮件填名称 + 收件邮箱 + 事件。
 
 import { Copy, ExternalLink, Loader2, Plus, X } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
@@ -7,7 +7,7 @@ import { useT } from '../../i18n'
 import { copyText } from '../../lib/copy'
 import { rpc } from '../../lib/rpc'
 import type { CloudNotifyChannelDto, CloudNotifyOverviewDto, CloudNotifyTelegramBindDto } from '../../lib/rpc'
-import { Badge, Button, CheckRow, ConfirmFooter, Dialog, DialogFooter, FieldHint, FormField, Icon, Input, InputWithAction, toast } from '../../ui'
+import { Badge, Button, CheckRow, ConfirmFooter, Dialog, DialogFooter, FormField, Icon, Input, InputWithAction, toast } from '../../ui'
 import { encodeQrChallengeImage } from '../settings/sections/extensions/challengeImage'
 import {
   DEFAULT_CLOUD_EVENTS,
@@ -23,11 +23,10 @@ import {
   kindMeta,
   newEmailStatus,
   removeEmail,
-  toggleId,
 } from './cloudLogic'
 import { useCountdown } from '../settings/sections/account/useCountdown'
 import { WEBHOOK_EVENTS } from './endpoints'
-import { cloudActionError, useCloudDevices } from './useCloudNotify'
+import { cloudActionError } from './useCloudNotify'
 
 export interface DialogTarget {
   kind: string
@@ -165,7 +164,6 @@ export function CloudChannelDialog({
   onClose: () => void
 }) {
   const t = useT()
-  const devices = useCloudDevices()
   const { kind, channel } = target
   const meta = kindMeta(kind)
   const kindName = meta ? t(meta.nameKey) : kind
@@ -174,7 +172,6 @@ export function CloudChannelDialog({
 
   const [name, setName] = useState(channel?.name ?? kindName)
   const [events, setEvents] = useState<readonly string[]>(channel ? channel.events : DEFAULT_CLOUD_EVENTS)
-  const [deviceIds, setDeviceIds] = useState<readonly string[]>(channel?.deviceIds ?? [])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [emailList, setEmailList] = useState<string[]>(() => initialEmailList(channel, overview.accountEmail))
@@ -254,7 +251,6 @@ export function CloudChannelDialog({
           id: channel.id,
           name: name.trim(),
           events: [...events],
-          deviceIds: [...deviceIds],
           ...addresses,
         })
       } else {
@@ -262,7 +258,6 @@ export function CloudChannelDialog({
           kind,
           name: name.trim(),
           events: [...events],
-          deviceIds: [...deviceIds],
           ...addresses,
         })
       }
@@ -461,21 +456,6 @@ export function CloudChannelDialog({
               </CheckRow>
             ))}
           </div>
-        </FormField>
-
-        <FormField label={t('cloudNotifyDevices')}>
-          <div className="flex flex-col">
-            {devices.map((device) => (
-              <CheckRow
-                key={device.deviceId}
-                checked={deviceIds.includes(device.deviceId)}
-                onCheckedChange={(checked) => setDeviceIds((current) => toggleId(current, device.deviceId, checked))}
-              >
-                {device.name}
-              </CheckRow>
-            ))}
-          </div>
-          {deviceIds.length === 0 ? <FieldHint>{t('cloudNotifyDevicesAll')}</FieldHint> : null}
         </FormField>
 
         {error ? (

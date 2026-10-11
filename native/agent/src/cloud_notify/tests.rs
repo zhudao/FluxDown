@@ -37,7 +37,7 @@ struct Mock {
     deliveries_calls: AtomicUsize,
 }
 
-fn overview_json(events: &[&str], device_ids: &[&str]) -> Value {
+fn overview_json(events: &[&str]) -> Value {
     json!({
         "enabled": true,
         "usage": {
@@ -47,7 +47,7 @@ fn overview_json(events: &[&str], device_ids: &[&str]) -> Value {
         "maxChannels": 2,
         "channels": [{
             "id": "c1", "kind": "email", "name": "邮件", "enabled": true,
-            "events": events, "deviceIds": device_ids, "target": "****abcd",
+            "events": events, "target": "****abcd",
             "status": "ok", "createdAt": "2026-10-09T00:00:00Z"
         }],
         "accountEmail": "me@example.com"
@@ -196,7 +196,7 @@ impl Fixture {
     async fn start_with_page(page: Value) -> Self {
         Self::start_full(
             on(),
-            overview_json(&["task.completed"], &[]),
+            overview_json(&["task.completed"]),
             true,
             false,
             Some(page),
@@ -384,8 +384,7 @@ fn notice(id: &str, event: &str) -> TaskNoticeDto {
 
 #[tokio::test]
 async fn matching_notices_are_trimmed_batched_and_update_usage() {
-    let fixture =
-        Fixture::start(on(), overview_json(&["task.completed", "task.failed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed", "task.failed"])).await;
     fixture.send(notice("d1", "task.completed")).await;
     fixture.send(notice("d2", "task.failed")).await;
     // 未订阅的事件不入队。
@@ -433,7 +432,7 @@ async fn privacy_switches_add_url_and_save_dir() {
         include_url: true,
         include_save_dir: true,
     };
-    let fixture = Fixture::start(prefs, overview_json(&["task.completed"], &[DEVICE_ID])).await;
+    let fixture = Fixture::start(prefs, overview_json(&["task.completed"])).await;
     fixture.send(notice("d1", "task.completed")).await;
     fixture.wait_batches(1, Duration::from_secs(5)).await;
     let batches = fixture.mock.batches.lock().await.clone();
@@ -444,29 +443,22 @@ async fn privacy_switches_add_url_and_save_dir() {
 }
 
 #[tokio::test]
-async fn nothing_is_sent_when_reporting_is_off_or_the_device_is_filtered_out() {
+async fn nothing_is_sent_when_reporting_is_off() {
     // 开关关（默认）：即使渠道匹配也不上报。
     let off = Fixture::start(
         CloudNotifyPrefs::default(),
-        overview_json(&["task.completed"], &[]),
+        overview_json(&["task.completed"]),
     )
     .await;
     off.send(notice("d1", "task.completed")).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(off.mock.report_calls.load(Ordering::SeqCst), 0);
     off.finish().await;
-
-    // 渠道只收其他设备：本设备不上报。
-    let other = Fixture::start(on(), overview_json(&["task.completed"], &["device-2"])).await;
-    other.send(notice("d1", "task.completed")).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(other.mock.report_calls.load(Ordering::SeqCst), 0);
-    other.finish().await;
 }
 
 #[tokio::test]
 async fn transient_failures_retry_but_client_errors_do_not() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     // 第一次 503 → 退避 2s 后重试成功。
     fixture
         .mock
@@ -496,7 +488,7 @@ async fn transient_failures_retry_but_client_errors_do_not() {
 async fn reporting_and_privacy_preferences_persist_locally_and_publish() {
     let fixture = Fixture::start(
         CloudNotifyPrefs::default(),
-        overview_json(&["task.completed"], &[]),
+        overview_json(&["task.completed"]),
     )
     .await;
     let (mut receiver, _) = fixture.events.subscribe_and_snapshot();
@@ -539,7 +531,7 @@ async fn reporting_and_privacy_preferences_persist_locally_and_publish() {
 
 #[tokio::test]
 async fn refresh_uses_the_cloud_overview_and_clears_after_logout() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     let state = fixture.service.refresh().await.expect("refresh");
     let overview = state.overview.expect("overview");
     assert!(overview.enabled);
@@ -601,8 +593,7 @@ async fn task_notice_is_never_forwarded_to_ui_subscribers() {
 
 #[tokio::test]
 async fn catalog_is_pulled_anonymously_at_startup_even_when_logged_out() {
-    let fixture =
-        Fixture::start_with(on(), overview_json(&["task.completed"], &[]), false, false).await;
+    let fixture = Fixture::start_with(on(), overview_json(&["task.completed"]), false, false).await;
     fixture.wait_catalog(Some(&["email", "telegram"])).await;
     assert_eq!(fixture.mock.catalog_authed_calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.mock.overview_calls.load(Ordering::SeqCst), 0);
@@ -618,8 +609,7 @@ async fn catalog_is_pulled_anonymously_at_startup_even_when_logged_out() {
 #[tokio::test]
 async fn failed_catalog_fetch_keeps_unknown_and_get_retries_until_known() {
     // 启动拉取失败：目录保持 None（未知），不覆盖概览。
-    let fixture =
-        Fixture::start_with(on(), overview_json(&["task.completed"], &[]), true, true).await;
+    let fixture = Fixture::start_with(on(), overview_json(&["task.completed"]), true, true).await;
     assert_eq!(fixture.catalog_kinds(), None);
     assert!(fixture.service.current().overview.is_some());
     assert_eq!(fixture.service.current().last_error_reason, None);
@@ -634,7 +624,7 @@ async fn failed_catalog_fetch_keeps_unknown_and_get_retries_until_known() {
 
 #[tokio::test]
 async fn failed_refresh_keeps_the_previous_catalog_and_logout_does_not_clear_it() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     fixture.wait_catalog(Some(&["email", "telegram"])).await;
 
     // 失败：保留旧值；概览仍然刷新成功，不受目录失败影响。
@@ -675,7 +665,7 @@ async fn failed_refresh_keeps_the_previous_catalog_and_logout_does_not_clear_it(
 
 #[tokio::test]
 async fn empty_catalog_stops_reporting_until_a_kind_is_enabled_again() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     fixture.wait_catalog(Some(&["email", "telegram"])).await;
 
     // 管理员关闭全部种类 → SSE `notify.changed` 唤醒刷新 → 目录为 Some(空)。
@@ -701,7 +691,7 @@ async fn empty_catalog_stops_reporting_until_a_kind_is_enabled_again() {
 
 #[tokio::test]
 async fn catalog_changes_are_published_as_cloud_notify_changed() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     fixture.wait_catalog(Some(&["email", "telegram"])).await;
     let (mut receiver, _) = fixture.events.subscribe_and_snapshot();
     *fixture.mock.catalog.lock().expect("catalog lock") = catalog_json(&["telegram"]);
@@ -788,7 +778,7 @@ async fn first_page_is_loaded_with_the_overview_and_replaced_by_refresh() {
 
 #[tokio::test]
 async fn sse_delivery_increments_upsert_in_order_and_are_published() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     let epoch = fixture.service.cloud.request_epoch();
     let feed = fixture.service.feed();
     let (mut receiver, _) = fixture.events.subscribe_and_snapshot();
@@ -828,7 +818,7 @@ async fn sse_delivery_increments_upsert_in_order_and_are_published() {
 
 #[tokio::test]
 async fn overflowing_the_window_truncates_and_refetches_the_first_page() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     let epoch = fixture.service.cloud.request_epoch();
     let calls_before = fixture.mock.deliveries_calls.load(Ordering::SeqCst);
     set_page(
@@ -860,7 +850,7 @@ async fn overflowing_the_window_truncates_and_refetches_the_first_page() {
 
 #[tokio::test]
 async fn sse_reconnect_overwrites_with_the_server_first_page() {
-    let fixture = Fixture::start(on(), overview_json(&["task.completed"], &[])).await;
+    let fixture = Fixture::start(on(), overview_json(&["task.completed"])).await;
     let epoch = fixture.service.cloud.request_epoch();
     let feed = fixture.service.feed();
     // 离线前本地看到的状态。

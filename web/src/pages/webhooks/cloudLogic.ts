@@ -279,12 +279,6 @@ export function emailTargetLine(channel: CloudNotifyChannelDto): { key: string |
   return { key: null, text: addresses[0] ?? channel.target }
 }
 
-/** 来源设备选择（空 = 全部）：切换一个设备，保持原顺序且不重复。 */
-export function toggleId(list: readonly string[], id: string, on: boolean): string[] {
-  const without = list.filter((item) => item !== id)
-  return on ? [...without, id] : without
-}
-
 // ───────────────────────── 错误文案 ─────────────────────────
 
 export interface ErrorText {

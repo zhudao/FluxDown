@@ -3,7 +3,7 @@
 import { useEffect } from 'react'
 import type { TFunction } from '../../i18n'
 import { RpcError, errorMessage, rpc, useAgent } from '../../lib/rpc'
-import type { AgentSessionDto, AgentSnapshot, CloudDevice, CloudNotifyStateDto } from '../../lib/rpc'
+import type { AgentSessionDto, AgentSnapshot, CloudNotifyStateDto } from '../../lib/rpc'
 import { notifyErrorText } from './cloudLogic'
 
 /** 旧快照缺失时视为默认（上报关、无概览）。 */
@@ -17,11 +17,8 @@ export const DEFAULT_CLOUD_STATE: CloudNotifyStateDto = {
   updatedAtUnixMs: null,
 }
 
-const NO_DEVICES: readonly CloudDevice[] = []
-
 const selectState = (snapshot: AgentSnapshot) => snapshot.cloudNotify ?? DEFAULT_CLOUD_STATE
 const selectSession = (snapshot: AgentSnapshot) => snapshot.session
-const selectDevices = (snapshot: AgentSnapshot) => snapshot.cloudDevices
 
 export function useCloudNotifyState(): CloudNotifyStateDto {
   return useAgent(selectState, DEFAULT_CLOUD_STATE)
@@ -29,10 +26,6 @@ export function useCloudNotifyState(): CloudNotifyStateDto {
 
 export function useCloudSession(): AgentSessionDto | null {
   return useAgent(selectSession, null)
-}
-
-export function useCloudDevices(): readonly CloudDevice[] {
-  return useAgent(selectDevices, NO_DEVICES)
 }
 
 /**

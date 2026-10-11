@@ -309,9 +309,6 @@ impl CloudApi {
         if let Some(events) = &params.events {
             body.insert("events".to_owned(), Value::from(events.clone()));
         }
-        if let Some(device_ids) = &params.device_ids {
-            body.insert("deviceIds".to_owned(), Value::from(device_ids.clone()));
-        }
         if let Some(addresses) = &params.addresses {
             body.insert("addresses".to_owned(), Value::from(addresses.clone()));
         }

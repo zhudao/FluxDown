@@ -73,7 +73,7 @@ pub(super) fn trim_for_upload(notice: &TaskNoticeDto, prefs: CloudNotifyPrefs) -
     }
 }
 
-/// 事件是否值得上报：已登录 + 本设备上报开 + 套餐允许 + 至少一个渠道匹配（事件 + 本设备）。
+/// 事件是否值得上报：已登录 + 本设备上报开 + 套餐允许 + 至少一个渠道匹配（已启用 + 订阅该事件）。
 ///
 /// `catalog` 为目录缓存：`Some(空)` = 管理员关闭了全部云端渠道，不上报；`None` = 尚未拉到，
 /// 不据此拦截（概览里是否有匹配渠道仍然把关）。
@@ -84,7 +84,6 @@ pub(super) fn should_report(
     catalog: Option<&[CloudNotifyKindDto]>,
     overview: Option<&CloudNotifyOverviewDto>,
     event: &str,
-    device_id: &str,
 ) -> bool {
     if !logged_in || !prefs.reporting || catalog.is_some_and(<[CloudNotifyKindDto]>::is_empty) {
         return false;
@@ -94,10 +93,7 @@ pub(super) fn should_report(
     };
     overview.enabled
         && overview.channels.iter().any(|channel| {
-            channel.enabled
-                && channel.events.iter().any(|subscribed| subscribed == event)
-                && (channel.device_ids.is_empty()
-                    || channel.device_ids.iter().any(|id| id == device_id))
+            channel.enabled && channel.events.iter().any(|subscribed| subscribed == event)
         })
 }
 
@@ -229,13 +225,12 @@ mod tests {
         }
     }
 
-    fn channel(enabled: bool, events: &[&str], devices: &[&str]) -> CloudNotifyChannelDto {
+    fn channel(enabled: bool, events: &[&str]) -> CloudNotifyChannelDto {
         CloudNotifyChannelDto {
             id: "c1".to_owned(),
             kind: "email".to_owned(),
             enabled,
             events: events.iter().map(|value| (*value).to_owned()).collect(),
-            device_ids: devices.iter().map(|value| (*value).to_owned()).collect(),
             ..CloudNotifyChannelDto::default()
         }
     }
@@ -315,9 +310,9 @@ mod tests {
 
     #[test]
     fn report_requires_login_switch_plan_and_matching_channel() {
-        let matching = overview(true, vec![channel(true, &["task.completed"], &[])]);
+        let matching = overview(true, vec![channel(true, &["task.completed"])]);
         let report = |logged_in, prefs, overview: Option<&CloudNotifyOverviewDto>, event| {
-            should_report(logged_in, prefs, None, overview, event, "dev-1")
+            should_report(logged_in, prefs, None, overview, event)
         };
         assert!(report(true, on(), Some(&matching), "task.completed"));
 
@@ -333,7 +328,7 @@ mod tests {
         // 概览未拉取
         assert!(!report(true, on(), None, "task.completed"));
         // 套餐未开通
-        let disabled = overview(false, vec![channel(true, &["task.completed"], &[])]);
+        let disabled = overview(false, vec![channel(true, &["task.completed"])]);
         assert!(!report(true, on(), Some(&disabled), "task.completed"));
         // 无渠道
         assert!(!report(
@@ -343,7 +338,7 @@ mod tests {
             "task.completed"
         ));
         // 渠道已暂停
-        let paused = overview(true, vec![channel(false, &["task.completed"], &[])]);
+        let paused = overview(true, vec![channel(false, &["task.completed"])]);
         assert!(!report(true, on(), Some(&paused), "task.completed"));
         // 事件未订阅
         assert!(!report(true, on(), Some(&matching), "task.failed"));
@@ -351,65 +346,17 @@ mod tests {
 
     #[test]
     fn empty_catalog_blocks_reporting_but_unknown_catalog_does_not() {
-        let matching = overview(true, vec![channel(true, &["task.completed"], &[])]);
+        let matching = overview(true, vec![channel(true, &["task.completed"])]);
         let kinds = [CloudNotifyKindDto {
             kind: "email".to_owned(),
             available: true,
         }];
         let report = |catalog: Option<&[CloudNotifyKindDto]>| {
-            should_report(
-                true,
-                on(),
-                catalog,
-                Some(&matching),
-                "task.completed",
-                "dev-1",
-            )
+            should_report(true, on(), catalog, Some(&matching), "task.completed")
         };
         assert!(report(None), "目录未知不拦截");
         assert!(report(Some(&kinds)));
         assert!(!report(Some(&[])), "目录为空 = 云端渠道全部关闭，不上报");
-    }
-
-    #[test]
-    fn device_filter_limits_sources() {
-        let only_other = overview(true, vec![channel(true, &["task.failed"], &["dev-2"])]);
-        assert!(!should_report(
-            true,
-            on(),
-            None,
-            Some(&only_other),
-            "task.failed",
-            "dev-1"
-        ));
-        let includes_me = overview(
-            true,
-            vec![channel(true, &["task.failed"], &["dev-2", "dev-1"])],
-        );
-        assert!(should_report(
-            true,
-            on(),
-            None,
-            Some(&includes_me),
-            "task.failed",
-            "dev-1"
-        ));
-        // 任一渠道匹配即可
-        let mixed = overview(
-            true,
-            vec![
-                channel(true, &["task.failed"], &["dev-2"]),
-                channel(true, &["task.failed"], &[]),
-            ],
-        );
-        assert!(should_report(
-            true,
-            on(),
-            None,
-            Some(&mixed),
-            "task.failed",
-            "dev-1"
-        ));
     }
 
     #[test]

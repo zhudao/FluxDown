@@ -103,7 +103,7 @@ pub struct SettingsStore {
     components: Vec<ComponentStatusDto>,
     webhook_deliveries: Vec<WebhookDeliveryDto>,
     session: Option<fluxdown_protocol::AgentSessionDto>,
-    /// 云账号下的全部设备（含本机）：侧栏设备区「未设置时自动显示」与云端推送「来源设备」的依据。
+    /// 云账号下的全部设备（含本机）：侧栏设备区「未设置时自动显示」的依据。
     cloud_devices: Vec<fluxdown_protocol::CloudDevice>,
     /// 云端推送的本机状态投影（`AgentSnapshot.cloud_notify`）。
     cloud_notify: fluxdown_protocol::CloudNotifyStateDto,
@@ -830,7 +830,23 @@ impl SettingsStore {
         self.last_error = None;
         self.last_notice = None;
         cx.notify();
-        let future = self.port.call(method, params);
+        let directory = match method {
+            method::AGENT_PLATFORM_OPEN_PATH
+                if params.get("reveal") == Some(&Value::Bool(false)) =>
+            {
+                params.get("path").and_then(Value::as_str)
+            }
+            method::AGENT_DIAGNOSTICS_REPAIR
+                if params.get("action").and_then(Value::as_str) == Some("open_log_dir") =>
+            {
+                params.get("target").and_then(Value::as_str)
+            }
+            _ => None,
+        };
+        let future = directory
+            .filter(|path| !path.trim().is_empty())
+            .and_then(|path| self.port.foreground_open_directory(path))
+            .unwrap_or_else(|| self.port.call(method, params));
         cx.spawn(async move |this, cx| {
             let result = future.await;
 

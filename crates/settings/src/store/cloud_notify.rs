@@ -5,7 +5,7 @@
 //! （`last_error`），原因由页面就地展示（`action_error` / `CloudDeliveryLog::error`）。
 
 use fluxdown_protocol::{
-    ApplicationErrorCode, CloudDevice, CloudNotifyDeliveriesPage, CloudNotifyDeliveriesParams,
+    ApplicationErrorCode, CloudNotifyDeliveriesPage, CloudNotifyDeliveriesParams,
     CloudNotifyDeliveryDto, CloudNotifyPrivacyParams, CloudNotifyReportingParams,
     CloudNotifyStateDto, RpcErrorData, method,
 };
@@ -39,12 +39,6 @@ impl SettingsStore {
     #[must_use]
     pub(crate) fn cloud_notify(&self) -> &CloudNotifyStateDto {
         &self.cloud_notify
-    }
-
-    /// 云账号下的全部设备（含本机）。
-    #[must_use]
-    pub(crate) fn cloud_devices(&self) -> &[CloudDevice] {
-        &self.cloud_devices
     }
 
     #[must_use]

@@ -476,7 +476,6 @@ impl CloudNotifyService {
 
     async fn ingest(self: &Arc<Self>, notice: TaskNoticeDto) {
         let logged_in = self.cloud.is_authenticated().await;
-        let device_id = self.state.lock().await.device_id.clone();
         let accepted = self.events.inspect(|snapshot| {
             let state = &snapshot.cloud_notify;
             should_report(
@@ -485,7 +484,6 @@ impl CloudNotifyService {
                 state.catalog.as_deref(),
                 state.overview.as_ref(),
                 &notice.event,
-                &device_id,
             )
         });
         if !accepted {

@@ -131,8 +131,6 @@ pub struct CloudNotifyChannelDto {
     pub enabled: bool,
     /// 订阅的事件 wire 名。
     pub events: Vec<String>,
-    /// 来源设备过滤；空 = 全部设备。
-    pub device_ids: Vec<String>,
     /// 展示用投递目标：邮件 = 第一个收件地址；Telegram = `@用户名` / 会话名。
     pub target: String,
     /// 邮件渠道的全部收件地址（账号邮箱在前；至多 [`CLOUD_NOTIFY_EMAIL_MAX_ADDRESSES`] 个）；其他种类为空。
@@ -204,8 +202,6 @@ pub struct CloudNotifyChannelCreateParams {
     pub name: String,
     pub events: Vec<String>,
     #[serde(default)]
-    pub device_ids: Vec<String>,
-    #[serde(default)]
     pub addresses: Vec<String>,
 }
 
@@ -221,8 +217,6 @@ pub struct CloudNotifyChannelUpdateParams {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub events: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub device_ids: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addresses: Option<Vec<String>>,
 }

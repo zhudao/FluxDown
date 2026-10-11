@@ -83,8 +83,6 @@ export interface CloudNotifyChannelDto {
   name: string;
   enabled: boolean;
   events: string[];
-  /** 空 = 全部设备。 */
-  deviceIds: string[];
   /** 展示用投递目标：邮件 = 第一个收件地址；Telegram = `@用户名` / 会话名。 */
   target: string;
   /** 邮件渠道的全部收件地址（账号邮箱在前）；其他种类为空。 */
@@ -134,7 +132,6 @@ export interface CloudNotifyChannelCreateParams {
   kind: string;
   name: string;
   events: string[];
-  deviceIds?: string[];
   addresses?: string[];
 }
 
@@ -144,7 +141,6 @@ export interface CloudNotifyChannelUpdateParams {
   name?: string;
   enabled?: boolean;
   events?: string[];
-  deviceIds?: string[];
   addresses?: string[];
 }
 

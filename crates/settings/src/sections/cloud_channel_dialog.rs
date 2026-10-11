@@ -1,4 +1,4 @@
-//! 云端渠道连接 / 编辑对话框：名称、推送事件多选、来源设备多选；邮件渠道有「收件邮箱 n/5」列表
+//! 云端渠道连接 / 编辑对话框：名称、推送事件多选；邮件渠道有「收件邮箱 n/5」列表
 //! （账号邮箱 + 经验证码验证的其他邮箱，内联添加表单）；Telegram 新建走一次性绑定码
 //! （深链 + 二维码 + 2s 轮询绑定结果）。
 //!
@@ -25,7 +25,7 @@ use gpui::{
     Styled, Window, div, ease_in_out, img, prelude::FluentBuilder as _, relative,
 };
 use gpui_component::{
-    Disableable as _, Icon, WindowExt as _,
+    Disableable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
@@ -49,8 +49,6 @@ use crate::ui::{dialog_footer, meta_text};
 const DIALOG_WIDTH: f32 = 900.;
 /// 正文区最大高度（超出在正文内滚动，标题 / 底栏常驻）。
 const BODY_MAX_HEIGHT: f32 = 480.;
-/// 右栏（来源设备）宽度档位。
-const DEVICES_WIDTH: f32 = 300.;
 /// Telegram 绑定结果轮询间隔。
 const BIND_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// 连续轮询失败多少次后放弃并提示重试。
@@ -101,8 +99,6 @@ pub(crate) struct CloudChannelDialog {
     code_notice: Option<SharedString>,
     code_error: Option<SharedString>,
     events: BTreeSet<String>,
-    /// 来源设备 `device_id`；空 = 全部设备。
-    devices: BTreeSet<String>,
     saving: bool,
     error: Option<SharedString>,
     bind: BindState,
@@ -173,9 +169,6 @@ impl CloudChannelDialog {
             },
             |channel| channel.events.iter().cloned().collect(),
         );
-        let devices = entry
-            .map(|channel| channel.device_ids.iter().cloned().collect())
-            .unwrap_or_default();
         // 邮件：新建默认只有账号邮箱，编辑沿用渠道现有收件列表。
         let account_email = store
             .read(cx)
@@ -216,7 +209,6 @@ impl CloudChannelDialog {
             code_notice: None,
             code_error: None,
             events,
-            devices,
             saving: false,
             error: None,
             bind,
@@ -397,29 +389,11 @@ impl CloudChannelDialog {
 
     // ───────────────────────── 保存 ─────────────────────────
 
-    /// 提交用的设备列表：按云端设备名册顺序，名册里已不存在的旧 id 原样保留（不擅自改变过滤语义）。
-    fn device_ids(&self, cx: &App) -> Vec<String> {
-        let store = self.store.read(cx);
-        let mut ordered: Vec<String> = store
-            .cloud_devices()
-            .iter()
-            .filter(|device| self.devices.contains(&device.device_id))
-            .map(|device| device.device_id.clone())
-            .collect();
-        for id in &self.devices {
-            if !ordered.contains(id) {
-                ordered.push(id.clone());
-            }
-        }
-        ordered
-    }
-
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.saving || !self.can_save(cx) {
             return;
         }
         let events = ordered_events(&self.events, WEBHOOK_EVENTS.iter().map(|(wire, _)| *wire));
-        let device_ids = self.device_ids(cx);
         let name = self.name.read(cx).value().trim().to_owned();
         // 邮件保存整个收件列表；Telegram 没有收件地址。
         let is_email = self.kind == ChannelKind::Email;
@@ -430,7 +404,6 @@ impl CloudChannelDialog {
                     kind: self.kind.wire().to_owned(),
                     name,
                     events,
-                    device_ids,
                     addresses: if is_email {
                         self.recipients.clone()
                     } else {
@@ -445,7 +418,6 @@ impl CloudChannelDialog {
                     name: Some(name),
                     enabled: None,
                     events: Some(events),
-                    device_ids: Some(device_ids),
                     addresses: is_email.then(|| self.recipients.clone()),
                 }),
             ),
@@ -947,65 +919,6 @@ impl CloudChannelDialog {
         }
     }
 
-    /// 来源设备：「全部设备」（空选择）+ 云账号下每台设备；点设备切换，点「全部」清空。
-    fn render_devices(&self, cx: &mut Context<Self>) -> Div {
-        let tokens = active_theme(cx).tokens().clone();
-        let view = cx.entity();
-        let devices = self.store.read(cx).cloud_devices().to_vec();
-        let mut list = v_flex().w_full().p(tokens.spacing.xs);
-        list = list.child(check_row(
-            "cloud-device-all",
-            self.devices.is_empty(),
-            self.t("cloudNotifyDevicesAll"),
-            {
-                let view = view.clone();
-                move |_, _, cx| {
-                    view.update(cx, |this, cx| {
-                        this.devices.clear();
-                        cx.notify();
-                    });
-                }
-            },
-            cx,
-        ));
-        for device in devices {
-            let id = device.device_id.clone();
-            let label = if device.name.is_empty() {
-                device.platform.clone().unwrap_or_else(|| id.clone())
-            } else {
-                device.name.clone()
-            };
-            let view = view.clone();
-            list = list.child(check_row(
-                SharedString::from(format!("cloud-device-{}", device.device_id)),
-                self.devices.contains(&device.device_id),
-                h_flex()
-                    .min_w_0()
-                    .items_center()
-                    .gap(tokens.spacing.xs)
-                    .child(div().min_w_0().truncate().child(SharedString::from(label)))
-                    .when(device.is_current, |row| {
-                        row.child(
-                            Icon::new(FluxIcon::Check).size(active_theme(cx).extended().icon.sm),
-                        )
-                    }),
-                move |checked, _, cx| {
-                    let id = id.clone();
-                    view.update(cx, |this, cx| {
-                        if checked {
-                            this.devices.insert(id);
-                        } else {
-                            this.devices.remove(&id);
-                        }
-                        cx.notify();
-                    });
-                },
-                cx,
-            ));
-        }
-        form_field(self.t("cloudNotifyDevices"), card(cx).child(list), None, cx)
-    }
-
     fn render_telegram_panel(&self, cx: &mut Context<Self>) -> Div {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
@@ -1176,25 +1089,13 @@ impl Render for CloudChannelDialog {
             self.render_telegram_panel(cx)
         } else {
             let mut left = v_flex()
-                .flex_1()
-                .min_w_0()
+                .w_full()
                 .gap(tokens.spacing.lg)
                 .child(self.render_name(cx));
             if let Some(field) = self.render_kind_field(cx) {
                 left = left.child(field);
             }
-            left = left.child(self.render_events(cx));
-            h_flex()
-                .w_full()
-                .items_start()
-                .gap(tokens.spacing.lg)
-                .child(left)
-                .child(
-                    v_flex()
-                        .flex_none()
-                        .w(active_theme(cx).text_extent(DEVICES_WIDTH))
-                        .child(self.render_devices(cx)),
-                )
+            left.child(self.render_events(cx))
         };
         v_flex()
             .w_full()

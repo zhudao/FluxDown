@@ -31,7 +31,6 @@ import {
   privacyFieldKeys,
   showKindSuffix,
   quotaStatus,
-  toggleId,
   usageMeter,
 } from './cloudLogic'
 
@@ -41,7 +40,6 @@ const channel = (patch: Partial<CloudNotifyChannelDto> = {}): CloudNotifyChannel
   name: 'iPhone',
   enabled: true,
   events: ['task.completed'],
-  deviceIds: [],
   target: '****abcd',
   status: 'ok',
   createdAt: '2026-10-09T00:00:00Z',
@@ -218,12 +216,6 @@ describe('channel grid & add menu', () => {
 })
 
 describe('helpers', () => {
-  test('toggleId keeps uniqueness', () => {
-    expect(toggleId(['a'], 'b', true)).toEqual(['a', 'b'])
-    expect(toggleId(['a', 'b'], 'a', false)).toEqual(['b'])
-    expect(toggleId(['a'], 'a', true)).toEqual(['a'])
-  })
-
   test('error reasons map to localized keys', () => {
     expect(notifyErrorText('notifyChannelLimit', '', 2)).toEqual({ key: 'cloudNotifyErrorChannelLimit', params: { limit: 2 } })
     expect(notifyErrorText('cloudUnreachable', '', 0).key).toBe('cloudNotifyErrorOffline')
