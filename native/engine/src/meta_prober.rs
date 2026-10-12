@@ -202,7 +202,8 @@ async fn probe_ftp_meta(
 ) -> ProbedMeta {
     let result = tokio::time::timeout(
         Duration::from_secs(PROBE_TIMEOUT_SECS),
-        crate::ftp_downloader::resolve_ftp_file_info(url, proxy_config),
+        // 元信息探测只要名称 / 大小；服务器时间由下载器完成期按需取。
+        crate::ftp_downloader::resolve_ftp_file_info(url, proxy_config, false),
     )
     .await;
     match result {

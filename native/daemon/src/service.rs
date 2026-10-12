@@ -1171,6 +1171,7 @@ impl DaemonService {
                 request: Box::new(params.request),
                 torrent_file_bytes: bytes,
                 hint_file_size: params.hint_file_size.filter(|size| *size > 0).unwrap_or(0),
+                name_hint: params.name_hint.unwrap_or_default(),
                 unattended: params.unattended,
             })
             .await;

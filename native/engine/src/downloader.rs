@@ -165,9 +165,11 @@ pub(crate) fn is_range_not_satisfiable(e: &DownloadError) -> bool {
 // Public types
 // ---------------------------------------------------------------------------
 
-/// 完成期定名（见 [`crate::naming::refine_inferred_name`]）：仅当任务名由引擎推断
-/// （`tasks.name_inferred`）时，按记录的响应命名证据与临时文件头魔数给出新名；否则
-/// 原样返回。读状态 / 读文件头失败只放弃精修，不影响下载完成。
+/// 完成期定名：任务名由引擎推断（`tasks.name_inferred`）时按记录的响应命名证据与临时
+/// 文件头魔数精修（见 [`crate::naming::refine_inferred_name`]）；显式名（用户改名 / API
+/// `out=` / CD 名）只在缺类型扩展名时按同一证据补扩展名（见
+/// [`crate::naming::complete_explicit_extension`]），其余原样返回。读状态 / 读文件头失败
+/// 只放弃精修，不影响下载完成。
 async fn refine_completed_name(p: &DownloadParams, temp_path: &Path, current: &str) -> String {
     let (inferred, resp_name, resp_mime) = match p.db.get_task_naming_state(&p.task_id).await {
         Ok(state) => state,
@@ -181,7 +183,7 @@ async fn refine_completed_name(p: &DownloadParams, temp_path: &Path, current: &s
             return current.to_string();
         }
     };
-    if !inferred {
+    if !inferred && !crate::naming::needs_type_extension(current) {
         return current.to_string();
     }
     let head = match read_file_head(temp_path, SNIFF_HEAD_BYTES).await {
@@ -201,11 +203,17 @@ async fn refine_completed_name(p: &DownloadParams, temp_path: &Path, current: &s
         mime: (!resp_mime.is_empty()).then_some(resp_mime.as_str()),
         sniffed_ext: crate::naming::sniff_extension(&head),
     };
-    match crate::naming::refine_inferred_name(current, &evidence) {
+    let refined = if inferred {
+        crate::naming::refine_inferred_name(current, &evidence)
+    } else {
+        crate::naming::complete_explicit_extension(current, &evidence)
+    };
+    match refined {
         Some(name) => {
             log_info!(
-                "[download] task {} refined inferred file name '{}' → '{}' (evidence: {:?})",
+                "[download] task {} refined {} file name '{}' → '{}' (evidence: {:?})",
                 p.task_id,
+                if inferred { "inferred" } else { "explicit" },
                 current,
                 name,
                 evidence
@@ -394,9 +402,10 @@ pub struct DownloadParams {
     /// 的推荐值：`effective = min(advisor, auto_max_connections)`。<=0 视为不限
     /// （回退 advisor 原值）。用户显式指定 segment_count 时本字段不参与。
     pub auto_max_connections: i32,
-    /// 下载完成后是否把文件修改时间设为服务器提供的 `Last-Modified` 时间
-    /// （config `use_server_time`）。服务器未提供该头、解析失败或写入失败时
-    /// 保留本地完成时间，绝不影响下载结果。
+    /// 下载完成后是否把文件修改时间设为服务器提供的原始时间（config
+    /// `use_server_time`）：HTTP 取 `Last-Modified`，FTP 取 `MDTM`，音视频轨对取
+    /// 轨道探测响应的 `Last-Modified`；HLS/DASH 分片流、BT、eD2k 无服务器文件时间。
+    /// 服务器未提供、解析失败或写入失败时保留本地完成时间，绝不影响下载结果。
     pub use_server_time: bool,
     /// 覆盖旧文件的授权（manager 注入）：全局 overwrite → `Any`；逐任务
     /// 「覆盖」答复 → `Only(询问时的文件名)`；其余 `Never`。授权时，起名/
@@ -3848,8 +3857,8 @@ async fn run_download_inner(
     // (兄弟任务预订名),防 DB 指针别名。
     //
     // 完成期定名：引擎推断的名字（HEAD 被拒 / 无 Content-Disposition 时的 URL 占位、
-    // 无扩展名、脚本端点名）按实际响应证据与文件头魔数精修；显式名永不改。精修名
-    // 没有启动期预订，同样经下方原子占名环避让冲突。
+    // 无扩展名、脚本端点名）按实际响应证据与文件头魔数精修；显式名只在缺类型扩展名
+    // 时补扩展名，主名不改。精修名没有启动期预订，同样经下方原子占名环避让冲突。
     let target_name = refine_completed_name(p, &temp_path, &actual_name).await;
     let mut chosen = target_name.clone();
     let mut avoid: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4041,13 +4050,26 @@ fn parse_http_date(s: &str) -> Option<std::time::SystemTime> {
     Some(std::time::UNIX_EPOCH + Duration::from_secs(secs))
 }
 
+/// 把 UTC 时间格式化为 RFC 9110 IMF-fixdate（`Sun, 06 Nov 1994 08:49:37 GMT`）。
+///
+/// 非 HTTP 协议（FTP `MDTM`）拿到的服务器时间经此转成与 `Last-Modified` 相同的
+/// 文本形态，统一交给 [`parse_http_date`] / [`apply_server_mtime`] 处理。
+pub(crate) fn format_http_date(time: chrono::NaiveDateTime) -> String {
+    time.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
 /// 把已完成下载的最终文件修改时间设为服务器提供的 `Last-Modified` 时间。
 ///
 /// 时间戳属于尽力而为的元数据：`last_modified` 为空（服务器未提供）、解析
 /// 失败或写入失败都只记日志直接返回——此刻文件数据已完整落盘，任何元数据
 /// 失败都不允许把成功的下载变成错误。
-async fn apply_server_mtime(dest: &Path, last_modified: &str, task_id: &str) {
+pub(crate) async fn apply_server_mtime(dest: &Path, last_modified: &str, task_id: &str) {
     if last_modified.is_empty() {
+        log_info!(
+            "[download] task {} 服务器未提供文件时间（Last-Modified / MDTM），{} 保留本地完成时间",
+            task_id,
+            dest.display()
+        );
         return;
     }
     let Some(mtime) = parse_http_date(last_modified) else {
@@ -4923,7 +4945,7 @@ async fn download_multi_segment(
 mod tests {
     use super::{
         PROBE_MAX_RETRIES, PROBE_RETRY_BASE_DELAY, PROBE_TIMEOUT, TEMP_EXT, await_probe_pair,
-        dedup_filename, format_probe_failure, parse_http_date,
+        dedup_filename, format_http_date, format_probe_failure, parse_http_date,
     };
     use std::time::Duration;
 
@@ -5017,6 +5039,20 @@ mod tests {
         assert_eq!(parse_http_date("2025-01-01T00:00:00Z"), None);
         // Unix 纪元之前的时间无法表示为 SystemTime 偏移，须整体放弃。
         assert_eq!(parse_http_date("Wed, 01 Jan 1902 00:00:00 GMT"), None);
+    }
+
+    #[test]
+    fn format_http_date_round_trips_through_parse() {
+        // FTP MDTM 20250102030405（UTC）→ IMF-fixdate → 与 Last-Modified 同一解析路径。
+        let time = chrono::NaiveDate::from_ymd_opt(2025, 1, 2)
+            .and_then(|date| date.and_hms_opt(3, 4, 5))
+            .expect("valid time");
+        let text = format_http_date(time);
+        assert_eq!(text, "Thu, 02 Jan 2025 03:04:05 GMT");
+        assert_eq!(
+            parse_http_date(&text),
+            Some(std::time::UNIX_EPOCH + Duration::from_secs(1_735_787_045))
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -750,7 +750,7 @@
   "silentSkipSelection": "跳过二次选择弹窗",
   "silentSkipSelectionDesc": "BT 文件选择、HLS/DASH 画质、插件清晰度、文件已存在询问等需要二次确认的任务不再弹窗，直接按默认（全部文件 / 最高画质 / 自动重命名）开始下载",
   "useServerTime": "使用服务器文件时间",
-  "useServerTimeDesc": "下载完成后将文件的修改时间设为服务器提供的原始时间（Last-Modified），而非下载完成时间",
+  "useServerTimeDesc": "下载完成后将文件的修改时间设为服务器提供的原始时间（HTTP Last-Modified / FTP MDTM），而非下载完成时间。适用于 HTTP/HTTPS、FTP 直链与音视频分轨合并的文件；HLS/DASH 分片流、BT、eD2k 没有服务器文件时间，不受影响",
   "fileExistsBehavior": "文件已存在时",
   "fileExistsBehaviorDesc": "自动追加序号重命名、覆盖旧文件、跳过下载，或每次询问。询问需要有打开的 FluxDown 界面；无人值守的下载（RSS、远程派发、跳过二次选择的免打扰下载）以及没有界面在线的主机按自动重命名处理",
   "fileExistsRename": "自动重命名",

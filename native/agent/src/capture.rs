@@ -400,6 +400,7 @@ impl CaptureService {
                     torrent_blob_id,
                     unattended,
                     hint_file_size: spec.hint_file_size,
+                    name_hint: spec.name_hint,
                 }),
             )
             .await
@@ -486,11 +487,13 @@ fn split_batch(request: DownloadRequest) -> Vec<DownloadRequest> {
         .collect()
 }
 
-/// 建任务请求 + 捕获方声明的文件大小提示（`hintFileSize` 不在 `CreateTaskRequest` 内）。
+/// 建任务请求 + 捕获方声明的文件大小提示与参照文件名（二者都不在 `CreateTaskRequest` 内）。
 struct CaptureCreate {
     request: CreateTaskRequest,
     /// 仅 >0 才有意义：daemon 据此跳过一次性 URL 的探测请求。
     hint_file_size: Option<i64>,
+    /// 表单改了名时，浏览器定下的原始名：用户名缺扩展名时引擎借它的扩展名补全。
+    name_hint: Option<String>,
 }
 
 /// 按捕获原请求建任务（静默提交 / 未带表单结果的确认）；队列与分段走 daemon 默认。
@@ -520,6 +523,7 @@ fn captured_create_request(request: DownloadRequest) -> CaptureCreate {
             save_site_auth: false,
         },
         hint_file_size,
+        name_hint: None,
     }
 }
 
@@ -536,13 +540,19 @@ fn merge_confirmed_request(
     let CaptureCreate {
         request: base,
         hint_file_size,
+        ..
     } = captured_create_request(captured);
     confirmed.url = base.url;
     confirmed.method = base.method;
     confirmed.body = base.body;
     confirmed.audio_url = base.audio_url;
     confirmed.torrent_b64 = None;
-    fill_if_blank(&mut confirmed.file_name, base.file_name);
+    let name_hint = if confirmed.file_name.trim().is_empty() {
+        confirmed.file_name = base.file_name;
+        None
+    } else {
+        Some(base.file_name).filter(|name| !name.trim().is_empty())
+    };
     fill_if_blank(&mut confirmed.save_dir, base.save_dir);
     fill_if_blank(&mut confirmed.cookies, base.cookies);
     fill_if_blank(&mut confirmed.referrer, base.referrer);
@@ -558,6 +568,7 @@ fn merge_confirmed_request(
     CaptureCreate {
         request: confirmed,
         hint_file_size,
+        name_hint,
     }
 }
 
@@ -1531,6 +1542,18 @@ mod tests {
         assert_eq!(merged.hint_file_size, Some(4096));
         let merged = merge_confirmed_request(with_size(None), form(json!({ "url": "" })));
         assert_eq!(merged.hint_file_size, None);
+    }
+
+    #[test]
+    fn renamed_form_carries_captured_name_as_extension_hint() {
+        let renamed =
+            merge_confirmed_request(captured(), form(json!({ "url": "", "fileName": "123" })));
+        assert_eq!(renamed.request.file_name, "123");
+        assert_eq!(renamed.name_hint.as_deref(), Some("a.bin"));
+        // 表单未改名：沿用捕获名本身，无需参照。
+        let kept = merge_confirmed_request(captured(), form(json!({ "url": "" })));
+        assert_eq!(kept.request.file_name, "a.bin");
+        assert_eq!(kept.name_hint, None);
     }
 
     #[test]

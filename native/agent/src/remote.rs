@@ -1179,6 +1179,7 @@ impl RemoteTaskService {
                     torrent_blob_id: None,
                     unattended: true,
                     hint_file_size: None,
+                    name_hint: None,
                 }),
             )
             .await

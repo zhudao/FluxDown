@@ -28,6 +28,8 @@ pub enum ActorOperation {
         request: Box<CreateTaskRequest>,
         torrent_file_bytes: Vec<u8>,
         hint_file_size: i64,
+        /// 参照文件名（浏览器捕获的原始名），见 `DaemonCreateTaskParams::name_hint`。
+        name_hint: String,
         unattended: bool,
     },
     PauseTask {
@@ -724,6 +726,7 @@ async fn execute_operation(
             request,
             mut torrent_file_bytes,
             hint_file_size,
+            name_hint,
             unattended,
         } => {
             let request = *request;
@@ -761,6 +764,7 @@ async fn execute_operation(
                     cookies: request.cookies,
                     referrer: request.referrer,
                     hint_file_size,
+                    name_hint,
                     torrent_file_bytes,
                     proxy_url: request.proxy_url,
                     user_agent: request.user_agent,
@@ -2145,6 +2149,7 @@ mod tests {
             ),
             torrent_file_bytes: torrent,
             hint_file_size: 0,
+            name_hint: String::new(),
             unattended: false,
         };
         let reason = |result: Result<super::ActorResult, ActorError>| match result {

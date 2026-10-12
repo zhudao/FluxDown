@@ -1001,7 +1001,8 @@ impl Db {
         self.add_column_if_missing("tasks", "range_verified", "INTEGER NOT NULL DEFAULT 1")
             .await?;
         // 文件名来源：1 = 引擎自行推断（探测所得但非 Content-Disposition、URL 兜底），
-        // HTTP 完成期可按实际响应证据精修；0 = 显式名 / CD 名 / 用户改名，永不改写。
+        // HTTP 完成期可按实际响应证据精修；0 = 显式名 / CD 名 / 用户改名，主名永不改写，
+        // 仅缺类型扩展名时按响应证据补扩展名。
         self.add_column_if_missing("tasks", "name_inferred", "INTEGER NOT NULL DEFAULT 0")
             .await?;
         // 实际 GET 响应观察到的命名证据（CD 解出的名字 / Content-Type），先写者胜。

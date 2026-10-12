@@ -750,7 +750,7 @@
   "silentSkipSelection": "Skip selection dialogs",
   "silentSkipSelectionDesc": "Tasks needing a second choice (BT file picker, HLS/DASH quality, plugin variants, file already exists) start right away with defaults (all files / best quality / auto rename) instead of popping a dialog",
   "useServerTime": "Use Server File Time",
-  "useServerTimeDesc": "Set the modified time of completed files to the server-provided original time (Last-Modified) instead of the download completion time",
+  "useServerTimeDesc": "Set the modified time of completed files to the server-provided original time (HTTP Last-Modified / FTP MDTM) instead of the download completion time. Applies to HTTP/HTTPS and FTP files and to merged audio/video track pairs; HLS/DASH segmented streams, BT and eD2k have no server file time and are not affected",
   "fileExistsBehavior": "When file exists",
   "fileExistsBehaviorDesc": "Rename with a numeric suffix, overwrite the old file, skip the download, or ask each time. Asking needs an open FluxDown window; unattended downloads (RSS, remote dispatch, silent downloads that skip dialogs) and hosts with no window open fall back to auto rename",
   "fileExistsRename": "Auto rename",

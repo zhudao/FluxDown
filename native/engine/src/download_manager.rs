@@ -1372,6 +1372,37 @@ async fn finalize_start_file_name(
                 total_bytes: 0,
             });
         }
+    } else if params.hint_file_size == 0
+        && naming::needs_type_extension(&params.file_name)
+        && prelude_shares_downloader_probe(params)
+    {
+        // Step 2b：显式名（新建对话框重命名 / API `out=`）缺类型扩展名。下载器本来就要
+        // 探测，序幕代跑同一轮并经 `preprobed` 交给它复用，不多发请求。扩展名取自探测
+        // 得出的完整名（CD > 重定向后的 CDN 路径 > 脚本端点名按 Content-Type 换扩展名），
+        // 不是请求链接的后缀；拿不到可信扩展名（无扩展名 CDN 对象 + octet-stream）时
+        // 保持原名，完成期再按实际 GET 证据与文件头魔数补。必须在「文件已存在」判断与
+        // dedup 之前完成，二者都按最终名工作。
+        let probed = probe_start_meta(params).await;
+        probed_total = Some(probed.total_bytes);
+        if let Some(name) =
+            naming::complete_extension_from_name(&params.file_name, &probed.file_name)
+        {
+            params.file_name = name;
+            if let Err(error) = params
+                .db
+                .set_task_file_name(&params.task_id, &params.file_name)
+                .await
+            {
+                return StartPrelude::Failed {
+                    error: error.into(),
+                };
+            }
+            params.sink.emit(EngineEvent::TaskMetaProbed {
+                task_id: params.task_id.clone(),
+                file_name: params.file_name.clone(),
+                total_bytes: 0,
+            });
+        }
     }
 
     // Step 3: HLS 归一化为 .ts。force_ts_extension 幂等；HLS 下载器内仍保留
@@ -2029,6 +2060,9 @@ pub struct NewTaskSpec {
     pub save_dir: String,
     /// 文件名（空 = 探测/URL 推断）。
     pub file_name: String,
+    /// 参照文件名（浏览器捕获时浏览器定下的原始名；空 = 无）。`file_name` 是缺类型
+    /// 扩展名的显式名时借它的扩展名补全，见 [`naming::complete_extension_offline`]。
+    pub name_hint: String,
     /// 分段数（<=0 = 自动）。
     pub segments: i32,
     /// 浏览器 cookies（空 = 无）。
@@ -2571,8 +2605,8 @@ pub struct DownloadManager {
     /// Auto 模式最大连接数上限（config `auto_max_connections`）。
     /// <=0 = 不限（罕见，仅显式配置），默认 [`DEFAULT_AUTO_MAX_CONNECTIONS`]。
     auto_max_connections: i32,
-    /// 下载完成后是否把文件修改时间设为服务器提供的 `Last-Modified` 时间
-    /// （config `use_server_time`，默认关闭）。
+    /// 下载完成后是否把文件修改时间设为服务器提供的原始时间（HTTP
+    /// `Last-Modified` / FTP `MDTM`；config `use_server_time`，默认关闭）。
     use_server_time: bool,
     /// 文件已存在时的处理策略（config `file_exists_behavior`，默认
     /// `Rename` = 自动重命名）。`Overwrite`/`Skip` 都只在重名冲突**只**
@@ -6609,6 +6643,7 @@ impl DownloadManager {
             mut url,
             save_dir,
             file_name,
+            name_hint,
             segments,
             cookies,
             referrer,
@@ -6760,7 +6795,13 @@ impl DownloadManager {
         let (save_dir, file_name) = if is_magnet(&url) || !torrent_file_bytes.is_empty() {
             (save_dir, file_name)
         } else {
-            split_relative_file_name(&save_dir, &file_name)
+            let (save_dir, file_name) = split_relative_file_name(&save_dir, &file_name);
+            // 显式名（用户改名 / `out=`）缺类型扩展名：先用无需联网的确定性参照补全，
+            // 建任务即定名——列表、「文件已存在」询问与下载中都显示带扩展名的名字，
+            // hint 任务（一次性 URL，启动期不探测）也不必等到完成期。
+            let file_name = naming::complete_extension_offline(&file_name, &name_hint, &url)
+                .unwrap_or(file_name);
+            (save_dir, file_name)
         };
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
         // dynamically calculate the optimal count after probing file size,

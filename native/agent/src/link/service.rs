@@ -95,6 +95,7 @@ impl LinkTaskCreator for DaemonTaskCreator {
                     // 对端下发的任务没有人在本机确认选择框：全选文件直接开始。
                     unattended: true,
                     hint_file_size: None,
+                    name_hint: None,
                 }),
             )
             .await
