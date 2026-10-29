@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.webkit.MimeTypeMap
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,6 +48,8 @@ class TaskActions(
     private val overlays: FluxOverlayState,
     private val nav: AppNavigator,
     private val haptics: FluxHaptics,
+    /** 当前主机是否为本机：远端主机的文件在主机磁盘上，本机无法打开。 */
+    private val isLocalHost: () -> Boolean,
 ) {
     private fun s(id: Int, vararg args: Pair<String, Any?>) = context.str(id, *args)
 
@@ -236,30 +237,62 @@ class TaskActions(
         context.startActivity(Intent.createChooser(send, task.fileName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    /** 打开已完成文件：不存在 → 警告；存在 → ACTION_VIEW（FileProvider）。 */
+    /** 本机已完成且文件仍在（iOS `hasLocalFile` 同条件）。远端主机的文件不在本机，不提供打开。 */
+    fun hasLocalFile(task: Task): Boolean =
+        isLocalHost() && task.status == TaskStatus.Completed && !task.fileMissing
+
+    /** 打开当前主机列表里的已完成文件：远端主机 / 不存在 → 警告；存在 → ACTION_VIEW（FileProvider）。 */
     fun open(task: Task) {
+        if (!hasLocalFile(task)) {
+            haptics.reject()
+            overlays.toast(s(R.string.mobileFileNotFound), FluxToastKind.Warn, FluxIcons.FileWarning)
+            return
+        }
+        openLocalFile(task)
+    }
+
+    /**
+     * 打开本机引擎的任务文件，不看当前查看的是哪台主机：完成提示里的本机任务（含 PC 下发到本机的）
+     * 在用户正查看远端主机时同样要能打开。调用方须保证 [task] 来自本机主机状态。
+     */
+    fun openLocalFile(task: Task) {
         val file = File(task.saveDir, task.fileName)
         if (task.fileMissing || !file.exists()) {
             haptics.reject()
             overlays.toast(s(R.string.mobileFileNotFound), FluxToastKind.Warn, FluxIcons.FileWarning)
             return
         }
-        val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
-        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+        val uri = try {
+            FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+        } catch (e: IllegalArgumentException) {
+            // 文件不在 FileProvider 任何已声明根目录内（异常存储布局）：提示而不是崩溃
+            android.util.Log.w("FluxDown", "open: ${file.path} is outside the FileProvider roots: ${e.message}")
+            haptics.reject()
+            overlays.toast(s(R.string.mobileOpenFileFailed), FluxToastKind.Error, FluxIcons.FileWarning)
+            return
+        }
+        val mime = mimeForFile(file.name)
+        fun view(type: String) = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         try {
-            context.startActivity(view)
+            context.startActivity(view(mime))
         } catch (e: android.content.ActivityNotFoundException) {
             android.util.Log.i("FluxDown", "no viewer for $mime: ${e.message}")
-            overlays.toast(s(R.string.mobileNoAppToOpen), FluxToastKind.Warn)
+            // 指定类型无人处理时退回 */*，保持此前能打开的文件仍可打开
+            try {
+                if (mime == "*/*") throw e
+                context.startActivity(view("*/*"))
+            } catch (e2: android.content.ActivityNotFoundException) {
+                overlays.toast(s(R.string.mobileNoAppToOpen), FluxToastKind.Warn)
+            }
         }
     }
 
     /** 行环钮的主动作（按状态）。 */
     fun primary(task: Task) = when {
         task.status == TaskStatus.Completed && task.fileMissing -> confirmRedownload(task)
-        task.status == TaskStatus.Completed -> open(task)
+        task.status == TaskStatus.Completed && isLocalHost() -> open(task)
+        task.status == TaskStatus.Completed -> nav.push(com.fluxdown.app.nav.Route.TaskDetail(task.taskId))
         task.status == TaskStatus.Paused || task.status == TaskStatus.Failed -> resume(listOf(task.taskId))
         else -> pause(listOf(task.taskId))
     }
@@ -270,11 +303,12 @@ class TaskActions(
      */
     fun menuItems(task: Task, boosted: Boolean, onSelect: (() -> Unit)? = null): List<FluxMenuItem> = buildList {
         val st = task.status
-        if (st == TaskStatus.Completed && !task.fileMissing) add(FluxMenuItem.Action(s(R.string.openFile), { open(task) }, FluxIcons.ExternalLink))
+        if (hasLocalFile(task)) add(FluxMenuItem.Action(s(R.string.openFile), { open(task) }, FluxIcons.ExternalLink))
         if (canRedownload(task)) add(FluxMenuItem.Action(s(R.string.redownloadTask), { confirmRedownload(task) }, FluxIcons.RotateCw))
-        if (st == TaskStatus.Paused || st == TaskStatus.Failed) add(FluxMenuItem.Action(s(R.string.resume), { resume(listOf(task.taskId)) }, FluxIcons.Play))
-        if (st.isActive || st == TaskStatus.Pending) add(FluxMenuItem.Action(s(R.string.pause), { pause(listOf(task.taskId)) }, FluxIcons.Pause))
-        if (st != TaskStatus.Completed) {
+        if (task.canResume) add(FluxMenuItem.Action(s(R.string.resume), { resume(listOf(task.taskId)) }, FluxIcons.Play))
+        if (task.canPause) add(FluxMenuItem.Action(s(R.string.pause), { pause(listOf(task.taskId)) }, FluxIcons.Pause))
+        // 只有未结束的任务能优先下载（主机对已完成 / 失败任务拒绝 Boost）。
+        if (st != TaskStatus.Completed && st != TaskStatus.Failed) {
             add(FluxMenuItem.Action(s(if (boosted) R.string.cancelBoost else R.string.boostDownload), { boost(task, boosted) }, FluxIcons.Zap, checked = boosted))
         }
         add(FluxMenuItem.Divider)

@@ -17,21 +17,26 @@
  *   published_at: "2025-01-01T00:00:00Z",
  *   total_downloads: 12345,
  *   extension_version: "0.2.3",   // 浏览器扩展版本（取自所在 release 的 tag），无扩展 release 时为 undefined
+ *   extension_crx_version: "0.2.2", // 商店签名 CRX 的版本（审核通过后才补传，可能落后于 extension_version）
  *   assets: {
  *     setup: { name, size, download_url },
  *     portable: { name, size, download_url },
- *     extension: { name, size, download_url },        // Chrome zip
+ *     extension: { name, size, download_url },        // Chrome 解压包 zip（开发者模式加载，不自动更新）
  *     firefox_extension: { name, size, download_url }, // Firefox XPI
+ *     chrome_crx: { name, size, download_url },       // 商店签名 CRX 原件（.github/workflows/cws-crx.yml 补传）
  *   },
  *   server: {
  *     version: "0.1.51",
  *     tag: "v0.1.51",  // 统一 release 为 vX.Y.Z；历史拆分 release 为 server-vX.Y.Z
  *     assets: { windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64,
- *               openwrt_x64, openwrt_arm64, openwrt_luci, qnap_x64, qnap_arm64,
- *               synology_dsm7_x64, synology_dsm7_arm64, synology_dsm6_x64, synology_dsm6_arm64 }
+ *               openwrt_x64, openwrt_arm64, openwrt_luci, openwrt_apk_x64, openwrt_apk_arm64,
+ *               openwrt_apk_luci, qnap_x64, qnap_arm64,
+ *               synology_dsm7_x64, synology_dsm7_arm64, synology_dsm6_x64, synology_dsm6_arm64,
+ *               fnos_x64, fnos_arm64 }
  *   } | null,  // FluxDown Server（headless Web 版），无对应 release 时为 null
  *   cli: { version, tag, assets:{ windows_x64, windows_arm64, linux_x64, linux_arm64, macos_x64, macos_arm64 } } | null,
- *   mobile: { version, tag, assets:{ android_arm64, android_armv7, android_x64, android_universal } } | null
+ *   mobile: { version, tag, assets:{ android_arm64, android_armv7, android_x64, android_universal } } | null,
+ *   ios: { version, tag, assets:{ sideload_ipa } } | null  // 未签名侧载 IPA（full flavor）；商店版走 TestFlight，不在此列
  * }
  */
 
@@ -39,8 +44,11 @@ import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "../../lib/api-cache";
 import { withBase } from "@/lib/base";
+import { getClientIp } from "@/lib/client-ip";
+import { markReleaseViewer, recordUpdateAssets } from "@/lib/download-gate";
 import {
   desktopAssets,
+  IOS_SIDELOAD_SUFFIX,
   pickComponentRelease,
   releaseVersion,
   type GitHubAsset,
@@ -59,7 +67,9 @@ const CACHE_TTL = 12 * 60 * 60 * 1000;
 // 因此作为固定基数叠加到当前仓库的动态下载量之上。
 const DOWNLOADS_BASELINE = 55_318 + 58_320;
 
-export const GET: APIRoute = async ({ url }) => {
+export const GET: APIRoute = async ({ url, request, clientAddress }) => {
+  // 读过发布清单的访客才能拿 CDN 下载链接（见 download-gate.ts）。
+  markReleaseViewer(getClientIp(request, clientAddress));
   // 渠道：缺省 stable（官网/存量客户端不带 channel 参数 → 永远稳定版）；
   // frontier 放行 prerelease，供客户端"预览版"更新通道使用。
   const channel =
@@ -154,6 +164,7 @@ export const GET: APIRoute = async ({ url }) => {
     const serverRelease = pickComponentRelease(appPool, "server", includePrerelease);
     const cliRelease = pickComponentRelease(appPool, "cli", includePrerelease);
     const mobileRelease = pickComponentRelease(appPool, "mobile", includePrerelease);
+    const iosRelease = pickComponentRelease(appPool, "ios", includePrerelease);
 
     // 统一 release 同时含服务器/CLI 的同后缀压缩包，桌面资产只在过滤后的集合里匹配
     const appAssets = desktopAssets(latest);
@@ -186,6 +197,14 @@ export const GET: APIRoute = async ({ url }) => {
     const extensionVersion = extensionRelease
       ? releaseVersion(extensionRelease.tag_name)
       : undefined;
+    // 商店签名 CRX 在审核通过后才由 cws-crx.yml 补传到同版本 release：取最近一个带它的
+    // 稳定 release，不跟 extensionRelease 绑定（新版审核期间仍提供上一版，装好后由商店自动更新）。
+    const crxRelease = published.find((r) =>
+      r.assets.some((a) => a.name.endsWith("-chrome.crx")),
+    );
+    const chromeCrxAsset = crxRelease?.assets.find((a) =>
+      a.name.endsWith("-chrome.crx"),
+    );
     // macOS 资产
     const macosDmgArm64Asset = appAssets.find((a) =>
       a.name.endsWith("-macos-arm64.dmg"),
@@ -224,19 +243,17 @@ export const GET: APIRoute = async ({ url }) => {
     const serverLinuxArm64Asset = findServerAsset("-linux-arm64.tar.gz");
     const serverMacosX64Asset = findServerAsset("-macos-x64.tar.gz");
     const serverMacosArm64Asset = findServerAsset("-macos-arm64.tar.gz");
-    // OpenWrt ipk（命名：fluxdown-server_<ver>_<arch>.ipk / luci-app-fluxdown_<ver>_all.ipk）；
-    // aarch64 有多个子架构标签的 ipk，官网只挂 aarch64_generic，其余在 release 页可取
-    const serverOpenwrtX64Asset = serverRelease?.assets.find(
-      (a) => a.name.startsWith("fluxdown-server_") && a.name.endsWith("_x86_64.ipk"),
-    );
-    const serverOpenwrtArm64Asset = serverRelease?.assets.find(
-      (a) =>
-        a.name.startsWith("fluxdown-server_") &&
-        a.name.endsWith("_aarch64_generic.ipk"),
-    );
-    const serverOpenwrtLuciAsset = serverRelease?.assets.find(
-      (a) => a.name.startsWith("luci-app-fluxdown_") && a.name.endsWith("_all.ipk"),
-    );
+    // OpenWrt（命名：fluxdown-server_<ver>_<arch>.<ipk|apk> / luci-app-fluxdown_<ver>_all.<ipk|apk>）；
+    // ipk = 24.10 及更早（opkg），apk = 25.12 起（apk-tools v3）。
+    // aarch64 有多个子架构标签的包，官网只挂 aarch64_generic，其余在 release 页可取
+    const findOpenwrtAsset = (prefix: string, suffix: string) =>
+      serverRelease?.assets.find((a) => a.name.startsWith(prefix) && a.name.endsWith(suffix));
+    const serverOpenwrtX64Asset = findOpenwrtAsset("fluxdown-server_", "_x86_64.ipk");
+    const serverOpenwrtArm64Asset = findOpenwrtAsset("fluxdown-server_", "_aarch64_generic.ipk");
+    const serverOpenwrtLuciAsset = findOpenwrtAsset("luci-app-fluxdown_", "_all.ipk");
+    const serverOpenwrtApkX64Asset = findOpenwrtAsset("fluxdown-server_", "_x86_64.apk");
+    const serverOpenwrtApkArm64Asset = findOpenwrtAsset("fluxdown-server_", "_aarch64_generic.apk");
+    const serverOpenwrtApkLuciAsset = findOpenwrtAsset("luci-app-fluxdown_", "_all.apk");
     // QNAP qpkg（命名：FluxDown-Server-<ver>-qnap-<arch>.qpkg）
     const serverQnapX64Asset = findServerAsset("-qnap-x64.qpkg");
     const serverQnapArm64Asset = findServerAsset("-qnap-arm64.qpkg");
@@ -245,6 +262,9 @@ export const GET: APIRoute = async ({ url }) => {
     const serverSynoDsm7Arm64Asset = findServerAsset("-synology-dsm7-arm64.spk");
     const serverSynoDsm6X64Asset = findServerAsset("-synology-dsm6-x64.spk");
     const serverSynoDsm6Arm64Asset = findServerAsset("-synology-dsm6-arm64.spk");
+    // 飞牛 fnOS fpk（命名：FluxDown-Server-<ver>-fnos-<arch>.fpk）
+    const serverFnosX64Asset = findServerAsset("-fnos-x64.fpk");
+    const serverFnosArm64Asset = findServerAsset("-fnos-arm64.fpk");
     // FluxDown CLI 资产（命名：FluxDown-CLI-<ver>-<os>-<arch>.<ext>）
     const findCliAsset = (suffix: string) =>
       cliRelease?.assets.find(
@@ -265,6 +285,10 @@ export const GET: APIRoute = async ({ url }) => {
     const mobileArmv7Asset = findMobileAsset("-android-armeabi-v7a.apk");
     const mobileX64Asset = findMobileAsset("-android-x86_64.apk");
     const mobileUniversalAsset = findMobileAsset("-android-universal.apk");
+    // iOS 侧载 IPA（命名：FluxDown-<ver>-ios-sideload-unsigned.ipa）
+    const iosSideloadAsset = iosRelease?.assets.find((a) =>
+      a.name.endsWith(IOS_SIDELOAD_SUFFIX),
+    );
 
     const formatAsset = (asset: GitHubAsset | undefined, tag?: string) => {
       if (!asset) return null;
@@ -296,6 +320,9 @@ export const GET: APIRoute = async ({ url }) => {
       published_at: latest.published_at,
       total_downloads: totalDownloads,
       extension_version: extensionVersion,
+      extension_crx_version: crxRelease
+        ? releaseVersion(crxRelease.tag_name)
+        : undefined,
       assets: {
         setup: formatAsset(setupAsset, appTag),
         portable: formatAsset(portableAsset, appTag),
@@ -306,6 +333,7 @@ export const GET: APIRoute = async ({ url }) => {
           firefoxExtensionAsset,
           extensionRelease?.tag_name,
         ),
+        chrome_crx: formatAsset(chromeCrxAsset, crxRelease?.tag_name),
         macos_dmg_arm64: formatAsset(macosDmgArm64Asset, appTag),
         macos_dmg_x64: formatAsset(macosDmgX64Asset, appTag),
         macos_tarball_arm64: formatAsset(macosTarballArm64Asset, appTag),
@@ -356,6 +384,18 @@ export const GET: APIRoute = async ({ url }) => {
                 serverOpenwrtLuciAsset,
                 serverRelease.tag_name,
               ),
+              openwrt_apk_x64: formatAsset(
+                serverOpenwrtApkX64Asset,
+                serverRelease.tag_name,
+              ),
+              openwrt_apk_arm64: formatAsset(
+                serverOpenwrtApkArm64Asset,
+                serverRelease.tag_name,
+              ),
+              openwrt_apk_luci: formatAsset(
+                serverOpenwrtApkLuciAsset,
+                serverRelease.tag_name,
+              ),
               qnap_x64: formatAsset(
                 serverQnapX64Asset,
                 serverRelease.tag_name,
@@ -378,6 +418,14 @@ export const GET: APIRoute = async ({ url }) => {
               ),
               synology_dsm6_arm64: formatAsset(
                 serverSynoDsm6Arm64Asset,
+                serverRelease.tag_name,
+              ),
+              fnos_x64: formatAsset(
+                serverFnosX64Asset,
+                serverRelease.tag_name,
+              ),
+              fnos_arm64: formatAsset(
+                serverFnosArm64Asset,
                 serverRelease.tag_name,
               ),
             },
@@ -415,7 +463,26 @@ export const GET: APIRoute = async ({ url }) => {
             },
           }
         : null,
+      ios: iosRelease
+        ? {
+            version: releaseVersion(iosRelease.tag_name),
+            tag: iosRelease.tag_name,
+            assets: {
+              sideload_ipa: formatAsset(iosSideloadAsset, iosRelease.tag_name),
+            },
+          }
+        : null,
     };
+
+    // 应用内更新只取桌面 / 服务器 / Android 资产（native/agent/src/update/install）：只有当前清单里的
+    // 这些资产能拿 123 直链，历史版本、扩展、CLI 与 iOS 侧载包不给。
+    const updateEntries = (tag: string, assets: Record<string, { name: string } | null>, skip: string[] = []) =>
+      Object.entries(assets).flatMap(([kind, asset]) => asset && !skip.includes(kind) ? [{ tag, name: asset.name }] : []);
+    recordUpdateAssets(channel, [
+      ...updateEntries(latest.tag_name, data.assets, ["extension", "firefox_extension", "chrome_crx"]),
+      ...(serverRelease && data.server ? updateEntries(serverRelease.tag_name, data.server.assets) : []),
+      ...(mobileRelease && data.mobile ? updateEntries(mobileRelease.tag_name, data.mobile.assets) : []),
+    ]);
 
     // 更新缓存
     setCached(cacheKey, data);

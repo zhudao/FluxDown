@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use base64::Engine;
 use fluxdown_protocol::{
-    AgentEvent, ApplicationErrorCode, CreateGroupRequest, CreateGroupResponse, CreateTaskRequest,
-    DaemonCreateTaskParams, DownloadRequest, PendingCaptureDto, ResolvePreviewRequest,
-    ResolvePreviewResponse, RpcErrorData,
+    AgentEvent, AgentSnapshot, ApplicationErrorCode, CategoryRouteDto, CreateGroupRequest,
+    CreateGroupResponse, CreateTaskRequest, DaemonCreateTaskParams, DownloadRequest,
+    PendingCaptureDto, ResolvePreviewRequest, ResolvePreviewResponse, RpcErrorData,
 };
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -22,6 +22,8 @@ use crate::shell::ShellState;
 
 /// 不小于 NMH 单批上限（1000），否则合法的整批多选会被确认队列整体拒绝。
 const CAPTURE_CAPACITY: usize = 1000;
+/// 已结束事务结局的保留数量；超出时丢弃最旧记录，仅供扩展轮询 `capture_status`。
+const CAPTURE_OUTCOME_CAPACITY: usize = 1024;
 
 /// 「免打扰下载」：外部接管请求不弹确认，直接按默认设置建任务（设置页 `download.rs`）。
 pub(crate) const SILENT_DOWNLOAD_PREF: &str = "download.silent_download";
@@ -30,6 +32,24 @@ pub(crate) const SILENT_SKIP_SELECTION_PREF: &str = "download.silent_skip_select
 /// 「跟随上次保存位置」与其记录（官方 UI 新建下载写入）。
 const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
 const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
+
+/// 确认事务的终态，供浏览器扩展判断被拒 / 失败后的回退。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureOutcome {
+    Accepted,
+    Rejected,
+    Failed,
+}
+
+impl CaptureOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+}
 
 /// 捕获来源，决定是否需要用户确认。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,17 +106,77 @@ impl ExternalPolicy {
 struct CaptureTransaction {
     public: PendingCaptureDto,
     request: DownloadRequest,
+    /// 捕获方未指定保存目录时的分类路由（入队时按当时的偏好算定）。
+    category: Option<CategoryPlan>,
     /// 按需分配；owned guard 跨 daemon 调用存活，避免重入或旧 resolve 重复建任务。
     group_creation: Option<Arc<Mutex<()>>>,
+}
+
+/// 捕获方未指定保存目录时交给 daemon 的分类路由：引擎按初始名定初始目录，下载完成、最终
+/// 文件名确定后（插件改名、按响应推断、HLS 转封装）再复核，见引擎 `category_route.rs`。
+#[derive(Clone, Debug)]
+struct CategoryPlan {
+    route: CategoryRouteDto,
+    /// 按捕获名命中的分类目录（确认表单据此预填）；未命中为空串。
+    prefill: String,
+}
+
+impl CategoryPlan {
+    fn of(request: &DownloadRequest, route: Option<&CategoryRouteDto>) -> Option<Self> {
+        let route = route.filter(|_| request.save_dir.trim().is_empty())?;
+        let prefill = crate::category_dir::route_save_dir(route, &request.filename, &request.url)
+            .unwrap_or_default()
+            .to_owned();
+        Some(Self {
+            route: route.clone(),
+            prefill,
+        })
+    }
+
+    /// 确认表单提交的目录仍是系统给出的（空 / 表单默认目录 `offered` / 任一分类目录）时
+    /// 继续按分类路由；用户改选了别的目录即以用户选择为准。认任一分类目录而不只是本条的
+    /// 预填：多条捕获并入同一张表单时，目录框只预填第一条命中的分类目录。
+    fn follows(&self, submitted: &str, offered: &str) -> bool {
+        self.route.follows(submitted, offered)
+    }
+
+    /// 交给 daemon 路由：基准目录（路由未命中时的落点）= 「跟随上次保存位置」记录，否则
+    /// daemon 默认。
+    fn apply(self, spec: &mut CaptureCreate, base: Option<&str>) {
+        spec.request.save_dir = base.unwrap_or_default().to_owned();
+        spec.category_route = Some(self.route);
+    }
+}
+
+/// 官方新建下载表单在捕获方未给目录时显示的默认目录（`crates/downloads`
+/// `build_new_download_context` 同序）：跟随上次 → 设置项 `default_save_dir` → daemon 运行时目录。
+fn offered_save_dir(snapshot: &AgentSnapshot, policy: &ExternalPolicy) -> String {
+    if let Some(dir) = &policy.remembered_save_dir {
+        return dir.clone();
+    }
+    match snapshot
+        .daemon
+        .config
+        .values
+        .get("default_save_dir")
+        .map(|dir| dir.trim())
+    {
+        Some(dir) if !dir.is_empty() => dir.to_owned(),
+        _ => snapshot.daemon.runtime_stats.save_dir.trim().to_owned(),
+    }
 }
 
 pub struct CaptureService {
     daemon: Arc<DaemonClient>,
     events: AgentEventHub,
     pending: Mutex<VecDeque<CaptureTransaction>>,
-    /// 静默建成单个任务且没有 UI 时按需拉起官方 UI 承载进度窗口（待确认捕获的拉起由外壳
-    /// 控制循环按快照电平触发，见 `shell::prompt_launch`）。
+    /// 静默建成单个任务且没有就绪 UI 时按需拉起官方 UI 承载进度 / 完成提示（待确认捕获的
+    /// 拉起由外壳控制循环按快照电平触发，见 `shell::prompt_launch`）。
     shell: Arc<ShellState>,
+    /// 最近的事务结局（最新在队尾）；std 锁只在内存操作期间短持有，不跨 await。
+    outcomes: std::sync::Mutex<VecDeque<(String, CaptureOutcome)>>,
+    /// 分享链接（`fluxdown://share/…`、`https://fluxdown.com/s/…`）的出口。
+    share_links: Option<Arc<dyn crate::share_link::ShareLinkSink>>,
 }
 
 impl CaptureService {
@@ -107,14 +187,64 @@ impl CaptureService {
             events,
             pending: Mutex::new(VecDeque::new()),
             shell,
+            outcomes: std::sync::Mutex::new(VecDeque::new()),
+            share_links: None,
         }
+    }
+
+    /// 接入分享链接出口（FluxMesh服务）；缺省没有，分享链接按「FluxMesh不可用」拒绝。
+    #[must_use]
+    pub fn with_share_links(
+        mut self,
+        sink: Option<Arc<dyn crate::share_link::ShareLinkSink>>,
+    ) -> Self {
+        self.share_links = sink;
+        self
+    }
+
+    fn record_outcome(&self, id: &str, outcome: CaptureOutcome) {
+        let mut outcomes = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if outcomes.len() >= CAPTURE_OUTCOME_CAPACITY {
+            outcomes.pop_front();
+        }
+        outcomes.push_back((id.to_owned(), outcome));
+    }
+
+    /// 按事务 ID 查询状态：待确认为 `pending`，已结束取最新结局，查不到为 `unknown`。
+    pub async fn statuses(&self, ids: &[String]) -> serde_json::Map<String, Value> {
+        let pending = self.pending.lock().await;
+        let outcomes = self
+            .outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ids.iter()
+            .map(|id| {
+                let status = if pending
+                    .iter()
+                    .any(|transaction| transaction.public.transaction_id == *id)
+                {
+                    "pending"
+                } else {
+                    outcomes
+                        .iter()
+                        .rev()
+                        .find(|(outcome_id, _)| outcome_id == id)
+                        .map_or("unknown", |(_, outcome)| outcome.as_str())
+                };
+                (id.clone(), Value::from(status))
+            })
+            .collect()
     }
 
     /// 按来源分流：`Direct` 与开启免打扰的 `External` 直接提交 daemon，其余排入确认队列（外壳
     /// 控制循环据快照在没有 UI 时拉起官方 UI）。批量请求（换行连接的多 URL）先拆成逐条请求。
     ///
     /// 保存目录优先级：捕获方指定 > 分类目录 > （仅静默）跟随上次 > daemon 默认（原生移动端 `SilentCapture` 同序）。
-    /// 确认路径把分类目录写进待确认摘要，官方表单据此预填。
+    /// 捕获方未指定目录时分类目录由 daemon 按初始名与下载完成时的最终文件名确定（[`CategoryPlan`]）；
+    /// 确认路径把按捕获名命中的分类目录写进待确认摘要，官方表单据此预填。
     pub async fn submit(
         &self,
         request: DownloadRequest,
@@ -134,41 +264,74 @@ impl CaptureService {
             .into_iter()
             .flat_map(split_batch)
             .collect::<Vec<_>>();
-        if origin == CaptureOrigin::Direct {
-            return self.create_all(requests, None, true).await;
-        }
-        let (policy, requests) = self.events.inspect(|snapshot| {
+        // 分享链接不是下载地址：交给FluxMesh服务。免打扰的外部接管直接接收全部文件，
+        // 否则只解析并等 UI 确认；绝不落成一条损坏的下载任务。
+        let (share_requests, requests): (Vec<_>, Vec<_>) = requests
+            .into_iter()
+            .partition(|request| fluxdown_protocol::capture_link::is_share_link(&request.url));
+        let (policy, route) = self.events.inspect(|snapshot| {
             let preferences = &snapshot.preferences.values;
-            let requests = requests
-                .into_iter()
-                .map(|request| with_category_dir(request, preferences))
-                .collect::<Vec<_>>();
-            (ExternalPolicy::from_preferences(preferences), requests)
+            (
+                ExternalPolicy::from_preferences(preferences),
+                crate::category_dir::category_route(preferences),
+            )
         });
+        // `Direct`（系统打开 / 拖入）与 `External`（扩展 / NMH）都是用户主动交来的链接，按免打扰偏好分流；
+        // `Prompt`（剪贴板监听）恒走确认。
+        let silent_share = origin != CaptureOrigin::Prompt && policy.silent;
+        for request in &share_requests {
+            let Some(sink) = &self.share_links else {
+                return Err(CaptureError::Share(
+                    RpcErrorData::new(ApplicationErrorCode::Unavailable, false)
+                        .with_reason(fluxdown_protocol::ErrorReason::ShareUnavailable),
+                ));
+            };
+            let result = if silent_share {
+                sink.receive_link(&request.url, policy.remembered_save_dir.as_deref())
+                    .await
+            } else {
+                sink.open_link(&request.url).await
+            };
+            result.map_err(CaptureError::Share)?;
+        }
+        if requests.is_empty() {
+            return Ok(json!({ "taskIds": [], "share": !share_requests.is_empty() }));
+        }
+        if origin == CaptureOrigin::Direct {
+            return self.create_all(requests, None, true, None).await;
+        }
         if origin == CaptureOrigin::External && policy.silent {
             let save_dir = policy.remembered_save_dir.as_deref();
             return self
-                .create_all(requests, save_dir, policy.skip_selection)
+                .create_all(requests, save_dir, policy.skip_selection, route.as_ref())
                 .await;
         }
-        self.enqueue(requests).await
+        self.enqueue(requests, route.as_ref()).await
     }
 
     /// 直接建任务（不经确认）。建成的任务随后以 [`AgentEvent::CaptureTasksStarted`] 通知官方
-    /// UI（进度窗口）；单个任务且当前没有 UI 连接时按需拉起界面承载进度窗口。
+    /// UI；单任务按两个窗口开关登记冷启动意图，批量请求不自动拉起下载提示窗口。
     async fn create_all(
         &self,
         requests: Vec<DownloadRequest>,
         fallback_save_dir: Option<&str>,
         unattended: bool,
+        route: Option<&CategoryRouteDto>,
     ) -> Result<Value, CaptureError> {
+        let single_request = requests.len() == 1;
         let mut task_ids = Vec::with_capacity(requests.len());
         let mut started = Vec::with_capacity(requests.len());
         let mut outcome = Ok(());
         for request in requests {
+            let plan = CategoryPlan::of(&request, route);
             let mut create = captured_create_request(request);
-            if let Some(dir) = fallback_save_dir {
-                fill_if_blank(&mut create.request.save_dir, dir.to_owned());
+            match plan {
+                Some(plan) => plan.apply(&mut create, fallback_save_dir),
+                None => {
+                    if let Some(dir) = fallback_save_dir {
+                        fill_if_blank(&mut create.request.save_dir, dir.to_owned());
+                    }
+                }
             }
             let created = match self.create(create, None, unattended).await {
                 Ok(created) => created,
@@ -183,9 +346,10 @@ impl CaptureService {
             }
             task_ids.push(task_id);
         }
-        if !started.is_empty() {
-            if let [task_id] = started.as_slice() {
-                self.shell.launch_for_progress(task_id);
+        // 批量只成功首项后失败，也不能被 UI 误认为单任务用户意图。
+        if !started.is_empty() && (single_request || started.len() > 1) {
+            if single_request && let [task_id] = started.as_slice() {
+                self.shell.launch_for_task_windows(task_id);
             }
             self.events
                 .publish(AgentEvent::CaptureTasksStarted(started));
@@ -193,7 +357,30 @@ impl CaptureService {
         outcome.map(|()| json!({ "taskIds": task_ids }))
     }
 
-    async fn enqueue(&self, requests: Vec<DownloadRequest>) -> Result<Value, CaptureError> {
+    /// 插件页面脚本调用开始的任务（`daemon.plugin.pageInvoke` 应答）按单任务静默捕获同一规则
+    /// 登记：恰好一个任务开始时才拉起 / 通知官方 UI 弹提示窗口；新建发 `CaptureTasksStarted`，
+    /// 恢复已有任务发 `CaptureTasksResumed`。一次开始多个与批量捕获一样不弹。
+    pub fn announce_page_started(&self, created: &[String], resumed: &[String]) {
+        let (task_id, event) = match (created, resumed) {
+            ([task_id], []) => (
+                task_id,
+                AgentEvent::CaptureTasksStarted(vec![task_id.clone()]),
+            ),
+            ([], [task_id]) => (
+                task_id,
+                AgentEvent::CaptureTasksResumed(vec![task_id.clone()]),
+            ),
+            _ => return,
+        };
+        self.shell.launch_for_task_windows(task_id);
+        self.events.publish(event);
+    }
+
+    async fn enqueue(
+        &self,
+        requests: Vec<DownloadRequest>,
+        route: Option<&CategoryRouteDto>,
+    ) -> Result<Value, CaptureError> {
         let transaction_ids = {
             let mut pending = self.pending.lock().await;
             if pending.len() + requests.len() > CAPTURE_CAPACITY {
@@ -201,11 +388,16 @@ impl CaptureService {
             }
             let mut transaction_ids = Vec::with_capacity(requests.len());
             for request in requests {
-                let public = pending_capture_dto(&request);
+                let category = CategoryPlan::of(&request, route);
+                let mut public = pending_capture_dto(&request);
+                if let Some(plan) = &category {
+                    public.save_dir.clone_from(&plan.prefill);
+                }
                 transaction_ids.push(public.transaction_id.clone());
                 pending.push_back(CaptureTransaction {
                     public,
                     request,
+                    category,
                     group_creation: None,
                 });
             }
@@ -264,6 +456,7 @@ impl CaptureService {
                 name: String::new(),
                 source_url: request.url,
                 error: String::new(),
+                plugin_id: String::new(),
                 items: Vec::new(),
             });
         }
@@ -291,13 +484,27 @@ impl CaptureService {
         context: CreateTaskRequest,
     ) -> Result<CreateGroupResponse, CaptureError> {
         validate_group_items(&request)?;
+        let offered = self.events.inspect(|snapshot| {
+            offered_save_dir(
+                snapshot,
+                &ExternalPolicy::from_preferences(&snapshot.preferences.values),
+            )
+        });
         let (request, claim) = {
             let mut pending = self.pending.lock().await;
             let transaction = pending
                 .iter_mut()
                 .find(|transaction| transaction.public.transaction_id == transaction_id)
                 .ok_or(CaptureError::NotFound)?;
-            let request = merge_group_request(transaction.request.clone(), request, &context)?;
+            let mut request = merge_group_request(transaction.request.clone(), request, &context)?;
+            // 任务组落在默认目录：预填的是按捕获名（多为分享页地址）算出的分类目录，不代表组内
+            // 文件；用户未改选目录时换回表单默认目录，组内文件也不再逐个按后缀分类。
+            if let Some(plan) = &transaction.category
+                && !offered.is_empty()
+                && plan.route.is_category_dir(request.save_dir.trim())
+            {
+                request.save_dir = offered;
+            }
             let claim = transaction
                 .group_creation
                 .get_or_insert_with(|| Arc::new(Mutex::new(())))
@@ -329,6 +536,7 @@ impl CaptureService {
                     .position(|transaction| transaction.public.transaction_id == transaction_id)
                     .ok_or(CaptureError::NotFound)?;
                 pending.remove(index).ok_or(CaptureError::NotFound)?;
+                service.record_outcome(&transaction_id, CaptureOutcome::Accepted);
             }
             service.publish().await;
             if let Some(save_auth) = save_auth
@@ -360,7 +568,9 @@ impl CaptureService {
         accepted: bool,
         confirmed: Option<CreateTaskRequest>,
     ) -> Result<Value, CaptureError> {
-        let transaction = {
+        let CaptureTransaction {
+            request, category, ..
+        } = {
             let mut pending = self.pending.lock().await;
             let index = pending
                 .iter()
@@ -377,13 +587,35 @@ impl CaptureService {
         };
         self.publish().await;
         if !accepted {
+            self.record_outcome(transaction_id, CaptureOutcome::Rejected);
             return Ok(json!({ "accepted": false }));
         }
-        let spec = match confirmed {
-            Some(confirmed) => merge_confirmed_request(transaction.request, confirmed),
-            None => captured_create_request(transaction.request),
+        let mut spec = match confirmed {
+            Some(confirmed) => merge_confirmed_request(request, confirmed),
+            None => captured_create_request(request),
         };
-        self.create(spec, None, false).await
+        if let Some(plan) = category {
+            let (offered, remembered) = self.events.inspect(|snapshot| {
+                let policy = ExternalPolicy::from_preferences(&snapshot.preferences.values);
+                (
+                    offered_save_dir(snapshot, &policy),
+                    policy.remembered_save_dir,
+                )
+            });
+            if plan.follows(&spec.request.save_dir, &offered) {
+                plan.apply(&mut spec, remembered.as_deref());
+            }
+        }
+        match self.create(spec, None, false).await {
+            Ok(created) => {
+                self.record_outcome(transaction_id, CaptureOutcome::Accepted);
+                Ok(created)
+            }
+            Err(error) => {
+                self.record_outcome(transaction_id, CaptureOutcome::Failed);
+                Err(error)
+            }
+        }
     }
 
     async fn create(
@@ -401,6 +633,7 @@ impl CaptureService {
                     unattended,
                     hint_file_size: spec.hint_file_size,
                     name_hint: spec.name_hint,
+                    category_route: spec.category_route,
                 }),
             )
             .await
@@ -441,20 +674,6 @@ fn pending_capture_dto(request: &DownloadRequest) -> PendingCaptureDto {
     }
 }
 
-/// 捕获方未指定保存目录时按分类规则补上（命中且该分类配置了目录）。
-fn with_category_dir(
-    mut request: DownloadRequest,
-    preferences: &BTreeMap<String, Value>,
-) -> DownloadRequest {
-    if request.save_dir.trim().is_empty()
-        && let Some(dir) =
-            crate::category_dir::category_save_dir(preferences, &request.filename, &request.url)
-    {
-        request.save_dir = dir;
-    }
-    request
-}
-
 /// `/download/batch` 把多个 URL 以换行连接成单个请求（`fluxdown_api::takeover::parse_batch`）；
 /// 建任务与确认事务都必须逐 URL 进行，否则 daemon 收到多行 URL，确认表单也会把它们拆成与事务
 /// 对不上的普通链接而丢掉 Cookie / Referer / 请求头。单 URL 原样保留；多 URL 只共享
@@ -487,13 +706,15 @@ fn split_batch(request: DownloadRequest) -> Vec<DownloadRequest> {
         .collect()
 }
 
-/// 建任务请求 + 捕获方声明的文件大小提示与参照文件名（二者都不在 `CreateTaskRequest` 内）。
+/// 建任务请求 + 不在 `CreateTaskRequest` 内的捕获附加信息（大小提示、参照文件名、分类路由）。
 struct CaptureCreate {
     request: CreateTaskRequest,
     /// 仅 >0 才有意义：daemon 据此跳过一次性 URL 的探测请求。
     hint_file_size: Option<i64>,
     /// 表单改了名时，浏览器定下的原始名：用户名缺扩展名时引擎借它的扩展名补全。
     name_hint: Option<String>,
+    /// 由 [`CategoryPlan::apply`] 设置；`None` = 保存目录即最终目录。
+    category_route: Option<CategoryRouteDto>,
 }
 
 /// 按捕获原请求建任务（静默提交 / 未带表单结果的确认）；队列与分段走 daemon 默认。
@@ -524,6 +745,7 @@ fn captured_create_request(request: DownloadRequest) -> CaptureCreate {
         },
         hint_file_size,
         name_hint: None,
+        category_route: None,
     }
 }
 
@@ -569,6 +791,7 @@ fn merge_confirmed_request(
         request: confirmed,
         hint_file_size,
         name_hint,
+        category_route: None,
     }
 }
 
@@ -689,6 +912,8 @@ pub enum CaptureError {
     InvalidGroup,
     #[error("daemon capture create failed: {0:?}")]
     Daemon(fluxdown_protocol::RpcErrorData),
+    #[error("share link was not accepted: {0:?}")]
+    Share(fluxdown_protocol::RpcErrorData),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -697,10 +922,9 @@ pub enum CaptureError {
 
 /// daemon 专用二进制上传端点（`POST /blobs/{torrents|plugins}`）的客户端。
 ///
-/// 鉴权用 daemon 在已认证 WebSocket 会话上派生的会话级 HTTP 凭据，不使用长期 token；
-/// base URL 由 RPC URL 换成 http(s) 并去掉路径。
+/// 鉴权与目标地址都取自已认证 WebSocket 会话（会话级凭据 + 该会话所连 daemon 的 HTTP 基址），
+/// 不使用长期 token；daemon 换端口重连后自动跟随。
 pub struct DaemonBlobClient {
-    base_url: reqwest::Url,
     session: crate::daemon_client::HttpSession,
     http: reqwest::Client,
 }
@@ -723,19 +947,6 @@ impl BlobKind {
 
 impl DaemonBlobClient {
     pub fn new(config: &crate::daemon_client::DaemonClientConfig) -> Result<Self, BlobError> {
-        let mut base_url = reqwest::Url::parse(&config.rpc_url)
-            .map_err(|error| BlobError::Url(error.to_string()))?;
-        let scheme = match base_url.scheme() {
-            "ws" | "http" => "http",
-            "wss" | "https" => "https",
-            other => return Err(BlobError::Url(format!("unsupported scheme {other}"))),
-        };
-        base_url
-            .set_scheme(scheme)
-            .map_err(|()| BlobError::Url("scheme is not settable".to_owned()))?;
-        base_url.set_path("");
-        base_url.set_query(None);
-        base_url.set_fragment(None);
         // 只连本机回环 daemon：不需要根证书库，跳过系统根证书加载（macOS 钥匙串，每次约 70ms，
         // 位于 Gateway 开始服务前的装配路径上）。
         let http = reqwest::Client::builder()
@@ -746,7 +957,6 @@ impl DaemonBlobClient {
             .timeout(std::time::Duration::from_secs(60))
             .build()?;
         Ok(Self {
-            base_url,
             session: config.http_session(),
             http,
         })
@@ -754,19 +964,19 @@ impl DaemonBlobClient {
 
     /// 上传字节并返回 daemon 分配的 `blobId`。
     pub async fn upload(&self, kind: BlobKind, bytes: Vec<u8>) -> Result<String, BlobError> {
-        let url = self
+        // 没有已认证的 daemon 会话（未连上 / 已断开）时没有可用凭据：按 daemon 不可用处理，
+        // 绝不退回长期 token。
+        let Some(access) = self.session.access() else {
+            return Err(BlobError::Status(503));
+        };
+        let url = access
             .base_url
             .join(kind.path())
             .map_err(|error| BlobError::Url(error.to_string()))?;
-        // 没有已认证的 daemon 会话（未连上 / 已断开）时没有可用凭据：按 daemon 不可用处理，
-        // 绝不退回长期 token。
-        let Some(credential) = self.session.credential() else {
-            return Err(BlobError::Status(503));
-        };
         let response = self
             .http
             .post(url)
-            .bearer_auth(credential)
+            .bearer_auth(access.credential)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
             .body(bytes)
             .send()
@@ -810,9 +1020,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        CaptureError, CaptureOrigin, CaptureService, DownloadRequest, ExternalPolicy,
+        CaptureError, CaptureOrigin, CaptureService, CategoryPlan, DownloadRequest, ExternalPolicy,
         captured_create_request, into_preview_request, merge_confirmed_request,
-        merge_group_request, pending_capture_dto, split_batch, with_category_dir,
+        merge_group_request, pending_capture_dto, split_batch,
     };
 
     fn preferences(
@@ -872,6 +1082,58 @@ mod tests {
         assert!(capture.list().await.is_empty());
     }
 
+    #[derive(Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl crate::share_link::ShareLinkSink for RecordingSink {
+        async fn open_link(&self, link: &str) -> Result<(), fluxdown_protocol::RpcErrorData> {
+            self.0.lock().expect("lock").push(format!("open {link}"));
+            Ok(())
+        }
+
+        async fn receive_link(
+            &self,
+            link: &str,
+            save_dir: Option<&str>,
+        ) -> Result<(), fluxdown_protocol::RpcErrorData> {
+            self.0
+                .lock()
+                .expect("lock")
+                .push(format!("receive {link} {save_dir:?}"));
+            Ok(())
+        }
+    }
+
+    async fn share_calls(prefs: serde_json::Value, origin: CaptureOrigin) -> Vec<String> {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let capture = service(prefs).with_share_links(Some(sink.clone()));
+        let mut request = captured();
+        request.url = "fluxdown://share/abc".to_owned();
+        capture.submit(request, origin).await.expect("share link");
+        assert!(capture.list().await.is_empty());
+        sink.0.lock().expect("lock").clone()
+    }
+
+    #[tokio::test]
+    async fn share_link_receives_directly_only_for_silent_non_prompt_capture() {
+        let silent = json!({ "download.silent_download": true });
+        for origin in [CaptureOrigin::External, CaptureOrigin::Direct] {
+            assert_eq!(
+                share_calls(silent.clone(), origin).await,
+                ["receive fluxdown://share/abc None"]
+            );
+            assert_eq!(
+                share_calls(json!({}), origin).await,
+                ["open fluxdown://share/abc"]
+            );
+        }
+        assert_eq!(
+            share_calls(silent, CaptureOrigin::Prompt).await,
+            ["open fluxdown://share/abc"]
+        );
+    }
+
     #[tokio::test]
     async fn oversized_batch_is_rejected_whole_without_partial_enqueue() {
         let capture = service(json!({}));
@@ -889,17 +1151,37 @@ mod tests {
     }
 
     #[test]
-    fn category_dir_fills_only_unspecified_save_dir() {
+    fn category_route_applies_only_when_the_dir_was_not_chosen() {
         let prefs = preferences(json!({
-            "custom_categories": [{
-                "id": "bin", "name": "bin", "extensions": ["bin"], "position": 1,
-                "saveDir": "/category",
-            }],
+            "custom_categories": [
+                { "id": "bin", "name": "bin", "extensions": ["bin"], "position": 1,
+                  "saveDir": "/category" },
+                { "id": "img", "name": "img", "extensions": ["jpg"], "position": 2,
+                  "saveDir": "/pictures" },
+            ],
         }));
-        assert_eq!(with_category_dir(captured(), &prefs).save_dir, "/captured");
+        let route = crate::category_dir::category_route(&prefs);
+        // 捕获方给了目录：不路由。
+        assert!(CategoryPlan::of(&captured(), route.as_ref()).is_none());
         let mut unspecified = captured();
         unspecified.save_dir = String::new();
-        assert_eq!(with_category_dir(unspecified, &prefs).save_dir, "/category");
+        let plan = CategoryPlan::of(&unspecified, route.as_ref()).expect("routable capture");
+        assert_eq!(plan.prefill, "/category");
+        // 表单保留预填 / 默认目录 / 留空 = 仍跟随分类；改选别的目录 = 用户选择为准。
+        assert!(plan.follows("", "/default"));
+        assert!(plan.follows(" /category ", "/default"));
+        assert!(plan.follows("/default", "/default"));
+        assert!(!plan.follows("/elsewhere", "/default"));
+        // 多条捕获共用一张表单时目录框是另一条的预填分类目录：仍各自按分类路由。
+        assert!(plan.follows("/pictures", "/default"));
+        // 交给 daemon 时保存目录是基准目录（跟随上次 / daemon 默认），分类由引擎定。
+        let mut spec = captured_create_request(unspecified);
+        plan.clone().apply(&mut spec, Some("/last"));
+        assert_eq!(spec.request.save_dir, "/last");
+        assert_eq!(spec.category_route, route);
+        let mut spec = captured_create_request(captured());
+        plan.apply(&mut spec, None);
+        assert_eq!(spec.request.save_dir, "");
     }
 
     #[test]
@@ -987,6 +1269,7 @@ mod tests {
             .push_back(super::CaptureTransaction {
                 public,
                 request,
+                category: None,
                 group_creation: None,
             });
         capture.publish().await;
@@ -1316,7 +1599,7 @@ mod tests {
         });
         let (daemon, events) = crate::daemon_client::DaemonClient::start(
             crate::daemon_client::DaemonClientConfig::new(format!("ws://{address}/rpc"), TOKEN),
-            Arc::new(crate::supervisor::DaemonSupervisor::new(address)),
+            Arc::new(crate::supervisor::DaemonSupervisor::new(Some(address))),
             tokio_util::sync::CancellationToken::new(),
         )
         .expect("start daemon client");
@@ -1340,6 +1623,127 @@ mod tests {
             stop,
             server,
         )
+    }
+
+    #[tokio::test]
+    async fn capture_notifications_preserve_single_intents_and_batch_boundaries() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (capture, mut calls, daemon_events, stop, server) = daemon_service().await;
+            let (mut events, _) = capture.events.subscribe_and_snapshot();
+            let single = {
+                let capture = Arc::clone(&capture);
+                tokio::spawn(
+                    async move { capture.submit(get_capture(), CaptureOrigin::Direct).await },
+                )
+            };
+            let (request, reply) = calls.recv().await.expect("single create");
+            assert_eq!(
+                request.method,
+                fluxdown_protocol::method::DAEMON_TASK_CREATE
+            );
+            reply
+                .send(Ok(json!({ "taskId": "single" })))
+                .expect("created single");
+            single
+                .await
+                .expect("single caller")
+                .expect("single capture");
+            assert!(matches!(
+                events.try_recv().expect("single notification").event,
+                ServiceEvent::Agent(AgentEvent::CaptureTasksStarted(ids)) if ids == ["single"]
+            ));
+
+            for fail_second in [false, true] {
+                let batch = {
+                    let capture = Arc::clone(&capture);
+                    tokio::spawn(async move {
+                        capture
+                            .submit_many(vec![get_capture(), get_capture()], CaptureOrigin::Direct)
+                            .await
+                    })
+                };
+                let (request, reply) = calls.recv().await.expect("batch first create");
+                assert_eq!(
+                    request.method,
+                    fluxdown_protocol::method::DAEMON_TASK_CREATE
+                );
+                reply
+                    .send(Ok(json!({ "taskId": "first" })))
+                    .expect("first created");
+                let (request, reply) = calls.recv().await.expect("batch second create");
+                assert_eq!(
+                    request.method,
+                    fluxdown_protocol::method::DAEMON_TASK_CREATE
+                );
+                if fail_second {
+                    reply
+                        .send(Err(RpcErrorData::new(
+                            ApplicationErrorCode::InvalidArgument,
+                            false,
+                        )))
+                        .expect("second rejected");
+                    assert!(matches!(
+                        batch.await.expect("batch caller"),
+                        Err(CaptureError::Daemon(_))
+                    ));
+                    assert!(
+                        matches!(
+                            events.try_recv(),
+                            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                        ),
+                        "partial batch must not become a single-task window intent"
+                    );
+                } else {
+                    reply
+                        .send(Ok(json!({ "taskId": "second" })))
+                        .expect("second created");
+                    batch.await.expect("batch caller").expect("batch capture");
+                    assert!(matches!(
+                        events.try_recv().expect("batch notification").event,
+                        ServiceEvent::Agent(AgentEvent::CaptureTasksStarted(ids))
+                            if ids == ["first", "second"]
+                    ));
+                }
+            }
+            stop.send(()).expect("stop test daemon");
+            drop(capture);
+            drop(daemon_events);
+            server.await.expect("daemon server");
+        })
+        .await
+        .expect("capture notification lifecycle");
+    }
+
+    /// 页面脚本调用开始的任务：恰好一个才通知，新建与恢复各用各的事件；多个（含一建一恢复）不通知。
+    #[tokio::test]
+    async fn page_started_tasks_notify_only_a_single_start() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (capture, _calls, daemon_events, stop, server) = daemon_service().await;
+            let (mut events, _) = capture.events.subscribe_and_snapshot();
+            let ids = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+
+            capture.announce_page_started(&ids(&["new"]), &[]);
+            assert!(matches!(
+                events.try_recv().expect("created notification").event,
+                ServiceEvent::Agent(AgentEvent::CaptureTasksStarted(ids)) if ids == ["new"]
+            ));
+            capture.announce_page_started(&[], &ids(&["old"]));
+            assert!(matches!(
+                events.try_recv().expect("resumed notification").event,
+                ServiceEvent::Agent(AgentEvent::CaptureTasksResumed(ids)) if ids == ["old"]
+            ));
+            capture.announce_page_started(&ids(&["a"]), &ids(&["b"]));
+            capture.announce_page_started(&ids(&["a", "b"]), &[]);
+            capture.announce_page_started(&[], &[]);
+            assert!(events.try_recv().is_err(), "multi-start must stay silent");
+
+            stop.send(()).expect("stop test daemon");
+            drop(capture);
+            drop(daemon_events);
+            server.await.expect("daemon server");
+        })
+        .await
+        .expect("page start notification lifecycle");
     }
 
     #[tokio::test]
@@ -1683,8 +2087,9 @@ mod tests {
             stream.write_all(body).await.expect("respond body");
             head
         });
+        let rpc_url = format!("ws://{address}/rpc");
         let config = crate::daemon_client::DaemonClientConfig::new(
-            format!("ws://{address}/rpc"),
+            rpc_url.clone(),
             "long-lived-daemon-token",
         );
         let client = super::DaemonBlobClient::new(&config).expect("blob client");
@@ -1697,9 +2102,13 @@ mod tests {
         assert!(matches!(error, super::BlobError::Status(503)), "{error}");
         assert!(!server.is_finished());
 
-        config
-            .http_session()
-            .install("session-credential".to_owned());
+        config.http_session().install(
+            crate::daemon_client::DaemonHttpAccess::from_rpc_url(
+                &rpc_url,
+                "session-credential".to_owned(),
+            )
+            .expect("session access"),
+        );
         let blob_id = client
             .upload(super::BlobKind::Torrent, vec![1, 2, 3])
             .await

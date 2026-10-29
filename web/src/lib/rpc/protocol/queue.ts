@@ -25,11 +25,25 @@ export interface QueueDto {
   scheduleDays: number;
 }
 
-/** 任务在队列中的位置。 */
+/**
+ * 任务在队列中的位置。全量列表按 `order` 升序排列，`position` = 下标 + 1。
+ * 增量见 `WsServerMsg` 的 `queueOrderChanged`。
+ */
 export interface QueuePositionDto {
   taskId: string;
   /** 1-based，0 = 不在队列中。 */
   position: number;
+  /**
+   * 引擎分配的排序键：升序即启动顺序；任务留在队列期间不变（队首出队不改其余任务的键），
+   * 只有用户调整顺序时整表重排。客户端排序用它，展示序号按键的名次计算。缺省按 0。
+   */
+  order: number;
+}
+
+/** 队列顺序增量的单项（`queueOrderChanged` 的 `added`）。 */
+export interface QueueOrderEntryDto {
+  taskId: string;
+  order: number;
 }
 
 /** 创建/更新队列的字段（更新时同时需要 `queueId`）。除 `name` 外可省略。 */
@@ -81,6 +95,11 @@ export interface CreateGroupRequest {
   extraHeaders?: Record<string, string>;
   ignoreTlsErrors?: boolean;
   startPaused?: boolean;
+  /**
+   * 预解析清单的来源插件（`ResolvePreviewResponse.pluginId` 原样回填）。非空 = 引擎把全部成员绑定到
+   * 该插件，插件已不可用则成员 fail-closed；空 = 引擎按预解析同一规则选插件。
+   */
+  resolverPluginId?: string;
   items: GroupItemRequest[];
 }
 
@@ -121,5 +140,7 @@ export interface ResolvePreviewResponse {
   name: string;
   sourceUrl: string;
   error: string;
+  /** 产出清单的插件 identity；无清单为空串（旧 daemon 缺省）。建组时回填 `CreateGroupRequest.resolverPluginId`。 */
+  pluginId?: string;
   items: PreviewItemDto[];
 }

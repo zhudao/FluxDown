@@ -2,41 +2,58 @@ import { File, PanelBottom, PanelRight, X } from 'lucide-react'
 import { useState } from 'react'
 import { useT } from '../../../i18n'
 import { Button, Icon, SegmentedTabs, Tooltip } from '../../../ui'
+import { usePluginDetailTabs } from '../../plugins/usePluginContributions'
+import { PluginViewHost } from '../../plugins/view/PluginViewHost'
 import { useDownloads } from '../state'
 import { AdvancedTab } from './AdvancedTab'
 import { GeneralTab } from './GeneralTab'
 import { LogTab } from './LogTab'
 import { SeedingTab } from './SeedingTab'
 import { SpeedTab } from './SpeedTab'
+import { GroupOverview } from './GroupOverview'
 import { useSpeedHistory } from './useSpeedHistory'
 import type { DownloadTaskView } from '../model/task'
+import { ShareTaskButton, TransferDiagnosticsTab, useShareTaskFacts } from '../../share'
 
-type DetailTab = 'general' | 'speed' | 'seeding' | 'log' | 'advanced'
+/** 内置 tab 或插件 tab（`plugin:<identity>:<viewId>`）。 */
+type DetailTab = string
 
-function TaskDetail({ view }: { view: DownloadTaskView }) {
+function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | 'sheet' }) {
   const t = useT()
   const [tab, setTab] = useState<DetailTab>('general')
+  const hasShareDiagnostics = useShareTaskFacts(view.taskId)?.isShareReceive === true
   const isBt = view.protocol === 'bt'
-  const active: DetailTab = tab === 'seeding' && !isBt ? 'general' : tab
-  const speedHistory = useSpeedHistory(view, active === 'speed')
+  const pluginTabs = usePluginDetailTabs()
+  const pluginTab = pluginTabs.find((item) => item.value === tab)
+  // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有；传输诊断仅FluxMesh接收任务有。
+  const active: DetailTab =
+    (tab === 'seeding' && !isBt) || (tab === 'shareDiag' && !hasShareDiagnostics) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
+  const speedHistory = useSpeedHistory(view.taskId, view.state === 'downloading', active === 'speed')
   const items = [
     { value: 'general' as const, label: t('detailTabGeneral') },
     { value: 'speed' as const, label: t('detailTabSpeed') },
     ...(isBt ? [{ value: 'seeding' as const, label: t('tabSeeding') }] : []),
+    ...(hasShareDiagnostics ? [{ value: 'shareDiag' as const, label: t('detailTabShareDiagnostics') }] : []),
     { value: 'log' as const, label: t('detailTabLog') },
     { value: 'advanced' as const, label: t('detailTabAdvanced') },
+    ...pluginTabs.map((item) => ({ value: item.value, label: item.view.title })),
   ]
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 px-3 pt-3">
+      <div className="flex shrink-0 items-center gap-2 px-3 pt-3">
         <SegmentedTabs items={items} value={active} onValueChange={setTab} />
+        {mode === 'sheet' ? <ShareTaskButton views={[view]} iconOnly={false} /> : null}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-3">
         {active === 'general' ? <GeneralTab view={view} /> : null}
         {active === 'speed' ? <SpeedTab view={view} history={speedHistory} /> : null}
         {active === 'seeding' ? <SeedingTab view={view} /> : null}
+        {active === 'shareDiag' ? <TransferDiagnosticsTab taskId={view.taskId} taskState={view.state} /> : null}
         {active === 'log' ? <LogTab taskId={view.taskId} /> : null}
         {active === 'advanced' ? <AdvancedTab view={view} /> : null}
+        {pluginTab && active === pluginTab.value ? (
+          <PluginViewHost key={`${pluginTab.value}/${view.taskId}`} identity={pluginTab.identity} view={pluginTab.view.id} taskId={view.taskId} />
+        ) : null}
       </div>
     </div>
   )
@@ -45,7 +62,7 @@ function TaskDetail({ view }: { view: DownloadTaskView }) {
 /** 任务详情面板：docked = 带标题栏（切换位置 / 关闭）；sheet = 仅内容（Sheet 自带标题与关闭）。 */
 export function DetailPanel({ mode }: { mode: 'docked' | 'sheet' }) {
   const t = useT()
-  const { detailTaskId, byKey, closeDetail, prefs, updatePrefs } = useDownloads()
+  const { detailTaskId, byKey, closeDetail, prefs, updatePrefs, overviewGroupId } = useDownloads()
   const view = detailTaskId ? byKey.get(`l:${detailTaskId}`) : undefined
   const right = prefs.detail_placement === 'right'
   const nextPlacement = right ? 'bottom' : 'right'
@@ -56,6 +73,7 @@ export function DetailPanel({ mode }: { mode: 'docked' | 'sheet' }) {
       {mode === 'docked' ? (
         <div className="flex min-h-control shrink-0 items-center gap-1 border-b border-hairline bg-chrome py-0.5 pl-3 pr-1">
           <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{t('detail')}</div>
+          {view && overviewGroupId === null ? <ShareTaskButton views={[view]} /> : null}
           <Tooltip content={placementLabel}>
             <Button
               variant="ghost"
@@ -73,8 +91,10 @@ export function DetailPanel({ mode }: { mode: 'docked' | 'sheet' }) {
           </Tooltip>
         </div>
       ) : null}
-      {view ? (
-        <TaskDetail key={view.taskId} view={view} />
+      {overviewGroupId !== null ? (
+        <GroupOverview key={overviewGroupId} groupId={overviewGroupId} />
+      ) : view ? (
+        <TaskDetail key={view.taskId} view={view} mode={mode} />
       ) : (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6">
           <File strokeWidth={1.5} className="text-text-tertiary" style={{ width: 32, height: 32 }} />

@@ -24,7 +24,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -42,11 +44,21 @@ import com.fluxdown.core.model.CloudDevice
 import com.fluxdown.core.model.HostRef
 import com.fluxdown.core.model.LinkDevice
 import com.fluxdown.core.model.TaskStatus
+import com.fluxdown.core.protocol.CloudConnectionDto
+import com.fluxdown.core.protocol.CloudPresence
+import com.fluxdown.core.protocol.DeviceRules
+import com.fluxdown.core.protocol.HostCapability
+import com.fluxdown.core.protocol.HostSection
+import com.fluxdown.core.protocol.Json
+import com.fluxdown.core.protocol.has
 import com.fluxdown.core.store.Connection
+import com.fluxdown.fluxui.chrome.FluxGlassIconButton
 import com.fluxdown.fluxui.chrome.FluxHeader
 import com.fluxdown.fluxui.controls.ButtonSize
 import com.fluxdown.fluxui.controls.ButtonVariant
 import com.fluxdown.fluxui.controls.FluxButton
+import com.fluxdown.fluxui.controls.FluxIconButton
+import com.fluxdown.fluxui.controls.IconButtonSize
 import com.fluxdown.fluxui.controls.FluxDivider
 import com.fluxdown.fluxui.controls.FluxListRow
 import com.fluxdown.fluxui.controls.FluxPresenceDot
@@ -69,8 +81,9 @@ import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 
 /**
- * V1 设备页（Dock 目的地）：当前主机卡 + 云端已信任设备 + 局域网已配对设备。
- * 配对 / 添加设备 / 设备详情依赖桥接层接口（端口内尚无），本页只读展示。
+ * V1 设备页（Dock 目的地）：当前主机卡 + 云端已信任设备（presence 未知时显示「状态未知」）+ 已配对设备
+ * （直连：在线点 / 刷新状态 / 下发 / 重命名 / 解除配对）。
+ * 添加设备（账户 / 直连配对）经页头「+」打开 [AddDeviceSheet]；入站配对确认是全局弹层（[InboundPairingPrompt]）。
  */
 @Composable
 fun DevicesScreen() {
@@ -82,20 +95,33 @@ fun DevicesScreen() {
     val cloud by remember { derivedStateOf { host.value.cloudDevices } }
     val link by remember { derivedStateOf { host.value.linkDevices } }
     val facts = remember { derivedStateOf { host.value.toFacts() } }
+    val live by remember { derivedStateOf { host.value.connection == Connection.Live } }
+    val connectionRaw by remember { derivedStateOf { host.value.sections[HostSection.agentCloudConnection] } }
+    // 云端在线状态是否可信（与「下载到」候选同一判定）；不可信时云设备显示「状态未知」，不当离线
+    val presenceKnown = remember(connectionRaw, live) {
+        CloudPresence.isKnown(CloudConnectionDto.fromJson(Json.parseOrNull(connectionRaw)), live)
+    }
 
-    val cloudSorted = remember(cloud) {
-        cloud.sortedWith(
-            compareByDescending<CloudDevice> { it.isCurrent }
-                .thenByDescending { it.isOnline }
+    val cloudSorted = remember(cloud, presenceKnown) { DeviceRules.sorted(cloud, presenceKnown) }
+    val linkSorted = remember(link) {
+        link.sortedWith(
+            compareBy<LinkDevice> { it.revoked }
+                .thenByDescending { it.online }
                 .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
         )
     }
-    val linkSorted = remember(link) {
-        link.sortedWith(compareByDescending<LinkDevice> { it.online }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
-    }
+    val sameAccount = remember(cloud, link) { DeviceRules.attachedLinkFingerprints(cloud, link) }
+    // 与「下载到」同一份候选；已挂接的直连记录经 resolveTarget 解析为云条目键，revoked / 不在候选里的没有下发入口
+    val targets = remember(cloud, link, presenceKnown, live) { DeviceRules.dispatchTargets(cloud, link, presenceKnown, live) }
+    fun dispatchTargetId(d: LinkDevice): String? =
+        if (d.revoked) null else DeviceRules.resolveTarget("link:${d.fingerprint}", targets)?.id
+    val accountCap by remember { derivedStateOf { host.value.has(HostCapability.agentAuth) } }
+    val linkCap by remember { derivedStateOf { host.value.has(HostCapability.agentDeviceLink) } }
+    val readOnly by remember { derivedStateOf { host.value.isReadOnly } }
+    val links = rememberLinkedDeviceActions()
+    var renaming by remember { mutableStateOf<LinkDevice?>(null) }
 
     val listState = rememberLazyListState()
-    DockMiniEffect(listState)
     val swipe = LocalSwipeRevealCoordinator.current
     val gate = rememberFlowInGate()
     val margin = space.screenMargin
@@ -115,6 +141,15 @@ fun DevicesScreen() {
             FluxHeader(
                 title = str(R.string.mobileNavDevices),
                 modifier = Modifier.padding(horizontal = margin).fluxFlowIn(0, gate, "header"),
+                actions = {
+                    if (accountCap || linkCap) {
+                        FluxGlassIconButton(
+                            icon = FluxIcons.Plus,
+                            contentDescription = str(R.string.addDeviceEntry),
+                            onClick = { nav.openSheet(SheetRoute.AddDevice) },
+                        )
+                    }
+                },
             )
         }
         item(key = "host") {
@@ -122,6 +157,7 @@ fun DevicesScreen() {
                 hostRef = hostRef,
                 facts = facts.value,
                 onSwitch = { nav.openSheet(SheetRoute.HostSwitch) },
+                onRepair = { (hostRef as? HostRef.Remote)?.let { nav.openSheet(SheetRoute.AddHost(repair = it)) } },
                 modifier = Modifier.padding(horizontal = margin, vertical = 6.dp).fluxFlowIn(1, gate, "host"),
             )
         }
@@ -134,28 +170,51 @@ fun DevicesScreen() {
                 ) {
                     cloudSorted.forEach { d ->
                         row(hasIcon = true) {
-                            DeviceRow(d.name, d.platform, d.isOnline, d.appVersion, d.isCurrent)
+                            DeviceRow(d.name, d.platform, if (presenceKnown) d.isOnline else null, d.appVersion, d.isCurrent)
                         }
                     }
                 }
             }
         }
-        if (linkSorted.isNotEmpty()) {
+        if (linkCap) {
             item(key = "link") {
                 GlassSection(
                     modifier = Modifier.padding(horizontal = margin).fluxFlowIn(3, gate, "link"),
                     title = str(R.string.linkedDevicesTitle),
                     footer = str(R.string.linkedDevicesDesc),
+                    action = {
+                        FluxButton(
+                            text = str(R.string.linkedDeviceRefresh),
+                            onClick = links::refresh,
+                            variant = ButtonVariant.Ghost,
+                            size = ButtonSize.Xs,
+                            icon = FluxIcons.RefreshCw,
+                            loading = links.refreshing,
+                            enabled = !readOnly,
+                        )
+                    },
                 ) {
+                    if (linkSorted.isEmpty()) {
+                        custom(padded = true) {
+                            FluxText(str(R.string.linkedDevicesEmpty), style = FluxTheme.type.sm, color = FluxTheme.colors.inkMuted)
+                        }
+                    }
                     linkSorted.forEach { d ->
                         row(hasIcon = true) {
-                            DeviceRow(d.name, d.platform, d.online, null, false)
+                            LinkedDeviceRow(
+                                device = d,
+                                sameAccount = d.fingerprint in sameAccount,
+                                actionsEnabled = !readOnly,
+                                onDispatch = dispatchTargetId(d)?.let { id -> { nav.openSheet(SheetRoute.NewDownload(targetId = id)) } },
+                                onRename = { renaming = d },
+                                onRemove = { links.confirmRemove(d) },
+                            )
                         }
                     }
                 }
             }
         }
-        if (cloudSorted.isEmpty() && linkSorted.isEmpty()) {
+        if (cloudSorted.isEmpty() && !linkCap) {
             item(key = "empty") {
                 Box(Modifier.fillMaxWidth().padding(top = 24.dp), contentAlignment = Alignment.Center) {
                     FluxEmpty(glyph = FluxGlyph.Device, title = str(R.string.mobileDevicesEmptyTitle))
@@ -169,6 +228,12 @@ fun DevicesScreen() {
             )
         }
     }
+
+    LinkRenameSheet(
+        target = renaming,
+        readOnly = readOnly,
+        onDismiss = { renaming = null },
+    )
 }
 
 // ── 主机事实（派生，结构相等才触发重组）──────────────────────────────────
@@ -212,7 +277,7 @@ private fun com.fluxdown.core.store.HostState.toFacts(): HostFacts {
 // ── 当前主机卡 ──────────────────────────────────────────────────────────
 
 @Composable
-private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, modifier: Modifier = Modifier) {
+private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, onRepair: () -> Unit, modifier: Modifier = Modifier) {
     val c = FluxTheme.colors
     val t = FluxTheme.type
     val actions = LocalTaskActions.current
@@ -223,7 +288,13 @@ private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, m
         Connection.Stale -> str(R.string.mobileHostConnStale) to Tone.Amber
         is Connection.Failed -> str(R.string.mobileHostConnFailed) to Tone.Coral
     }
-    val connError = (facts.connection as? Connection.Failed)?.let { actions.errorText(it.error) }
+    val failure = (facts.connection as? Connection.Failed)?.error
+    val needsRepair = failure != null && hostRef.needsRepair(failure)
+    val connError = when {
+        needsRepair -> str(R.string.mobileHostRepairNeeded)
+        failure != null -> actions.errorText(failure)
+        else -> null
+    }
 
     Column(
         modifier
@@ -253,6 +324,15 @@ private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, m
                 },
             )
             if (connError != null) FluxText(connError, style = t.sm, color = c.coralText)
+            if (needsRepair) {
+                FluxButton(
+                    text = str(R.string.mobileHostRepair),
+                    onClick = onRepair,
+                    variant = ButtonVariant.Secondary,
+                    size = ButtonSize.Sm,
+                    icon = FluxIcons.Link,
+                )
+            }
         }
         FluxDivider()
         val disk = facts.diskFree?.let { Format.bytes(it) }
@@ -282,12 +362,30 @@ private fun HostCard(hostRef: HostRef, facts: HostFacts, onSwitch: () -> Unit, m
 // ── 设备行 ──────────────────────────────────────────────────────────────
 
 @Composable
-private fun DeviceRow(name: String, platform: String?, online: Boolean, version: String?, current: Boolean) {
+private fun DeviceRow(
+    name: String,
+    platform: String?,
+    /** null = 云端 presence 不可信（状态未知，不当离线）。 */
+    online: Boolean?,
+    version: String?,
+    current: Boolean,
+    subtitleOverride: String? = null,
+    /** 附在状态行末尾的说明（如「可控制本机」）。 */
+    note: String? = null,
+    trailing: (@Composable () -> Unit)? = null,
+) {
     val c = FluxTheme.colors
-    val subtitle = listOfNotNull(
-        str(if (online) R.string.deviceOnline else R.string.deviceOffline),
+    val subtitle = subtitleOverride ?: listOfNotNull(
+        str(
+            when (online) {
+                true -> R.string.deviceOnline
+                false -> R.string.deviceOffline
+                null -> R.string.devicePresenceUnknown
+            },
+        ),
         platformLabel(platform),
         version?.takeIf { it.isNotBlank() }?.let { "v$it" },
+        note,
     ).joinToString(" · ")
     FluxListRow(
         title = name,
@@ -296,13 +394,74 @@ private fun DeviceRow(name: String, platform: String?, online: Boolean, version:
             Box(Modifier.size(44.dp)) {
                 GlyphTile(
                     icon = platformIcon(platform),
-                    tint = if (online) c.ink else c.inkFaint,
+                    tint = if (online == true) c.ink else c.inkFaint,
                     modifier = Modifier.align(Alignment.TopStart),
                 )
-                PresenceMark(online, Modifier.align(Alignment.BottomEnd))
+                PresenceMark(online == true, Modifier.align(Alignment.BottomEnd))
             }
         },
-        trailing = if (current) ({ FluxTag(str(R.string.thisDevice), tone = Tone.Accent) }) else null,
+        trailing = trailing ?: if (current) ({ FluxTag(str(R.string.thisDevice), tone = Tone.Accent) }) else null,
+    )
+}
+
+/**
+ * 已配对设备行（直连）：在线点、生效名（备注名优先）、平台 / 版本；对方已解除 = revoked 标签 + 只给「解除配对」；
+ * 挂接到同账号云设备 = 「同一账号」标签；操作：下发（[onDispatch] 非空才显示）、重命名、解除配对。
+ */
+@Composable
+private fun LinkedDeviceRow(
+    device: LinkDevice,
+    sameAccount: Boolean,
+    actionsEnabled: Boolean,
+    onDispatch: (() -> Unit)?,
+    onRename: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    DeviceRow(
+        name = device.name,
+        platform = device.platform,
+        online = device.online && !device.revoked,
+        version = device.appVersion,
+        current = false,
+        subtitleOverride = if (device.revoked) str(R.string.linkedDeviceRevokedDesc) else null,
+        note = if (device.grantsControl && !device.revoked) str(R.string.linkControlGrantedTag) else null,
+        trailing = {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                when {
+                    device.revoked -> FluxTag(str(R.string.linkedDeviceRevokedTag), tone = Tone.Coral)
+                    sameAccount -> FluxTag(str(R.string.linkedDeviceSameAccountTag), tone = Tone.Accent)
+                }
+                if (!device.revoked) {
+                    if (onDispatch != null) {
+                        FluxIconButton(
+                            FluxIcons.Send,
+                            str(R.string.deviceDownloadToThis),
+                            onClick = onDispatch,
+                            size = IconButtonSize.Sm,
+                            glass = false,
+                            enabled = actionsEnabled,
+                        )
+                    }
+                    FluxIconButton(
+                        FluxIcons.Pen,
+                        str(R.string.linkedDeviceRename),
+                        onClick = onRename,
+                        size = IconButtonSize.Sm,
+                        glass = false,
+                        enabled = actionsEnabled,
+                    )
+                }
+                FluxIconButton(
+                    FluxIcons.Trash2,
+                    str(R.string.linkedDeviceRemove),
+                    onClick = onRemove,
+                    size = IconButtonSize.Sm,
+                    glass = false,
+                    danger = true,
+                    enabled = actionsEnabled,
+                )
+            }
+        },
     )
 }
 

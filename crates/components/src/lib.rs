@@ -9,6 +9,7 @@ mod kit;
 mod motion;
 mod qr;
 mod sidebar;
+mod tooltip;
 
 pub use callout::{CalloutTone, RevealCallout};
 pub use icons::{ComponentAssets, FluxIcon, category_icon};
@@ -20,7 +21,8 @@ pub use kit::{
 };
 pub use motion::{SlidingHighlight, StateLayer, color_transition};
 pub use qr::{MAX_QR_TEXT_LENGTH, QrPalette, qr_image};
-pub use sidebar::{SidebarChange, SidebarPanel, SidebarState};
+pub use sidebar::{SidebarChange, SidebarPanel, SidebarState, sidebar_toggle_button};
+pub use tooltip::tooltip_view;
 
 use fluxdown_ui_theme::active_theme;
 use gpui::prelude::FluentBuilder as _;

@@ -30,7 +30,7 @@ use crate::events::EventSink;
 use crate::logger::log_info;
 use crate::naming::{extract_from_url, sanitize_filename};
 use crate::output;
-use crate::proxy_config::{self, ProxyConfig};
+use crate::proxy_config::{self, ProxyConfig, host_matches_no_proxy};
 use crate::speed_limiter::SpeedLimiter;
 use crate::transfer_activity::{TaskRuntime, TaskSegment, TransferTracker};
 
@@ -220,56 +220,6 @@ fn set_control_timeouts(tcp: &std::net::TcpStream) -> std::io::Result<()> {
     tcp.set_read_timeout(Some(FTP_CONTROL_READ_TIMEOUT))?;
     tcp.set_write_timeout(Some(FTP_CONTROL_READ_TIMEOUT))?;
     Ok(())
-}
-
-/// no_proxy 匹配（逗号/分号分隔）：`*`、精确主机、域后缀（`.x` / `*.x` / `x`）、
-/// 精确 IP 与 CIDR，语义对齐 reqwest::NoProxy。
-fn host_matches_no_proxy(host: &str, list: &str) -> bool {
-    use std::net::IpAddr;
-    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
-    let host_ip = host.parse::<IpAddr>().ok();
-    for raw in list.split([',', ';']) {
-        let entry = raw.trim().to_ascii_lowercase();
-        if entry.is_empty() {
-            continue;
-        }
-        if entry == "*" {
-            return true;
-        }
-        if let Some((net, bits)) = entry.split_once('/')
-            && let (Ok(net), Ok(bits), Some(ip)) =
-                (net.parse::<IpAddr>(), bits.parse::<u32>(), host_ip)
-        {
-            let in_net = match (net, ip) {
-                (IpAddr::V4(n), IpAddr::V4(h)) if bits <= 32 => {
-                    let mask = if bits == 0 {
-                        0
-                    } else {
-                        u32::MAX << (32 - bits)
-                    };
-                    u32::from(n) & mask == u32::from(h) & mask
-                }
-                (IpAddr::V6(n), IpAddr::V6(h)) if bits <= 128 => {
-                    let mask = if bits == 0 {
-                        0
-                    } else {
-                        u128::MAX << (128 - bits)
-                    };
-                    u128::from(n) & mask == u128::from(h) & mask
-                }
-                _ => false,
-            };
-            if in_net {
-                return true;
-            }
-            continue;
-        }
-        let suffix = entry.trim_start_matches("*.").trim_start_matches('.');
-        if host == suffix || host.ends_with(&format!(".{suffix}")) {
-            return true;
-        }
-    }
-    false
 }
 
 /// Connect to an FTP server, optionally through a proxy.
@@ -884,17 +834,30 @@ async fn verify_ftp_rest_honoured(
 pub async fn run_ftp_download(params: DownloadParams) {
     let task_id_log = params.task_id.clone();
     let result = match run_ftp_download_inner(&params).await {
-        Ok(total) => params
-            .db
-            .update_task_status(&params.task_id, 3, "")
-            .await
-            .map(|()| total)
-            .map_err(DownloadError::Db),
+        Ok(total) => {
+            match crate::downloader::finalize_output(&params, crate::intercept::ProtocolKind::Ftp)
+                .await
+            {
+                Ok(replaced) => {
+                    let (total, renamed) = match replaced {
+                        Some((name, size)) => (size, Some(name)),
+                        None => (total, None),
+                    };
+                    params
+                        .db
+                        .update_task_status(&params.task_id, 3, "")
+                        .await
+                        .map(|()| (total, renamed))
+                        .map_err(DownloadError::Db)
+                }
+                Err(e) => Err(e),
+            }
+        }
         Err(error) => Err(error),
     };
 
     match result {
-        Ok(total) => {
+        Ok((total, renamed)) => {
             log_info!(
                 "[ftp-download] task {} completed, total={} bytes",
                 task_id_log,
@@ -908,7 +871,7 @@ pub async fn run_ftp_download(params: DownloadParams) {
                     total_bytes: total,
                     status: 3,
                     error_message: String::new(),
-                    file_name: String::new(),
+                    file_name: renamed.unwrap_or_default(),
                     segment_details: None,
                     ..Default::default()
                 })
@@ -1056,6 +1019,39 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         info.supports_range
     );
 
+    let mut requested_segments = p.segment_count;
+    let mut connection_cap = p.connection_cap;
+    if crate::intercept::wants(
+        p.interceptor.as_ref(),
+        crate::intercept::InterceptStage::Probed,
+    ) {
+        let task_ctx = crate::intercept::ctx::task_ctx(p, crate::intercept::ProtocolKind::Ftp);
+        let notes = crate::intercept::ActivityNotes::of(p);
+        let decision = crate::intercept::drive::run_probed(
+            p.interceptor.as_ref(),
+            &notes,
+            &p.cancel_token,
+            &task_ctx,
+            crate::intercept::patch::request_snapshot(&p.url, &p.spec, &p.run_meta),
+            crate::intercept::ctx::ConnectionsCtx {
+                segments: p.segment_count,
+                max_connections: p.connection_cap,
+                auto_max_connections: p.auto_max_connections,
+            },
+            crate::intercept::ctx::ProbeCtx {
+                total_bytes: info.total_bytes,
+                supports_range: info.supports_range,
+                file_name: info.file_name.clone(),
+                content_type: String::new(),
+                etag: String::new(),
+                last_modified: info.last_modified.clone(),
+            },
+        )
+        .await?;
+        requested_segments = decision.segments.unwrap_or(requested_segments);
+        connection_cap = decision.max_connections.unwrap_or(connection_cap);
+    }
+
     // p.file_name 来自外部（aria2 out、云端下发、接管请求等），与 HTTP/HLS 一致地清洗，
     // 否则 save_dir.join 可被 `..`/绝对路径带出保存目录。
     let auto_name = if p.file_name.is_empty() {
@@ -1069,6 +1065,30 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     // 兄弟任务预订协调），FTP downloader 内不再做名称变更——保留
     // p.file_name 即可，仅当为空时（兜底）使用 probe 结果。
     let actual_name = auto_name.clone();
+
+    // 换源结算（同 HTTP，见 `Db::settle_source_change`）：必须先于下面覆盖 total_bytes。
+    // 新链接大小与旧总大小不一致 = 换成了另一个文件，清空进度并删除旧临时文件。
+    if p.is_resume
+        && p.db
+            .settle_source_change(&p.task_id, info.total_bytes)
+            .await?
+    {
+        log_info!(
+            "[ftp-download] task {} 换源后大小与原文件不一致（新={}），丢弃已下进度从头下载",
+            p.task_id,
+            info.total_bytes
+        );
+        let stale = PathBuf::from(format!(
+            "{}{}",
+            save_dir.join(&actual_name).display(),
+            TEMP_EXT
+        ));
+        match tokio::fs::remove_file(&stale).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
 
     p.db.update_task_file_info(&p.task_id, &actual_name, info.total_bytes)
         .await?;
@@ -1096,6 +1116,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         .send(ProgressUpdate {
             task_id: p.task_id.clone(),
             downloaded_bytes: initial_downloaded,
+            download_baseline: Some(initial_downloaded),
             total_bytes: info.total_bytes,
             status: 1,
             error_message: String::new(),
@@ -1113,7 +1134,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
 
     // Dynamic segment calculation
-    let segments = if p.segment_count <= 0 {
+    let segments = if requested_segments <= 0 {
         if p.is_resume {
             let existing = p.db.load_segments(&p.task_id).await?;
             if !existing.is_empty() {
@@ -1125,7 +1146,12 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             compute_ftp_segments(p, &info).await
         }
     } else {
-        p.segment_count
+        requested_segments
+    };
+    let segments = if connection_cap > 0 {
+        segments.min(connection_cap)
+    } else {
+        segments
     };
 
     let mut use_segments = info.supports_range && info.total_bytes > 1_048_576 && segments > 1;
@@ -1180,7 +1206,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
     let tracker = TransferTracker::new();
 
     if use_segments {
-        ftp_download_multi_segment(
+        let outcome = ftp_download_multi_segment(
             &p.task_id,
             &ftp_url,
             &temp_path,
@@ -1194,8 +1220,18 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
             &tracker,
             &p.sink,
             p.spawn_gen,
+            crate::intercept::cap_connections(MAX_CONCURRENT_FTP_CONNECTIONS, connection_cap),
         )
-        .await?;
+        .await;
+        // 暂停终态帧读 tasks.downloaded_bytes：退出前按已落库分段对齐（同 HTTP 多段）。
+        if matches!(outcome, Err(DownloadError::Cancelled))
+            && let Err(error) =
+                p.db.sync_task_progress_from_segments(&p.task_id, p.spawn_gen)
+                    .await
+        {
+            crate::logger::report_warning("ftp-download", "sync paused progress", &error);
+        }
+        outcome?;
     } else {
         // Retry wrapper for single-thread FTP download.
         // ftp_download_single supports resume (checks existing file length),
@@ -1587,6 +1623,24 @@ async fn ftp_download_single(
         } else {
             tokio::io::BufWriter::with_capacity(BUF_WRITER_CAPACITY, File::create(&dest).await?)
         };
+        // The actual file offset can differ from tasks.downloaded_bytes, and
+        // REST fallback retries may have truncated it since the outer probe.
+        // Establish this attempt's starting point before consuming body data.
+        if progress_tx
+            .send(ProgressUpdate {
+                task_id: task_id.clone(),
+                downloaded_bytes: downloaded,
+                download_baseline: Some(downloaded),
+                total_bytes,
+                status: 1,
+                ..Default::default()
+            })
+            .await
+            .is_err()
+        {
+            tracing::debug!("FTP progress receiver closed");
+            return Err(DownloadError::Cancelled);
+        }
         let mut last_report = std::time::Instant::now();
         let mut last_db_save = std::time::Instant::now();
         loop {
@@ -1725,6 +1779,7 @@ async fn ftp_download_multi_segment(
     tracker: &TransferTracker,
     sink: &Arc<dyn EventSink>,
     spawn_gen: i64,
+    max_connections: usize,
 ) -> Result<(), DownloadError> {
     output::ensure_parent(dest).await?;
 
@@ -1826,9 +1881,28 @@ async fn ftp_download_multi_segment(
         }
     }
 
+    // Use repaired segment checkpoints, not the independently persisted task
+    // counter. No worker has started, so this contains restored bytes only.
+    let baseline = total_downloaded.load(Ordering::Relaxed);
+    if progress_tx
+        .send(ProgressUpdate {
+            task_id: task_id.to_owned(),
+            downloaded_bytes: baseline,
+            download_baseline: Some(baseline),
+            total_bytes,
+            status: 1,
+            ..Default::default()
+        })
+        .await
+        .is_err()
+    {
+        tracing::debug!("FTP progress receiver closed");
+        return Err(DownloadError::Cancelled);
+    }
+
     // Limit concurrent FTP connections to avoid server-side per-IP limits
     // (most FTP servers cap at 5-10 simultaneous connections per IP).
-    let ftp_semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FTP_CONNECTIONS));
+    let ftp_semaphore = Arc::new(tokio::sync::Semaphore::new(max_connections));
     let mut handles = Vec::new();
 
     for (idx, start, end, already_downloaded) in &seg_defs {
@@ -1854,6 +1928,7 @@ async fn ftp_download_multi_segment(
         let proxy = proxy_config.clone();
         let tracker = tracker.clone();
         let sink = sink.clone();
+        let parallelism = max_connections as u32;
 
         let handle = tokio::spawn(async move {
             // 排队中的段遇到取消要立即退出，否则每个排队段都会先完整握手再发现已取消。
@@ -1886,6 +1961,7 @@ async fn ftp_download_multi_segment(
                 &tracker,
                 sink.as_ref(),
                 spawn_gen,
+                parallelism,
             )
             .await
         });
@@ -1954,6 +2030,7 @@ async fn ftp_do_segment_with_retry(
     tracker: &TransferTracker,
     sink: &dyn EventSink,
     spawn_gen: i64,
+    parallelism: u32,
 ) -> Result<(), DownloadError> {
     let mut attempts = 0u32;
 
@@ -1976,6 +2053,7 @@ async fn ftp_do_segment_with_retry(
             proxy_config,
             tracker,
             spawn_gen,
+            parallelism,
         )
         .await
         {
@@ -2045,6 +2123,7 @@ async fn ftp_do_segment(
     proxy_config: &ProxyConfig,
     tracker: &TransferTracker,
     spawn_gen: i64,
+    parallelism: u32,
 ) -> Result<(), DownloadError> {
     let bytes_needed = (seg_end - actual_start + 1) as u64;
     if cancel.is_cancelled() {
@@ -2253,7 +2332,7 @@ async fn ftp_do_segment(
                 };
                 let current_total = snapshot.iter().map(|s| s.downloaded_bytes).sum();
                 for segment in &mut snapshot { segment.active = Some(tracker.is_active(segment.index)); }
-                let runtime = ftp_runtime(task_id, total_bytes, MAX_CONCURRENT_FTP_CONNECTIONS as u32, tracker, &snapshot, sample_sequence);
+                let runtime = ftp_runtime(task_id, total_bytes, parallelism, tracker, &snapshot, sample_sequence);
                 if progress_tx.send(ProgressUpdate {
                     task_id: task_id.to_owned(), downloaded_bytes: current_total, total_bytes,
                     status: 1, segment_details: Some(snapshot), runtime: Some(runtime),
@@ -2597,6 +2676,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             no_proxy_list: "*.local".to_string(),
+            rules: None,
         };
         assert!(!super::connects_via_proxy(&url, Some(&proxy)));
         let remote = super::FtpUrl {
@@ -2757,7 +2837,7 @@ mod tests {
                 upload_limit_bps: 0,
                 default_save_dir: dir.to_string_lossy().into_owned(),
                 app_data_dir: dir.to_string_lossy().into_owned(),
-                bt_config: crate::bt_downloader::BtConfig::default(),
+                bt_config: crate::bt_config::BtConfig::default(),
                 proxy_config: crate::proxy_config::ProxyConfig::default(),
                 user_agent: String::new(),
                 data_dir_override: Some(dir.clone()),
@@ -2844,7 +2924,7 @@ mod tests {
                 upload_limit_bps: 0,
                 default_save_dir: dir.to_string_lossy().into_owned(),
                 app_data_dir: dir.to_string_lossy().into_owned(),
-                bt_config: crate::bt_downloader::BtConfig::default(),
+                bt_config: crate::bt_config::BtConfig::default(),
                 proxy_config: crate::proxy_config::ProxyConfig::default(),
                 user_agent: String::new(),
                 data_dir_override: Some(dir.clone()),
@@ -2980,6 +3060,58 @@ mod tests {
         assert_eq!(tokio::fs::read(&path).await?, b"old");
         drop(writer);
         tokio::fs::remove_file(path).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_ftp_partial_file_emits_zero_baseline_before_new_bytes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const PAYLOAD: &[u8] = b"ftp-baseline-payload";
+        let db = crate::db::Db::connect("sqlite::memory:").await?;
+        db.insert_task(
+            "baseline-reset",
+            "ftp://localhost/f",
+            "f",
+            "",
+            1,
+            PAYLOAD.len() as i64,
+            "",
+            "",
+            "",
+            1,
+        )
+        .await?;
+        db.update_task_progress("baseline-reset", 8).await?;
+        let dir =
+            std::env::temp_dir().join(format!("fluxdown_ftp_baseline_{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await?;
+        let dest = dir.join("missing-partial");
+        let (port, _, _) = spawn_fake_ftp(false, false, PAYLOAD)?;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::ftp_download_single(
+                "baseline-reset",
+                &fake_ftp_url(port),
+                &dest,
+                PAYLOAD.len() as i64,
+                true,
+                &db,
+                &tx,
+                &tokio_util::sync::CancellationToken::new(),
+                &crate::speed_limiter::SpeedLimiter::new(0),
+                &crate::proxy_config::ProxyConfig::default(),
+                &crate::transfer_activity::TransferTracker::new(),
+            ),
+        )
+        .await??;
+        let baseline = rx
+            .try_recv()
+            .expect("actual baseline precedes body progress");
+        assert_eq!(baseline.download_baseline, Some(0));
+        assert_eq!(baseline.downloaded_bytes, 0);
+        assert_eq!(tokio::fs::read(&dest).await?, PAYLOAD);
+        remove_test_dir(&dir).await;
         Ok(())
     }
 

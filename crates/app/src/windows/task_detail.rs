@@ -38,13 +38,16 @@ pub fn open(cx: &mut App, task_id: String) {
     let key = WindowKey::TaskDetail(task_id.clone());
     WindowRegistry::open_or_focus(cx, key, options, move |window, cx| {
         let downloads_port = Arc::new(AgentDownloadsPort::new(client.clone()));
-        let host = DownloadHostActions {
+        let mut host = DownloadHostActions {
             open_group_window: Some(Rc::new(|group_id, _window, cx| {
                 crate::windows::group_detail::open(cx, group_id);
             })),
             on_user_started: Some(Rc::new(crate::progress_windows::user_started)),
+            plugin_tab_view: Some(crate::plugin_contributions::tab_view_factory()),
             ..DownloadHostActions::default()
         };
+        let share_hub = Desktop::global(cx).share_hub.clone();
+        crate::share_host::extend_download_actions(&mut host, &share_hub);
         let detail = cx.new(|cx| {
             TaskDetailView::new(
                 translator.clone(),
@@ -56,6 +59,7 @@ pub fn open(cx: &mut App, task_id: String) {
             )
         });
         attach(&session, &detail, cx);
+        crate::plugin_contributions::attach_detail_window(&detail, cx);
         let window_view = cx.new(|cx| {
             AuxiliaryWindowView::new(translator.clone(), "detail", detail.clone().into(), cx)
         });

@@ -212,9 +212,17 @@ pub(crate) fn affected(event: &AgentEvent) -> &'static [Section] {
             | DaemonEvent::TaskActivityAdded(_)
             // 云端推送事件只由 agent 消费，不应到达投影；到达也不改变任何分区。
             | DaemonEvent::TaskNotice(_)
+            // 插件可移植视图事件：移动端 v1 不渲染，不改变任何分区。
+            | DaemonEvent::PluginViewFrame(_)
+            | DaemonEvent::PluginViewClosed { .. }
+            | DaemonEvent::PluginToast { .. }
             | DaemonEvent::SnapshotReplaced(_)
+            // 整表重载宣告：任务 / 队列位置表不属于任何分区，由完整快照信号承载。
+            | DaemonEvent::TablesReloading { .. }
             | DaemonEvent::TaskChanged(_)
+            | DaemonEvent::TasksChanged(_)
             | DaemonEvent::TaskDeleted { .. }
+            | DaemonEvent::TasksDeleted { .. }
             | DaemonEvent::QueuesChanged(_)
             | DaemonEvent::GroupsChanged(_)
             | DaemonEvent::ConfigChanged(_)
@@ -239,6 +247,11 @@ pub(crate) fn affected(event: &AgentEvent) -> &'static [Section] {
         | AgentEvent::CloudDevicesChanged(_)
         | AgentEvent::LinkedDevicesChanged(_)
         | AgentEvent::CaptureTasksStarted(_)
+        // 外部恢复任务只驱动桌面提示窗口，移动端既无分区也不发通知。
+        | AgentEvent::CaptureTasksResumed(_)
+        // FluxMesh暂不进移动端（桌面 / Web 先行）：既无分区也不发通知。
+        | AgentEvent::ShareChanged(_)
+        | AgentEvent::ShareProgress(_)
         // 远端主机的应用内更新只在其桌面 / Web 界面操作，移动端不暴露分区。
         | AgentEvent::UpdateChanged(_)
         | AgentEvent::SessionRevoked(_) => &[],

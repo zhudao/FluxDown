@@ -6,6 +6,7 @@
 pub mod analytics;
 pub mod api_host;
 pub mod background_effects;
+mod bundle_watch;
 pub mod capture;
 mod category_dir;
 pub mod cdn_worker;
@@ -18,9 +19,13 @@ mod demo;
 mod device_identity;
 pub mod device_meta;
 pub mod diagnostics;
+pub mod egress;
 pub mod embedded;
 pub mod event_hub;
+mod event_pump;
 pub mod gateway;
+#[cfg(feature = "desktop")]
+mod hotkey;
 mod http_client;
 pub mod lifecycle;
 pub mod link;
@@ -31,18 +36,27 @@ pub mod notification;
 mod open_association;
 pub mod permission;
 pub mod platform;
+pub mod plugin_revocation;
 pub mod power;
 pub mod remote;
 pub mod runtime;
 pub mod server_mode;
+#[cfg(feature = "share-p2p")]
+pub mod share;
+pub mod share_link;
 pub mod shell;
+pub mod sniff_rules;
+mod sound;
+mod startup_failure;
 pub mod state;
 pub mod supervisor;
 pub mod sync;
+mod system_proxy;
 mod task_events;
 pub mod update;
 mod web_assets;
 
+pub use category_dir::route_save_dir;
 pub use embedded::{AgentStartError, EmbeddedAgent, EmbeddedConfig, start_embedded};
 pub use gateway::{LocalConnection, LocalEventError};
 

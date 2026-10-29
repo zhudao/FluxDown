@@ -41,6 +41,12 @@ You don't need to open the popup to flip it: press **Alt+Shift+D** anywhere in t
 
 The toolbar icon itself reflects the current state too (it dims when interception is off), so you can tell at a glance without opening the popup.
 
+## Using with SingleFile
+
+In Chrome, Brave, and other Chromium-based browsers, with both the FluxDown extension and [SingleFile](https://github.com/gildas-lormeau/SingleFile) enabled, pages saved by SingleFile may get a random ID as their file name (for example `fc17bc0e-762a-4990-a07d-b8a4b7c91ae2.htm`). This is a known Chromium bug ([crbug 41418926](https://issues.chromium.org/issues/41418926)): while any extension takes part in deciding download file names, a file name another extension passes to the downloads API can be lost. IDM, XDown, and Video DownloadHelper trigger it the same way.
+
+Fix: open SingleFile's options and, under **Misc**, turn off **Save pages in background**. SingleFile then saves from within the page, file names come out correctly, and FluxDown's download interception keeps working.
+
 ## The fluxdown:// protocol mode
 
 Normally the extension hands downloads to the FluxDown app over Native Messaging. The **FluxDown Protocol** toggle in the popup's Quick Settings and on the options page (off by default) switches to a different channel: an intercepted download navigates to a `fluxdown://download?url=...&filename=...` URL, and the operating system wakes whatever app is registered for that protocol — the FluxDown desktop or Android app.
@@ -74,6 +80,8 @@ The last option sends the current page's own URL to FluxDown — useful when the
 
 FluxDown continuously scans each page for downloadable resources — video and audio elements, streaming manifests (HLS `.m3u8`, DASH `.mpd`), subtitles, and links or network responses that look like files — combining a DOM scan with live monitoring of the page's network activity. Detected items are classified (video, audio, document, archive, image, torrent, stream, subtitle, magnet link, other) and lightly filtered, so the list stays about real downloadable content instead of every icon, ad ping, or preload fragment: very small files are dropped per type, tracker/analytics traffic is ignored, and raw streaming segments stay hidden unless they're large enough to plausibly be a real file on their own. Image sniffing is off by default, so ordinary page images don't clutter the results.
 
+What counts as a downloadable resource is decided by sniffing rules. If a site isn't detected correctly, you can write your own rule under **Sniffing Rules** in the options page — see the [Sniffing Rules Reference](/docs/en/browser-extension/sniff-rules/).
+
 Two pieces of on-page UI surface what's found:
 
 - **Floating ball** — a small draggable dot that docks to the left or right edge of the page (drag it and let go; it snaps to the nearest edge) and shows a badge with the number of resources found. Click it to open the resource panel. Hide it from the popup's **Floating Ball** toggle, or from the eye icon in the resource panel's own header, if you'd rather not see it — detection and the toolbar badge keep working either way.
@@ -88,6 +96,22 @@ The extension's toolbar icon shows a numeric badge with the resource count for t
 ### Install the FFmpeg component for merged output
 
 Many of the resources you'll sniff — streaming manifests especially — don't arrive as one finished file. DASH streams (`.mpd`) routinely split audio and video into separate tracks, so downloading one produces two files (for example `video.mp4` and `video.audio.m4a`) unless FluxDown can merge them. That merge is done with **FFmpeg** (a fast stream copy, no re-encoding), which isn't bundled with the app — it's an optional component you install on demand from **Settings → Extensions → Components** inside the desktop app. With it installed, DASH audio/video tracks are merged into a single playable file automatically; without it, the tracks are kept separate for you to merge yourself. Installing FFmpeg also unlocks plugins that declare the `ffmpeg` capability (see the [plugin API reference](/docs/en/plugins/api-reference/)), and installs `ffprobe` alongside it. HLS (`.m3u8`) downloads don't need FFmpeg — FluxDown reassembles and remuxes those to MP4 on its own.
+
+## Plugin page scripts
+
+Some FluxDown plugins ship **page scripts**: small scripts the extension runs on the websites the plugin lists, for example to add a download button to a page. They are off until you turn them on, and the extension only ever runs scripts of plugins you have installed in the FluxDown desktop app and approved there.
+
+To turn them on:
+
+1. In the FluxDown desktop app (Settings → Extensions → Plugins), install the plugin and approve it. A plugin with page scripts has **Full trust** risk, and its approval dialog lists each script and the sites it runs on.
+2. Open the extension's options page, go to **Page scripts** in the sidebar and click **Enable** for the plugin you want. The first time you do this for a plugin, the extension explains that its scripts can read and change those pages and your logged-in sessions there, lists the sites they run on and asks you to confirm (**I understand the risks, enable**); after that, plugin updates update the scripts without asking again. Use **Disable and remove** to remove them, and **View source** to inspect a script at any time.
+3. Allow the browser permission when prompted, and make sure the browser's user-scripts switch is on:
+   - **Chrome / Edge (Chromium)**: open `chrome://extensions`, open FluxDown's **Details** and turn on **Allow User Scripts** (Chrome 138 and later; on older versions turn on **Developer mode** instead).
+   - **Firefox**: accept the optional **user scripts** permission request. It can be granted or removed under `about:addons` → FluxDown → **Permissions**.
+
+After that the extension keeps scripts up to date with the desktop app on its own: a plugin update, a new script or a changed site list applies automatically, and you are not asked again for that plugin. The extension does not store a copy of the script code; it always takes it from the desktop app, and scripts that are already registered keep running if the app is closed.
+
+To remove them: turn the plugin's scripts off in the options page, or disable or uninstall the plugin in the desktop app — its scripts are unregistered from the browser at the next sync. Revoking the user-scripts permission (Firefox) or turning **Allow User Scripts** off (Chrome) stops every plugin script at once and leaves the rest of the extension working.
 
 ## Track today's stats
 

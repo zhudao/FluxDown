@@ -94,6 +94,7 @@ struct ProtocolChannelTests {
         }
 
         func close() {}
+        func categorySaveDir(fileName _: String, url _: String) -> String? { nil }
         func createTask(_: CreateTaskRequest) async throws(HostError) -> String { "" }
         func pause(_: String) async throws(HostError) {}
         func resume(_: String) async throws(HostError) {}
@@ -155,6 +156,17 @@ struct ProtocolChannelTests {
         #expect(HostMethod.agentCloudNotifyTelegramBindStatus == "agent.cloudNotify.telegramBindStatus")
         #expect(HostMethod.agentCloudNotifySendEmailCode == "agent.cloudNotify.sendEmailCode")
         #expect(HostMethod.agentCloudNotifyVerifyEmail == "agent.cloudNotify.verifyEmail")
+        #expect(HostMethod.agentShareConfig == "agent.share.config")
+        #expect(HostMethod.agentShareSetLocalConfig == "agent.share.setLocalConfig")
+        #expect(HostMethod.agentShareReceiveRecords == "agent.share.receiveRecords")
+        #expect(HostMethod.agentShareSwitchToBridge == "agent.share.switchToBridge")
+        #expect(HostMethod.agentShareSessionKill == "agent.share.sessionKill")
+        #expect(HostMethod.agentShareConvertToCloud == "agent.share.convertToCloud")
+        #expect(HostMethod.agentShareDeleteCloudCopy == "agent.share.deleteCloudCopy")
+        #expect(HostMethod.agentShareStopProviding == "agent.share.stopProviding")
+        #expect(HostCapability.agentShare == "agent.share")
+        #expect(HostMethod.agentProfileSendDeleteCode == "agent.profile.sendDeleteCode")
+        #expect(HostMethod.agentProfileDeleteAccount == "agent.profile.deleteAccount")
         #expect(HostSection.agentCloudNotify == "agent.cloudNotify")
         #expect(HostCapability.agentRemoteTasks == "agent.remoteTasks")
         #expect(HostSection.all.count == 16)

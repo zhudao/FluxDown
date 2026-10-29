@@ -336,7 +336,7 @@ impl PreparedCall {
 pub enum Step {
     /// 已同步得出的响应（握手、校验失败、`system.hello` / `system.shutdown`）。
     Reply(SessionReply),
-    /// 普通调用；传输层按 [`PreparedCall::is_slow`] 选择内联等待或交给 [`SlowCalls`]。
+    /// 普通调用；传输层按 [`PreparedCall::is_slow`] 选择 FIFO 在途槽或 [`SlowCalls`]。
     Call(PreparedCall),
 }
 
@@ -810,6 +810,7 @@ mod tests {
             method::DAEMON_RSS_VALIDATE,
             method::DAEMON_LINK_PROBE,
             method::DAEMON_CONFIG_PROXY_TEST,
+            method::DAEMON_CONFIG_PROXY_ROUTE,
             method::DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH,
             method::DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH,
         ] {

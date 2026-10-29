@@ -63,6 +63,8 @@ const CHECK_NOTIFICATIONS: &str = "notifications";
 const CHECK_NMH_LAUNCH: &str = "nmh_launch";
 /// Windows：限制原生消息主机的组织策略。
 const CHECK_NMH_POLICY: &str = "nmh_policy";
+/// Windows：浏览器经 `%ComSpec% /d /c` 启动原生消息主机所用的命令解释器。
+const CHECK_NMH_COMSPEC: &str = "nmh_comspec";
 /// 类 Unix：属于其他用户的 NMH 启动脚本 / 清单（以后的自动注册改不了）。
 const CHECK_NMH_OWNERSHIP: &str = "nmh_ownership";
 /// 类 Unix 桌面：FluxDown 正以 root 运行。
@@ -116,6 +118,10 @@ const HINT_NMH_POLICY_BLOCKED: &str = "nmh_policy_blocked";
 const HINT_NMH_USER_HOSTS_DISABLED: &str = "nmh_user_hosts_disabled";
 const HINT_NMH_CMD_DISABLED: &str = "nmh_cmd_disabled";
 const HINT_NMH_FOREIGN_OWNED: &str = "nmh_foreign_owned";
+/// `ComSpec` 配置值不可用：浏览器起不来原生消息主机。
+const HINT_NMH_COMSPEC_INVALID: &str = "nmh_comspec_invalid";
+/// `ComSpec` 已正确，但本进程（以及修改前启动的浏览器）仍沿用旧值。
+const HINT_NMH_COMSPEC_RESTART: &str = "nmh_comspec_restart";
 #[cfg(unix)]
 const HINT_RUNNING_ELEVATED: &str = "running_elevated";
 
@@ -138,6 +144,8 @@ pub const ACTION_FIX_COMPONENT: &str = "fix_component";
 pub const ACTION_ENABLE_AUTOSTART: &str = "enable_autostart";
 /// 打开系统设置页，`target` 为 [`crate::platform::SettingsPane::name`]。
 pub const ACTION_OPEN_SETTINGS: &str = "open_settings";
+/// 把 `ComSpec` 改回可用值（只写用户变量，无需管理员）并通知资源管理器刷新环境变量。
+pub const ACTION_FIX_COMSPEC: &str = "fix_comspec";
 /// `register` 动作的 `.torrent` 关联目标。
 pub const TARGET_TORRENT: &str = "torrent";
 
@@ -328,6 +336,7 @@ impl DiagnosticsService {
         let _serial = self.repair_lock.lock().await;
         match params.action.as_str() {
             ACTION_REREGISTER | ACTION_USE_THIS_INSTALL => self.repair_nmh().await,
+            ACTION_FIX_COMSPEC => self.repair_comspec().await,
             ACTION_FIX_DIR_ACCESS => self.repair_dir_access(&params.target).await,
             ACTION_FIX_COMPONENT => self.repair_component(&params.target).await,
             ACTION_ENABLE_AUTOSTART => self.repair_autostart().await,
@@ -487,7 +496,7 @@ impl DiagnosticsService {
     }
 
     async fn probe_daemon(&self) -> DaemonProbe {
-        let endpoint = &self.daemon_config.rpc_url;
+        let endpoint = self.daemon_config.endpoint_label();
         let ping = tokio::time::timeout(
             DAEMON_TIMEOUT,
             self.daemon
@@ -674,7 +683,7 @@ impl DiagnosticsService {
             "appVersion": fluxdown_protocol::APP_VERSION,
             "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
             "dataDir": self.store.data_dir().display().to_string(),
-            "daemonRpcUrl": self.daemon_config.rpc_url,
+            "daemonRpcUrl": self.daemon_config.endpoint_label(),
             "deviceId": state.device_id,
             "deviceName": state.device_name,
             "devicePlatform": state.platform,
@@ -707,20 +716,18 @@ impl DiagnosticsService {
             .ok_or_else(|| {
                 DiagnosticsError::Export("prepareLogExport returned no exportId".to_owned())
             })?;
-        let url = daemon_export_url(&self.daemon_config.rpc_url, export_id)?;
+        // 会话级凭据与地址只在已认证的 daemon 连接上存在；没有会话就是 daemon 不可用，不退回
+        // 长期 token。
+        let access = self.daemon_config.http_session().access().ok_or_else(|| {
+            DiagnosticsError::Export("daemon session is not established".to_owned())
+        })?;
+        let url = daemon_export_url(&access.base_url, export_id);
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(DAEMON_TIMEOUT)
             .build()
             .map_err(|error| DiagnosticsError::Export(error.to_string()))?;
-        // 会话级凭据只在已认证的 daemon 连接上存在；没有会话就是 daemon 不可用，不退回长期 token。
-        let credential = self
-            .daemon_config
-            .http_session()
-            .credential()
-            .ok_or_else(|| {
-                DiagnosticsError::Export("daemon session is not established".to_owned())
-            })?;
+        let credential = access.credential;
         let response = client
             .get(url)
             .bearer_auth(credential)
@@ -1166,11 +1173,7 @@ fn nmh_launch_check(
     diagnosis: &crate::nmh::registry::NmhDiagnosis,
     result: &Result<(), crate::nmh::registry::RelayLaunchError>,
 ) -> DiagnosticCheckDto {
-    let entry = if cfg!(windows) {
-        format!("cmd.exe /d /c {}", diagnosis.registered_relay)
-    } else {
-        diagnosis.relay_location.clone()
-    };
+    let entry = diagnosis.launch_entry();
     match result {
         Ok(()) => check(
             CHECK_NMH_LAUNCH,
@@ -1327,8 +1330,61 @@ fn nmh_checks(diagnosis: &crate::nmh::registry::NmhDiagnosis) -> Vec<DiagnosticC
             Some((ACTION_REREGISTER, "")),
         ));
     }
+    checks.extend(diagnosis.comspec.as_ref().map(comspec_check));
     checks.extend(diagnosis.policy_blocks.iter().map(policy_check));
     checks
+}
+
+/// `ComSpec` 以注册表配置值（新启动的程序拿到的值）为准；本进程环境只用来发现「已修正但
+/// 修改前启动的程序仍沿用旧值」——Windows 不会把环境变量的修改推给已在运行的进程。
+fn comspec_check(state: &crate::nmh::comspec::ComSpecState) -> DiagnosticCheckDto {
+    use crate::nmh::comspec::DEFAULT_COMSPEC;
+
+    let configured = state.configured.as_ref().map(|configured| {
+        let value = if configured.raw == configured.path {
+            format!("\"{}\"", configured.raw)
+        } else {
+            format!("\"{}\" → {}", configured.raw, configured.path)
+        };
+        format!("{value} ({})", configured.source.location())
+    });
+    if let Some(issue) = state.configured_issue {
+        let current =
+            configured.unwrap_or_else(|| "neither the user nor the system variable".to_owned());
+        return check(
+            CHECK_NMH_COMSPEC,
+            "",
+            DiagnosticLevel::Error,
+            format!("ComSpec = {current}: {issue}\nexpected: {DEFAULT_COMSPEC}"),
+            HINT_NMH_COMSPEC_INVALID,
+            Some((ACTION_FIX_COMSPEC, "")),
+        );
+    }
+    let configured = configured.unwrap_or_default();
+    if let Some(issue) = state.process_issue {
+        let process = state
+            .process
+            .as_deref()
+            .map_or_else(|| "(not set)".to_owned(), |value| format!("\"{value}\""));
+        return check(
+            CHECK_NMH_COMSPEC,
+            "",
+            DiagnosticLevel::Warn,
+            format!(
+                "programs started from now on: {configured}\nprograms started before the change, FluxDown included: {process}: {issue}"
+            ),
+            HINT_NMH_COMSPEC_RESTART,
+            Some((ACTION_FIX_COMSPEC, "")),
+        );
+    }
+    check(
+        CHECK_NMH_COMSPEC,
+        "",
+        DiagnosticLevel::Ok,
+        configured,
+        "",
+        None,
+    )
 }
 
 /// 组织策略是管理员的明确意图：只报告，不提供修复（FluxDown 不绕过策略）。
@@ -1820,19 +1876,12 @@ fn daemon_log_dir(describe: Option<&Value>) -> Option<&str> {
         .filter(|dir| !dir.is_empty())
 }
 
-/// `ws://host:port/rpc` → `http://host:port/exports/{id}`。
-fn daemon_export_url(rpc_url: &str, export_id: &str) -> Result<reqwest::Url, DiagnosticsError> {
-    let mut url = reqwest::Url::parse(rpc_url)
-        .map_err(|error| DiagnosticsError::Export(format!("daemon URL invalid: {error}")))?;
-    let scheme = match url.scheme() {
-        "wss" | "https" => "https",
-        _ => "http",
-    };
-    url.set_scheme(scheme)
-        .map_err(|()| DiagnosticsError::Export("daemon URL scheme not switchable".to_owned()))?;
+/// daemon 会话的 HTTP 基址 → `<基址>/exports/{id}`。
+fn daemon_export_url(base: &reqwest::Url, export_id: &str) -> reqwest::Url {
+    let mut url = base.clone();
     url.set_path(&format!("/exports/{export_id}"));
     url.set_query(None);
-    Ok(url)
+    url
 }
 
 fn pretty_json<T: serde::Serialize>(value: &T) -> Vec<u8> {
@@ -1899,20 +1948,21 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ACTION_ENABLE_AUTOSTART, ACTION_ENABLE_SERVICE, ACTION_FIX_COMPONENT,
+        ACTION_ENABLE_AUTOSTART, ACTION_ENABLE_SERVICE, ACTION_FIX_COMPONENT, ACTION_FIX_COMSPEC,
         ACTION_FIX_DIR_ACCESS, ACTION_OPEN_LOG_DIR, ACTION_OPEN_SETTINGS, ACTION_REGISTER,
         ACTION_REREGISTER, ACTION_TEST_NOTIFICATION, ACTION_USE_THIS_INSTALL, DiskSleepBlockers,
         HINT_ASSOCIATION_OFF, HINT_AUTOSTART_BLOCKED, HINT_CHECK_DISK, HINT_COMPONENT_BLOCKED,
         HINT_COMPONENT_BLOCKED_FIXABLE, HINT_COMPONENT_BROKEN, HINT_DAEMON_STARTUP_FAILED,
         HINT_DIR_PERMISSION, HINT_DIR_PERMISSION_MACOS, HINT_DIR_TIMEOUT, HINT_DISK_SLEEP_BLOCKERS,
         HINT_ENABLE_LOCAL_SERVER, HINT_ENABLE_PROTOCOL, HINT_LOW_DISK_SPACE, HINT_NMH_CMD_DISABLED,
-        HINT_NMH_FOREIGN_OWNED, HINT_NMH_LAUNCH_FAILED, HINT_NMH_OTHER_INSTALL,
-        HINT_NMH_USER_HOSTS_DISABLED, HINT_NOTIFICATIONS_BLOCKED, HINT_REINSTALL_APP,
-        HINT_REREGISTER_NMH, LOW_SPACE_BYTES, STARTUP_STDERR_LINES, TARGET_TORRENT,
-        autostart_check, category_probe_targets, component_check, daemon_export_url,
-        daemon_log_dir, daemon_startup_check, disk_sleep_blockers, disk_sleep_check,
-        manifest_check, nmh_checks, nmh_launch_check, notification_check, opted_out_associations,
-        probe_local_server, probe_log_dir, relay_check, shell_checks, storage_check,
+        HINT_NMH_COMSPEC_INVALID, HINT_NMH_COMSPEC_RESTART, HINT_NMH_FOREIGN_OWNED,
+        HINT_NMH_LAUNCH_FAILED, HINT_NMH_OTHER_INSTALL, HINT_NMH_USER_HOSTS_DISABLED,
+        HINT_NOTIFICATIONS_BLOCKED, HINT_REINSTALL_APP, HINT_REREGISTER_NMH, LOW_SPACE_BYTES,
+        STARTUP_STDERR_LINES, TARGET_TORRENT, autostart_check, category_probe_targets,
+        component_check, comspec_check, daemon_export_url, daemon_log_dir, daemon_startup_check,
+        disk_sleep_blockers, disk_sleep_check, manifest_check, nmh_checks, nmh_launch_check,
+        notification_check, opted_out_associations, probe_local_server, probe_log_dir, relay_check,
+        shell_checks, storage_check,
     };
     use crate::nmh::registry::{NmhDiagnosis, NmhTarget, RelayOwner};
     use crate::permission::Os;
@@ -2477,10 +2527,14 @@ mod tests {
 
     #[test]
     fn daemon_export_url_and_log_dir_are_derived() {
-        let url = daemon_export_url("ws://127.0.0.1:17801/rpc?x=1", "logs:abc").ok();
+        let access = crate::daemon_client::DaemonHttpAccess::from_rpc_url(
+            "ws://127.0.0.1:17801/rpc?x=1",
+            String::new(),
+        )
+        .expect("session access");
         assert_eq!(
-            url.map(|u| u.to_string()),
-            Some("http://127.0.0.1:17801/exports/logs:abc".to_owned())
+            daemon_export_url(&access.base_url, "logs:abc").to_string(),
+            "http://127.0.0.1:17801/exports/logs:abc"
         );
         let describe = serde_json::json!({ "logDir": "/data/logs" });
         assert_eq!(daemon_log_dir(Some(&describe)), Some("/data/logs"));
@@ -2782,6 +2836,84 @@ mod tests {
         assert_eq!(
             repair_of(&failed),
             Some((ACTION_REREGISTER.to_owned(), String::new()))
+        );
+    }
+
+    #[test]
+    fn comspec_check_trusts_the_registry_and_flags_stale_processes() {
+        use crate::nmh::comspec::{ComSpecIssue, ComSpecSource, ComSpecState, ConfiguredComSpec};
+        let cmd = r"C:\Windows\system32\cmd.exe";
+        let default = ConfiguredComSpec {
+            source: ComSpecSource::System,
+            raw: r"%SystemRoot%\system32\cmd.exe".to_owned(),
+            path: cmd.to_owned(),
+        };
+        let summary = |state: &ComSpecState| {
+            let check = comspec_check(state);
+            (check.level, check.hint.clone(), repair_of(&check))
+        };
+        let fix = Some((ACTION_FIX_COMSPEC.to_owned(), String::new()));
+
+        // 用户反馈的现场：用户变量以分隔符结尾，本进程也继承了它。
+        let broken = ComSpecState {
+            configured: Some(ConfiguredComSpec {
+                source: ComSpecSource::User,
+                raw: r"C:\Windows\system32\".to_owned(),
+                path: r"C:\Windows\system32\".to_owned(),
+            }),
+            configured_issue: Some(ComSpecIssue::TrailingSeparator),
+            process: Some(r"C:\Windows\system32\".to_owned()),
+            process_issue: Some(ComSpecIssue::TrailingSeparator),
+        };
+        assert_eq!(
+            summary(&broken),
+            (
+                DiagnosticLevel::Error,
+                HINT_NMH_COMSPEC_INVALID.to_owned(),
+                fix.clone()
+            )
+        );
+        assert!(comspec_check(&broken).detail.contains(r"HKCU\Environment"));
+
+        let unset = ComSpecState {
+            configured_issue: Some(ComSpecIssue::Missing),
+            process_issue: Some(ComSpecIssue::Missing),
+            ..ComSpecState::default()
+        };
+        assert_eq!(summary(&unset).0, DiagnosticLevel::Error);
+
+        // 注册表已修好、本进程仍是旧值：不再报错，提示重启浏览器，并允许再次广播。
+        let stale = ComSpecState {
+            configured: Some(default.clone()),
+            configured_issue: None,
+            ..broken.clone()
+        };
+        assert_eq!(
+            summary(&stale),
+            (
+                DiagnosticLevel::Warn,
+                HINT_NMH_COMSPEC_RESTART.to_owned(),
+                fix
+            )
+        );
+
+        // 反过来：本进程正常但注册表被改坏，新启动的浏览器会失败。
+        let regressed = ComSpecState {
+            process: Some(cmd.to_owned()),
+            process_issue: None,
+            ..broken
+        };
+        assert_eq!(summary(&regressed).0, DiagnosticLevel::Error);
+
+        let healthy = ComSpecState {
+            configured: Some(default),
+            configured_issue: None,
+            process: Some(cmd.to_owned()),
+            process_issue: None,
+        };
+        assert_eq!(
+            summary(&healthy),
+            (DiagnosticLevel::Ok, String::new(), None)
         );
     }
 

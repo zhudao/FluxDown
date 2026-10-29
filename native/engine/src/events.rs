@@ -4,7 +4,7 @@
 //! 引擎事件不依赖 UI、FFI 或具体传输协议。
 
 use crate::model::{
-    GroupInfo, ManifestItemInfo, QueueInfo, QueuePosition, SegmentDetail, TaskInfo,
+    GroupInfo, ManifestItemInfo, QueueInfo, QueueOrderEntry, QueuePosition, SegmentDetail, TaskInfo,
 };
 use crate::rss::model::{RssItemInfo, RssSourceInfo};
 use crate::transfer_activity::TaskRuntime;
@@ -60,6 +60,37 @@ pub enum EngineEvent {
     /// 响应“请求全部任务”——全部持久化任务快照。
     TasksSnapshot(Vec<TaskInfo>),
 
+    /// 完整持久化单任务事实；创建配置全部落库后、任何下载或探测帧之前发送。
+    TaskChanged(Box<TaskInfo>),
+
+    /// 一批新建任务的完整持久化事实（批量创建 `create_tasks_batch`）；语义 =
+    /// 按序对每个任务应用一次 [`EngineEvent::TaskChanged`]。整批先于任何
+    /// 单任务进度/元数据/启动帧发送，宿主据此一次处理整批而非逐任务广播。
+    TasksChanged(Vec<TaskInfo>),
+
+    /// 一批任务的记录已删除（批量删除 `delete_tasks_batch`）；语义 = 按序对每个任务
+    /// 应用一次删除。经 progress reporter 排序发出：先于它入队的这些任务的进度帧都已发出，
+    /// 宿主据此一次移除整批，而不是逐任务处理 `status=4` 删除哨兵。
+    TasksDeleted(Vec<String>),
+
+    /// Authoritative download counter baseline, ordered through the progress
+    /// reporter before the corresponding progress frame. Restored bytes are
+    /// not traffic; an explicit lower baseline starts a new transfer interval.
+    /// Host-local accounting only: this is not a wire event.
+    TaskTransferBaseline {
+        task_id: String,
+        downloaded_bytes: i64,
+        /// Last raw counter before the new baseline. The reporter may have
+        /// coalesced this sample; settle it before replacing the interval.
+        previous_downloaded_bytes: Option<i64>,
+    },
+
+    /// 自上一帧以来从网络读到的 body 字节（下载器上报了
+    /// `ProgressUpdate::transfer_bytes` 时才有），紧排在对应进度帧之前。
+    /// 宿主据此统计流量，并忽略该任务进度帧的落盘增量，直到任务离开活动态。
+    /// Host-local accounting only: this is not a wire event.
+    TaskTransferred { task_id: String, bytes: i64 },
+
     /// 分段级进度，用于下载可视化（IDM 风格）。
     SegmentProgress {
         task_id: String,
@@ -78,8 +109,15 @@ pub enum EngineEvent {
         total_bytes: i64,
     },
 
-    /// 队列位置批量更新——每次队列变化时广播。
+    /// 队列位置全量替换——首次发布与用户调序（已发布键的相对顺序被破坏）时发送。
     QueuePositionsChanged(Vec<QueuePosition>),
+
+    /// 队列顺序增量——先移除 `removed`，再按 `order` 插入 / 更新 `added`。
+    /// 队首出队只携带被移除的任务，其余任务的键不变。
+    QueueOrderChanged {
+        removed: Vec<String>,
+        added: Vec<QueueOrderEntry>,
+    },
 
     /// 全部命名队列——启动时与任意队列变化后发送。
     QueuesChanged(Vec<QueueInfo>),
@@ -133,6 +171,12 @@ pub enum EngineEvent {
         reason: String,
     },
 
+    /// 插件状态（列表 / 设置 / 站点默认）发生变化，携带最新完整列表。
+    /// 客户端整体替换插件列表并重新拉取插件相关查询。
+    /// 仅 `plugins` feature 下由 `PluginManager::publish_state` 发出。
+    #[cfg(feature = "plugins")]
+    PluginsChanged(Vec<crate::plugin::PluginInfo>),
+
     /// BT 重复添加检测：新任务的 info-hash 已被另一任务持有（下载或做种），
     /// 引擎已删除新建的占位任务行（不产生失败任务）。宿主据此提示用户并
     /// 可跳转已有任务（兼容 WebSocket 事件为 `duplicateTorrent`）。
@@ -155,6 +199,28 @@ pub enum EngineEvent {
         task_id: String,
         plugin_id: String,
         running: bool,
+    },
+
+    /// 常驻插件宿主渲染出一棵新的可移植视图树（未规范化的原始 JSON，由 daemon
+    /// `normalize_view` + `diff_view` 后推给 UI）。仅 `plugins` feature 下由
+    /// `PluginManager` 发出。
+    PluginViewRendered {
+        session: String,
+        tree: serde_json::Value,
+    },
+    /// 可移植视图渲染 / 事件处理失败（会话仍保持打开，下一次渲染可恢复）。
+    PluginViewFailed { session: String, message: String },
+    /// 可移植视图会话已结束（`reason`：`closed` / `expired` / `pluginUnloaded` /
+    /// `requested`——插件经 `ctx.close()` 请求关闭承载容器）。
+    PluginViewClosed { session: String, reason: String },
+    /// 插件经 `ctx.navigate()` 请求主界面跳转；`target` 为已校验的路由 id
+    /// （内置 `downloads` / `rss` / `webhooks` / `share`，或 `plugin:<identity>:<view>`）。
+    PluginViewNavigate { session: String, target: String },
+    /// 插件经 `flux.ui.toast` 请求的提示（`level`：info/success/warning/error）。
+    PluginToast {
+        identity: String,
+        level: String,
+        text: String,
     },
 
     /// 全部任务组快照——组建/删除/改名/回收（GC）后发送。兼容 WebSocket

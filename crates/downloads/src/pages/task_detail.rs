@@ -7,22 +7,29 @@
 #[path = "task_detail_activity.rs"]
 mod activity;
 
-use std::{collections::VecDeque, rc::Rc, sync::Arc, time::Duration, time::Instant};
+use std::{
+    collections::{HashMap, VecDeque},
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chrono::{Local, TimeZone as _};
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, DaemonEvent, ServiceEvent, TaskDto, TaskRuntimeDto,
+    TaskSpeedHistoryDto, TaskSpeedHistoryQuery, WsServerMsg,
 };
 use fluxdown_ui_components::{
-    ControlExt as _, FluxIcon, IconControlExt as _, form, form_field, form_row, segmented_tabs,
-    tabular_numbers,
+    ControlExt as _, FluxIcon, IconControlExt as _, form, form_field, segmented_tabs,
+    tabular_numbers, tooltip_view,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    AnyElement, App, AppContext as _, ClipboardItem, Context, Div, Entity, EventEmitter,
-    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    Anchor, AnyElement, AnyView, App, AppContext as _, ClipboardItem, Context, Div, Entity,
+    EventEmitter, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Disableable as _, Icon, WindowExt as _,
@@ -30,6 +37,7 @@ use gpui_component::{
     chart::{AreaChart, PieChart},
     h_flex,
     input::{InputState, NumberInput},
+    menu::{DropdownMenu as _, PopupMenuItem},
     notification::Notification,
     v_flex,
 };
@@ -37,9 +45,12 @@ use gpui_component::{
 use activity::ActivityFeed;
 
 use crate::{
+    UserStartIntent,
     components::{
         segment_progress::render_segment_progress,
-        task_table::{progress_bar_color, progress_track_color, task_status_color},
+        task_table::{
+            progress_bar_color, progress_track_color, task_menu_facts_for, task_status_color,
+        },
     },
     controller::{
         DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult,
@@ -47,21 +58,28 @@ use crate::{
     },
     model::{
         DownloadTaskView, RowKey, TaskProtocol, TaskState, TaskStore, format_bytes,
+        share::ShareHostCaps,
         source_composition::{SourceKind, compose, format_percent},
+        task_route::route_label,
     },
-    pages::downloads::DownloadHostActions,
+    pages::{
+        downloads::{DownloadHostActions, PluginTaskTab},
+        task_edit::{TaskEditTarget, open_change_segments_dialog, open_change_url_dialog},
+    },
     strings::DownloadStrings,
 };
 
-/// 速度曲线保留的采样点数（每秒一次）。
+/// 做种页实时上传曲线保留的采样点数（每秒一次）。
 const SPEED_HISTORY_CAPACITY: usize = 120;
+/// 速度页下载中的刷新间隔；1 s 定时器的抖动留出余量。
+const SPEED_REFRESH_INTERVAL: Duration = Duration::from_millis(1_500);
 /// 常规页信息列的折行基准宽度：可用宽度容不下「信息列 + 来源构成」时来源换行。
 const GENERAL_INFO_MIN_WIDTH: f32 = 300.;
 /// 常规页「来源构成」区块宽度（环形图 140 + 图例）。
 const SOURCES_SECTION_WIDTH: f32 = 360.;
 /// 键值表标签列宽：详情、做种、高级与任务组概览共用，保证值列左缘对齐。
 const DETAIL_LABEL_WIDTH: f32 = 112.;
-/// 活动日志时间戳列宽（`YYYY-MM-DD HH:MM:SS.mmm` 等宽数字）。
+/// 活动日志时间戳宽度（`YYYY-MM-DD HH:MM:SS.mmm` 等宽数字），条目头部单独一行显示。
 const ACTIVITY_TIME_WIDTH: f32 = 168.;
 /// 空状态图标边长。
 const EMPTY_ICON_SIZE: f32 = 32.;
@@ -79,9 +97,33 @@ pub enum DetailMode {
 enum DetailTab {
     General,
     Speed,
+    /// FluxMesh接收任务的传输诊断（内容由宿主工厂提供）。
+    ShareDiagnostics,
     Seeding,
     Log,
     Advanced,
+    /// 插件贡献的 tab，下标对应 `TaskDetailView::plugin_tabs`。
+    Plugin(u16),
+}
+
+/// 可见 tab 顺序：内置 tab（做种仅 BT 任务、传输诊断仅FluxMesh接收任务）后接全部插件 tab。
+fn visible_tabs(is_bt: bool, share_diagnostics: bool, plugin_tabs: usize) -> Vec<DetailTab> {
+    let builtin = [
+        DetailTab::General,
+        DetailTab::Speed,
+        DetailTab::ShareDiagnostics,
+        DetailTab::Seeding,
+        DetailTab::Log,
+        DetailTab::Advanced,
+    ]
+    .into_iter()
+    .filter(move |tab| match tab {
+        DetailTab::Seeding => is_bt,
+        DetailTab::ShareDiagnostics => share_diagnostics,
+        _ => true,
+    });
+    let plugin = (0..u16::try_from(plugin_tabs).unwrap_or(u16::MAX)).map(DetailTab::Plugin);
+    builtin.chain(plugin).collect()
 }
 
 /// 面板对外事件：任务被删除 / 快照中不再存在时发出，宿主据此关闭承载窗口。
@@ -100,11 +142,26 @@ pub struct TaskDetailView {
     translator: Entity<Translator>,
     strings: DownloadStrings,
     tab: DetailTab,
+    /// 插件贡献的 tab（下标即 `DetailTab::Plugin`）。
+    plugin_tabs: Vec<PluginTaskTab>,
+    /// 插件 tab 视图缓存：`(tab 下标, task_id)` → 视图。
+    plugin_views: HashMap<(u16, String), AnyView>,
+    /// 传输诊断页签视图缓存：任务 id → 视图。
+    share_views: HashMap<String, AnyView>,
     /// 完整 DTO（校验和 / 代理 / 做种详情等 `DownloadTaskView` 未覆盖的字段）。
     /// 停靠模式由宿主经 [`Self::sync`] 提供；窗口模式来自私有 controller。
     dto: Option<TaskDto>,
     queue_names: Vec<(String, String)>,
+    /// 客户端 1 Hz 实时采样环（仅做种页上传曲线使用）。
     speed_history: VecDeque<(Instant, u64)>,
+    /// daemon 持久化的全生命周期速度曲线与统计（速度页）。
+    speed_stats: Option<TaskSpeedHistoryDto>,
+    speed_fetching: bool,
+    /// 请求在途时又出现刷新需求：返回后补拉一次。
+    speed_refetch: bool,
+    speed_generation: u64,
+    speed_was_downloading: bool,
+    speed_last_fetch: Option<Instant>,
     activity: ActivityFeed,
     runtime: Option<TaskRuntimeDto>,
     activity_stale: bool,
@@ -116,10 +173,14 @@ pub struct TaskDetailView {
     seed_time_limit: Entity<InputState>,
     seed_inactive_limit: Entity<InputState>,
     seed_upload_limit: Entity<InputState>,
+    /// 四个限制项（总分享率、做种后分享率、做种时长、不活跃时长）当前选中的模式。
+    seed_modes: [SeedMode; 4],
     /// 做种限制输入框上次预填所用的限制值；`None` = 尚未预填。保存时未改动的输入项按它还原。
     seed_baseline: Option<SeedLimits>,
     /// 错误信息复制按钮的反馈代次；非零 = 显示「已复制」勾选态，定时回落时比对代次防连点提前复位。
     error_copied: u32,
+    /// 日志「复制全部」按钮的反馈代次，语义同 `error_copied`。
+    log_copied: u32,
 }
 
 impl EventEmitter<TaskDetailEvent> for TaskDetailView {}
@@ -191,11 +252,21 @@ impl TaskDetailView {
             Some(controller) => Rc::clone(controller.store()),
             None => store.unwrap_or_default(),
         };
-        let seed_ratio = Self::seed_input(window, cx);
-        let seed_post_ratio = Self::seed_input(window, cx);
-        let seed_time_limit = Self::seed_input(window, cx);
-        let seed_inactive_limit = Self::seed_input(window, cx);
-        let seed_upload_limit = Self::seed_input(window, cx);
+        store.set_share_host(ShareHostCaps {
+            send: host.share_tasks.is_some(),
+            switch_bridge: host.share_switch_to_bridge.is_some(),
+            open_usage: host.share_open_usage.is_some(),
+            stop_providing: host.share_stop_providing.is_some(),
+        });
+        let seed_ratio = Self::seed_input(window, cx, |t| parse_seed_ratio(t).is_some(), "1.00");
+        let seed_post_ratio =
+            Self::seed_input(window, cx, |t| parse_seed_ratio(t).is_some(), "1.00");
+        let seed_time_limit =
+            Self::seed_input(window, cx, |t| parse_seed_minutes(t).is_some(), "1440");
+        let seed_inactive_limit =
+            Self::seed_input(window, cx, |t| parse_seed_minutes(t).is_some(), "1440");
+        let seed_upload_limit =
+            Self::seed_input(window, cx, |t| parse_seed_upload_limit(t).is_some(), "0");
 
         cx.observe(&translator, |this, translator, cx| {
             this.strings = DownloadStrings::from_translator(translator.read(cx));
@@ -217,9 +288,18 @@ impl TaskDetailView {
             translator,
             strings,
             tab: DetailTab::General,
+            plugin_tabs: Vec::new(),
+            plugin_views: HashMap::new(),
+            share_views: HashMap::new(),
             dto: None,
             queue_names: Vec::new(),
             speed_history: VecDeque::new(),
+            speed_stats: None,
+            speed_fetching: false,
+            speed_refetch: false,
+            speed_generation: 0,
+            speed_was_downloading: false,
+            speed_last_fetch: None,
             closed: false,
             last_error: None,
             seed_ratio,
@@ -227,17 +307,26 @@ impl TaskDetailView {
             seed_time_limit,
             seed_inactive_limit,
             seed_upload_limit,
+            seed_modes: [SeedMode::Global; 4],
             seed_baseline: None,
             error_copied: 0,
+            log_copied: 0,
         };
         Self::spawn_speed_ticker(cx);
         this
     }
 
-    fn seed_input(window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+    fn seed_input(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        valid: fn(&str) -> bool,
+        default_text: &str,
+    ) -> Entity<InputState> {
         cx.new(|cx| {
-            InputState::new(window, cx)
-                .validate(|text, _| text.trim().is_empty() || text.trim().parse::<i64>().is_ok())
+            let mut state = InputState::new(window, cx)
+                .validate(move |text, _| text.trim().is_empty() || valid(text.trim()));
+            state.set_value(default_text, window, cx);
+            state
         })
     }
 
@@ -245,7 +334,13 @@ impl TaskDetailView {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |this, cx| this.sample_speed(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.sample_speed(cx);
+                        this.tick_speed_history(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -260,13 +355,22 @@ impl TaskDetailView {
         }
         self.task_id = task_id;
         self.tab = DetailTab::General;
+        self.plugin_views.clear();
+        self.share_views.clear();
         self.dto = None;
         self.activity.switch_task(self.task_id.clone());
         self.activity_stale = false;
         self.speed_history.clear();
+        self.speed_stats = None;
+        self.speed_fetching = false;
+        self.speed_refetch = false;
+        self.speed_generation = self.speed_generation.wrapping_add(1);
+        self.speed_was_downloading = false;
+        self.speed_last_fetch = None;
         self.runtime = None;
         self.closed = false;
         self.error_copied = 0;
+        self.log_copied = 0;
         self.seed_baseline = None;
         self.fetch_activity(cx);
         cx.notify();
@@ -320,14 +424,16 @@ impl TaskDetailView {
         if queue_id.is_empty() {
             return None;
         }
-        match &self.controller {
-            Some(controller) => controller.queue_name(queue_id).map(str::to_owned),
+        let name = match &self.controller {
+            Some(controller) => controller.queue_name(queue_id),
             None => self
                 .queue_names
                 .iter()
                 .find(|(id, _)| id == queue_id)
-                .map(|(_, name)| name.clone()),
+                .map(|(_, name)| name.as_str()),
         }
+        .unwrap_or(queue_id);
+        Some(self.strings.queue_name(queue_id, name).to_string())
     }
 
     fn is_bt(&self) -> bool {
@@ -341,6 +447,11 @@ impl TaskDetailView {
     }
 
     fn refresh_from_store(&mut self, cx: &mut Context<Self>) {
+        // 任务表分页载入期间行集合只是占位：行不在不代表任务已被删除。
+        if self.store.loading().is_some() {
+            cx.notify();
+            return;
+        }
         if self
             .store
             .get(&RowKey::Local(self.task_id.clone()))
@@ -359,7 +470,14 @@ impl TaskDetailView {
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return;
         };
-        let speed = row.speed_bytes_per_second.unwrap_or(0);
+        // 做种页曲线画上传速度：下载中取实时上传，本地做种中取做种上传，其余为 0。
+        let uploading = row.state == TaskState::Downloading
+            || (row.state == TaskState::Completed && row.seeding_status == 1);
+        let speed = if uploading {
+            row.upload_speed_bytes_per_second
+        } else {
+            0
+        };
         drop(row);
         push_bounded(
             &mut self.speed_history,
@@ -425,6 +543,10 @@ impl TaskDetailView {
                     self.close(cx);
                     return;
                 }
+                DaemonEvent::TasksDeleted { task_ids } if task_ids.contains(&self.task_id) => {
+                    self.close(cx);
+                    return;
+                }
                 DaemonEvent::TaskActivityAdded(entry) => {
                     if self.activity.add(entry.clone()) {
                         cx.notify();
@@ -436,13 +558,33 @@ impl TaskDetailView {
                 _ => {}
             }
         }
+        let concerns_task = self.event_concerns_task(event);
         if let Some(controller) = &mut self.controller {
+            // 控制器照常应用；与本任务无关的单任务事件不再克隆 DTO / 重绘。
             let changed = controller.apply_event(event);
-            if changed {
+            if changed && concerns_task {
                 self.dto = controller.task_dto(&self.task_id).cloned();
                 self.refresh_from_store(cx);
             }
         }
+    }
+
+    /// 单任务的高频事件（任务变更 / 进度 / 运行态 / 元数据）只有涉及本任务才需要刷新；
+    /// 其余事件一律视为相关。
+    fn event_concerns_task(&self, event: &ServiceEvent) -> bool {
+        let ServiceEvent::Agent(AgentEvent::Daemon(event)) = event else {
+            return true;
+        };
+        let task_id = match event {
+            DaemonEvent::TaskChanged(task) => &task.task_id,
+            DaemonEvent::TaskRuntimeChanged(runtime) => &runtime.task_id,
+            DaemonEvent::Engine(
+                WsServerMsg::TaskProgress { task_id, .. }
+                | WsServerMsg::TaskMetaProbed { task_id, .. },
+            ) => task_id,
+            _ => return true,
+        };
+        *task_id == self.task_id
     }
 
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
@@ -487,6 +629,71 @@ impl TaskDetailView {
         .detach();
     }
 
+    fn task_downloading(&self) -> bool {
+        self.store
+            .get(&RowKey::Local(self.task_id.clone()))
+            .is_some_and(|row| row.state == TaskState::Downloading)
+    }
+
+    /// 速度页的定时刷新决策（随 1 s 定时器调用）。
+    fn tick_speed_history(&mut self, cx: &mut Context<Self>) {
+        let downloading = self.task_downloading();
+        let was_downloading = std::mem::replace(&mut self.speed_was_downloading, downloading);
+        if self.tab != DetailTab::Speed {
+            return;
+        }
+        if speed_refresh_due(
+            was_downloading,
+            downloading,
+            self.speed_last_fetch.map(|at| at.elapsed()),
+        ) {
+            self.fetch_speed_history(cx);
+        }
+    }
+
+    fn fetch_speed_history(&mut self, cx: &mut Context<Self>) {
+        if self.closed || !self.activity_online || self.tab != DetailTab::Speed {
+            return;
+        }
+        if self.speed_fetching {
+            self.speed_refetch = true;
+            return;
+        }
+        self.speed_fetching = true;
+        self.speed_refetch = false;
+        self.speed_last_fetch = Some(Instant::now());
+        let generation = self.speed_generation;
+        let task_id = self.task_id.clone();
+        let future = self
+            .port
+            .execute(DownloadsCommand::TaskSpeedHistory(TaskSpeedHistoryQuery {
+                task_id: task_id.clone(),
+            }));
+        cx.spawn(async move |this, cx| {
+            let result = future.await;
+            let Ok(()) = this.update(cx, |this, cx| {
+                if this.speed_generation != generation {
+                    return;
+                }
+                this.speed_fetching = false;
+                // 失败（含旧宿主不支持该方法）保留上次成功的数据。
+                if let Ok(DownloadsResult::TaskSpeedHistory(history)) = result
+                    && history.as_ref().is_none_or(|dto| dto.task_id == task_id)
+                {
+                    this.speed_stats = history;
+                }
+                cx.notify();
+                if this.speed_refetch {
+                    this.fetch_speed_history(cx);
+                }
+            }) else {
+                // 视图已释放。
+                return;
+            };
+        })
+        .detach();
+    }
+
     fn load_older_activity(&mut self, cx: &mut Context<Self>) {
         self.activity.load_older();
         self.fetch_activity(cx);
@@ -502,6 +709,10 @@ impl TaskDetailView {
     fn select_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
         if self.tab != tab {
             self.tab = tab;
+            if tab == DetailTab::Speed {
+                self.speed_was_downloading = self.task_downloading();
+                self.fetch_speed_history(cx);
+            }
             cx.notify();
         }
     }
@@ -558,17 +769,33 @@ impl TaskDetailView {
             return;
         }
         let task_id = self.task_id.clone();
+        let on_user_started = self.host.on_user_started.clone();
+        if let Some(hook) = &on_user_started {
+            hook(
+                UserStartIntent::RestartRequested {
+                    task_id: task_id.clone(),
+                    replaces_task: false,
+                },
+                cx,
+            );
+        }
         let future = self.port.execute(DownloadsCommand::Resume {
             task_id: task_id.clone(),
         });
         cx.spawn(async move |this, cx| {
             let failed = future.await.is_err();
+            if let Some(hook) = on_user_started {
+                let intent = if failed {
+                    UserStartIntent::RestartFailed(task_id)
+                } else {
+                    UserStartIntent::RestartSucceeded(task_id)
+                };
+                cx.update(|cx| hook(intent, cx));
+            }
 
             let Ok(()) = this.update(cx, |this, cx| {
                 if failed {
                     this.last_error = Some(this.strings.action_failed.clone());
-                } else if let Some(hook) = this.host.on_user_started.clone() {
-                    hook(task_id, cx);
                 }
                 cx.notify();
             }) else {
@@ -589,18 +816,52 @@ impl TaskDetailView {
         window.push_notification(Notification::success(self.strings.url_copied.clone()), cx);
     }
 
+    /// 详情「常规」页「更换链接 / 修改线程数」按钮的编辑上下文（与右键菜单同一对话框）。
+    fn edit_target(&self) -> TaskEditTarget {
+        TaskEditTarget {
+            key: RowKey::Local(self.task_id.clone()),
+            store: Rc::clone(&self.store),
+            port: Arc::clone(&self.port),
+            strings: self.strings.clone(),
+            translator: self.translator.clone(),
+        }
+    }
+
     fn copy_error(&mut self, cx: &mut Context<Self>) {
         let Some(row) = self.store.get(&RowKey::Local(self.task_id.clone())) else {
             return;
         };
-        let message = row.error_message.clone();
+        let message = self.strings.task_error_text(&row.error_message).to_owned();
         drop(row);
         if message.is_empty() {
             return;
         }
         cx.write_to_clipboard(ClipboardItem::new_string(message));
-        let generation = self.error_copied.wrapping_add(1).max(1);
-        self.error_copied = generation;
+        self.flash_copied(cx, |this| &mut this.error_copied);
+    }
+
+    /// 日志页「复制全部」：按界面显示顺序（新→旧）导出已加载的全部条目。
+    fn copy_log(&mut self, cx: &mut Context<Self>) {
+        let mut text = String::new();
+        for entry in self.activity.entries().rev() {
+            let line = self.activity_line_text(entry, cx);
+            text.push_str(&format_activity_timestamp(entry.timestamp_ms));
+            text.push(' ');
+            text.push_str(&line);
+            text.push('\n');
+        }
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.flash_copied(cx, |this| &mut this.log_copied);
+    }
+
+    /// 复制按钮勾选态：递增代次并在 1.5s 后回落；代次不符说明期间又点过，不提前复位。
+    fn flash_copied(&mut self, cx: &mut Context<Self>, slot: fn(&mut Self) -> &mut u32) {
+        let counter = slot(self);
+        let generation = counter.wrapping_add(1).max(1);
+        *counter = generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -608,8 +869,9 @@ impl TaskDetailView {
                 .await;
 
             let Ok(()) = this.update(cx, |this, cx| {
-                if this.error_copied == generation {
-                    this.error_copied = 0;
+                let counter = slot(this);
+                if *counter == generation {
+                    *counter = 0;
                     cx.notify();
                 }
             }) else {
@@ -620,19 +882,44 @@ impl TaskDetailView {
         .detach();
     }
 
+    /// 切换某个限制项的模式：非自定义时数字框回到 qBittorrent 默认值，自定义保留当前文本。
+    fn set_seed_mode(
+        &mut self,
+        index: usize,
+        mode: SeedMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.seed_modes[index] = mode;
+        if mode != SeedMode::Custom {
+            let input = [
+                &self.seed_ratio,
+                &self.seed_post_ratio,
+                &self.seed_time_limit,
+                &self.seed_inactive_limit,
+            ][index];
+            input.update(cx, |input, cx| {
+                input.set_value(SEED_DEFAULT_TEXTS[index], window, cx);
+            });
+        }
+        cx.notify();
+    }
+
     fn save_seed_limits(&mut self, cx: &mut Context<Self>) {
         let baseline = self
             .seed_baseline
             .clone()
             .unwrap_or_else(SeedLimits::inherit_all);
+        let values = [
+            self.seed_ratio.read(cx).value(),
+            self.seed_post_ratio.read(cx).value(),
+            self.seed_time_limit.read(cx).value(),
+            self.seed_inactive_limit.read(cx).value(),
+            self.seed_upload_limit.read(cx).value(),
+        ];
         let limits = seed_limits_from_form(
-            [
-                &self.seed_ratio.read(cx).value(),
-                &self.seed_post_ratio.read(cx).value(),
-                &self.seed_time_limit.read(cx).value(),
-                &self.seed_inactive_limit.read(cx).value(),
-                &self.seed_upload_limit.read(cx).value(),
-            ],
+            self.seed_modes,
+            [&values[0], &values[1], &values[2], &values[3], &values[4]],
             &baseline,
         );
         self.run_command(
@@ -660,7 +947,9 @@ impl TaskDetailView {
             &self.seed_inactive_limit,
             &self.seed_upload_limit,
         ];
-        for (input, text) in inputs.into_iter().zip(seed_form_texts(&limits)) {
+        let (modes, texts) = seed_form_state(&limits);
+        self.seed_modes = modes;
+        for (input, text) in inputs.into_iter().zip(texts) {
             input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
         self.seed_baseline = Some(limits);
@@ -674,33 +963,156 @@ impl TaskDetailView {
 
     // ---- rendering ----
 
+    /// 插件 tab 内容：按 `(下标, 任务 id)` 缓存宿主工厂产出的视图，任务变化后重建。
+    fn render_plugin_tab(
+        &mut self,
+        index: u16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(factory) = self.host.plugin_tab_view.clone() else {
+            return div().into_any_element();
+        };
+        let Some(tab) = self.plugin_tabs.get(usize::from(index)).cloned() else {
+            return div().into_any_element();
+        };
+        let key = (index, self.task_id.clone());
+        let view = match self.plugin_views.get(&key) {
+            Some(view) => view.clone(),
+            None => {
+                let view = factory(&tab, self.task_id.clone(), window, cx);
+                self.plugin_views.insert(key, view.clone());
+                view
+            }
+        };
+        div().size_full().child(view).into_any_element()
+    }
+    /// 「传输诊断」页签可见：宿主提供了页面工厂、FluxMesh可用，且本任务是FluxMesh接收任务。
+    fn share_diagnostics_visible(&self) -> bool {
+        let share = self.store.share();
+        self.host.share_diagnostics_view.is_some()
+            && share.available()
+            && share.is_share_receive(&self.task_id)
+    }
+
+    /// 传输诊断页签内容：按任务 id 缓存宿主工厂产出的视图。
+    fn render_share_diagnostics(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(factory) = self.host.share_diagnostics_view.clone() else {
+            return div().into_any_element();
+        };
+        let view = match self.share_views.get(&self.task_id) {
+            Some(view) => view.clone(),
+            None => {
+                let view = factory(self.task_id.clone(), window, cx);
+                self.share_views.insert(self.task_id.clone(), view.clone());
+                view
+            }
+        };
+        div().size_full().child(view).into_any_element()
+    }
+
+    /// 「分享」：把本任务交给宿主打开分享面板。
+    fn share_this_task(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let keys = [RowKey::Local(self.task_id.clone())];
+        if !self.store.share_control(&keys).is_enabled() {
+            return;
+        }
+        if let Some(open) = self.host.share_tasks.clone() {
+            open(vec![self.task_id.clone()], window, cx);
+        }
+    }
+
+    /// 独立窗口头部的「分享」按钮：隐藏时 `None`；禁用时悬浮提示说明原因。
+    /// `labelled` = 带文字的按钮（完成态头部），否则图标按钮（进行中头部）。
+    fn share_head_button(&self, labelled: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let control = self
+            .store
+            .share_control(&[RowKey::Local(self.task_id.clone())]);
+        if !control.is_visible() {
+            return None;
+        }
+        let tip = match control.block() {
+            Some(block) => self.strings.share_disabled(block),
+            None => self.strings.share.clone(),
+        };
+        let button = if labelled {
+            Button::new("detail-share")
+                .outline()
+                .control(cx)
+                .icon(FluxIcon::Share2)
+                .label(self.strings.share.clone())
+        } else {
+            Button::new("detail-share")
+                .ghost()
+                .icon(FluxIcon::Share2)
+                .control_icon(cx)
+        }
+        .disabled(!control.is_enabled())
+        .on_click(cx.listener(|this, _, window, cx| this.share_this_task(window, cx)));
+        Some(
+            div()
+                .id("detail-share-tooltip")
+                .flex_none()
+                .tooltip(move |window, cx| tooltip_view(tip.clone(), window, cx))
+                .child(button)
+                .into_any_element(),
+        )
+    }
+
+    /// 替换插件贡献的 tab；旧视图缓存随之作废。当前选中的插件 tab 消失时回到「常规」。
+    pub fn set_plugin_tabs(&mut self, mut tabs: Vec<PluginTaskTab>, cx: &mut Context<Self>) {
+        tabs.truncate(usize::from(u16::MAX));
+        if self.plugin_tabs == tabs {
+            return;
+        }
+        self.plugin_tabs = tabs;
+        self.plugin_views.clear();
+        if let DetailTab::Plugin(index) = self.tab
+            && usize::from(index) >= self.plugin_tabs.len()
+        {
+            self.tab = DetailTab::General;
+        }
+        cx.notify();
+    }
+
+    fn tab_label(&self, tab: DetailTab, cx: &App) -> SharedString {
+        let key = match tab {
+            DetailTab::General => "detailTabGeneral",
+            DetailTab::Speed => "detailTabSpeed",
+            DetailTab::Seeding => "tabSeeding",
+            DetailTab::ShareDiagnostics => "detailTabShareDiagnostics",
+            DetailTab::Log => "detailTabLog",
+            DetailTab::Advanced => "detailTabAdvanced",
+            DetailTab::Plugin(index) => {
+                return self
+                    .plugin_tabs
+                    .get(usize::from(index))
+                    .map_or_else(SharedString::default, |tab| tab.title.clone());
+            }
+        };
+        self.t(cx, key)
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = active_theme(cx).tokens().clone();
-        let is_bt = self.is_bt();
-        let candidates: [(DetailTab, &'static str); 5] = [
-            (DetailTab::General, "detailTabGeneral"),
-            (DetailTab::Speed, "detailTabSpeed"),
-            (DetailTab::Seeding, "tabSeeding"),
-            (DetailTab::Log, "detailTabLog"),
-            (DetailTab::Advanced, "detailTabAdvanced"),
-        ];
-        let visible: Vec<(DetailTab, SharedString)> = candidates
-            .into_iter()
-            .filter(|(tab, _)| *tab != DetailTab::Seeding || is_bt)
-            .map(|(tab, key)| (tab, self.t(cx, key)))
-            .collect();
-        let selected = visible
-            .iter()
-            .position(|(tab, _)| *tab == self.tab)
-            .unwrap_or(0);
-        let tabs: Vec<DetailTab> = visible.iter().map(|(tab, _)| *tab).collect();
+        let tabs = visible_tabs(
+            self.is_bt(),
+            self.share_diagnostics_visible(),
+            self.plugin_tabs.len(),
+        );
+        let labels: Vec<SharedString> = tabs.iter().map(|tab| self.tab_label(*tab, cx)).collect();
+        let selected = tabs.iter().position(|tab| *tab == self.tab).unwrap_or(0);
         let this = cx.weak_entity();
         h_flex()
             .px(tokens.spacing.md)
             .pt(tokens.spacing.md)
             .child(segmented_tabs(
                 "detail-tabs",
-                visible.into_iter().map(|(_, label)| label),
+                labels,
                 selected,
                 move |index, _, cx| {
                     if let Some(tab) = tabs.get(index).copied() {
@@ -800,7 +1212,8 @@ impl TaskDetailView {
                             .icon(FluxIcon::FolderOpen)
                             .label(self.strings.open_folder.clone())
                             .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))),
-                    ),
+                    )
+                    .children(self.share_head_button(true, cx)),
             )
             .into_any_element()
     }
@@ -919,7 +1332,8 @@ impl TaskDetailView {
                             .control_icon(cx)
                             .tooltip(self.strings.open_folder.clone())
                             .on_click(cx.listener(|this, _, _, cx| this.reveal(cx))),
-                    ),
+                    )
+                    .children(self.share_head_button(false, cx)),
             )
             .into_any_element()
     }
@@ -945,6 +1359,10 @@ impl TaskDetailView {
             .map(SharedString::from)
             .unwrap_or_else(|| follow_global.clone());
         let ignore_tls = dto.is_some_and(|dto| dto.ignore_tls_errors);
+        let route = dto
+            .map(|dto| dto.auto_route.as_str())
+            .filter(|route| !route.is_empty())
+            .map(|route| route_label(route, self.translator.read(cx)));
         let queue_label = self
             .queue_label(&row.queue_id)
             .map(SharedString::from)
@@ -990,12 +1408,9 @@ impl TaskDetailView {
                 |this| {
                     this.child(detail_row(
                         self.t(cx, "infoStatus"),
-                        div().text_color(task_status_color(&row, cx)).child(
-                            self.strings
-                                .queued_label(&row)
-                                .map(SharedString::from)
-                                .unwrap_or_else(|| self.strings.task_state_label(&row)),
-                        ),
+                        div()
+                            .text_color(task_status_color(&row, cx))
+                            .child(self.strings.task_status_text(&row, &self.store)),
                         cx,
                     ))
                     .when(row.size_bytes > 0, |this| {
@@ -1061,6 +1476,9 @@ impl TaskDetailView {
             .child(detail_row(self.t(cx, "taskQueueLabel"), queue_label, cx))
             .child(detail_row(self.t(cx, "taskChecksum"), checksum, cx))
             .child(detail_row(self.t(cx, "taskProxy"), proxy, cx));
+        if let Some(route) = route {
+            list = list.child(detail_row(self.t(cx, "taskRoute"), route, cx));
+        }
 
         if ignore_tls {
             list = list.child(detail_row(
@@ -1092,7 +1510,9 @@ impl TaskDetailView {
                             .flex_1()
                             .min_w_0()
                             .text_color(tokens.colors.destructive)
-                            .child(SharedString::from(row.error_message.clone())),
+                            .child(SharedString::from(
+                                self.strings.task_error_text(&row.error_message).to_owned(),
+                            )),
                     )
                     .child(
                         Button::new("detail-copy-error")
@@ -1124,15 +1544,46 @@ impl TaskDetailView {
                 cx,
             ));
         }
+        let facts = task_menu_facts_for(&self.store, &RowKey::Local(self.task_id.clone()));
+        let can_change_url = facts.is_some_and(|facts| facts.can_change_url());
+        let can_change_segments = facts.is_some_and(|facts| facts.can_change_segments());
         let list = list.child(
-            h_flex().gap(tokens.spacing.sm).pt(tokens.spacing.md).child(
-                Button::new("detail-copy-link")
-                    .outline()
-                    .control(cx)
-                    .icon(FluxIcon::Copy)
-                    .label(self.strings.copy_url.clone())
-                    .on_click(cx.listener(|this, _, window, cx| this.copy_link(window, cx))),
-            ),
+            h_flex()
+                .flex_wrap()
+                .gap(tokens.spacing.sm)
+                .pt(tokens.spacing.md)
+                .child(
+                    Button::new("detail-copy-link")
+                        .outline()
+                        .control(cx)
+                        .icon(FluxIcon::Copy)
+                        .label(self.strings.copy_url.clone())
+                        .on_click(cx.listener(|this, _, window, cx| this.copy_link(window, cx))),
+                )
+                .when(can_change_url, |this| {
+                    this.child(
+                        Button::new("detail-change-url")
+                            .outline()
+                            .control(cx)
+                            .icon(FluxIcon::Globe)
+                            .label(self.strings.change_url.clone())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                open_change_url_dialog(this.edit_target(), window, cx);
+                            })),
+                    )
+                })
+                .when(can_change_segments, |this| {
+                    this.child(
+                        Button::new("detail-change-segments")
+                            .outline()
+                            .control(cx)
+                            .icon(FluxIcon::Layers)
+                            .label(self.strings.edit_threads.clone())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                open_change_segments_dialog(this.edit_target(), window, cx);
+                            })),
+                    )
+                }),
         );
         // 响应式：宽度够（横向底部面板 / 宽窗口）时信息列与来源构成并排，
         // 窄（右侧面板）时来源构成自动换到信息列下方——按实际可用宽度折行，
@@ -1154,7 +1605,7 @@ impl TaskDetailView {
             .into_any_element()
     }
 
-    /// 「速度」页：当前 / 近 2 分钟平均 / 近 2 分钟峰值三块统计 + 1 Hz 面积图 + 明细行。
+    /// 「速度」页：当前 / 平均 / 峰值 / 下载时长四块统计 + 全生命周期面积图（daemon 持久化数据）+ 明细行。
     fn render_speed(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
@@ -1183,24 +1634,19 @@ impl TaskDetailView {
             .and_then(|runtime| runtime.connected_peers);
         drop(row);
 
-        let samples = self.speed_history.len() as u64;
-        let total: u64 = self.speed_history.iter().map(|(_, speed)| *speed).sum();
-        let average = total.checked_div(samples).unwrap_or(0);
-        let peak = self
-            .speed_history
-            .iter()
-            .map(|(_, speed)| *speed)
-            .max()
-            .unwrap_or(0);
-        let chart_points: Vec<(usize, f64)> = self
-            .speed_history
-            .iter()
-            .enumerate()
-            .map(|(index, (_, speed))| (index, *speed as f64))
-            .collect();
+        let (average, peak, active_secs, chart_points) = match &self.speed_stats {
+            Some(stats) => (
+                u64::try_from(stats.average_bps()).unwrap_or(0),
+                u64::try_from(stats.peak_bps).unwrap_or(0),
+                stats.active_secs,
+                speed_chart_points(stats),
+            ),
+            None => (0, 0, 0, Vec::new()),
+        };
         let has_chart = chart_points.len() > 1 && peak > 0;
+        let duration = self.strings.format_eta(active_secs.max(0) as u64);
 
-        let tile = |label: SharedString, value: u64, color: Hsla| {
+        let tile = |label: SharedString, value: SharedString, color: Hsla| {
             v_flex()
                 .flex_1()
                 .min_w_0()
@@ -1223,7 +1669,7 @@ impl TaskDetailView {
                         .font_weight(FontWeight::MEDIUM)
                         .font_features(tabular_numbers())
                         .text_color(color)
-                        .child(SharedString::from(format!("{}/s", format_bytes(value)))),
+                        .child(value),
                 )
         };
 
@@ -1234,32 +1680,55 @@ impl TaskDetailView {
                     .gap(tokens.spacing.sm)
                     .child(tile(
                         self.t(cx, "infoSpeed"),
-                        current,
+                        rate_text(current),
                         tokens.colors.primary,
                     ))
                     .child(tile(
-                        self.t(cx, "speedAverageRecent"),
-                        average,
+                        self.t(cx, "speedAverage"),
+                        rate_text(average),
                         tokens.colors.foreground,
                     ))
                     .child(tile(
-                        self.t(cx, "speedPeakRecent"),
-                        peak,
+                        self.t(cx, "speedPeak"),
+                        rate_text(peak),
+                        tokens.colors.foreground,
+                    ))
+                    .child(tile(
+                        self.t(cx, "speedActiveTime"),
+                        duration.clone(),
                         tokens.colors.foreground,
                     )),
             )
             .child(if has_chart {
-                div()
-                    .h(px(120.))
+                v_flex()
                     .w_full()
                     .child(
-                        AreaChart::new(chart_points)
-                            .x(|point: &(usize, f64)| SharedString::from(point.0.to_string()))
-                            .y(|point: &(usize, f64)| point.1)
-                            .stroke(tokens.colors.primary)
-                            .linear()
-                            .x_axis(false)
-                            .grid(false),
+                        div().h(px(120.)).w_full().child(
+                            AreaChart::new(chart_points)
+                                .x(|point: &(SharedString, f64)| point.0.clone())
+                                .y(|point: &(SharedString, f64)| point.1)
+                                .stroke(tokens.colors.primary)
+                                .name(self.t(cx, "infoSpeed"))
+                                .tooltip_value(|_, _, value| rate_text(value.max(0.) as u64))
+                                .y_axis(true)
+                                .y_axis_label_placement(
+                                    gpui_component::plot::AxisLabelPlacement::Inside,
+                                )
+                                .y_tick_count(3)
+                                .y_tick_format(|value| rate_text(value.max(0.) as u64))
+                                .linear()
+                                .x_axis(false)
+                                .grid(false),
+                        ),
+                    )
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .text_size(tokens.typography.xs.size)
+                            .line_height(tokens.typography.xs.line_height)
+                            .text_color(tokens.colors.muted_foreground)
+                            .child(self.t(cx, "speedAxisStart"))
+                            .child(duration),
                     )
                     .into_any_element()
             } else {
@@ -1491,6 +1960,7 @@ impl TaskDetailView {
             "—".to_owned()
         };
         let duration = format_duration(self.translator.read(cx), seeding_time_secs);
+        // 做种页曲线画上传速度：上传一律用成功（绿）色，下载保持主色。
         let chart_points: Vec<(usize, f64)> = self
             .speed_history
             .iter()
@@ -1518,7 +1988,10 @@ impl TaskDetailView {
                         AreaChart::new(chart_points)
                             .x(|point: &(usize, f64)| SharedString::from(point.0.to_string()))
                             .y(|point: &(usize, f64)| point.1)
-                            .stroke(tokens.colors.primary)
+                            .stroke(extended.colors.success)
+                            .tooltip_content(|point: &(usize, f64), _, _| {
+                                div().child(rate_text(point.1.max(0.) as u64))
+                            })
                             .linear()
                             .x_axis(false)
                             .grid(false),
@@ -1542,41 +2015,35 @@ impl TaskDetailView {
             )
             .child(
                 form(cx)
-                    .child(form_row(
-                        [
-                            self.render_seed_field(cx, "btSeedRatioLimit", &self.seed_ratio, None),
-                            self.render_seed_field(
-                                cx,
-                                "btSeedPostRatioLimit",
-                                &self.seed_post_ratio,
-                                None,
-                            ),
-                        ],
+                    .child(self.render_seed_limit_field(
                         cx,
+                        0,
+                        "btSeedRatioLimit",
+                        &self.seed_ratio,
+                        None,
                     ))
-                    .child(form_row(
-                        [
-                            self.render_seed_field(
-                                cx,
-                                "btSeedTimeLimit",
-                                &self.seed_time_limit,
-                                None,
-                            ),
-                            self.render_seed_field(
-                                cx,
-                                "btSeedInactiveTimeLimit",
-                                &self.seed_inactive_limit,
-                                None,
-                            ),
-                        ],
+                    .child(self.render_seed_limit_field(
                         cx,
+                        1,
+                        "btSeedPostRatioLimit",
+                        &self.seed_post_ratio,
+                        None,
                     ))
-                    .child(self.render_seed_field(
+                    .child(self.render_seed_limit_field(
                         cx,
-                        "btSeedUploadLimit",
-                        &self.seed_upload_limit,
-                        Some("btSeedUploadLimitHint"),
+                        2,
+                        "btSeedTimeLimit",
+                        &self.seed_time_limit,
+                        Some("timeUnitMinutes"),
                     ))
+                    .child(self.render_seed_limit_field(
+                        cx,
+                        3,
+                        "btSeedInactiveTimeLimit",
+                        &self.seed_inactive_limit,
+                        Some("timeUnitMinutes"),
+                    ))
+                    .child(self.render_seed_upload_field(cx))
                     .child(
                         h_flex().justify_end().child(
                             Button::new("detail-save-seed-limits")
@@ -1590,18 +2057,75 @@ impl TaskDetailView {
             .into_any_element()
     }
 
-    /// 做种限制字段：标签 → 数字输入（统一控件档 28 高）→ 可选说明。
-    fn render_seed_field(
+    /// 做种限制字段：标签 → 模式下拉 + 数字输入（仅自定义模式可编辑）→ 可选说明。
+    fn render_seed_limit_field(
         &self,
         cx: &mut Context<Self>,
+        index: usize,
         label_key: &str,
         state: &Entity<InputState>,
         hint_key: Option<&str>,
     ) -> AnyElement {
+        let mode = self.seed_modes[index];
+        let options: Vec<(SeedMode, SharedString)> = SeedMode::ALL
+            .into_iter()
+            .map(|option| (option, self.t(cx, option.label_key())))
+            .collect();
+        let label = self.t(cx, mode.label_key());
+        let this = cx.weak_entity();
+        let dropdown = Button::new(SharedString::from(format!("detail-seed-mode-{index}")))
+            .outline()
+            .control(cx)
+            .label(label)
+            .dropdown_caret(true)
+            .w_full()
+            .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu, _, _| {
+                options.iter().fold(menu, |menu, (option, label)| {
+                    let option = *option;
+                    let this = this.clone();
+                    menu.item(
+                        PopupMenuItem::new(label.clone())
+                            .checked(option == mode)
+                            .on_click(move |_, window, cx| {
+                                let Ok(()) = this.update(cx, |this, cx| {
+                                    this.set_seed_mode(index, option, window, cx);
+                                }) else {
+                                    // 视图已释放，结束这次回调而不再更新状态。
+                                    return;
+                                };
+                            }),
+                    )
+                })
+            });
         form_field(
             self.t(cx, label_key),
-            NumberInput::new(state).control(cx).w_full(),
+            // 详情面板很窄：每项独占一行，下拉与数字框各占一半，避免挤压重叠。
+            h_flex()
+                .w_full()
+                .gap(px(8.))
+                .child(div().flex_1().min_w_0().child(dropdown))
+                .child(
+                    div().flex_1().min_w_0().child(
+                        NumberInput::new(state)
+                            .control(cx)
+                            .w_full()
+                            .disabled(mode != SeedMode::Custom),
+                    ),
+                ),
             hint_key.map(|key| self.t(cx, key)),
+            cx,
+        )
+        .into_any_element()
+    }
+
+    /// 上传限速字段（KB/s）：始终可编辑的数字输入，0 = 不限速。
+    fn render_seed_upload_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        form_field(
+            self.t(cx, "btSeedUploadLimit"),
+            NumberInput::new(&self.seed_upload_limit)
+                .control(cx)
+                .w_full(),
+            Some(self.t(cx, "btSeedUploadLimitHint")),
             cx,
         )
         .into_any_element()
@@ -1619,10 +2143,40 @@ impl TaskDetailView {
                 .text_color(color)
                 .child(text)
         };
-        let mut content = v_flex().gap(tokens.spacing.xs).child(note(
-            self.t(cx, "detailLogHint"),
-            tokens.colors.muted_foreground,
-        ));
+        let has_entries = self.activity.entries().next().is_some();
+        let copied = self.log_copied != 0;
+        let copy_label = self.t(
+            cx,
+            if copied {
+                "detailLogCopied"
+            } else {
+                "detailCopyLog"
+            },
+        );
+        let mut content = v_flex().gap(tokens.spacing.xs).child(
+            h_flex()
+                .items_start()
+                .gap(tokens.spacing.sm)
+                .pb(tokens.spacing.xs)
+                .child(div().flex_1().min_w_0().child(note(
+                    self.t(cx, "detailLogHint"),
+                    tokens.colors.muted_foreground,
+                )))
+                .child(
+                    Button::new("detail-copy-log")
+                        .ghost()
+                        .control(cx)
+                        .icon(if copied {
+                            FluxIcon::Check
+                        } else {
+                            FluxIcon::Copy
+                        })
+                        .label(copy_label)
+                        .when(copied, |this| this.text_color(extended.colors.success))
+                        .disabled(!has_entries)
+                        .on_click(cx.listener(|this, _, _, cx| this.copy_log(cx))),
+                ),
+        );
         if truncated {
             content = content.child(note(
                 self.t(cx, "detailActivityTruncated"),
@@ -1680,54 +2234,47 @@ impl TaskDetailView {
                 tokens.colors.muted_foreground,
             ));
         }
-        content = content.children(self.activity.entries().rev().map(|entry| {
-            let kind_key = activity_kind_key(&entry.kind);
-            let label = self.t(cx, kind_key);
-            let state = if entry.kind == "status" {
-                entry
-                    .status
-                    .map(|status| self.strings.state_label(activity_state(status)))
-            } else {
-                None
-            };
-            let text = if let Some(state) = state {
-                format!("{label}: {state}")
-            } else if kind_key == "detailActivityKindUnknown" {
-                if entry.message.is_empty() {
-                    format!("{label} ({})", entry.kind)
-                } else {
-                    format!("{label} ({}): {}", entry.kind, entry.message)
-                }
-            } else if entry.message.is_empty() {
-                label.to_string()
-            } else {
-                format!("{label}: {}", entry.message)
-            };
-            h_flex()
-                .gap(tokens.spacing.sm)
-                .items_start()
-                .text_size(tokens.typography.xs.size)
-                .line_height(tokens.typography.xs.line_height)
-                .child(
-                    div()
-                        .flex_none()
-                        .w(active_theme(cx).text_extent(ACTIVITY_TIME_WIDTH))
-                        .font_features(tabular_numbers())
-                        .text_color(extended.colors.text_tertiary)
-                        .child(format_activity_timestamp(entry.timestamp_ms)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .text_color(if entry.kind == "journal_overflow" {
-                            extended.colors.warning
-                        } else {
-                            tokens.colors.foreground
-                        })
-                        .child(text),
-                )
-        }));
+        let mut list = v_flex()
+            .rounded(tokens.radius.sm)
+            .border_1()
+            .border_color(extended.colors.hairline)
+            .overflow_hidden();
+        let total = self.activity.entries().count();
+        for (index, entry) in self.activity.entries().rev().enumerate() {
+            let text = self.activity_line_text(entry, cx);
+            list = list.child(
+                v_flex()
+                    .px(tokens.spacing.sm)
+                    .py(tokens.spacing.xs)
+                    .gap(px(2.))
+                    .when(index + 1 < total, |this| {
+                        this.border_b(extended.stroke.thin)
+                            .border_color(extended.colors.hairline)
+                    })
+                    .text_size(tokens.typography.xs.size)
+                    .line_height(tokens.typography.xs.line_height)
+                    .child(
+                        div()
+                            .w(active_theme(cx).text_extent(ACTIVITY_TIME_WIDTH))
+                            .font_features(tabular_numbers())
+                            .text_color(extended.colors.text_tertiary)
+                            .child(format_activity_timestamp(entry.timestamp_ms)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_color(if entry.kind == "journal_overflow" {
+                                extended.colors.warning
+                            } else {
+                                tokens.colors.foreground
+                            })
+                            .child(text),
+                    ),
+            );
+        }
+        if has_entries {
+            content = content.child(list);
+        }
         if self.activity.has_older() && !self.activity.is_loading() && !self.activity.failed() {
             content = content.child(
                 div().pt(tokens.spacing.xs).child(
@@ -1740,6 +2287,32 @@ impl TaskDetailView {
             );
         }
         content.into_any_element()
+    }
+
+    /// 单条活动的显示文本（界面与「复制全部」共用）。
+    fn activity_line_text(&self, entry: &fluxdown_protocol::TaskActivityDto, cx: &App) -> String {
+        let kind_key = activity_kind_key(&entry.kind);
+        let label = self.t(cx, kind_key);
+        let state = if entry.kind == "status" {
+            entry
+                .status
+                .map(|status| self.strings.status_code_label(status))
+        } else {
+            None
+        };
+        if let Some(state) = state {
+            format!("{label}: {state}")
+        } else if kind_key == "detailActivityKindUnknown" {
+            if entry.message.is_empty() {
+                format!("{label} ({})", entry.kind)
+            } else {
+                format!("{label} ({}): {}", entry.kind, entry.message)
+            }
+        } else if entry.message.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label}: {}", entry.message)
+        }
     }
 
     fn render_advanced(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1758,16 +2331,23 @@ impl TaskDetailView {
             .map(SharedString::from)
             .unwrap_or_else(|| self.t(cx, "detailFollowGlobal"));
         let ignore_tls = dto.is_some_and(|dto| dto.ignore_tls_errors);
+        let route = dto
+            .map(|dto| dto.auto_route.as_str())
+            .filter(|route| !route.is_empty())
+            .map(|route| route_label(route, self.translator.read(cx)));
         drop(row);
-        v_flex()
+        let mut list = v_flex()
             .child(detail_row(self.t(cx, "infoSourcePage"), referrer, cx))
-            .child(detail_row(self.t(cx, "taskProxy"), proxy, cx))
-            .child(detail_row(
-                self.t(cx, "taskIgnoreTlsErrors"),
-                SharedString::from(if ignore_tls { "✓" } else { "—" }),
-                cx,
-            ))
-            .into_any_element()
+            .child(detail_row(self.t(cx, "taskProxy"), proxy, cx));
+        if let Some(route) = route {
+            list = list.child(detail_row(self.t(cx, "taskRoute"), route, cx));
+        }
+        list.child(detail_row(
+            self.t(cx, "taskIgnoreTlsErrors"),
+            SharedString::from(if ignore_tls { "✓" } else { "—" }),
+            cx,
+        ))
+        .into_any_element()
     }
 }
 
@@ -1805,6 +2385,22 @@ impl gpui::Render for TaskDetailView {
         if self.tab == DetailTab::Seeding {
             self.sync_seed_inputs(window, cx);
         }
+        // 页签依赖的FluxMesh事实消失（任务不再是FluxMesh接收任务 / FluxMesh不可用）：回到「常规」并丢弃缓存。
+        if !self.share_diagnostics_visible() {
+            if self.tab == DetailTab::ShareDiagnostics {
+                self.tab = DetailTab::General;
+            }
+            self.share_views.clear();
+        }
+        let body = match self.tab {
+            DetailTab::General => self.render_general(cx),
+            DetailTab::Speed => self.render_speed(cx),
+            DetailTab::Seeding => self.render_seeding(cx),
+            DetailTab::Log => self.render_log(cx),
+            DetailTab::Advanced => self.render_advanced(cx),
+            DetailTab::ShareDiagnostics => self.render_share_diagnostics(window, cx),
+            DetailTab::Plugin(index) => self.render_plugin_tab(index, window, cx),
+        };
         v_flex()
             .size_full()
             .min_h_0()
@@ -1831,13 +2427,7 @@ impl gpui::Render for TaskDetailView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .p(tokens.spacing.md)
-                    .child(match self.tab {
-                        DetailTab::General => self.render_general(cx),
-                        DetailTab::Speed => self.render_speed(cx),
-                        DetailTab::Seeding => self.render_seeding(cx),
-                        DetailTab::Log => self.render_log(cx),
-                        DetailTab::Advanced => self.render_advanced(cx),
-                    }),
+                    .child(body),
             )
     }
 }
@@ -1891,16 +2481,6 @@ fn format_activity_timestamp(timestamp_ms: i64) -> SharedString {
         )
 }
 
-fn activity_state(status: i32) -> TaskState {
-    match status {
-        0 | 5 => TaskState::Pending,
-        1 => TaskState::Downloading,
-        2 => TaskState::Paused,
-        3 => TaskState::Completed,
-        _ => TaskState::Failed,
-    }
-}
-
 fn activity_kind_key(kind: &str) -> &'static str {
     match kind {
         "status" => "detailActivityKindStatus",
@@ -1915,70 +2495,155 @@ fn activity_kind_key(kind: &str) -> &'static str {
         "nic_off" => "detailActivityKindNicOff",
         "retry" => "detailActivityKindRetry",
         "journal_overflow" => "detailActivityKindJournalOverflow",
+        "plugin" => "detailActivityKindPlugin",
         _ => "detailActivityKindUnknown",
     }
 }
 
-/// 输入框文本 → 限制值：空 / 非法 = 跟随全局。
-fn parse_seed_limit(text: &str) -> i64 {
-    text.trim()
-        .parse::<i64>()
-        .unwrap_or(SEED_LIMIT_FOLLOW_GLOBAL)
+/// 做种限制的三态：跟随全局 / 不限制 / 自定义（对应线上哨兵 -2 / -1 或 0 / 正值）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeedMode {
+    Global,
+    Unlimited,
+    Custom,
 }
 
-/// 上传限速输入（KB/s）→ 字节/秒：空 / 非法 = 0（跟随全局）。
-fn parse_seed_upload_limit(text: &str) -> i64 {
-    text.trim()
-        .parse::<i64>()
-        .map(|kbps| kbps.saturating_mul(1024))
-        .unwrap_or(0)
-}
+impl SeedMode {
+    const ALL: [Self; 3] = [Self::Global, Self::Unlimited, Self::Custom];
 
-/// 限制值 → 输入框预填文本：「跟随全局」显示为空；上传限速按 KB/s 向上取整显示。
-fn seed_form_texts(limits: &SeedLimits) -> [String; 5] {
-    let limit_text = |value: i64| {
+    /// 线上限制值 → 模式；引擎把 0 也视为不限制。
+    fn of(value: i64) -> Self {
         if value == SEED_LIMIT_FOLLOW_GLOBAL {
-            String::new()
+            Self::Global
+        } else if value > 0 {
+            Self::Custom
         } else {
-            value.to_string()
+            Self::Unlimited
+        }
+    }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Global => "btSeedLimitsModeGlobal",
+            Self::Unlimited => "btSeedLimitsModeUnlimited",
+            Self::Custom => "btSeedLimitsModeCustom",
+        }
+    }
+}
+
+/// 非自定义模式下数字框展示的 qBittorrent 默认值：总分享率、做种后分享率、做种时长（分钟）、
+/// 不活跃时长（分钟）、上传限速（KB/s，0 = 不限）。
+const SEED_DEFAULT_TEXTS: [&str; 5] = ["1.00", "1.00", "1440", "1440", "0"];
+
+/// 千分比分享率 → 两位小数文本（1500 → "1.50"）。
+fn format_seed_ratio(milli: i64) -> String {
+    let hundredths = milli.saturating_add(5) / 10;
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
+}
+
+/// 小数分享率文本 → 千分比；必须是有限正数且换算后至少 1。
+fn parse_seed_ratio(text: &str) -> Option<i64> {
+    let value: f64 = text.trim().parse().ok()?;
+    let milli = (value * 1000.0).round();
+    if !value.is_finite() || !(1.0..=1e12).contains(&milli) {
+        return None;
+    }
+    Some(milli as i64)
+}
+
+/// 时长文本（分钟）→ 正整数。
+fn parse_seed_minutes(text: &str) -> Option<i64> {
+    text.trim().parse::<i64>().ok().filter(|value| *value > 0)
+}
+
+/// 上传限速文本（KB/s）→ 字节/秒；非负整数，空 = 0（不限）。
+fn parse_seed_upload_limit(text: &str) -> Option<i64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(0);
+    }
+    text.parse::<i64>()
+        .ok()
+        .filter(|kbps| *kbps >= 0)
+        .map(|kbps| kbps.saturating_mul(1024))
+}
+
+/// 任务限制 → 表单状态：四个限制项的模式 + 五个数字框文本。自定义显示已存值，其余显示
+/// qBittorrent 默认值；上传限速按 KB/s 向上取整显示（0 = 不限）。
+fn seed_form_state(limits: &SeedLimits) -> ([SeedMode; 4], [String; 5]) {
+    let values = [
+        limits.ratio_limit_milli,
+        limits.post_ratio_limit_milli,
+        limits.seed_time_limit_minutes,
+        limits.inactive_time_limit_minutes,
+    ];
+    let modes = values.map(SeedMode::of);
+    let texts = std::array::from_fn(|index| {
+        if index == 4 {
+            return if limits.upload_limit_bps > 0 {
+                (limits.upload_limit_bps.saturating_add(1023) / 1024).to_string()
+            } else {
+                SEED_DEFAULT_TEXTS[4].to_owned()
+            };
+        }
+        match (modes[index], index) {
+            (SeedMode::Custom, 0 | 1) => format_seed_ratio(values[index]),
+            (SeedMode::Custom, _) => values[index].to_string(),
+            _ => SEED_DEFAULT_TEXTS[index].to_owned(),
+        }
+    });
+    (modes, texts)
+}
+
+/// 表单（四个模式 + 五个数字框文本）→ 保存的限制值。
+/// 全局 → -2，不限制 → -1，自定义 → 解析值。模式与文本都未改动的项保持 `baseline` 原值
+/// （含 0 视同不限制、上传限速不足 1 KB/s 的零头）；自定义文本非法的项同样保持原值。
+fn seed_limits_from_form(
+    modes: [SeedMode; 4],
+    texts: [&str; 5],
+    baseline: &SeedLimits,
+) -> SeedLimits {
+    let (base_modes, original) = seed_form_state(baseline);
+    let base_values = [
+        baseline.ratio_limit_milli,
+        baseline.post_ratio_limit_milli,
+        baseline.seed_time_limit_minutes,
+        baseline.inactive_time_limit_minutes,
+    ];
+    let limit = |index: usize| -> i64 {
+        let unchanged = base_values[index];
+        match modes[index] {
+            mode @ (SeedMode::Global | SeedMode::Unlimited) if mode == base_modes[index] => {
+                unchanged
+            }
+            SeedMode::Global => SEED_LIMIT_FOLLOW_GLOBAL,
+            SeedMode::Unlimited => -1,
+            SeedMode::Custom => {
+                let text = texts[index].trim();
+                if base_modes[index] == SeedMode::Custom && text == original[index] {
+                    unchanged
+                } else {
+                    let parsed = if index < 2 {
+                        parse_seed_ratio(text)
+                    } else {
+                        parse_seed_minutes(text)
+                    };
+                    parsed.unwrap_or(unchanged)
+                }
+            }
         }
     };
-    [
-        limit_text(limits.ratio_limit_milli),
-        limit_text(limits.post_ratio_limit_milli),
-        limit_text(limits.seed_time_limit_minutes),
-        limit_text(limits.inactive_time_limit_minutes),
-        if limits.upload_limit_bps > 0 {
-            (limits.upload_limit_bps.saturating_add(1023) / 1024).to_string()
-        } else {
-            String::new()
-        },
-    ]
-}
-
-/// 五个输入框（总分享率、做种后分享率、做种时长、不活跃时长、上传限速）→ 保存的限制值。
-/// 文本与预填文本一致的项视为未改动，保持 `baseline` 的原值（含上传限速不足 1 KB/s 的
-/// 零头），不会被重置为跟随全局；用户改过的项按输入解析。
-fn seed_limits_from_form(texts: [&str; 5], baseline: &SeedLimits) -> SeedLimits {
-    let original = seed_form_texts(baseline);
-    let resolve = |index: usize, parse: fn(&str) -> i64, unchanged: i64| {
-        let text = texts[index].trim();
-        if text == original[index] {
-            unchanged
-        } else {
-            parse(text)
-        }
+    let upload_limit_bps = if texts[4].trim() == original[4] {
+        baseline.upload_limit_bps
+    } else {
+        parse_seed_upload_limit(texts[4]).unwrap_or(baseline.upload_limit_bps)
     };
     SeedLimits {
-        ratio_limit_milli: resolve(0, parse_seed_limit, baseline.ratio_limit_milli),
-        post_ratio_limit_milli: resolve(1, parse_seed_limit, baseline.post_ratio_limit_milli),
-        seed_time_limit_minutes: resolve(2, parse_seed_limit, baseline.seed_time_limit_minutes),
-        inactive_time_limit_minutes: resolve(
-            3,
-            parse_seed_limit,
-            baseline.inactive_time_limit_minutes,
-        ),
-        upload_limit_bps: resolve(4, parse_seed_upload_limit, baseline.upload_limit_bps),
+        ratio_limit_milli: limit(0),
+        post_ratio_limit_milli: limit(1),
+        seed_time_limit_minutes: limit(2),
+        inactive_time_limit_minutes: limit(3),
+        upload_limit_bps,
     }
 }
 
@@ -1994,6 +2659,49 @@ fn seeding_status_key(code: i32) -> &'static str {
         8 => "seedingStatusQueued",
         _ => "seedingStatusNone",
     }
+}
+
+fn rate_text(bytes_per_second: u64) -> SharedString {
+    SharedString::from(format!("{}/s", format_bytes(bytes_per_second)))
+}
+
+/// 曲线点：横坐标为该点结束时的下载用时（`m:ss` / `h:mm:ss`，悬浮提示标题），纵坐标为速率。
+fn speed_chart_points(stats: &TaskSpeedHistoryDto) -> Vec<(SharedString, f64)> {
+    let bucket = i64::from(stats.bucket_secs.max(1));
+    let mut previous = 0_i64;
+    stats
+        .samples
+        .iter()
+        .zip(1_i64..)
+        .map(|(speed, index)| {
+            // 末点可能是未满桶：按累计用时截断，但保证横坐标严格递增。
+            let elapsed = index
+                .saturating_mul(bucket)
+                .min(stats.active_secs)
+                .max(previous + 1);
+            previous = elapsed;
+            (clock_text(elapsed), (*speed).max(0) as f64)
+        })
+        .collect()
+}
+
+fn clock_text(seconds: i64) -> SharedString {
+    let (hours, minutes, secs) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    SharedString::from(if hours > 0 {
+        format!("{hours}:{minutes:02}:{secs:02}")
+    } else {
+        format!("{minutes}:{secs:02}")
+    })
+}
+
+/// 速度页是否需要刷新：下载中按间隔轮询，离开下载态补拉一次拿到最终曲线。
+fn speed_refresh_due(
+    was_downloading: bool,
+    downloading: bool,
+    since_last_fetch: Option<Duration>,
+) -> bool {
+    (was_downloading && !downloading)
+        || (downloading && since_last_fetch.is_none_or(|elapsed| elapsed >= SPEED_REFRESH_INTERVAL))
 }
 
 fn format_duration(translator: &Translator, total_seconds: i64) -> SharedString {
@@ -2016,9 +2724,81 @@ mod tests {
     use chrono::{TimeZone as _, Utc};
 
     use super::{
-        SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits, format_activity_timestamp, seed_form_texts,
-        seed_limits_from_form,
+        DetailTab, SEED_LIMIT_FOLLOW_GLOBAL, SeedLimits, SeedMode, format_activity_timestamp,
+        format_seed_ratio, parse_seed_ratio, seed_form_state, seed_limits_from_form, visible_tabs,
     };
+
+    #[test]
+    fn speed_chart_points_label_elapsed_time_and_cap_partial_bucket() {
+        let stats = fluxdown_protocol::TaskSpeedHistoryDto {
+            bucket_secs: 2,
+            samples: vec![100, 200, 300],
+            // 末点为未满桶：只覆盖 1 秒。
+            active_secs: 5,
+            ..Default::default()
+        };
+        let labels: Vec<String> = super::speed_chart_points(&stats)
+            .into_iter()
+            .map(|(label, _)| label.to_string())
+            .collect();
+        assert_eq!(labels, ["0:02", "0:04", "0:05"]);
+
+        let long = fluxdown_protocol::TaskSpeedHistoryDto {
+            bucket_secs: 3600,
+            samples: vec![1, 2],
+            active_secs: 7265,
+            ..Default::default()
+        };
+        let labels: Vec<String> = super::speed_chart_points(&long)
+            .into_iter()
+            .map(|(label, _)| label.to_string())
+            .collect();
+        assert_eq!(labels, ["1:00:00", "2:00:00"]);
+    }
+
+    #[test]
+    fn speed_refresh_polls_while_downloading_and_once_after() {
+        use std::time::Duration;
+
+        use super::speed_refresh_due;
+
+        let recent = Some(Duration::from_secs(1));
+        let stale = Some(Duration::from_secs(2));
+        assert!(speed_refresh_due(false, true, None));
+        assert!(!speed_refresh_due(true, true, recent));
+        assert!(speed_refresh_due(true, true, stale));
+        assert!(speed_refresh_due(true, false, recent));
+        assert!(!speed_refresh_due(false, false, stale));
+    }
+
+    #[test]
+    fn plugin_tabs_follow_builtin_tabs() {
+        assert_eq!(
+            visible_tabs(false, false, 2),
+            [
+                DetailTab::General,
+                DetailTab::Speed,
+                DetailTab::Log,
+                DetailTab::Advanced,
+                DetailTab::Plugin(0),
+                DetailTab::Plugin(1),
+            ]
+        );
+        assert_eq!(
+            visible_tabs(true, true, 0),
+            [
+                DetailTab::General,
+                DetailTab::Speed,
+                DetailTab::ShareDiagnostics,
+                DetailTab::Seeding,
+                DetailTab::Log,
+                DetailTab::Advanced,
+            ]
+        );
+        // 传输诊断只给FluxMesh接收任务；不带插件 tab 时保持原顺序。
+        assert!(!visible_tabs(false, false, 0).contains(&DetailTab::ShareDiagnostics));
+        assert!(visible_tabs(false, true, 0).contains(&DetailTab::ShareDiagnostics));
+    }
 
     #[test]
     fn activity_uses_source_milliseconds_with_calendar_date() {
@@ -2035,32 +2815,75 @@ mod tests {
     }
 
     #[test]
-    fn untouched_seed_fields_keep_the_task_values() {
-        let baseline = SeedLimits {
-            ratio_limit_milli: 1500,
-            post_ratio_limit_milli: -1,
-            seed_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
-            inactive_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
-            upload_limit_bps: 1500,
-        };
-        let texts = seed_form_texts(&baseline);
-        assert_eq!(texts, ["1500", "-1", "", "", "2"].map(String::from));
-        // 用户只填了做种时长：其余项保持原值，上传限速零头不丢。
-        let saved = seed_limits_from_form(
-            [&texts[0], &texts[1], "90", &texts[3], &texts[4]],
-            &baseline,
-        );
-        assert_eq!(
-            saved,
-            SeedLimits {
-                seed_time_limit_minutes: 90,
-                ..baseline.clone()
-            }
-        );
+    fn ratio_text_is_decimal_with_two_places() {
+        assert_eq!(format_seed_ratio(1500), "1.50");
+        assert_eq!(format_seed_ratio(1000), "1.00");
+        assert_eq!(format_seed_ratio(2005), "2.01");
+        assert_eq!(format_seed_ratio(999), "1.00");
+        assert_eq!(parse_seed_ratio("1.50"), Some(1500));
+        assert_eq!(parse_seed_ratio(" 2 "), Some(2000));
+        assert_eq!(parse_seed_ratio("0.0004"), None);
+        assert_eq!(parse_seed_ratio("0"), None);
+        assert_eq!(parse_seed_ratio("-1"), None);
+        assert_eq!(parse_seed_ratio("abc"), None);
+        assert_eq!(parse_seed_ratio("inf"), None);
     }
 
     #[test]
-    fn edited_or_cleared_seed_fields_follow_the_input() {
+    fn form_shows_qbittorrent_defaults_unless_custom() {
+        let (modes, texts) = seed_form_state(&SeedLimits::inherit_all());
+        assert_eq!(modes, [SeedMode::Global; 4]);
+        assert_eq!(
+            texts,
+            ["1.00", "1.00", "1440", "1440", "0"].map(String::from)
+        );
+
+        let limits = SeedLimits {
+            ratio_limit_milli: 1500,
+            post_ratio_limit_milli: -1,
+            seed_time_limit_minutes: 0,
+            inactive_time_limit_minutes: 90,
+            upload_limit_bps: 1500,
+        };
+        let (modes, texts) = seed_form_state(&limits);
+        assert_eq!(
+            modes,
+            [
+                SeedMode::Custom,
+                SeedMode::Unlimited,
+                SeedMode::Unlimited,
+                SeedMode::Custom
+            ]
+        );
+        assert_eq!(texts, ["1.50", "1.00", "1440", "90", "2"].map(String::from));
+    }
+
+    #[test]
+    fn untouched_form_round_trips_the_baseline() {
+        for baseline in [
+            SeedLimits::inherit_all(),
+            SeedLimits {
+                ratio_limit_milli: 1005,
+                post_ratio_limit_milli: -1,
+                seed_time_limit_minutes: 0,
+                inactive_time_limit_minutes: 90,
+                upload_limit_bps: 1500,
+            },
+        ] {
+            let (modes, texts) = seed_form_state(&baseline);
+            let refs = [
+                texts[0].as_str(),
+                texts[1].as_str(),
+                texts[2].as_str(),
+                texts[3].as_str(),
+                texts[4].as_str(),
+            ];
+            assert_eq!(seed_limits_from_form(modes, refs, &baseline), baseline);
+        }
+    }
+
+    #[test]
+    fn modes_and_custom_values_map_to_limits() {
         let baseline = SeedLimits {
             ratio_limit_milli: 1500,
             post_ratio_limit_milli: 2000,
@@ -2068,26 +2891,46 @@ mod tests {
             inactive_time_limit_minutes: 30,
             upload_limit_bps: 512 * 1024,
         };
-        let saved = seed_limits_from_form(["", "2500", "60", "", "1024"], &baseline);
+        let saved = seed_limits_from_form(
+            [
+                SeedMode::Global,
+                SeedMode::Custom,
+                SeedMode::Unlimited,
+                SeedMode::Custom,
+            ],
+            ["1.50", "2.5", "1440", "30", "1024"],
+            &baseline,
+        );
         assert_eq!(
             saved,
             SeedLimits {
                 ratio_limit_milli: SEED_LIMIT_FOLLOW_GLOBAL,
                 post_ratio_limit_milli: 2500,
-                seed_time_limit_minutes: 60,
-                inactive_time_limit_minutes: SEED_LIMIT_FOLLOW_GLOBAL,
+                seed_time_limit_minutes: -1,
+                inactive_time_limit_minutes: 30,
                 upload_limit_bps: 1024 * 1024,
             }
         );
+        // 上传限速清空 / 填 0 = 不限速。
+        let (modes, _) = seed_form_state(&baseline);
         assert_eq!(
-            seed_limits_from_form(["", "", "", "", ""], &baseline).upload_limit_bps,
+            seed_limits_from_form(modes, ["", "", "", "", ""], &baseline).upload_limit_bps,
+            0
+        );
+        assert_eq!(
+            seed_limits_from_form(modes, ["1.5", "2", "60", "30", "0"], &baseline).upload_limit_bps,
             0
         );
     }
 
     #[test]
-    fn form_without_a_loaded_task_defaults_to_following_global() {
-        let saved = seed_limits_from_form(["", "", "", "", ""], &SeedLimits::inherit_all());
-        assert_eq!(saved, SeedLimits::inherit_all());
+    fn invalid_custom_input_keeps_the_baseline_value() {
+        let baseline = SeedLimits {
+            ratio_limit_milli: 1500,
+            ..SeedLimits::inherit_all()
+        };
+        let modes = [SeedMode::Custom; 4];
+        let saved = seed_limits_from_form(modes, ["0", "x", "-5", "", "-3"], &baseline);
+        assert_eq!(saved, baseline);
     }
 }

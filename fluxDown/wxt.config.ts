@@ -1,10 +1,54 @@
+import type { Plugin } from "vite";
 import { defineConfig } from "wxt";
+
+/**
+ * 内联 CSS 虚拟模块的 id：`\0` 前缀让其他插件跳过它；`.js` 后缀不可省，以 `.css` 结尾的 id
+ * 会被 Vite 的 CSS 插件当成样式表处理。
+ */
+const CONTENT_CSS_PREFIX = "\0fluxdown-content-css:";
+const CONTENT_CSS_SUFFIX = ".js";
+
+/**
+ * 只用于 `cssInjectionMode: "manual"` 的内容脚本构建：把依赖图里的每个 `import "x.css"` 换成
+ * 「`x.css?inline` 字符串 + 登记到 ui/content-css.ts」的虚拟模块，产物不再有 content-scripts/*.css，
+ * UI 经 `createShadowRootUi(ctx, { css: contentCss() })` 注入，运行期零 fetch（原因见 ui/content-css.ts）。
+ * 组件仍照常 `import "./x.css"`，扩展页面构建不受影响。
+ */
+function inlineContentCss(): Plugin {
+  return {
+    name: "fluxdown:inline-content-css",
+    enforce: "pre",
+    async resolveId(source, importer, options) {
+      if (!importer || !source.endsWith(".css")) return null;
+      if (importer.startsWith(CONTENT_CSS_PREFIX) || /\.css(?:$|\?)/.test(importer)) return null;
+      const resolved = await this.resolve(source, importer, { ...options, skipSelf: true });
+      if (!resolved || resolved.external) return null;
+      return CONTENT_CSS_PREFIX + resolved.id + CONTENT_CSS_SUFFIX;
+    },
+    load(id) {
+      if (!id.startsWith(CONTENT_CSS_PREFIX) || !id.endsWith(CONTENT_CSS_SUFFIX)) return null;
+      const file = id.slice(CONTENT_CSS_PREFIX.length, -CONTENT_CSS_SUFFIX.length).replaceAll("\\", "/");
+      return [
+        `import css from ${JSON.stringify(`${file}?inline`)};`,
+        `import { registerContentCss } from "@/ui/content-css";`,
+        "registerContentCss(css);",
+      ].join("\n");
+    },
+  };
+}
 
 export default defineConfig({
   // 关闭 unimport 自动导入：utils/ 下 download-dispatch 与 native-messaging
   // 曾因同名导出触发 "Duplicated imports" 警告；全项目已改为显式导入
   // （browser 来自 wxt/browser，define* 来自 wxt/utils/*），不再需要魔法全局。
   imports: false,
+  // 两个浏览器统一产出 MV3（输出目录 .output/{chrome,firefox}-mv3[-dev]）；
+  // Firefox 的 background 为非持久 event page（manifest 的 background.scripts），不是 service worker。
+  manifestVersion: 3,
+  // UI 使用 Preact：esbuild 的 automatic JSX 运行时指向 preact/jsx-runtime。
+  vite: () => ({
+    esbuild: { jsx: "automatic", jsxImportSource: "preact" },
+  }),
   zip: {
     excludeSources: ["*.zip", "*.html", "stats.html"],
   },
@@ -48,12 +92,15 @@ export default defineConfig({
       : {}),
     permissions: [
       "downloads",
-      "downloads.shelf", // setShelfEnabled 隐藏下载栏
+      // setShelfEnabled 隐藏下载栏；Firefox 没有该 API，声明会被判为无效权限。
+      ...(browser === "firefox" ? [] : ["downloads.shelf"]),
       "cookies",
       "webRequest",
       // Firefox MV3 仍支持 blocking webRequest：用 onHeadersReceived {cancel:true}
-      // 从源头拦截下载，避免残留"已取消"记录（issue #21）。Chrome MV3 已弃用，故仅 Firefox 加。
+      // 从源头拦截下载，避免残留"已取消"记录。Chrome MV3 已弃用，故仅 Firefox 加。
       ...(browser === "firefox" ? ["webRequestBlocking"] : []),
+      // 扩展安装 / 更新后给已打开的页面补注入 sensor 与 MAIN 钩子（background/probe.ts）。
+      "scripting",
       "storage",
       "alarms",
       "notifications",
@@ -63,12 +110,8 @@ export default defineConfig({
       "contextMenus",
     ],
     host_permissions: ["<all_urls>"],
-    web_accessible_resources: [
-      {
-        resources: ["/fetch-interceptor.js"],
-        matches: ["<all_urls>"],
-      },
-    ],
+    // 插件页面脚本经 userScripts API 注册；该权限只能在用户手势内按需申请（Firefox 仅支持可选）。
+    optional_permissions: ["userScripts"],
     action: {
       default_icon: {
         16: "/icon/16.png",
@@ -92,22 +135,34 @@ export default defineConfig({
         },
       },
     },
+    // 描述经 _locales 跟随浏览器语言；浏览器快捷键页已按扩展分组，无需再加扩展名前缀。
+    // 打开侧边栏：Firefox 用内置 `_execute_sidebar_action`（浏览器直接切换 sidebar_action）；
+    // Chromium 无内置命令，以自定义命令在 background 中调用 sidePanel.open。
     commands: {
       "toggle-intercept": {
         suggested_key: {
           default: "Alt+Shift+D",
         },
-        description:
-          browser === "chrome"
-            ? "__MSG_extensionName__: Toggle download interception"
-            : "Toggle download interception",
+        description: "__MSG_commandToggleIntercept__",
+      },
+      "download-playing-media": {
+        suggested_key: {
+          default: "Alt+Shift+V",
+        },
+        description: "__MSG_commandDownloadPlayingMedia__",
+      },
+      [browser === "firefox" ? "_execute_sidebar_action" : "open-side-panel"]: {
+        suggested_key: {
+          default: "Alt+Shift+S",
+        },
+        description: "__MSG_commandOpenSidePanel__",
       },
     },
   }),
   // WXT bug: addDevModeCsp() 只给 script-src 加了 localhost，未加 style-src，
   // 导致 Firefox 严格执行默认 style-src 'self' 拦截 dev server 的 CSS 加载。
-  // 此 hook 在 addDevModeCsp() 之后、convertCspToMv2() 之前执行，
-  // 在对象格式的 CSP 上补充 style-src 白名单。
+  // MV3 清单的 content_security_policy 是对象格式（extension_pages / sandbox），
+  // 此 hook 在 addDevModeCsp() 之后执行，给 extension_pages 补充 style-src 白名单。
   hooks: {
     "build:manifestGenerated"(wxt, manifest) {
       if (wxt.config.command !== "serve") return;
@@ -117,6 +172,11 @@ export default defineConfig({
         // 追加 style-src 允许从 dev server 加载 CSS
         csp.extension_pages += `; style-src 'self' ${origin} 'unsafe-inline'`;
       }
+    },
+    // 内容脚本逐个单独构建：cssInjectionMode "manual" 的（panel / sensor）把 CSS 内联进脚本，见 inlineContentCss。
+    "vite:build:extendConfig"(entrypoints, viteConfig) {
+      const inline = entrypoints.some((e) => e.type === "content-script" && e.options.cssInjectionMode === "manual");
+      if (inline) viteConfig.plugins = [...(viteConfig.plugins ?? []), inlineContentCss()];
     },
   },
 });

@@ -26,7 +26,7 @@
 [![Unraid CA](https://img.shields.io/badge/Unraid-CA-F15A2C?style=flat-square)](https://github.com/selfhosters/unRAID-CA-templates/blob/master/templates/fluxdown.xml)
 [![Chinese Indie Dev](https://img.shields.io/badge/Chinese%20Indie-Dev-ef4444?style=flat-square)](https://github.com/1c7/chinese-independent-developer)
 
-[**Website**](https://fluxdown.zerx.dev) · [**Download**](https://fluxdown.zerx.dev/#download) · [**Changelog**](https://fluxdown.zerx.dev/changelog) · [**FAQ**](https://fluxdown.zerx.dev/faq) · [**Feedback**](https://fluxdown.zerx.dev/feedback)
+[**Website**](https://fluxdown.com) · [**Download**](https://fluxdown.com/#download) · [**Changelog**](https://fluxdown.com/changelog) · [**FAQ**](https://fluxdown.com/faq) · [**Feedback**](https://fluxdown.com/feedback)
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -77,7 +77,7 @@
 
 ## Installation
 
-Grab the latest build from [**GitHub Releases**](https://github.com/zerx-lab/FluxDown/releases/latest) or [**fluxdown.zerx.dev**](https://fluxdown.zerx.dev/#download):
+Grab the latest build from [**GitHub Releases**](https://github.com/zerx-lab/FluxDown/releases/latest) or [**fluxdown.com**](https://fluxdown.com/#download):
 
 | Platform | Packages |
 |---|---|
@@ -85,7 +85,7 @@ Grab the latest build from [**GitHub Releases**](https://github.com/zerx-lab/Flu
 | **macOS** (Intel / Apple Silicon) | `.dmg` · portable `.tar.gz` |
 | **Linux** (x64) | `.AppImage` · `.deb` · Arch `.pkg.tar.zst` · portable `.tar.gz` |
 | **Android** (arm64-v8a / armeabi-v7a / x86_64) | per-ABI `.apk` · universal `.apk` |
-| **NAS / Server** (headless, x64 / ARM64) | [Docker](https://ghcr.io/zerx-lab/fluxdown-server) · Synology DSM 6/7 `.spk` · QNAP `.qpkg` · OpenWrt `.ipk` · Unraid CA template · CasaOS / ZimaOS app store |
+| **NAS / Server** (headless, x64 / ARM64) | [Docker](https://ghcr.io/zerx-lab/fluxdown-server) · Synology DSM 6/7 `.spk` · QNAP `.qpkg` · OpenWrt `.apk` (25.12+) / `.ipk` · Unraid CA template · CasaOS / ZimaOS app store |
 
 ### Browser Extension
 
@@ -113,7 +113,7 @@ Open `http://<server>:17800/` and set an access key in the first-run wizard. The
 - For unattended setup, supply `FLUXDOWN_TOKEN` through your deployment environment or secret manager, not a committed file. It initializes the key only if one has not already been set.
 - Persist `/data` for the database, logs and access key, and `/root/Downloads` for downloads. The supplied Compose file uses a named data volume and `docker/downloads/` on the host.
 - Prefer SSD/cache storage for `/data` if download disks need to sleep.
-- Native deployments must keep `fluxdown-agent` and `fluxdownd` in the same directory. The old `native/server` crate is frozen and is not the deployment entry point.
+- Native deployments must keep `fluxdown-agent` and `fluxdownd` in the same directory.
 
 ## CLI & HTTP APIs
 
@@ -213,7 +213,7 @@ flowchart TD
 | Web management UI | React + TypeScript + Vite | [`web/`](web) |
 | CLI | HTTP client or embedded engine | [`native/cli/`](native/cli) |
 | Browser integration | WXT + TypeScript, Native Messaging, userscript | [`fluxDown/`](fluxDown), [`native/nmh/`](native/nmh), [`userscript/`](userscript) |
-| Website | Astro + React; `website/` is the legacy archive | [`website-v2/`](website-v2) |
+| Website | Astro + React | [`website-v2/`](website-v2) |
 
 ## Building from Source
 
@@ -291,14 +291,14 @@ cargo test -p fluxdown_mobile        # Shared native mobile core
 
 ## Contributing & Community
 
-- **Bug reports / feature requests** — [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) or the [website feedback page](https://fluxdown.zerx.dev/feedback)
-- **QQ Group** — [832143651](https://fluxdown.zerx.dev/qq-group)
+- **Bug reports / feature requests** — [GitHub Issues](https://github.com/zerx-lab/FluxDown/issues) or the [website feedback page](https://fluxdown.com/feedback)
+- **QQ Group** — [832143651](https://fluxdown.com/qq-group)
 
 Pull requests are welcome! Branch off `main` and target `main` — it is the development branch, while `stable` only tracks stable releases (maintainers advance it from `main`). Before submitting, please make sure:
 
 ```shell
 cargo fmt --check
-cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.

@@ -7,7 +7,8 @@ use fluxdown_ui_components::FluxIcon;
 use fluxdown_ui_downloads::{DownloadHostActions, DownloadView};
 use fluxdown_ui_rss::RssView;
 use fluxdown_ui_settings::{PushHost, PushView};
-use fluxdown_ui_shell::{ShellAction, ShellRoute, ShellView, main_window_options};
+use fluxdown_ui_share::ShareView;
+use fluxdown_ui_shell::{ShellAction, ShellChrome, ShellRoute, ShellView, main_window_options};
 use gpui::{App, AppContext as _, Window, WindowHandle, px, size};
 use gpui_component::{Icon, Root};
 
@@ -30,21 +31,33 @@ pub fn reveal(cx: &mut App) {
 
 /// 打开或聚焦主窗口。返回新建窗口句柄（已开时 `None`）。
 pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
+    open_with(cx, true)
+}
+
+/// 开机自启（托盘不可见时）：新建的主窗口不抢焦点，随后由调用方最小化。
+pub fn open_unfocused(cx: &mut App) -> Option<WindowHandle<Root>> {
+    open_with(cx, false)
+}
+
+fn open_with(cx: &mut App, focus: bool) -> Option<WindowHandle<Root>> {
     let desktop = Desktop::global(cx);
     let translator = desktop.translator.clone();
     let session = desktop.session.clone();
     let client = desktop.client.clone();
     let settings_store = desktop.settings_store.clone();
-    let menu_bar = desktop.menu_bar.clone();
     let mut options = main_window_options();
+    options.focus = focus;
     WindowRegistry::restore_bounds(RememberedWindow::Main, &mut options, MAIN_WINDOW_SIZE, cx);
 
     let handle = WindowRegistry::open_or_focus(cx, WindowKey::Main, options, move |window, cx| {
         let downloads_port = Arc::new(AgentDownloadsPort::new(client.clone()));
         let downloads =
             cx.new(|cx| DownloadView::new(translator.clone(), downloads_port, window, cx));
+        watch_import_suspension(&client, &downloads, cx);
         let rss_port = Arc::new(AgentRssPort::new(client.clone()));
         let rss = cx.new(|cx| RssView::new(translator.clone(), rss_port, window, cx));
+        let share_hub = Desktop::global(cx).share_hub.clone();
+        let share = cx.new(|cx| ShareView::new(share_hub.clone(), window, cx));
         let push = cx.new(|cx| {
             PushView::new(
                 translator.clone(),
@@ -102,6 +115,17 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                     )
                     .optional(optional),
                 ),
+                ActivityEntry::Share => routes.push(
+                    ShellRoute::new(
+                        crate::activity::SHARE_ROUTE,
+                        button_id,
+                        "activity-share-tooltip",
+                        entry.label_key(),
+                        Icon::new(FluxIcon::Share2),
+                        share.clone().into(),
+                    )
+                    .optional(optional),
+                ),
                 ActivityEntry::Account => {
                     let host = Desktop::global(cx).account_host.clone();
                     let button = cx.new(|cx| {
@@ -112,7 +136,11 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                             cx,
                         )
                     });
-                    actions.push(ShellAction::view(button_id, button.into()).optional(optional));
+                    actions.push(
+                        ShellAction::view(button_id, entry.label_key(), button.into())
+                            .layout_id(entry.layout_id())
+                            .optional(optional),
+                    );
                 }
                 ActivityEntry::Settings => actions.push(
                     ShellAction::new(
@@ -122,15 +150,25 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                         Icon::new(FluxIcon::Settings),
                         move |_, cx| crate::windows::settings::open(cx),
                     )
+                    .layout_id(entry.layout_id())
                     .optional(optional),
                 ),
             }
         }
-        let shell =
-            cx.new(|cx| ShellView::new(translator.clone(), routes, actions, Some(menu_bar), cx));
+        let chrome = ShellChrome {
+            widgets: crate::chrome_layout::widgets(&downloads, cx),
+            catalog: crate::chrome_layout::catalog(),
+            on_layout_change: Rc::new(|value, cx| {
+                Desktop::set_pref(cx, crate::chrome_layout::CHROME_LAYOUT_PREF, value);
+            }),
+        };
+        let shell = cx.new(|cx| ShellView::new(translator.clone(), routes, actions, chrome, cx));
         shell.update(cx, |shell, cx| {
+            shell.observe_widget_source(&downloads, cx);
             let preferences = Desktop::preferences(cx).clone();
             activity::apply_visibility(shell, &preferences, cx);
+            crate::chrome_layout::apply(shell, &preferences, cx);
+            crate::menus::apply_menu_bar_visibility(shell, &preferences, cx);
         });
 
         let settings_for_categories = settings_store.clone();
@@ -138,7 +176,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
         let shutdown_status = crate::power::status(cx);
         let shutdown_port = crate::power::shutdown_port(cx);
         downloads.update(cx, |downloads, _| {
-            downloads.set_host_actions(DownloadHostActions {
+            let mut host = DownloadHostActions {
                 open_new_download: Some(Rc::new(|context, _, cx| {
                     crate::windows::new_download::open(cx, context);
                 })),
@@ -152,6 +190,8 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                     crate::windows::queue_manager::open(cx);
                 })),
                 open_add_device: Some(Rc::new(crate::account_host::open_add_device_dialog)),
+                rename_linked_device: Some(Rc::new(crate::account_host::open_link_rename_dialog)),
+                unpair_linked_device: Some(Rc::new(crate::account_host::confirm_link_unpair)),
                 open_file_conflicts: Some(Rc::new(|window, cx| {
                     crate::windows::file_conflict::open_from_window(window, cx);
                 })),
@@ -168,7 +208,12 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
                 shutdown_status,
                 shutdown: shutdown_port,
                 on_user_started: Some(Rc::new(crate::progress_windows::user_started)),
-            });
+                run_plugin_command: Some(crate::plugin_contributions::command_runner()),
+                plugin_tab_view: Some(crate::plugin_contributions::tab_view_factory()),
+                ..DownloadHostActions::default()
+            };
+            crate::share_host::extend_download_actions(&mut host, &share_hub);
+            downloads.set_host_actions(host);
         });
 
         attach(&session, &downloads, cx);
@@ -178,6 +223,7 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
             desktop.main_downloads = Some(downloads.downgrade());
             desktop.main_shell = Some(shell.downgrade());
         }
+        crate::plugin_contributions::attach_main_window(cx);
 
         let root = cx.new(|cx| Root::new(shell, window, cx));
         WindowRegistry::persist_bounds(RememberedWindow::Main, client, &root, window, cx);
@@ -189,8 +235,35 @@ pub fn open(cx: &mut App) -> Option<WindowHandle<Root>> {
         cx.defer(crate::account_host::replay_pending);
         cx.defer(crate::plugin_notices::replay_pending);
         cx.defer(crate::update_notices::replay_pending);
+        cx.defer(crate::service_notices::replay_pending);
     }
     handle
+}
+
+/// 导入闸门挂起状态同步到下载页：挂起期间「全部开始」必须可点（它是唯一解除入口）。
+fn watch_import_suspension(
+    client: &crate::agent_client::AgentClient,
+    downloads: &gpui::Entity<DownloadView>,
+    cx: &mut App,
+) {
+    let mut state = client.submissions.subscribe();
+    let suspended = state.borrow_and_update().suspended();
+    downloads.update(cx, |view, cx| view.set_import_suspended(suspended, cx));
+    let downloads = downloads.downgrade();
+    cx.spawn(async move |cx| {
+        while state.changed().await.is_ok() {
+            let suspended = state.borrow_and_update().suspended();
+            if downloads
+                .update(cx, |view, cx| view.set_import_suspended(suspended, cx))
+                .is_err()
+            {
+                // 主窗口已关闭：重建时会重新订阅。
+                return;
+            }
+        }
+        log::debug!("download submission state channel closed");
+    })
+    .detach();
 }
 
 /// 关闭策略：原生关闭按钮（`windowShouldClose:`）与 ⌘W 共用一份判定。
@@ -207,9 +280,11 @@ pub fn should_close(window: &mut Window, cx: &mut App) -> bool {
         return true;
     }
     if Desktop::active_task_count(cx) == 0 {
-        crate::lifecycle::quit_everything(cx);
+        crate::lifecycle::quit_everything_in(window, cx);
     } else {
-        confirm_active_tasks(window, cx, |_, cx| crate::lifecycle::quit_everything(cx));
+        confirm_active_tasks(window, cx, |window, cx| {
+            crate::lifecycle::quit_everything_in(window, cx);
+        });
     }
     false
 }

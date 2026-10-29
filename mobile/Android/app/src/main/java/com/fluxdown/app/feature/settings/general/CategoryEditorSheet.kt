@@ -1,8 +1,5 @@
 package com.fluxdown.app.feature.settings.general
 
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,10 +32,8 @@ import com.fluxdown.app.feature.settings.RemoteDirectoryPickerSheet
 import com.fluxdown.app.feature.settings.rememberLastNonNull
 import com.fluxdown.app.i18n.fill
 import com.fluxdown.app.i18n.str
-import com.fluxdown.app.ui.canRequestAllFilesAccess
-import com.fluxdown.app.ui.allFilesAccessIntent
+import com.fluxdown.app.ui.rememberLocalDirectoryPicker
 import com.fluxdown.app.ui.isLocalDirWritable
-import com.fluxdown.app.ui.treeUriToPath
 import com.fluxdown.core.protocol.CategoryBuild
 import com.fluxdown.core.protocol.CategoryDraft
 import com.fluxdown.core.protocol.CategoryRules
@@ -72,12 +67,13 @@ private fun CategoryValidationError.message(): Int = when (this) {
     CategoryValidationError.NameRequired -> R.string.categoryNameRequired
     CategoryValidationError.ExtensionsRequired -> R.string.extensionsRequired
     CategoryValidationError.RegexInvalid -> R.string.regexInvalid
+    CategoryValidationError.UrlPatternRequired -> R.string.urlPatternRequired
 }
 
 /**
  * 分类编辑器（新建 / 编辑）。自包含：只依赖分类条目与回调，保存 / 删除由调用方写回 `custom_categories`。
- * 校验与条目生成全部走 [CategoryRules.build]。[target] = null 时收起；本机主机的保存目录用系统目录选择器
- * （SAF → 绝对路径 + 可写检查），远端主机可手填或浏览服务器目录。有未保存修改时只能经按钮关闭（先确认丢弃）。
+ * 校验与条目生成全部走 [CategoryRules.build]。[target] = null 时收起；本机使用应用内目录浏览与存储授权，
+ * 远端主机可手填或浏览服务器目录。有未保存修改时只能经按钮关闭（先确认丢弃）。
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -102,10 +98,6 @@ internal fun CategoryEditorSheet(
 
     val title = str(if (existing == null) R.string.addCategory else R.string.editCategory)
     val notWritable = str(R.string.mobileSaveDirNotWritable)
-    val unmappable = str(R.string.mobilePickDirUnmappable)
-    val grantTitle = str(R.string.mobileAllFilesTitle)
-    val grantDesc = str(R.string.mobileAllFilesDescNative)
-    val grantAction = str(R.string.mobileGoGrant)
     val cancel = str(R.string.cancel)
 
     fun change(next: CategoryDraft) {
@@ -167,43 +159,10 @@ internal fun CategoryEditorSheet(
         }
     }
 
-    fun applyLocalDir(dir: String) {
-        when {
-            isLocalDirWritable(dir) -> {
-                haptics.tick()
-                change(draft.copy(saveDir = dir))
-            }
-            canRequestAllFilesAccess(dir) -> {
-                haptics.reject()
-                overlays.showDialog(
-                    FluxDialogSpec(
-                        title = grantTitle,
-                        message = grantDesc,
-                        icon = FluxIcons.FolderOpen,
-                        buttons = listOf(
-                            FluxDialogButton(cancel),
-                            FluxDialogButton(grantAction, FluxDialogButtonStyle.Primary) {
-                                context.startActivity(allFilesAccessIntent(context))
-                            },
-                        ),
-                    ),
-                )
-            }
-            else -> {
-                haptics.reject()
-                overlays.toast(notWritable.fill("dir" to dir), FluxToastKind.Error)
-            }
-        }
-    }
-
-    val treePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val path = treeUriToPath(uri)
-        if (path == null) {
-            haptics.reject()
-            overlays.toast(unmappable, FluxToastKind.Warn)
-        } else {
-            applyLocalDir(path)
+    val pickDirectory = rememberLocalDirectoryPicker { dir ->
+        if (isLocalHost && target != null) {
+            haptics.tick()
+            change(draft.copy(saveDir = dir))
         }
     }
 
@@ -240,7 +199,7 @@ internal fun CategoryEditorSheet(
                     isLocalHost = isLocalHost,
                     canDelete = canDelete,
                     onChange = ::change,
-                    onBrowseLocal = { treePicker.launch(null) },
+                    onBrowseLocal = { pickDirectory(draft.saveDir) },
                     onBrowseRemote = { showRemotePicker = true },
                     onDelete = ::confirmDelete,
                 )
@@ -278,7 +237,11 @@ private fun ColumnScope.EditorBody(
     val context = LocalContext.current
     val showsRules = existing?.hasMatchRules ?: true
     val showsSaveDir = existing?.isAll != true
-    val isRegex = draft.matchMode == "regex"
+    val mode = when (draft.matchMode) {
+        "regex" -> "regex"
+        "url" -> "url"
+        else -> "extension"
+    }
     val namePrompt = if (existing != null && existing.isBuiltin) categoryDisplayName(context, existing) else str(R.string.categoryNameHint)
 
     androidx.compose.foundation.layout.Column(
@@ -317,11 +280,12 @@ private fun ColumnScope.EditorBody(
                     options = listOf(
                         SegOption("extension", str(R.string.matchByExtension)),
                         SegOption("regex", str(R.string.matchByRegex)),
+                        SegOption("url", str(R.string.matchByUrl)),
                     ),
-                    selected = if (isRegex) "regex" else "extension",
+                    selected = mode,
                     onSelect = { onChange(draft.copy(matchMode = it)) },
                 )
-                if (isRegex) {
+                if (mode == "regex") {
                     FluxField(
                         value = draft.regexText,
                         onValueChange = { onChange(draft.copy(regexText = it)) },
@@ -329,6 +293,16 @@ private fun ColumnScope.EditorBody(
                         placeholder = str(R.string.regexHint),
                         mono = true,
                         error = error?.takeIf { it == CategoryValidationError.RegexInvalid }?.let { str(it.message()) },
+                    )
+                } else if (mode == "url") {
+                    FluxField(
+                        value = draft.urlText,
+                        onValueChange = { onChange(draft.copy(urlText = it)) },
+                        label = str(R.string.urlPatternLabel),
+                        placeholder = str(R.string.urlPatternHint),
+                        hint = str(R.string.urlPatternDesc),
+                        mono = true,
+                        error = error?.takeIf { it == CategoryValidationError.UrlPatternRequired }?.let { str(it.message()) },
                     )
                 } else {
                     FluxField(
@@ -373,17 +347,21 @@ private fun ColumnScope.EditorBody(
 }
 
 /**
- * 保存目录：本机 = 只读展示 + 系统目录选择器（手填路径极易写成不可写目录）；远端 = 可手填，也可浏览服务器目录。
+ * 保存目录：本机 = 只读展示 + 应用内目录浏览与授权；远端 = 可手填，也可浏览服务器目录。
  */
 @Composable
 private fun SaveDirField(value: String, isLocalHost: Boolean, onChange: (String) -> Unit, onBrowse: () -> Unit) {
+    val context = LocalContext.current
+    val display = androidx.compose.runtime.remember(value, isLocalHost) {
+        if (isLocalHost) com.fluxdown.app.ui.friendlyLocalPath(context, value) else value
+    }
     FluxField(
-        value = value,
+        value = display,
         onValueChange = onChange,
         label = str(R.string.categorySaveDir),
         placeholder = str(R.string.mobileSaveDirUnset),
         hint = str(R.string.categorySaveDirDesc),
-        mono = true,
+        mono = !isLocalHost,
         singleLine = false,
         readOnly = isLocalHost,
         trailing = {

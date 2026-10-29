@@ -6,31 +6,51 @@
 
 /// 插件通用认证凭据存储与请求注入。
 pub mod auth;
+/// `ProxyMode::Auto` 探测阶段的多路径竞速（Happy Eyeballs 式错峰并行探测）。
+pub(crate) mod auto_probe;
 /// `ProxyMode::Auto`：候选代理解析、多路径任务上下文与路由 wire 标签。
 pub mod auto_proxy;
+/// BitTorrent / 磁力配置与链接识别（始终编译；无 `bt` feature 时用于明确拒绝）。
+pub mod bt_config;
+/// BitTorrent 会话与下载实现（librqbit）。仅 `bt` feature 下编译。
+#[cfg(feature = "bt")]
 pub mod bt_downloader;
 /// BT 部分选择做种的 parts 边车（选中文件路径映射 + 跨文件边界字节）。
+#[cfg(feature = "bt")]
 pub mod bt_partfile;
 pub mod bt_seeding;
-/// BT staging 文件的 NTFS sparse 存储包装（免预留簇 / 免 VDL 零填充）。
+/// Windows 的 NTFS sparse 标记（HTTP 多段预分配与 BT staging 共用）；BT staging
+/// 存储包装仅 `bt` feature 下编译。
 #[cfg(target_os = "windows")]
 pub mod bt_sparse;
+/// 已完成 BT 任务的完整性校验（按 piece 表重哈希落盘数据）。
+#[cfg(feature = "bt")]
+pub mod bt_verify;
+/// 外部捕获的分类保存目录路由：建任务时选初始目录，完成前按最终文件名复核落点。
+pub mod category_route;
 pub mod cdn;
+pub(crate) mod client_cache;
 pub mod components;
+/// 请求凭据（Cookie / Authorization / Referer）对锚点 URL 的作用域判定（公共后缀表）。
+pub(crate) mod credential_scope;
 pub mod dash_downloader;
 pub mod data_dir;
 pub mod db;
 pub mod disk_space;
 pub mod download_manager;
 pub mod downloader;
+/// eD2K / Kad 协议栈。仅 `ed2k` feature 下编译。
+#[cfg(feature = "ed2k")]
 pub mod ed2k;
+/// 宿主自身外网请求（应用更新、组件、插件包、订阅列表）的统一出口：全局代理 + 插件改写。
+pub mod egress;
 pub mod events;
 pub mod file_exists;
 pub mod ftp_downloader;
 pub mod hls_downloader;
-/// 设备互联（`fluxdown_link`）的引擎数据库存储后端。仅 `link` feature 下编译。
-#[cfg(feature = "link")]
-pub mod link;
+/// 下载请求发送：逐跳跟随重定向，每跳按凭据作用域重建请求头。
+pub(crate) mod http_request;
+pub mod intercept;
 pub mod logger;
 /// 下载来源标记（Windows Zone.Identifier / macOS quarantine）。
 pub mod mark_of_the_web;
@@ -40,7 +60,16 @@ pub mod model;
 pub mod multi_nic;
 /// 下载文件名命名管线：Content-Disposition 解码、URL / 类型证据、sanitize、魔数嗅探。
 pub mod naming;
+/// 网络传输失败的类型化分类（换路 / 自动重试的唯一判据，平台与语言无关）。
+pub mod net_failure;
 pub(crate) mod output;
+/// 系统 PAC：脚本获取与缓存、按下载链接决策、失败代理记忆。
+pub(crate) mod pac;
+/// 系统 PAC 脚本的 `FindProxyForURL` JS 执行器（QuickJS，仅 `plugins` feature）。
+#[cfg(feature = "plugins")]
+pub(crate) mod pac_js;
+/// 任务起跑时按系统 PAC 修正出口（System / Auto 模式）。
+pub(crate) mod pac_route;
 /// 多路径分段调度的纯判据（稳态速率采样、竞争集、均衡拆分、完成时间抢占）。
 pub(crate) mod path_scheduler;
 /// 插件系统（可选、可失败的下载中间层）。仅 `plugins` feature 下编译。
@@ -48,15 +77,23 @@ pub(crate) mod path_scheduler;
 pub mod plugin;
 mod proc;
 pub mod proxy_config;
+/// 站点代理规则：规则模型、严格校验、逐请求匹配与「测试网址」解释。
+pub mod proxy_rules;
+/// 排队顺序的增量发布（稳定排序键 + 差异计算）。
+pub mod queue_order;
 /// `ProxyMode::Auto` 各路径单连接速率的跨重启折扣先验。
 pub mod route_health;
 /// RSS 订阅自动下载（feed 轮询 → 规则过滤 → 建任务）。
 pub mod rss;
+/// 站点代理规则的逐请求路由（`RequestSpec.egress`）。
+pub mod rule_route;
 pub mod segment_advisor;
 pub mod segment_coordinator;
 pub mod selection;
 /// 站点 HTTP Basic 认证凭据（per-host 保存 + 建任务时自动套用）。
 pub mod site_auth;
+/// 任务整个下载期的速度曲线与统计（持久化，任务完成后可回看）。
+pub mod speed_history;
 pub mod speed_limiter;
 /// 通用订阅 provider 接口（RSS 与插件订阅共用）。
 pub mod subscription;
@@ -64,6 +101,8 @@ pub mod task_activity;
 mod temp_file_guard;
 /// `thunder://` 链接解析（迅雷专有 base64 封装：`AA<真实地址>ZZ`）。
 pub mod thunder;
+/// BT tracker 列表订阅。仅 `bt` feature 下编译。
+#[cfg(feature = "bt")]
 pub mod tracker_subscription;
 pub mod transfer_activity;
 /// 用户主目录下的系统标准目录（下载目录：Windows 已知文件夹 / XDG user-dirs）。
@@ -76,7 +115,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bt_downloader::BtConfig;
+use bt_config::BtConfig;
 use db::{Db, DbError};
 use download_manager::{DownloadManager, DownloadManagerConfig};
 use downloader::DownloadError;
@@ -92,7 +131,7 @@ use selection::{HostSelection, SelectionOutcome};
 ///
 /// ```
 /// use fluxdown_engine::EngineConfig;
-/// use fluxdown_engine::bt_downloader::BtConfig;
+/// use fluxdown_engine::bt_config::BtConfig;
 /// use fluxdown_engine::proxy_config::ProxyConfig;
 ///
 /// let config = EngineConfig {
@@ -156,7 +195,7 @@ pub enum EngineError {
 /// ```no_run
 /// use std::sync::Arc;
 /// use fluxdown_engine::{Engine, EngineConfig, NoopSelection, NoopSink};
-/// use fluxdown_engine::bt_downloader::BtConfig;
+/// use fluxdown_engine::bt_config::BtConfig;
 /// use fluxdown_engine::proxy_config::ProxyConfig;
 ///
 /// # async fn run() -> Result<(), fluxdown_engine::EngineError> {
@@ -304,7 +343,12 @@ impl Engine {
         {
             let (proxy_cfg, plugin_sink, max_conc, data_dir_p) = plugin_ctx;
             let retry_tx = manager.plugin_retry_sender();
-            let bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
+            let runtime: Arc<dyn plugin::ScriptRuntime> = Arc::new(
+                plugin::quickjs::QuickJsScriptRuntime::new(max_conc)
+                    .map_err(|e| EngineError::Plugin(e.to_string()))?,
+            );
+            let audit = plugin::audit::AuditLog::new(db.clone(), &runtime.spawn_handle());
+            let engine_bridge = Arc::new(
                 plugin::bridge::EngineBridge::new(
                     db.clone(),
                     &proxy_cfg,
@@ -313,9 +357,8 @@ impl Engine {
                 )
                 .map_err(|e| EngineError::Plugin(e.to_string()))?,
             );
-            let runtime: Arc<dyn plugin::ScriptRuntime> = Arc::new(
-                plugin::quickjs::QuickJsScriptRuntime::new(max_conc)
-                    .map_err(|e| EngineError::Plugin(e.to_string()))?,
+            let bridge: Arc<dyn plugin::PluginBridge> = Arc::new(
+                plugin::audit::AuditingBridge::new(engine_bridge.clone(), audit.clone()),
             );
             let app_version = db
                 .get_config("app_version")
@@ -332,17 +375,18 @@ impl Engine {
                         plugins_root.display()
                     ))
                 })?;
-            let pm = Arc::new(plugin::PluginManager::new(
+            let pm = Arc::new(plugin::PluginManager::with_audit(
                 runtime,
                 bridge,
                 db.clone(),
                 plugins_root,
                 app_version,
                 plugin_sink,
+                audit,
             ));
             pm.load_all().await;
             manager.rss.set_fallback_provider(pm.subscription_router());
-            manager.install_plugin_manager(pm);
+            manager.install_plugin_manager(pm, engine_bridge);
         }
         // 装载 RSS 订阅到内存镜像——放在引擎构造而非交给宿主，保证任何
         // 宿主（daemon / CLI --local）都不必记得这一步就能让轮询生效。
@@ -413,18 +457,33 @@ impl Engine {
         probe_id: String,
         torrent_bytes: Vec<u8>,
     ) -> TorrentMetaResult {
-        let probe_id_for_panic = probe_id.clone();
-        tokio::task::spawn_blocking(move || {
-            bt_downloader::probe_torrent_meta(probe_id, torrent_bytes)
-        })
-        .await
-        .unwrap_or_else(|e| TorrentMetaResult {
-            probe_id: probe_id_for_panic,
-            name: String::new(),
-            total_bytes: 0,
-            files: Vec::new(),
-            error: format!("probe task panicked: {e}"),
-        })
+        #[cfg(feature = "bt")]
+        {
+            let probe_id_for_panic = probe_id.clone();
+            tokio::task::spawn_blocking(move || {
+                bt_downloader::probe_torrent_meta(probe_id, torrent_bytes)
+            })
+            .await
+            .unwrap_or_else(|e| TorrentMetaResult {
+                probe_id: probe_id_for_panic,
+                name: String::new(),
+                total_bytes: 0,
+                files: Vec::new(),
+                error: format!("probe task panicked: {e}"),
+            })
+        }
+        // 无 BT 后端：明确回报不支持，而不是静默返回空结果。
+        #[cfg(not(feature = "bt"))]
+        {
+            let _ = torrent_bytes;
+            TorrentMetaResult {
+                probe_id,
+                name: String::new(),
+                total_bytes: 0,
+                files: Vec::new(),
+                error: download_manager::BT_DISABLED_MESSAGE.to_owned(),
+            }
+        }
     }
 
     /// 投递日志快照（新的在前，上限 [`webhook::MAX_DELIVERY_LOG`]）。

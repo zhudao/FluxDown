@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     pin::Pin,
     rc::Rc,
@@ -14,15 +14,25 @@ use fluxdown_protocol::{
 };
 
 use crate::model::{
-    CategoryIndex, DownloadTaskView, TaskState, TaskStore,
+    CategoryIndex, DownloadTaskView, TaskStore,
     devices::{DeviceEntry, local_device_id, other_devices},
     file_conflict::FileConflictSet,
+    group_tree::{GroupAggregate, GroupMeta},
+    share::ShareFacts,
 };
 
 /// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
 pub const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
 /// 偏好：新建下载默认沿用上次保存目录。
 pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
+/// 本机偏好：新建下载保存目录历史（字符串数组，最新在前；设备本地，不进云同步）。
+pub const SAVE_DIR_HISTORY_PREF: &str = "download.save_dir_history";
+/// 本机偏好：是否记录并在新建下载中列出保存目录历史（缺省开启；设备本地）。
+pub const SAVE_DIR_HISTORY_ENABLED_PREF: &str = "download.save_dir_history_enabled";
+/// 本机偏好：下载限速最近自定义值（KB/s 整数数组，最新在前；设备本地，不进云同步）。
+pub const SPEED_LIMIT_RECENT_PREF: &str = "download.speed_limit_recent_kbps";
+/// 本机偏好：上传限速最近自定义值（KB/s 整数数组，最新在前；设备本地，不进云同步）。
+pub const UPLOAD_LIMIT_RECENT_PREF: &str = "download.upload_limit_recent_kbps";
 /// 本机偏好：新建下载「下载到」上次选择的目标（`local` / `cloud:<id>` / `link:<fp>`），
 /// 设备本地，不进云同步。
 pub const LAST_DOWNLOAD_TARGET_PREF: &str = "download.last_target";
@@ -55,6 +65,9 @@ pub struct SeedLimits {
 /// `SeedLimits` 各限制字段的「跟随全局」哨兵（与 `native/protocol` 一致）。
 pub(crate) const SEED_LIMIT_FOLLOW_GLOBAL: i64 = -2;
 
+/// 引擎单任务删除时广播的 `TaskProgress` 哨兵（`status == 4` 且 `error_message` 为此值）。
+const DELETED_SENTINEL: &str = "deleted";
+
 impl SeedLimits {
     /// 全部跟随全局（上传限速 0 = 未设置）。
     #[must_use]
@@ -84,7 +97,12 @@ impl SeedLimits {
 pub enum DownloadsCommand {
     /// 分页读取 daemon 持久活动历史。
     TaskActivity(TaskActivityQuery),
+    /// 读取 daemon 持久化的任务全生命周期速度曲线与统计（`daemon.task.speedHistory`）。
+    TaskSpeedHistory(fluxdown_protocol::TaskSpeedHistoryQuery),
     Create(Box<fluxdown_protocol::DaemonCreateTaskParams>),
+    /// 批量建任务（`daemon.task.createMany`）：整块一个事务、按 `batch_id` 幂等，
+    /// 结果不确定时可原样重发。
+    CreateMany(Box<fluxdown_protocol::DaemonCreateTasksParams>),
     Pause {
         task_id: String,
     },
@@ -94,6 +112,23 @@ pub enum DownloadsCommand {
     Rename {
         task_id: String,
         file_name: String,
+    },
+    /// 更换下载源地址（`daemon.task.changeUrl`）：仅非活跃、未完成、非 BT 任务；
+    /// 失败为引擎稳定错误码（`invalid-url` / `task-active` / `protocol-mismatch` …）。
+    ChangeUrl {
+        task_id: String,
+        url: String,
+    },
+    /// 修改线程数（`daemon.task.setSegments`）：`<= 0` = 自动，已下进度保留；
+    /// 下载中任务由引擎静默暂停 → 改配置 → 恢复。
+    SetSegments {
+        task_id: String,
+        segments: i32,
+    },
+    /// 已完成 BT 任务的完整性校验（`daemon.task.verify`，慢方法）：结果为
+    /// [`DownloadsResult::TaskVerify`]；同一任务校验在途时为 `conflict`。
+    VerifyTask {
+        task_id: String,
     },
     Delete {
         task_id: String,
@@ -186,6 +221,11 @@ pub enum DownloadsCommand {
     SiteAuthMatch {
         url: String,
     },
+    /// 新建下载表单的只读元信息预探测（`daemon.link.probe`，只发一次 HEAD，不消耗
+    /// 一次性令牌）；结果为 [`fluxdown_protocol::LinkProbeResult`]。
+    ProbeLink {
+        url: String,
+    },
     /// 经 FluxCloud 把链接下发到账号内另一台设备（`agent.remote.dispatch`）。
     RemoteDispatch(RemoteDispatchParams),
     /// 下发到局域网已配对设备（`agent.link.dispatch`）。
@@ -197,6 +237,11 @@ pub enum DownloadsCommand {
     },
     RevealTask {
         task_id: String,
+    },
+    /// 把已完成任务的产物以文件形式写入系统剪贴板（`agent.platform.copyTaskFiles`，可在文件管理器
+    /// 里粘贴）；任一产物已不在磁盘上即整体失败（`notFound`）。
+    CopyTaskFiles {
+        task_ids: Vec<String>,
     },
     /// 重扫已完成任务的产物是否仍在下载目录（`daemon.task.rescan`，结果经
     /// `fileMissingChanged` 事件回流）。
@@ -244,9 +289,15 @@ pub enum DownloadsResult {
     Unit,
     Value(serde_json::Value),
     TaskActivity(TaskActivityPage),
+    /// 无记录（从未下载或已重新下载重置）时为 `None`。
+    TaskSpeedHistory(Option<fluxdown_protocol::TaskSpeedHistoryDto>),
     Preview(fluxdown_protocol::ResolvePreviewResponse),
     /// `FileIcon` 的 PNG 字节。
     FileIcon(Vec<u8>),
+    /// `CreateMany` 的逐条结果（与请求条目同序）。
+    CreateMany(fluxdown_protocol::DaemonCreateTasksResult),
+    /// `VerifyTask` 的校验报告。
+    TaskVerify(fluxdown_protocol::TaskVerifyResult),
 }
 
 impl DownloadsResult {
@@ -277,18 +328,23 @@ pub trait DownloadsPort: Send + Sync {
     fn execute(&self, command: DownloadsCommand) -> PortFuture<DownloadsResult>;
 }
 
-/// 任务组聚合（由任务行 + `snapshot.daemon.groups` 计算）。
+/// 「全部开始」能恢复哪些暂停任务（见 [`DownloadsController::resume_targets`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResumeTargets {
+    /// 有运行中队列里的暂停任务。
+    Some,
+    /// 暂停任务全在已停止的队列里：全部开始不会动它们，需先启动队列。
+    OnlyInStoppedQueues,
+    /// 没有暂停任务。
+    None,
+}
+
+/// 任务组聚合（由任务行 + `snapshot.daemon.groups` 计算，覆盖组内全部本地成员）。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct GroupSummary {
     pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) origin_url: String,
-    pub(crate) save_dir: String,
-    pub(crate) total: usize,
-    pub(crate) completed: usize,
-    pub(crate) failed: usize,
-    pub(crate) downloading: usize,
-    pub(crate) progress: f32,
+    pub(crate) meta: GroupMeta,
+    pub(crate) aggregate: GroupAggregate,
 }
 
 pub struct DownloadsController {
@@ -296,11 +352,13 @@ pub struct DownloadsController {
     local: Vec<TaskDto>,
     remote: Vec<RemoteTaskDto>,
     store: Rc<TaskStore>,
-    live_speeds: HashMap<String, i64>,
+    /// 任务实时速度 `(下载, 上传)`（字节/秒）。
+    live_speeds: HashMap<String, (i64, i64)>,
     task_runtime: BTreeMap<String, Rc<TaskRuntimeDto>>,
     boosted: Option<String>,
-    /// 引擎待启动队列位置（task_id → 1 起的位置）；智能排序的排队档按它排列。
-    queue_positions: HashMap<String, u32>,
+    /// 引擎待启动队列排序键（task_id → `QueuePositionDto::order`）。行里存键，智能排序的排队档
+    /// 按键排列；展示序号是键在 `store` 有序键集合里的名次，不随队首出队逐行改写。
+    queue_keys: HashMap<String, i64>,
     queues: Vec<QueueDto>,
     groups: Vec<GroupDto>,
     group_summaries: Vec<GroupSummary>,
@@ -332,7 +390,7 @@ impl DownloadsController {
             live_speeds: HashMap::new(),
             task_runtime: BTreeMap::new(),
             boosted: None,
-            queue_positions: HashMap::new(),
+            queue_keys: HashMap::new(),
             queues: Vec::new(),
             groups: Vec::new(),
             group_summaries: Vec::new(),
@@ -355,6 +413,7 @@ impl DownloadsController {
     pub fn replace_snapshot(&mut self, snapshot: &AgentSnapshot) {
         self.live_speeds.clear();
         self.local.clone_from(&snapshot.daemon.tasks);
+        self.note_loading(&snapshot.daemon);
         self.remote.clone_from(&snapshot.remote_tasks);
         self.cloud_devices.clone_from(&snapshot.cloud_devices);
         self.cloud_connected =
@@ -371,6 +430,8 @@ impl DownloadsController {
         if self.stale {
             self.task_runtime.clear();
         }
+        self.store
+            .replace_share(ShareFacts::from_state(&snapshot.share));
         self.rebuild_all();
         self.rebuild_remote();
     }
@@ -384,6 +445,7 @@ impl DownloadsController {
             AgentEvent::DaemonSnapshotReplaced(snapshot) => {
                 self.live_speeds.clear();
                 self.local.clone_from(&snapshot.tasks);
+                self.note_loading(snapshot);
                 self.absorb_daemon_context(snapshot);
                 self.stale = false;
                 self.rebuild_all();
@@ -436,6 +498,10 @@ impl DownloadsController {
                 self.set_preferences(&preferences.values);
                 true
             }
+            AgentEvent::ShareChanged(state) => {
+                self.store.replace_share(ShareFacts::from_state(state))
+            }
+            AgentEvent::ShareProgress(progress) => self.store.apply_share_progress(progress),
             AgentEvent::Daemon(event) => self.apply_daemon_event(event),
             _ => false,
         }
@@ -506,6 +572,20 @@ impl DownloadsController {
         &self.group_summaries
     }
 
+    /// 单个任务组的聚合（不走缓存，只扫一遍本地任务；停靠面板渲染用）。
+    pub(crate) fn group_summary(&self, group_id: &str) -> Option<GroupSummary> {
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.group_id == group_id)?;
+        let local = self.store.local();
+        Some(GroupSummary {
+            id: group.group_id.clone(),
+            meta: GroupMeta::from_dto(group),
+            aggregate: GroupAggregate::of(local.iter().filter(|task| task.group_id == group_id)),
+        })
+    }
+
     /// 本机的云设备 id（未登录 / 名册未就绪为 `None`）。
     #[must_use]
     pub(crate) fn local_device_id(&self) -> Option<String> {
@@ -526,6 +606,55 @@ impl DownloadsController {
     #[must_use]
     pub(crate) fn runtime_stats(&self) -> &DaemonRuntimeStatsDto {
         &self.runtime_stats
+    }
+
+    /// 任务表 / 队列位置表仍在分页载入：「任务全集」类判定（[`Self::has_pausable_tasks`]、
+    /// 全选 / 全部暂停范围等）此刻都不成立，调用方应显示加载态而不是「没有任务」。
+    #[must_use]
+    pub(crate) fn tables_loading(&self) -> bool {
+        self.store.loading().is_some()
+    }
+
+    /// 同步载入态到共享存储，读者（表格 / 详情）据此显示加载态、跳过删除推断。
+    fn note_loading(&self, snapshot: &DaemonSnapshot) {
+        self.store
+            .set_loading(snapshot.tables_loading().then(|| snapshot.task_count()));
+    }
+
+    /// 状态栏「全部暂停」是否有作用对象：与 daemon `PauseAll` 同判定（等待 / 下载中 /
+    /// 准备中，即 status 0 / 1 / 5 的本地任务），另含做种中（status 3 且 seeding_status 1 / 8）的任务。
+    #[must_use]
+    pub(crate) fn has_pausable_tasks(&self) -> bool {
+        self.store.pausable_count() > 0
+    }
+
+    /// 状态栏「全部开始」的作用对象：与引擎 `eligible_resume_task_ids` 同判定——
+    /// 已暂停（status 2）且所在队列运行中；队列不在快照里（孤儿）视作运行中；
+    /// 另含用户停止做种（status 3、seeding_status 4）且产物仍在的任务（不受队列约束）。
+    /// 停止队列内的暂停任务由「启动队列」恢复，不计入，但单独报告以便界面说明原因。
+    /// 按存储里增量维护的「各队列暂停数」判定，不随任务数扫描。
+    #[must_use]
+    pub(crate) fn resume_targets(&self) -> ResumeTargets {
+        if self.store.resumable_seed_count() > 0 {
+            return ResumeTargets::Some;
+        }
+        let mut held = false;
+        for queue_id in self.store.paused_by_queue().keys() {
+            let running = self
+                .queues
+                .iter()
+                .find(|queue| &queue.queue_id == queue_id)
+                .is_none_or(|queue| queue.is_running);
+            if running {
+                return ResumeTargets::Some;
+            }
+            held = true;
+        }
+        if held {
+            ResumeTargets::OnlyInStoppedQueues
+        } else {
+            ResumeTargets::None
+        }
     }
 
     /// daemon 公开配置（字符串编码）。
@@ -601,12 +730,12 @@ impl DownloadsController {
             .map(|(id, runtime)| (id.clone(), Rc::new(runtime.clone())))
             .collect();
         for task in &snapshot.tasks {
-            if !matches!(task.status, 1 | 5) {
-                self.stop_runtime(&task.task_id);
-            }
+            self.settle_runtime(&task.task_id, task.status);
         }
         self.boosted = snapshot.priority.first().cloned();
-        self.queue_positions = queue_position_map(&snapshot.queue_positions);
+        self.queue_keys = queue_key_map(&snapshot.queue_positions);
+        self.store
+            .replace_queue_keys(self.queue_keys.values().copied().collect());
         self.conflicts.replace(&snapshot.pending_selections);
     }
 
@@ -615,9 +744,30 @@ impl DownloadsController {
             DaemonEvent::SnapshotReplaced(snapshot) => {
                 self.live_speeds.clear();
                 self.local.clone_from(&snapshot.tasks);
+                self.note_loading(snapshot);
                 self.absorb_daemon_context(snapshot);
                 self.rebuild_all();
                 true
+            }
+            // 整表重载宣告：清空对应表并进入加载态；完整表由会话分页载入后以快照信号送达。
+            DaemonEvent::TablesReloading { tasks, queue } => {
+                if tasks.is_some() {
+                    self.live_speeds.clear();
+                    self.local.clear();
+                    self.rebuild_all();
+                }
+                if queue.is_some() {
+                    self.queue_keys.clear();
+                    self.store.replace_queue_keys(Vec::new());
+                    for ix in 0..self.local.len() {
+                        self.store.set_queue_key(ix, None);
+                    }
+                }
+                let total = tasks.map_or(self.local.len(), |total| {
+                    usize::try_from(total).unwrap_or(usize::MAX)
+                });
+                self.store.set_loading(Some(total));
+                tasks.is_some() || queue.is_some()
             }
             DaemonEvent::QueuesChanged(queues) => {
                 self.queues.clone_from(queues);
@@ -641,10 +791,20 @@ impl DownloadsController {
             DaemonEvent::TaskChanged(task) => {
                 if !matches!(task.status, 1 | 5) {
                     self.live_speeds.remove(&task.task_id);
-                    self.stop_runtime(&task.task_id);
+                    self.settle_runtime(&task.task_id, task.status);
                 }
                 self.upsert(task.clone());
                 true
+            }
+            DaemonEvent::TasksChanged(tasks) => {
+                for task in tasks {
+                    if !matches!(task.status, 1 | 5) {
+                        self.live_speeds.remove(&task.task_id);
+                        self.settle_runtime(&task.task_id, task.status);
+                    }
+                }
+                self.upsert_many(tasks);
+                !tasks.is_empty()
             }
             DaemonEvent::TaskRuntimeChanged(runtime) => {
                 let task_id = &runtime.task_id;
@@ -655,6 +815,11 @@ impl DownloadsController {
                     return false;
                 }
                 let row = self.store.find_local(task_id);
+                // 已完成任务不再保留运行时：迟到的旧样本不得把条目加回来。
+                if row.is_some_and(|ix| !fluxdown_protocol::runtime_retained(self.local[ix].status))
+                {
+                    return false;
+                }
                 let mut runtime = runtime.clone();
                 if runtime.segments.is_empty()
                     && let Some(previous) = self.task_runtime.get(task_id)
@@ -675,25 +840,60 @@ impl DownloadsController {
             }
             DaemonEvent::TaskActivityAdded(_) => false,
             DaemonEvent::TaskDeleted { task_id } => {
-                self.live_speeds.remove(task_id);
-                self.task_runtime.remove(task_id);
-                if let Some(ix) = self.store.find_local(task_id) {
-                    self.local.swap_remove(ix);
-                    self.store.swap_remove_local(ix);
-                }
+                self.remove_tasks(std::slice::from_ref(task_id));
                 true
             }
+            DaemonEvent::TasksDeleted { task_ids } => {
+                self.remove_tasks(task_ids);
+                !task_ids.is_empty()
+            }
             DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks }) => {
-                self.local.clone_from(tasks);
+                let ids: HashSet<&str> = tasks.iter().map(|task| task.task_id.as_str()).collect();
                 self.live_speeds
-                    .retain(|task_id, _| tasks.iter().any(|task| task.task_id == *task_id));
+                    .retain(|task_id, _| ids.contains(task_id.as_str()));
                 self.task_runtime
-                    .retain(|task_id, _| tasks.iter().any(|task| task.task_id == *task_id));
-                for task in tasks.iter().filter(|task| !matches!(task.status, 1 | 5)) {
-                    self.stop_runtime(&task.task_id);
+                    .retain(|task_id, _| ids.contains(task_id.as_str()));
+                let mut changed = false;
+                for ix in (0..self.local.len()).rev() {
+                    if !ids.contains(self.local[ix].task_id.as_str()) {
+                        self.local.swap_remove(ix);
+                        self.store.swap_remove_local(ix);
+                        changed = true;
+                    }
                 }
-                self.rebuild_all();
-                true
+                // Apply every snapshot in order: deleting then reintroducing an ID
+                // must not resurrect its runtime, even within one event batch.
+                for (target, task) in tasks.iter().enumerate() {
+                    let runtime_changed = if !matches!(task.status, 1 | 5) {
+                        self.live_speeds.remove(&task.task_id).is_some()
+                            | self.settle_runtime(&task.task_id, task.status)
+                    } else {
+                        false
+                    };
+                    match self.store.find_local(&task.task_id) {
+                        Some(ix) => {
+                            if self.local[ix] != *task || runtime_changed {
+                                self.upsert(task.clone());
+                                changed = true;
+                            }
+                            if ix != target {
+                                self.local.swap(ix, target);
+                                self.store.swap_local(ix, target);
+                                changed = true;
+                            }
+                        }
+                        None => {
+                            self.upsert(task.clone());
+                            let ix = self.local.len() - 1;
+                            if ix != target {
+                                self.local.swap(ix, target);
+                                self.store.swap_local(ix, target);
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+                changed
             }
             DaemonEvent::Engine(WsServerMsg::TaskQueueChanged { task_id, queue_id }) => {
                 let Some(ix) = self.store.find_local(task_id) else {
@@ -712,11 +912,24 @@ impl DownloadsController {
                 speed,
                 error_message,
                 uploaded_bytes,
+                upload_speed,
                 seeding_status,
                 ..
             }) => {
-                self.live_speeds
-                    .insert(task_id.clone(), if *status == 1 { *speed } else { 0 });
+                // 单任务删除沿用 status=4 + "deleted" 哨兵：按删除处理，不能把行改成失败。
+                if *status == 4 && error_message == DELETED_SENTINEL {
+                    self.remove_tasks(std::slice::from_ref(task_id));
+                    return true;
+                }
+                let upload = if matches!(*status, 1 | 3) {
+                    *upload_speed
+                } else {
+                    0
+                };
+                self.live_speeds.insert(
+                    task_id.clone(),
+                    (if *status == 1 { *speed } else { 0 }, upload),
+                );
                 let Some(ix) = self.store.find_local(task_id) else {
                     return false;
                 };
@@ -732,7 +945,7 @@ impl DownloadsController {
                     task.error_message.clone_from(error_message);
                 }
                 if !matches!(*status, 1 | 5) {
-                    self.stop_runtime(task_id);
+                    self.settle_runtime(task_id, *status);
                 }
                 self.rebuild_row(ix);
                 true
@@ -757,22 +970,33 @@ impl DownloadsController {
                 true
             }
             DaemonEvent::Engine(WsServerMsg::QueuePositionsChanged { positions }) => {
-                let next = queue_position_map(positions);
-                let changed: Vec<usize> = self
-                    .queue_positions
+                let next = queue_key_map(positions);
+                if next == self.queue_keys {
+                    return false;
+                }
+                let changed: Vec<(usize, Option<i64>)> = self
+                    .queue_keys
                     .keys()
                     .chain(
                         next.keys()
-                            .filter(|task_id| !self.queue_positions.contains_key(*task_id)),
+                            .filter(|task_id| !self.queue_keys.contains_key(*task_id)),
                     )
-                    .filter(|task_id| self.queue_positions.get(*task_id) != next.get(*task_id))
-                    .filter_map(|task_id| self.store.find_local(task_id))
+                    .filter(|task_id| self.queue_keys.get(*task_id) != next.get(*task_id))
+                    .filter_map(|task_id| {
+                        let ix = self.store.find_local(task_id)?;
+                        Some((ix, next.get(task_id).copied()))
+                    })
                     .collect();
-                self.queue_positions = next;
-                for &ix in &changed {
-                    self.rebuild_row(ix);
+                self.queue_keys = next;
+                self.store
+                    .replace_queue_keys(self.queue_keys.values().copied().collect());
+                for (ix, key) in changed {
+                    self.store.set_queue_key(ix, key);
                 }
-                !changed.is_empty()
+                true
+            }
+            DaemonEvent::Engine(WsServerMsg::QueueOrderChanged { removed, added }) => {
+                self.apply_queue_order(removed, added)
             }
             DaemonEvent::Engine(WsServerMsg::PriorityTaskChanged {
                 priority_task_id, ..
@@ -826,23 +1050,49 @@ impl DownloadsController {
     }
 
     fn view_of(&self, task: &TaskDto) -> DownloadTaskView {
+        let live = self.live_speeds.get(&task.task_id).copied();
         let mut view = DownloadTaskView::local(
             task,
-            self.live_speeds.get(&task.task_id).copied(),
+            live.map(|(download, _)| download),
             self.boosted.as_deref() == Some(task.task_id.as_str()),
         );
+        view.upload_speed_bytes_per_second = live.map_or(0, |(_, upload)| upload.max(0) as u64);
         view.runtime = self.task_runtime.get(&task.task_id).cloned();
-        view.queue_position = self
-            .queue_positions
-            .get(&task.task_id)
-            .copied()
-            .unwrap_or(0);
         view.runtime_connected = !self.stale;
         view.conflict_pending = self.conflicts.contains_task(&task.task_id);
         view
     }
 
-    fn stop_runtime(&mut self, task_id: &str) {
+    /// 按序移除一批本地任务（语义等同逐条 `TaskDeleted`）：每行 `swap_remove` 为 O(1)，
+    /// 整批只登记一次结构变化。
+    fn remove_tasks(&mut self, task_ids: &[String]) {
+        let mut removed = false;
+        for task_id in task_ids {
+            self.live_speeds.remove(task_id);
+            self.task_runtime.remove(task_id);
+            if let Some(ix) = self.store.find_local(task_id) {
+                self.local.swap_remove(ix);
+                removed |= self.store.swap_remove_local_quiet(ix);
+            }
+        }
+        if removed {
+            self.store.commit_removals();
+        }
+    }
+
+    /// 任务状态变化后的运行时收尾：完成即删除条目，其余非活跃状态只清零传输读数。
+    /// 返回条目是否有变化。
+    fn settle_runtime(&mut self, task_id: &str, status: i32) -> bool {
+        if !fluxdown_protocol::runtime_retained(status) {
+            return self.task_runtime.remove(task_id).is_some();
+        }
+        if matches!(status, 1 | 5) {
+            return false;
+        }
+        self.stop_runtime(task_id)
+    }
+
+    fn stop_runtime(&mut self, task_id: &str) -> bool {
         if let Some(runtime) = self.task_runtime.get_mut(task_id) {
             if runtime.active_transfers == Some(0)
                 && runtime.connected_peers == Some(0)
@@ -851,7 +1101,7 @@ impl DownloadsController {
                     .iter()
                     .all(|segment| segment.active == Some(false))
             {
-                return;
+                return false;
             }
             let runtime = Rc::make_mut(runtime);
             runtime.active_transfers = Some(0);
@@ -859,7 +1109,9 @@ impl DownloadsController {
             for segment in &mut runtime.segments {
                 segment.active = Some(false);
             }
+            return true;
         }
+        false
     }
 
     fn upsert(&mut self, task: TaskDto) {
@@ -871,6 +1123,25 @@ impl DownloadsController {
             let view = self.view_of(&task);
             self.local.push(task);
             self.store.push_local(view);
+        }
+    }
+
+    /// 按序批量 upsert（语义等同逐条 [`Self::upsert`]），新增行只登记一次结构变化。
+    fn upsert_many(&mut self, tasks: &[TaskDto]) {
+        let mut appended = false;
+        for task in tasks {
+            let view = self.view_of(task);
+            if let Some(ix) = self.store.find_local(&task.task_id) {
+                self.local[ix].clone_from(task);
+                self.store.set_local(ix, view);
+            } else {
+                self.local.push(task.clone());
+                self.store.append_local(view);
+                appended = true;
+            }
+        }
+        if appended {
+            self.store.commit_appends();
         }
     }
 
@@ -904,59 +1175,90 @@ impl DownloadsController {
             self.store.set_local(ix, view);
         }
     }
+
+    /// 队列顺序增量：只更新进出队列的任务（O(Δ·log P) 加有序数组移动）。其余排队行的键没有
+    /// 变，名次在渲染时由 `store` 二分得到，所以队首出队不重建任何其它行。返回是否有净变化
+    /// （调用方据此通知读者重绘：名次变了，行内容没变）。
+    fn apply_queue_order(
+        &mut self,
+        removed: &[String],
+        added: &[fluxdown_protocol::QueueOrderEntryDto],
+    ) -> bool {
+        // 记下每个被触及任务的原始键，批内重复 / 先删后加按净效果结算。
+        let mut originals: HashMap<&str, Option<i64>> =
+            HashMap::with_capacity(removed.len() + added.len());
+        for task_id in removed {
+            if !originals.contains_key(task_id.as_str()) {
+                originals.insert(task_id, self.queue_keys.get(task_id).copied());
+            }
+            self.queue_keys.remove(task_id);
+        }
+        for entry in added {
+            if !originals.contains_key(entry.task_id.as_str()) {
+                originals.insert(&entry.task_id, self.queue_keys.get(&entry.task_id).copied());
+            }
+            match self.queue_keys.get_mut(&entry.task_id) {
+                Some(key) => *key = entry.order,
+                None => {
+                    self.queue_keys.insert(entry.task_id.clone(), entry.order);
+                }
+            }
+        }
+        let mut removed_keys = Vec::new();
+        let mut added_keys = Vec::new();
+        let mut touched_rows = Vec::new();
+        for (task_id, original) in originals {
+            let current = self.queue_keys.get(task_id).copied();
+            if current == original {
+                continue;
+            }
+            removed_keys.extend(original);
+            added_keys.extend(current);
+            if let Some(ix) = self.store.find_local(task_id) {
+                touched_rows.push((ix, current));
+            }
+        }
+        if removed_keys.is_empty() && added_keys.is_empty() {
+            return false;
+        }
+        self.store
+            .apply_queue_keys(&mut removed_keys, &mut added_keys);
+        for (ix, key) in touched_rows {
+            self.store.set_queue_key(ix, key);
+        }
+        true
+    }
 }
 
-fn queue_position_map(positions: &[fluxdown_protocol::QueuePositionDto]) -> HashMap<String, u32> {
+fn queue_key_map(positions: &[fluxdown_protocol::QueuePositionDto]) -> HashMap<String, i64> {
     positions
         .iter()
-        .filter_map(|entry| {
-            let position = u32::try_from(entry.position).ok().filter(|p| *p > 0)?;
-            Some((entry.task_id.clone(), position))
-        })
+        .filter(|entry| entry.position > 0)
+        .map(|entry| (entry.task_id.clone(), entry.order))
         .collect()
 }
 
 fn compute_group_summaries(groups: &[GroupDto], rows: &[DownloadTaskView]) -> Vec<GroupSummary> {
-    let mut summaries: Vec<GroupSummary> = groups
+    let index: HashMap<&str, usize> = groups
         .iter()
-        .map(|group| GroupSummary {
-            id: group.group_id.clone(),
-            name: group.name.clone(),
-            origin_url: group.source_url.clone(),
-            save_dir: group.save_dir.clone(),
-            ..GroupSummary::default()
-        })
+        .enumerate()
+        .map(|(ix, group)| (group.group_id.as_str(), ix))
         .collect();
-    let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut members: Vec<Vec<&DownloadTaskView>> = vec![Vec::new(); groups.len()];
     for row in rows.iter().filter(|row| !row.group_id.is_empty()) {
-        let Some(summary) = summaries
-            .iter_mut()
-            .find(|summary| summary.id == row.group_id)
-        else {
-            continue;
-        };
-        summary.total += 1;
-        match row.state {
-            TaskState::Completed => summary.completed += 1,
-            TaskState::Failed => summary.failed += 1,
-            TaskState::Downloading => summary.downloading += 1,
-            TaskState::Pending | TaskState::Paused => {}
+        if let Some(&ix) = index.get(row.group_id.as_str()) {
+            members[ix].push(row);
         }
-        let entry = totals.entry(row.group_id.clone()).or_default();
-        entry.0 += row.downloaded_bytes;
-        entry.1 += row.size_bytes;
     }
-    for summary in &mut summaries {
-        let (downloaded, total) = totals.get(&summary.id).copied().unwrap_or((0, 0));
-        summary.progress = if total > 0 {
-            (downloaded as f64 / total as f64).clamp(0.0, 1.0) as f32
-        } else if summary.total > 0 {
-            summary.completed as f32 / summary.total as f32
-        } else {
-            0.0
-        };
-    }
-    summaries
+    groups
+        .iter()
+        .zip(members)
+        .map(|(group, members)| GroupSummary {
+            id: group.group_id.clone(),
+            meta: GroupMeta::from_dto(group),
+            aggregate: GroupAggregate::of(members),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -967,7 +1269,7 @@ mod tests {
 
     use super::{
         AgentEvent, DaemonEvent, DownloadsCommand, DownloadsController, DownloadsPort,
-        DownloadsResult, PortFuture, ServiceEvent, WsServerMsg,
+        DownloadsResult, PortFuture, ResumeTargets, ServiceEvent, WsServerMsg,
     };
 
     struct NullPort;
@@ -985,6 +1287,355 @@ mod tests {
             "errorMessage":"","createdAt":"1","proxyUrl":"","queueId":"main","checksum":""
         }))
         .expect("task")
+    }
+
+    #[test]
+    fn snapshots_preserve_order_deletion_and_terminal_runtime_boundaries() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let mut active = task("a");
+        active.status = 1;
+        let snapshot = |tasks| DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks });
+        controller.apply_daemon_event(&snapshot(vec![active.clone(), task("b")]));
+        controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(
+            fluxdown_protocol::TaskRuntimeDto {
+                task_id: "a".to_owned(),
+                active_transfers: Some(2),
+                connected_peers: Some(2),
+                ..Default::default()
+            },
+        ));
+        controller.live_speeds.insert("a".to_owned(), (100, 0));
+        let generation = controller.store.generation();
+        assert!(!controller.apply_daemon_event(&snapshot(vec![active.clone(), task("b")])));
+        assert_eq!(controller.store.generation(), generation);
+        let mut paused = active.clone();
+        paused.status = 2;
+        controller.apply_daemon_event(&snapshot(vec![task("b"), paused]));
+        assert_eq!(
+            controller
+                .task_runtime("a")
+                .expect("runtime")
+                .active_transfers,
+            Some(0)
+        );
+        assert!(!controller.live_speeds.contains_key("a"));
+        assert_eq!(controller.store.find_local("a"), Some(1));
+        controller.apply_daemon_event(&snapshot(vec![task("b")]));
+        assert!(controller.task_runtime("a").is_none());
+        controller.apply_daemon_event(&snapshot(vec![active, task("b")]));
+        assert_eq!(controller.store.find_local("a"), Some(0));
+        assert!(controller.store.local()[0].runtime.is_none());
+        assert!(controller.task_runtime("a").is_none());
+    }
+
+    #[test]
+    fn tasks_changed_batch_equals_sequential_task_changed_with_one_structure_bump() {
+        let mut batched = DownloadsController::new(Arc::new(NullPort));
+        let mut sequential = DownloadsController::new(Arc::new(NullPort));
+        let mut running = task("a");
+        running.status = 1;
+        for controller in [&mut batched, &mut sequential] {
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(running.clone()));
+            controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(
+                fluxdown_protocol::TaskRuntimeDto {
+                    task_id: "a".to_owned(),
+                    active_transfers: Some(2),
+                    ..Default::default()
+                },
+            ));
+        }
+        // 已有任务进入终态 + 两个新任务 + 同批里对新任务的再次更新。
+        let mut finished = running.clone();
+        finished.status = 3;
+        let mut updated = task("c");
+        updated.downloaded_bytes = 7;
+        let events = vec![finished, task("b"), task("c"), updated];
+
+        let structure = batched.store.structure_generation();
+        assert!(batched.apply_daemon_event(&DaemonEvent::TasksChanged(events.clone())));
+        assert_eq!(
+            batched.store.structure_generation(),
+            structure.wrapping_add(1)
+        );
+        for event in events {
+            sequential.apply_daemon_event(&DaemonEvent::TaskChanged(event));
+        }
+        assert_eq!(batched.local, sequential.local);
+        assert_eq!(
+            batched.store.find_local("c"),
+            sequential.store.find_local("c")
+        );
+        let rows = |controller: &DownloadsController| {
+            controller
+                .store
+                .local()
+                .iter()
+                .map(|row| {
+                    (
+                        row.key.clone(),
+                        row.progress.to_bits(),
+                        row.active_transfers(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&batched), rows(&sequential));
+        // 完成任务的运行时在批内同样被收口：条目删除而不是清零。
+        assert!(batched.task_runtime("a").is_none());
+        assert!(!batched.apply_daemon_event(&DaemonEvent::TasksChanged(Vec::new())));
+    }
+
+    fn sampled(id: &str, sequence: u64) -> fluxdown_protocol::TaskRuntimeDto {
+        fluxdown_protocol::TaskRuntimeDto {
+            task_id: id.to_owned(),
+            sample_sequence: sequence,
+            total_bytes: 100,
+            active_transfers: Some(2),
+            segments: vec![fluxdown_protocol::TaskSegmentDto {
+                start_byte: 0,
+                end_byte: 99,
+                downloaded_bytes: 10,
+                active: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn completed_tasks_leave_no_runtime_and_late_samples_cannot_readd_it() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        const TASKS: u64 = 500;
+        for index in 0..TASKS {
+            let id = format!("t{index}");
+            let mut running = task(&id);
+            running.status = 1;
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(running.clone()));
+            controller
+                .apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(sampled(&id, index + 1)));
+            assert!(controller.task_runtime(&id).is_some());
+            // 三条完成路径各走一遍：TaskChanged / TaskProgress / TasksChanged。
+            match index % 3 {
+                0 => {
+                    running.status = 3;
+                    controller.apply_daemon_event(&DaemonEvent::TaskChanged(running));
+                }
+                1 => {
+                    controller.apply_daemon_event(&DaemonEvent::Engine(
+                        WsServerMsg::TaskProgress {
+                            task_id: id.clone(),
+                            status: 3,
+                            downloaded_bytes: 100,
+                            total_bytes: 100,
+                            speed: 0,
+                            upload_speed: 0,
+                            file_name: String::new(),
+                            save_dir: String::new(),
+                            url: String::new(),
+                            error_message: String::new(),
+                            uploaded_bytes: 0,
+                            seeding_status: 0,
+                            seeding_message: String::new(),
+                            seeding_time_secs: 0,
+                        },
+                    ));
+                }
+                _ => {
+                    running.status = 3;
+                    controller.apply_daemon_event(&DaemonEvent::TasksChanged(vec![running]));
+                }
+            }
+            assert!(controller.task_runtime(&id).is_none(), "{id}");
+            // 迟到的旧样本（序号更高也一样）不会把条目加回来。
+            assert!(
+                !controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(sampled(
+                    &id,
+                    index + 1_000
+                )))
+            );
+            assert!(controller.task_runtime(&id).is_none(), "{id}");
+        }
+        assert!(controller.task_runtime.is_empty());
+        assert!(
+            controller
+                .store
+                .local()
+                .iter()
+                .all(|row| row.runtime.is_none())
+        );
+    }
+
+    #[test]
+    fn paused_and_failed_tasks_keep_their_segments() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        for (id, status) in [("paused", 2), ("failed", 4)] {
+            let mut running = task(id);
+            running.status = 1;
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(running.clone()));
+            controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(sampled(id, 1)));
+            running.status = status;
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(running));
+            let runtime = controller.task_runtime(id).expect("runtime kept");
+            assert_eq!(runtime.segments.len(), 1);
+            assert_eq!(runtime.active_transfers, Some(0));
+        }
+    }
+
+    #[test]
+    fn bulk_pause_and_resume_availability_follows_daemon_targets() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        assert!(!controller.has_pausable_tasks());
+        assert_eq!(controller.resume_targets(), ResumeTargets::None);
+        let with_status = |id: &str, status: i32, queue: &str| {
+            let mut dto = task(id);
+            dto.status = status;
+            queue.clone_into(&mut dto.queue_id);
+            dto
+        };
+        let snapshot = |tasks| DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks });
+        controller.queues = vec![
+            serde_json::from_value(json!({
+                "queueId":"stopped","name":"s","speedLimitKbps":0,"maxConcurrent":0,
+                "defaultSaveDir":"","position":1,"defaultSegments":0,"defaultUserAgent":"",
+                "isRunning":false
+            }))
+            .expect("queue"),
+        ];
+        // 完成 / 失败不是任何一侧的对象；停止队列里的暂停任务只由「启动队列」恢复。
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("done", 3, "main"),
+            with_status("failed", 4, "main"),
+            with_status("held", 2, "stopped"),
+        ]));
+        assert!(!controller.has_pausable_tasks());
+        assert_eq!(
+            controller.resume_targets(),
+            ResumeTargets::OnlyInStoppedQueues
+        );
+        // 准备中（5）可暂停；快照里没有的队列（孤儿）视作运行中，可恢复。
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_status("preparing", 5, "main"),
+            with_status("orphan", 2, "gone"),
+        ]));
+        assert!(controller.has_pausable_tasks());
+        assert_eq!(controller.resume_targets(), ResumeTargets::Some);
+        // 做种中（status 3 + seeding_status 1 / 8）可暂停；用户停止做种（4）且文件在则「全部开始」
+        // 有对象，即使其余暂停任务都在停止队列里；停止做种但文件丢失不计入。
+        let with_seeding = |id: &str, seeding_status: i32, file_missing: bool| {
+            let mut dto = with_status(id, 3, "main");
+            dto.seeding_status = seeding_status;
+            dto.file_missing = file_missing;
+            dto
+        };
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_seeding("seed", 1, false),
+        ]));
+        assert!(controller.has_pausable_tasks());
+        assert_eq!(
+            controller.resume_targets(),
+            ResumeTargets::OnlyInStoppedQueues
+        );
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_seeding("queued", 8, false),
+            with_seeding("ratio", 2, false),
+            with_seeding("missing", 4, true),
+        ]));
+        assert!(controller.has_pausable_tasks());
+        assert_eq!(
+            controller.resume_targets(),
+            ResumeTargets::OnlyInStoppedQueues
+        );
+        controller.apply_daemon_event(&snapshot(vec![
+            with_status("held", 2, "stopped"),
+            with_seeding("stopped", 4, false),
+        ]));
+        assert!(!controller.has_pausable_tasks());
+        assert_eq!(controller.resume_targets(), ResumeTargets::Some);
+    }
+
+    /// 分页载入期间（头快照 / 重载宣告）控制器只给出加载态，不把空表当完整表；完整快照到达才解除。
+    #[test]
+    fn paged_header_and_reload_announcement_put_the_controller_in_a_loading_state() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let inline = |tasks| DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks });
+        controller.apply_daemon_event(&inline(vec![task("a"), task("b")]));
+        assert!(!controller.tables_loading());
+
+        assert!(
+            controller.apply_daemon_event(&DaemonEvent::TablesReloading {
+                tasks: Some(2_100),
+                queue: None,
+            })
+        );
+        assert!(controller.tables_loading());
+        assert_eq!(controller.store.loading(), Some(2_100));
+        assert!(controller.store.local().is_empty());
+        assert!(!controller.has_pausable_tasks());
+
+        let mut complete = fluxdown_protocol::AgentSnapshot::default();
+        complete.daemon.tasks = vec![task("a"), task("b")];
+        controller.replace_snapshot(&complete);
+        assert!(!controller.tables_loading());
+        assert_eq!(controller.store.local().len(), 2);
+
+        let mut header = fluxdown_protocol::AgentSnapshot::default();
+        header.daemon.task_total = Some(7);
+        controller.replace_snapshot(&header);
+        assert_eq!(controller.store.loading(), Some(7));
+        assert!(controller.store.local().is_empty());
+
+        // 头快照内联的替换事件同样进入 / 解除加载态。
+        let replaced = fluxdown_protocol::DaemonSnapshot {
+            tasks: vec![task("a")],
+            ..fluxdown_protocol::DaemonSnapshot::default()
+        };
+        controller.apply_daemon_event(&DaemonEvent::SnapshotReplaced(replaced));
+        assert!(!controller.tables_loading());
+        assert_eq!(controller.store.local().len(), 1);
+    }
+
+    #[test]
+    fn twenty_thousand_incremental_tasks_and_snapshots_keep_view_generations_local() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        let mut tasks: Vec<_> = (0..20_000).map(|ix| task(&format!("task-{ix}"))).collect();
+        let start = std::time::Instant::now();
+        for task in &tasks {
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(task.clone()));
+        }
+        let create_time = start.elapsed();
+        assert_eq!(controller.store.local().len(), 20_000);
+        let generation = controller.store.generation();
+        let snapshot = DaemonEvent::Engine(WsServerMsg::TasksSnapshot {
+            tasks: tasks.clone(),
+        });
+        let start = std::time::Instant::now();
+        for _ in 0..5 {
+            assert!(!controller.apply_daemon_event(&snapshot));
+        }
+        let snapshot_time = start.elapsed();
+        assert_eq!(controller.store.generation(), generation);
+        let start = std::time::Instant::now();
+        for task in &mut tasks {
+            task.status = 3;
+            task.downloaded_bytes = 128 * 1024;
+            task.total_bytes = 128 * 1024;
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(task.clone()));
+        }
+        assert_eq!(controller.store.generation(), generation + 20_000);
+        assert!(
+            controller
+                .store
+                .local()
+                .iter()
+                .all(|row| row.progress == 1.0)
+        );
+        eprintln!(
+            "controller 20000 creates={create_time:?}, five snapshots={snapshot_time:?}, 20000 completions={:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
@@ -1011,6 +1662,177 @@ mod tests {
         )));
         assert_eq!(controller.store().local()[0].queue_id, "work");
         assert_eq!(controller.task_dto("task-1").unwrap().queue_id, "work");
+    }
+
+    fn queue_controller(count: usize) -> DownloadsController {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        for ix in 0..count {
+            controller.local.push(task(&format!("t{ix}")));
+        }
+        controller.rebuild_all();
+        controller
+    }
+
+    fn full_queue_event(model: &[fluxdown_protocol::QueuePositionDto]) -> DaemonEvent {
+        DaemonEvent::Engine(WsServerMsg::QueuePositionsChanged {
+            positions: model.to_vec(),
+        })
+    }
+
+    fn order_event(
+        removed: &[&str],
+        added: &[(&str, i64)],
+    ) -> (Vec<String>, Vec<fluxdown_protocol::QueueOrderEntryDto>) {
+        (
+            removed.iter().map(|id| (*id).to_owned()).collect(),
+            added
+                .iter()
+                .map(|(id, order)| fluxdown_protocol::QueueOrderEntryDto {
+                    task_id: (*id).to_owned(),
+                    order: *order,
+                })
+                .collect(),
+        )
+    }
+
+    fn rank_by_task(controller: &DownloadsController) -> std::collections::BTreeMap<String, u32> {
+        let store = controller.store();
+        store
+            .local()
+            .iter()
+            .map(|row| (row.key.task_id().to_owned(), store.queue_rank(row)))
+            .collect()
+    }
+
+    /// 增量应用 `(removed, added)` 后，名次必须与对「共享 reducer 折叠出的全量表」整表替换完全一致。
+    fn apply_delta_and_compare(
+        incremental: &mut DownloadsController,
+        model: &mut Vec<fluxdown_protocol::QueuePositionDto>,
+        removed: &[&str],
+        added: &[(&str, i64)],
+    ) -> bool {
+        let (removed, added) = order_event(removed, added);
+        let changed =
+            incremental.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::QueueOrderChanged {
+                removed: removed.clone(),
+                added: added.clone(),
+            }));
+        fluxdown_protocol::apply_queue_order(model, &removed, &added);
+        let mut reference = queue_controller(incremental.local.len());
+        reference.apply_daemon_event(&full_queue_event(model));
+        assert_eq!(rank_by_task(incremental), rank_by_task(&reference));
+        changed
+    }
+
+    #[test]
+    fn queue_order_deltas_rank_like_full_tables_and_rebuild_only_changed_rows() {
+        const COUNT: usize = 300;
+        let mut incremental = queue_controller(COUNT);
+        let mut model: Vec<_> = (0..COUNT)
+            .map(|ix| fluxdown_protocol::QueuePositionDto {
+                task_id: format!("t{ix}"),
+                position: i32::try_from(ix + 1).unwrap(),
+                order: i64::try_from(ix + 1).unwrap() * 10,
+            })
+            .collect();
+        assert!(incremental.apply_daemon_event(&full_queue_event(&model)));
+        let ranks = rank_by_task(&incremental);
+        assert_eq!((ranks["t0"], ranks["t1"], ranks["t299"]), (1, 2, 300));
+        // 内容相同的全量表不是变化。
+        assert!(!incremental.apply_daemon_event(&full_queue_event(&model)));
+
+        // 队首出队：其余 299 行一个都不重建（generation 只因被移出的那一行 +1），名次整体前移。
+        let generation = incremental.store().generation();
+        assert!(apply_delta_and_compare(
+            &mut incremental,
+            &mut model,
+            &["t0"],
+            &[]
+        ));
+        assert_eq!(incremental.store().generation(), generation + 1);
+        let ranks = rank_by_task(&incremental);
+        assert_eq!((ranks["t0"], ranks["t1"], ranks["t299"]), (0, 1, 299));
+        assert_eq!(incremental.store().local()[0].queue_key, None);
+        assert_eq!(incremental.store().local()[1].queue_key, Some(20));
+
+        // 未排队任务的移除、内容相同的重复登记都没有净变化。
+        let generation = incremental.store().generation();
+        assert!(!apply_delta_and_compare(
+            &mut incremental,
+            &mut model,
+            &["t0", "nope"],
+            &[("t1", 20)]
+        ));
+        assert_eq!(incremental.store().generation(), generation);
+
+        // 队尾追加 + 中间移除 + 改键（插到队首之前）+ 尚无行的任务（幽灵）。
+        assert!(apply_delta_and_compare(
+            &mut incremental,
+            &mut model,
+            &["t150"],
+            &[("t5", 15), ("ghost", 5000), ("t0", 4000), ("ghost", 5001)],
+        ));
+        let ranks = rank_by_task(&incremental);
+        assert_eq!((ranks["t5"], ranks["t1"], ranks["t150"]), (1, 2, 0));
+
+        // 批量变化（走归并路径）：头部 120 个出队，同批里先删后加、重复登记以最后一项为准。
+        let removed: Vec<String> = (1..=120).map(|ix| format!("t{ix}")).collect();
+        let removed: Vec<&str> = removed.iter().map(String::as_str).collect();
+        let mut added: Vec<(String, i64)> = (0..90)
+            .map(|ix| (format!("new{ix}"), 1_000_000 + i64::from(ix) * 7 - 3000))
+            .collect();
+        added.push(("t7".to_owned(), 99));
+        added.push(("t7".to_owned(), 101));
+        added.push(("t3".to_owned(), 55));
+        let added: Vec<(&str, i64)> = added
+            .iter()
+            .map(|(id, order)| (id.as_str(), *order))
+            .collect();
+        assert!(apply_delta_and_compare(
+            &mut incremental,
+            &mut model,
+            &removed,
+            &added
+        ));
+        let ranks = rank_by_task(&incremental);
+        assert_eq!(
+            (ranks["t5"], ranks["t3"], ranks["t7"], ranks["t1"]),
+            (0, 1, 2, 0)
+        );
+    }
+
+    #[test]
+    fn progress_keeps_sidebar_counts_valid_until_a_counted_field_changes() {
+        let mut controller = queue_controller(2);
+        let counts = controller.store().counts_generation();
+        let generation = controller.store().generation();
+
+        // 字节 / 总大小 / 排队键变化只动行内容，不动侧栏计数。
+        assert!(
+            controller.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::TaskMetaProbed {
+                task_id: "t0".to_owned(),
+                file_name: String::new(),
+                total_bytes: 4096,
+            },))
+        );
+        assert!(controller.apply_daemon_event(&DaemonEvent::Engine(
+            WsServerMsg::QueueOrderChanged {
+                removed: Vec::new(),
+                added: vec![fluxdown_protocol::QueueOrderEntryDto {
+                    task_id: "t1".to_owned(),
+                    order: 7,
+                }],
+            },
+        )));
+        assert!(controller.store().generation() > generation);
+        assert_eq!(controller.store().counts_generation(), counts);
+
+        // 状态变化（等待 → 完成）改变「已完成」桶，必须失效；行增删同理。
+        assert!(controller.apply_daemon_event(&progress_event("t0", 3, "")));
+        let after_status = controller.store().counts_generation();
+        assert_ne!(after_status, counts);
+        assert!(controller.apply_daemon_event(&DaemonEvent::TaskChanged(task("t2"))));
+        assert_ne!(controller.store().counts_generation(), after_status);
     }
 
     #[test]
@@ -1211,6 +2033,131 @@ mod tests {
         assert_eq!(controller.local[0].task_id, "c");
         assert_eq!(controller.store().local()[0].key.task_id(), "c");
     }
+
+    fn progress_event(id: &str, status: i32, error_message: &str) -> DaemonEvent {
+        DaemonEvent::Engine(WsServerMsg::TaskProgress {
+            task_id: id.to_owned(),
+            status,
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            speed: 5,
+            upload_speed: 0,
+            file_name: String::new(),
+            save_dir: "/tmp".to_owned(),
+            url: "https://example.com/download".to_owned(),
+            error_message: error_message.to_owned(),
+            uploaded_bytes: 0,
+            seeding_status: 0,
+            seeding_message: String::new(),
+            seeding_time_secs: 0,
+        })
+    }
+
+    fn controller_with_running(ids: &[&str]) -> DownloadsController {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        for id in ids {
+            let mut running = task(id);
+            running.status = 1;
+            controller.apply_daemon_event(&DaemonEvent::TaskChanged(running));
+            controller.apply_daemon_event(&progress_event(id, 1, ""));
+            controller.apply_daemon_event(&DaemonEvent::TaskRuntimeChanged(
+                fluxdown_protocol::TaskRuntimeDto {
+                    task_id: (*id).to_owned(),
+                    active_transfers: Some(1),
+                    ..Default::default()
+                },
+            ));
+        }
+        controller
+    }
+
+    #[test]
+    fn tasks_deleted_batch_equals_sequential_task_deleted_with_one_structure_bump() {
+        let ids = ["a", "b", "c", "d", "e"];
+        let mut batched = controller_with_running(&ids);
+        let mut sequential = controller_with_running(&ids);
+        // 未知 id 被忽略；顺序与重复 id 都按逐条语义处理。
+        let deleted: Vec<String> = ["b", "missing", "d", "a", "b"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+
+        let structure = batched.store.structure_generation();
+        assert!(batched.apply_daemon_event(&DaemonEvent::TasksDeleted {
+            task_ids: deleted.clone(),
+        }));
+        assert_eq!(
+            batched.store.structure_generation(),
+            structure.wrapping_add(1)
+        );
+        for task_id in deleted {
+            sequential.apply_daemon_event(&DaemonEvent::TaskDeleted { task_id });
+        }
+
+        assert_eq!(batched.local, sequential.local);
+        let keys = |controller: &DownloadsController| {
+            controller
+                .store
+                .local()
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&batched), keys(&sequential));
+        assert_eq!(batched.local.len(), 2);
+        // 下标索引与行一致，被删任务的运行时与实时速度一并清掉。
+        for (ix, row) in batched.local.iter().enumerate() {
+            assert_eq!(batched.store.find_local(&row.task_id), Some(ix));
+        }
+        for gone in ["a", "b", "d"] {
+            assert_eq!(batched.store.find_local(gone), None);
+            assert!(batched.task_runtime(gone).is_none());
+            assert!(!batched.live_speeds.contains_key(gone));
+        }
+        for kept in ["c", "e"] {
+            assert!(batched.task_runtime(kept).is_some());
+            assert!(batched.live_speeds.contains_key(kept));
+        }
+        // 空批次不报告变化；只含未知 id 的批次不动结构计数。
+        let structure = batched.store.structure_generation();
+        assert!(!batched.apply_daemon_event(&DaemonEvent::TasksDeleted {
+            task_ids: Vec::new(),
+        }));
+        assert!(batched.apply_daemon_event(&DaemonEvent::TasksDeleted {
+            task_ids: vec!["missing".to_owned()],
+        }));
+        assert_eq!(batched.store.structure_generation(), structure);
+    }
+
+    #[test]
+    fn delete_sentinel_progress_removes_the_row_instead_of_marking_it_failed() {
+        let mut controller = controller_with_running(&["a", "b", "c"]);
+
+        // 真实的失败进度仍把行标成失败，保留错误信息。
+        controller.apply_daemon_event(&progress_event("a", 4, "disk full"));
+        assert_eq!(controller.store.local().len(), 3);
+        assert_eq!(controller.task_dto("a").unwrap().error_message, "disk full");
+
+        let structure = controller.store.structure_generation();
+        assert!(controller.apply_daemon_event(&progress_event("b", 4, "deleted")));
+        assert_eq!(
+            controller.store.structure_generation(),
+            structure.wrapping_add(1)
+        );
+        assert_eq!(controller.store.find_local("b"), None);
+        assert!(controller.task_dto("b").is_none());
+        assert!(controller.task_runtime("b").is_none());
+        assert!(!controller.live_speeds.contains_key("b"));
+        assert_eq!(controller.store.local().len(), 2);
+        for (ix, row) in controller.local.iter().enumerate() {
+            assert_eq!(controller.store.find_local(&row.task_id), Some(ix));
+        }
+
+        // 对未知任务的哨兵不留下实时速度残留。
+        controller.apply_daemon_event(&progress_event("ghost", 4, "deleted"));
+        assert!(!controller.live_speeds.contains_key("ghost"));
+    }
+
     #[test]
     fn late_snapshot_contains_segments_and_pausing_clears_active_without_erasing_bytes() {
         let mut snapshot = fluxdown_protocol::AgentSnapshot {
@@ -1443,5 +2390,85 @@ mod tests {
         assert!(controller.store().remote().is_empty());
         assert!(controller.other_devices().is_empty());
         assert_eq!(controller.local_device_id(), None);
+    }
+
+    fn share_state(
+        path_kind: fluxdown_protocol::SharePathKind,
+    ) -> fluxdown_protocol::ShareStateDto {
+        let mut state = fluxdown_protocol::ShareStateDto {
+            available: true,
+            can_send: true,
+            ..fluxdown_protocol::ShareStateDto::default()
+        };
+        state.task_facts.insert(
+            "t1".into(),
+            fluxdown_protocol::ShareTaskFactsDto {
+                is_share_receive: true,
+                path_kind,
+                session_id: Some("s1".into()),
+                ..fluxdown_protocol::ShareTaskFactsDto::default()
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn share_facts_follow_snapshot_changed_and_progress_events() {
+        use fluxdown_protocol::{SharePathKind, ShareProgressDto};
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        assert!(!controller.store().share().available());
+
+        let snapshot = fluxdown_protocol::AgentSnapshot {
+            share: share_state(SharePathKind::Relay),
+            ..fluxdown_protocol::AgentSnapshot::default()
+        };
+        controller.replace_snapshot(&snapshot);
+        {
+            let share = controller.store().share();
+            assert!(share.available() && share.can_send());
+            assert_eq!(
+                share.task("t1").map(|facts| facts.path_kind),
+                Some(SharePathKind::Relay)
+            );
+        }
+
+        // 整体替换：内容相同不算变化（不触发表格重绘），内容变了才算。
+        assert!(
+            !controller.apply_event(&agent(AgentEvent::ShareChanged(share_state(
+                SharePathKind::Relay
+            ))))
+        );
+        assert!(
+            controller.apply_event(&agent(AgentEvent::ShareChanged(share_state(
+                SharePathKind::DirectLan
+            ))))
+        );
+
+        // 进度只刷新匹配会话的路径；路径没变的高频帧不重绘。
+        let progress = |session: &str, path_kind| {
+            agent(AgentEvent::ShareProgress(ShareProgressDto {
+                session_id: session.into(),
+                path_kind,
+                ..ShareProgressDto::default()
+            }))
+        };
+        assert!(!controller.apply_event(&progress("other", SharePathKind::Relay)));
+        assert!(!controller.apply_event(&progress("s1", SharePathKind::DirectLan)));
+        assert!(controller.apply_event(&progress("s1", SharePathKind::Relay)));
+        assert_eq!(
+            controller
+                .store()
+                .share()
+                .task("t1")
+                .map(|facts| facts.path_kind),
+            Some(SharePathKind::Relay)
+        );
+
+        // FluxMesh不可用：入口门控随之关闭。
+        controller.apply_event(&agent(AgentEvent::ShareChanged(
+            fluxdown_protocol::ShareStateDto::default(),
+        )));
+        assert!(!controller.store().share().available());
+        assert!(!controller.store().share().is_share_receive("t1"));
     }
 }

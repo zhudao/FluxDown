@@ -1,6 +1,7 @@
 import FluxDomain
 import FluxUI
 import SwiftUI
+#if FULL_FLAVOR
 
 // N5 · 插件清单预解析 → 任务组（`02-downloads.md` §15）。
 // N1 单条 http(s) 链接经 `daemon.group.resolvePreview` 命中清单，数据已就绪后推入本页。
@@ -31,7 +32,8 @@ nonisolated struct ManifestBaseOptions: Hashable {
         groupName: String,
         queueId: String,
         startPaused: Bool,
-        items: [GroupItemRequest]
+        items: [GroupItemRequest],
+        resolverPluginId: String
     ) -> CreateGroupRequest {
         CreateGroupRequest(
             sourceUrl: sourceUrl,
@@ -46,17 +48,9 @@ nonisolated struct ManifestBaseOptions: Hashable {
             extraHeaders: headers,
             ignoreTlsErrors: ignoreTls,
             startPaused: startPaused,
-            items: items
+            items: items,
+            resolverPluginId: resolverPluginId
         )
-    }
-}
-
-/// 队列显示名：主队列 / 稍后下载用本地化名，其余取队列自带名称（N1 与清单选择共用）。
-func newTaskQueueLabel(_ q: TaskQueue) -> String {
-    switch q.queueId {
-    case "", TaskQueue.main: L("mainQueue")
-    case TaskQueue.later: L("downloadLater")
-    default: q.name
     }
 }
 
@@ -68,6 +62,8 @@ final class ManifestSelectModel {
     var base: ManifestBaseOptions
     let manifestName: String
     let sourceUrl: String
+    /// 预览产出清单的插件 id，建组时回传以绑定同一插件。
+    let resolverPluginId: String
     var selection: ManifestSelection
     var groupName: String
     var search = ""
@@ -79,6 +75,7 @@ final class ManifestSelectModel {
         case let .daemon(preview, sourceUrl):
             manifestName = preview.name
             self.sourceUrl = sourceUrl
+            resolverPluginId = preview.pluginId
             selection = ManifestSelection(items: preview.items)
             groupName = ManifestSelection.defaultGroupName(manifestName: preview.name, sourceUrl: sourceUrl)
         }
@@ -144,7 +141,8 @@ final class ManifestSelectModel {
             groupName: trimmed.isEmpty ? manifestName : trimmed,
             queueId: queueId,
             startPaused: startPaused,
-            items: selection.requestItems()
+            items: selection.requestItems(),
+            resolverPluginId: resolverPluginId
         )
         let session = container.session
         let count = request.items.count
@@ -483,3 +481,4 @@ struct ManifestSelectView: View {
         }
     }
 }
+#endif

@@ -11,27 +11,36 @@ object HostMethod {
     const val systemHello = "system.hello"
     const val systemPing = "system.ping"
     const val systemSnapshot = "system.snapshot"
+    /** 任务表 / 队列位置表分页（协议 v17）：`{section:"tasks"|"queue", cursor?, limit?}`。分页载入由 Rust 会话完成，Kotlin 不直接调用。 */
+    const val systemTaskPage = "system.taskPage"
     /** 让服务优雅退出：daemon 关停引擎后退出；agent 先关停 daemon 再退出（完全退出）。允许作为连接首帧（握手前）调用。 */
     const val systemShutdown = "system.shutdown"
     const val daemonTaskList = "daemon.task.list"
     const val daemonTaskGet = "daemon.task.get"
     const val daemonTaskActivity = "daemon.task.activity"
+    /** 任务全生命周期速度曲线与统计（`TaskSpeedHistoryQuery` → `TaskSpeedHistoryDto | null`）；旧主机无此方法。 */
+    const val daemonTaskSpeedHistory = "daemon.task.speedHistory"
     const val daemonTaskCreate = "daemon.task.create"
     const val daemonTaskPause = "daemon.task.pause"
     const val daemonTaskResume = "daemon.task.resume"
     const val daemonTaskRename = "daemon.task.rename"
     /** 更换任务下载源地址（`{taskId, url}`，语义同旧 `PUT /api/v1/tasks/{id}/url`）。 */
     const val daemonTaskChangeUrl = "daemon.task.changeUrl"
+    /** 修改任务线程数（`SetTaskSegmentsParams`），已下进度保留；完成或不存在的任务返回 `not-found`。 */
+    const val daemonTaskSetSegments = "daemon.task.setSegments"
     const val daemonTaskDelete = "daemon.task.delete"
     const val daemonTaskPauseAll = "daemon.task.pauseAll"
     const val daemonTaskResumeAll = "daemon.task.resumeAll"
     const val daemonTaskRescan = "daemon.task.rescan"
     const val daemonTaskSetSeedLimits = "daemon.task.setSeedLimits"
+    const val daemonTaskVerify = "daemon.task.verify"
     /** 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。 */
     const val daemonTaskPauseMany = "daemon.task.pauseMany"
     const val daemonTaskResumeMany = "daemon.task.resumeMany"
     /** 批量删除（`{taskIds, deleteFiles}`）：语义同批量暂停。 */
     const val daemonTaskDeleteMany = "daemon.task.deleteMany"
+    /** 批量建任务（`DaemonCreateTasksParams`）：整块一个事务、一次 `tasksChanged` 事件，按 `batchId` 幂等。 */
+    const val daemonTaskCreateMany = "daemon.task.createMany"
     const val daemonQueueList = "daemon.queue.list"
     const val daemonQueueCreate = "daemon.queue.create"
     const val daemonQueueUpdate = "daemon.queue.update"
@@ -51,6 +60,7 @@ object HostMethod {
     const val daemonConfigGet = "daemon.config.get"
     const val daemonConfigPatch = "daemon.config.patch"
     const val daemonConfigProxyTest = "daemon.config.proxyTest"
+    const val daemonConfigProxyRoute = "daemon.config.proxyRoute"
     const val daemonConfigConnPolicy = "daemon.config.connPolicy"
     const val daemonConfigClearConnPolicy = "daemon.config.clearConnPolicy"
     const val daemonConfigSystemProxy = "daemon.config.systemProxy"
@@ -75,6 +85,9 @@ object HostMethod {
     const val daemonRssValidate = "daemon.rss.validate"
     const val daemonLinkProbe = "daemon.link.probe"
     const val daemonPluginList = "daemon.plugin.list"
+    const val daemonPluginSniffRules = "daemon.plugin.sniffRules"
+    const val daemonPluginPageScripts = "daemon.plugin.pageScripts"
+    const val daemonPluginPageScriptSource = "daemon.plugin.pageScriptSource"
     const val daemonPluginAuth = "daemon.plugin.auth"
     const val daemonPluginSetEnabled = "daemon.plugin.setEnabled"
     const val daemonPluginUpdateSettings = "daemon.plugin.updateSettings"
@@ -86,6 +99,20 @@ object HostMethod {
     const val daemonPluginMarketList = "daemon.plugin.marketList"
     const val daemonPluginMarketInstall = "daemon.plugin.marketInstall"
     const val daemonPluginIgnoreRetry = "daemon.plugin.ignoreRetry"
+    const val daemonPluginSiteDefaults = "daemon.plugin.siteDefaults"
+    const val daemonPluginSetSiteDefault = "daemon.plugin.setSiteDefault"
+    const val daemonPluginConsent = "daemon.plugin.consent"
+    const val daemonPluginAuditList = "daemon.plugin.audit.list"
+    const val daemonPluginAuditClear = "daemon.plugin.audit.clear"
+    const val daemonPluginAuditRecord = "daemon.plugin.audit.record"
+    const val daemonPluginViewOpen = "daemon.plugin.view.open"
+    const val daemonPluginViewEvent = "daemon.plugin.view.event"
+    const val daemonPluginViewClose = "daemon.plugin.view.close"
+    const val daemonPluginViewSnapshot = "daemon.plugin.view.snapshot"
+    const val daemonPluginViewKeepalive = "daemon.plugin.view.keepalive"
+    const val daemonPluginCommand = "daemon.plugin.command"
+    const val daemonPluginInvoke = "daemon.plugin.invoke"
+    const val daemonPluginPageInvoke = "daemon.plugin.pageInvoke"
     const val daemonComponentGet = "daemon.component.get"
     const val daemonComponentListVersions = "daemon.component.listVersions"
     const val daemonComponentInstall = "daemon.component.install"
@@ -100,6 +127,7 @@ object HostMethod {
     const val daemonCdnReportsPeek = "daemon.cdnReports.peek"
     const val daemonCdnReportsAck = "daemon.cdnReports.ack"
     const val daemonCdnConfigApply = "daemon.cdnConfig.apply"
+    const val daemonEgressPlan = "daemon.egress.plan"
     const val daemonBtTrackerSubscriptionRefresh = "daemon.bt.trackerSubscription.refresh"
     const val daemonEd2kServerSubscriptionRefresh = "daemon.ed2k.serverSubscription.refresh"
     const val daemonDiagnosticsDescribe = "daemon.diagnostics.describe"
@@ -132,6 +160,8 @@ object HostMethod {
     const val agentProfileChangeNickname = "agent.profile.changeNickname"
     const val agentProfileSendPasswordCode = "agent.profile.sendPasswordCode"
     const val agentProfileChangePassword = "agent.profile.changePassword"
+    const val agentProfileSendDeleteCode = "agent.profile.sendDeleteCode"
+    const val agentProfileDeleteAccount = "agent.profile.deleteAccount"
     const val agentGatewayGet = "agent.gateway.get"
     const val agentGatewayPatch = "agent.gateway.patch"
     /** 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。 */
@@ -141,6 +171,7 @@ object HostMethod {
     const val agentRemoteReconnect = "agent.remote.reconnect"
     const val agentDeviceRename = "agent.device.rename"
     const val agentDeviceDelete = "agent.device.delete"
+    const val agentDeviceDisconnect = "agent.device.disconnect"
     const val agentPreferencesPatch = "agent.preferences.patch"
     const val agentSyncGet = "agent.sync.get"
     const val agentSyncEnable = "agent.sync.enable"
@@ -171,10 +202,34 @@ object HostMethod {
     const val agentLinkApprove = "agent.link.approve"
     /** `LinkDeviceParams`：解除配对。 */
     const val agentLinkRemove = "agent.link.remove"
+    /** `LinkRenameParams` → `LinkDeviceInfo`：设置 / 清除已配对设备的本机备注名（省略 / 空白 = 清除）。 */
+    const val agentLinkRename = "agent.link.rename"
     /** 探测全部已配对设备在线状态 → `Vec<LinkDeviceInfo>`（同时推送 `LinkedDevicesChanged`）。 */
     const val agentLinkRefresh = "agent.link.refresh"
     /** `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。 */
     const val agentLinkDispatch = "agent.link.dispatch"
+    /** `LinkDeviceParams` → `LinkControlCredentialDto`：本机对已配对且可控制的主机签发设备专属控制凭据（仅发起方）。 */
+    const val agentLinkControlCredential = "agent.link.controlCredential"
+    /** FluxMesh（`agent.share.*`）：仅当主机 hello 带 `agent.share` 能力时可用；移动端暂不使用，常量只为与 `method.rs` 一一对应。 */
+    const val agentShareConfig = "agent.share.config"
+    const val agentShareSetLocalConfig = "agent.share.setLocalConfig"
+    const val agentShareCreate = "agent.share.create"
+    const val agentShareList = "agent.share.list"
+    const val agentShareUpdate = "agent.share.update"
+    const val agentShareStop = "agent.share.stop"
+    const val agentShareResume = "agent.share.resume"
+    const val agentShareDelete = "agent.share.delete"
+    const val agentShareResolve = "agent.share.resolve"
+    const val agentShareReceive = "agent.share.receive"
+    const val agentShareReceiveRecords = "agent.share.receiveRecords"
+    const val agentShareDismissPending = "agent.share.dismissPending"
+    const val agentShareSwitchToBridge = "agent.share.switchToBridge"
+    const val agentShareDiagnostics = "agent.share.diagnostics"
+    const val agentShareLogs = "agent.share.logs"
+    const val agentShareSessionKill = "agent.share.sessionKill"
+    const val agentShareConvertToCloud = "agent.share.convertToCloud"
+    const val agentShareDeleteCloudCopy = "agent.share.deleteCloudCopy"
+    const val agentShareStopProviding = "agent.share.stopProviding"
     const val agentPlanList = "agent.plan.list"
     const val agentOrderCreate = "agent.order.create"
     const val agentOrderGet = "agent.order.get"
@@ -187,6 +242,8 @@ object HostMethod {
     const val agentReferralValidate = "agent.referral.validate"
     const val agentPlatformOpenTask = "agent.platform.openTask"
     const val agentPlatformRevealTask = "agent.platform.revealTask"
+    /** 把任务产物以文件写入主机系统剪贴板；仅桌面主机本机来源，移动端不使用。 */
+    const val agentPlatformCopyTaskFiles = "agent.platform.copyTaskFiles"
     const val agentPlatformOpenPath = "agent.platform.openPath"
     const val agentPlatformIntegrationGet = "agent.platform.integrationGet"
     const val agentPlatformSetAutostart = "agent.platform.setAutostart"
@@ -194,6 +251,8 @@ object HostMethod {
     const val agentPlatformSetUrlProtocol = "agent.platform.setUrlProtocol"
     /** 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。 */
     const val agentPlatformFileIcon = "agent.platform.fileIcon"
+    /** 由 agent 在本机播放一次提示音偏好值；仅桌面，移动端不使用。 */
+    const val agentSoundPreview = "agent.sound.preview"
     const val agentCaptureSubmit = "agent.capture.submit"
     /** 从本机 `.torrent` 文件建任务：agent 读文件、上传 daemon blob 后调用 `daemon.task.create`。 */
     const val agentCaptureSubmitTorrentFile = "agent.capture.submitTorrentFile"
@@ -254,5 +313,9 @@ object HostCapability {
     const val agentExternalCapture = "agent.externalCapture"
     /** 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。 */
     const val agentOpenTaskFiles = "agent.openTaskFiles"
+    /** 按连接下发：本连接可把任务产物写入 agent 所在主机的系统剪贴板（`agent.platform.copyTaskFiles`）。 */
+    const val agentCopyTaskFiles = "agent.copyTaskFiles"
+    /** 本主机编入了FluxMesh服务（`agent.share.*`）；移动端暂不使用。 */
+    const val agentShare = "agent.share"
     const val clientSelections = "client.selections"
 }

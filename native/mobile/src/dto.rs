@@ -158,6 +158,22 @@ impl From<&proto::QueueDto> for QueueDto {
     }
 }
 
+/// 排队任务的引擎排序键：任务留在队列期间不变，队首出队不改其余任务的键。
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct QueueOrderDto {
+    pub task_id: String,
+    pub order: i64,
+}
+
+impl From<&proto::QueueOrderEntryDto> for QueueOrderDto {
+    fn from(entry: &proto::QueueOrderEntryDto) -> Self {
+        Self {
+            task_id: entry.task_id.clone(),
+            order: entry.order,
+        }
+    }
+}
+
 /// `GroupDto`；组进度由客户端汇总成员任务。
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GroupDto {
@@ -233,6 +249,15 @@ pub struct VariantOptionDto {
     pub total_bytes: i64,
 }
 
+/// 多插件选择的候选插件（`PluginCandidateDto`）。
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct PluginCandidateDto {
+    pub identity: String,
+    pub name: String,
+    pub version: String,
+    pub description: String,
+}
+
 /// `FileExistsAction`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum FileExistsActionDto {
@@ -283,6 +308,12 @@ pub enum SelectionKindDto {
         rename_preview: String,
         actions: Vec<FileExistsActionDto>,
     },
+    /// 多个插件都能处理该链接，由用户选择本次使用的插件（可记为站点默认）。
+    Plugin {
+        site: String,
+        url: String,
+        candidates: Vec<PluginCandidateDto>,
+    },
 }
 
 /// `SelectionOutcome`。
@@ -292,6 +323,7 @@ pub enum SelectionOutcomeDto {
     Bt { indices: Vec<i32> },
     Variant { index: i32 },
     FileExists { action: FileExistsActionDto },
+    Plugin { identity: String, remember: bool },
     Cancelled,
 }
 
@@ -350,6 +382,23 @@ impl From<&proto::SelectionKind> for SelectionKindDto {
                 rename_preview: rename_preview.clone(),
                 actions: actions.iter().copied().map(Into::into).collect(),
             },
+            proto::SelectionKind::Plugin {
+                site,
+                url,
+                candidates,
+            } => Self::Plugin {
+                site: site.clone(),
+                url: url.clone(),
+                candidates: candidates
+                    .iter()
+                    .map(|candidate| PluginCandidateDto {
+                        identity: candidate.identity.clone(),
+                        name: candidate.name.clone(),
+                        version: candidate.version.clone(),
+                        description: candidate.description.clone(),
+                    })
+                    .collect(),
+            },
         }
     }
 }
@@ -365,6 +414,10 @@ impl From<&proto::SelectionOutcome> for SelectionOutcomeDto {
             proto::SelectionOutcome::FileExists { action } => Self::FileExists {
                 action: (*action).into(),
             },
+            proto::SelectionOutcome::Plugin { identity, remember } => Self::Plugin {
+                identity: identity.clone(),
+                remember: *remember,
+            },
             proto::SelectionOutcome::Cancelled => Self::Cancelled,
         }
     }
@@ -379,6 +432,9 @@ impl From<SelectionOutcomeDto> for proto::SelectionOutcome {
             SelectionOutcomeDto::FileExists { action } => Self::FileExists {
                 action: action.into(),
             },
+            SelectionOutcomeDto::Plugin { identity, remember } => {
+                Self::Plugin { identity, remember }
+            }
             SelectionOutcomeDto::Cancelled => Self::Cancelled,
         }
     }
@@ -509,6 +565,22 @@ pub struct LinkDeviceDto {
     pub default_save_dir: Option<String>,
     /// 见 [`path_style_wire`]。
     pub path_style: Option<String>,
+    /// 本机备注名（`agent.link.rename`）；`name` 已是生效名。
+    pub custom_name: Option<String>,
+    /// 对端自报的客户端版本。
+    pub app_version: Option<String>,
+    /// 对端自报的云设备 id：本机云名册里存在同 id 时合并为同一台设备展示。
+    pub cloud_device_id: Option<String>,
+    /// 对端已解除与本机的配对：不可下发，只能删除或重新配对。
+    pub revoked: bool,
+    /// 该设备被本机授权可经 `/rpc` 完全控制本机（本机用户批准了它的控制请求）。
+    pub grants_control: bool,
+    /// 本机可经 `/rpc` 控制该设备（本机以控制请求配对了它）。
+    pub controllable: bool,
+    /// 配对时间（Unix 秒）。
+    pub paired_at: i64,
+    /// 最近一次确认在线的时间（Unix 秒，0 = 未知）。
+    pub last_seen_at: i64,
 }
 
 impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
@@ -520,6 +592,14 @@ impl From<&proto::LinkDeviceInfo> for LinkDeviceDto {
             online: device.online,
             default_save_dir: device.default_save_dir.clone(),
             path_style: path_style_wire(device.path_style),
+            custom_name: device.custom_name.clone(),
+            app_version: device.app_version.clone(),
+            cloud_device_id: device.cloud_device_id.clone(),
+            revoked: device.revoked,
+            grants_control: device.grants_control,
+            controllable: device.controllable,
+            paired_at: device.paired_at,
+            last_seen_at: device.last_seen_at,
         }
     }
 }
@@ -534,6 +614,8 @@ pub struct CategoryDto {
     pub extensions: Vec<String>,
     /// 非空 = 正则模式（`matchMode = regex`）。
     pub regex_pattern: String,
+    /// 非空 = 网址模式（`matchMode = url`）的通配符模式。
+    pub url_pattern: String,
     pub position: i32,
     pub visible: bool,
     /// all / video / audio / document / image / program / archive / other；自定义为 `None`。
@@ -550,6 +632,11 @@ impl From<&proto::CustomCategoryDto> for CategoryDto {
             extensions: category.extensions.clone(),
             regex_pattern: if regex_mode {
                 category.regex_pattern.clone()
+            } else {
+                String::new()
+            },
+            url_pattern: if category.match_mode == "url" {
+                category.url_pattern.clone()
             } else {
                 String::new()
             },
@@ -581,11 +668,16 @@ impl CategoryDto {
 pub struct HostSnapshotDto {
     pub info: HostInfoDto,
     pub daemon_connected: bool,
+    /// 任务表是否仍在分页载入：`true` 期间 `tasks` / `runtime` / `queue_order` 为空，
+    /// 只代表「尚未载入」，**不得**当成空列表（计数、空态、批量操作范围）。
+    pub tasks_loading: bool,
+    /// 主机上的任务总数：载入期间取主机报告的 `taskTotal`，载入完毕等于 `tasks.len()`。
+    pub task_total: u64,
     pub tasks: Vec<TaskDto>,
     pub runtime: Vec<TaskRuntimeDto>,
     pub queues: Vec<QueueDto>,
-    /// taskId → 排队序号（1 起）。
-    pub queue_positions: HashMap<String, i32>,
+    /// 排队任务的排序键，按 `order` 升序（名次 = 下标 + 1 即「排队 #n」）。
+    pub queue_order: Vec<QueueOrderDto>,
     pub groups: Vec<GroupDto>,
     pub stats: RuntimeStatsDto,
     /// 0 或 1 个优先任务。
@@ -610,17 +702,33 @@ impl HostSnapshotDto {
         sections: HashMap<String, String>,
     ) -> Self {
         let daemon = &snapshot.daemon;
+        let loading = daemon.tables_loading();
         Self {
             info: info.clone(),
             daemon_connected: snapshot.daemon_connected,
-            tasks: daemon.tasks.iter().map(TaskDto::from).collect(),
-            runtime: daemon
-                .task_runtime
-                .values()
-                .map(TaskRuntimeDto::from)
-                .collect(),
+            tasks_loading: loading,
+            task_total: u64::try_from(daemon.task_count()).unwrap_or(u64::MAX),
+            // 载入期间投影里的表是半份（或已清空）：一律不下发，等载入完成后的完整快照。
+            tasks: if loading {
+                Vec::new()
+            } else {
+                daemon.tasks.iter().map(TaskDto::from).collect()
+            },
+            runtime: if loading {
+                Vec::new()
+            } else {
+                daemon
+                    .task_runtime
+                    .values()
+                    .map(TaskRuntimeDto::from)
+                    .collect()
+            },
             queues: daemon.queues.iter().map(QueueDto::from).collect(),
-            queue_positions: positions_map(&daemon.queue_positions),
+            queue_order: if loading {
+                Vec::new()
+            } else {
+                queue_order_dtos(&daemon.queue_positions)
+            },
             groups: daemon.groups.iter().map(GroupDto::from).collect(),
             stats: (&daemon.runtime_stats).into(),
             priority_task_id: daemon.priority.first().cloned(),
@@ -648,10 +756,14 @@ impl HostSnapshotDto {
     }
 }
 
-pub(crate) fn positions_map(positions: &[proto::QueuePositionDto]) -> HashMap<String, i32> {
+/// 全量位置表 → 排序键表：协议保证按 `order` 升序，名次（`position`）不下发，由客户端按键序计算。
+pub(crate) fn queue_order_dtos(positions: &[proto::QueuePositionDto]) -> Vec<QueueOrderDto> {
     positions
         .iter()
-        .map(|entry| (entry.task_id.clone(), entry.position))
+        .map(|entry| QueueOrderDto {
+            task_id: entry.task_id.clone(),
+            order: entry.order,
+        })
         .collect()
 }
 
@@ -695,8 +807,14 @@ pub enum HostEventDto {
     QueuesChanged {
         queues: Vec<QueueDto>,
     },
+    /// 队列顺序整表替换（首次 / 用户重排）：按 `order` 升序，名次 = 下标 + 1。
     QueuePositionsChanged {
-        positions: HashMap<String, i32>,
+        order: Vec<QueueOrderDto>,
+    },
+    /// 队列顺序增量：先移除 `removed`，再按 `order` 插入 / 更新 `added`；名次由客户端按键序计算。
+    QueueOrderChanged {
+        removed: Vec<String>,
+        added: Vec<QueueOrderDto>,
     },
     GroupsChanged {
         groups: Vec<GroupDto>,
@@ -780,6 +898,14 @@ pub struct CreateTaskRequestDto {
     pub http_user: String,
     pub http_password: String,
     pub save_site_auth: bool,
+    /// 免打扰（静默）提交：引擎需要选择时不向 UI 请求而取默认。仅 `create_task` 使用；
+    /// 批量导入忽略。
+    pub unattended: bool,
+    /// 新建下载表单 / 外部捕获的表单初始保存目录（任何分类预填之前的目录：跟随上次保存位置，
+    /// 否则默认下载目录，否则主机运行时目录）。`None` = 永不按分类路由；`Some` 时由 Rust 按
+    /// 已连接主机当前 `custom_categories` 偏好决定：`save_dir` 仍是系统给出的（空 / 初始目录 /
+    /// 任一分类目录）则以初始目录为基准目录交给 daemon 按分类路由，用户改选了别的目录则不路由。
+    pub offered_save_dir: Option<String>,
 }
 
 impl From<CreateTaskRequestDto> for proto::CreateTaskRequest {

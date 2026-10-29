@@ -1,22 +1,29 @@
 /**
  * Release 下载入口（仅 302，不代理文件流量）。
- * source=auto：CDN 缓存优先、未命中 OSS 回源、失败 GitHub；无 CDN 时验证 OSS 后直连。
- * source=github：仅 GitHub；source=oss：仅已验证 OSS，不可用返回 503。
- * 无 source / 未知 source：保留旧客户端 OSS 优先、GitHub 兜底行为。
+ * 下载源优先级：123 云盘直链（仅应用内更新）→ dl-cn 镜像（中国大陆访客）→ GitHub。
+ * 两个镜像都不能回退 GitHub，302 前必须确认镜像有该资产且大小与 GitHub 资产一致。
+ * 镜像只发给像正常客户端的请求（24 小时内读过发布清单、非脚本 User-Agent，见 download-gate.ts）；
+ * 大陆按 Cloudflare 判定的访客国家（X-Client-Country = CN，见 client-ip.ts）判定。
+ * 123 另外要求（不分地区）：≥ 0.6.0 更新器 User-Agent（isPan123Updater）、资产在当前更新清单里
+ * （isUpdateAsset）、该 IP 未超签发配额（hasPan123Quota）；官网浏览器下载不走 123。
+ * source=github：仅 GitHub；source=oss：大陆准入访客在镜像都不可用时返回 503，其余同 auto。
  */
 import type { APIRoute } from "astro";
 import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
-import { cdnDownloadUrl, ossConfigured, ossDownloadUrl, presignOssUrl, releaseObjectKey } from "@/lib/oss";
+import { getClientCountry, getClientIp } from "@/lib/client-ip";
+import { recordDownload } from "@/lib/download-ban";
+import { hasPan123Quota, isPan123Updater, isUpdateAsset, mayUseMirror, recordPan123Link } from "@/lib/download-gate";
+import { cdnConfigured, cdnDownloadUrl, ossConfigured, presignOssHeadUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
 import { createOssProbe } from "@/lib/download-probe";
+import { pan123Configured, pan123DownloadUrl } from "@/lib/pan123";
 import {
   DownloadLookupError,
   downloadRedirect,
   downloadSource,
   latestWithAsset,
   isGitHubDownloadUrl,
-  mayProbeOss,
   ossUnavailable,
   transientGitHubStatus,
   type DownloadRelease,
@@ -29,7 +36,7 @@ const GITHUB_HEADERS: Record<string, string> = {
   "X-GitHub-Api-Version": "2022-11-28",
   ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
 };
-const ossHasAsset = createOssProbe((key) => presignOssUrl("HEAD", key, 60));
+const ossHasAsset = createOssProbe((key) => presignOssHeadUrl(key, 60));
 
 function releaseCache(): DownloadLookupCache<DownloadRelease[]> {
   const key = "download:lookup-cache:v2";
@@ -97,11 +104,27 @@ function jsonError(status: number, error: string): Response {
   });
 }
 
-export const GET: APIRoute = async ({ params, url }) => {
+export const GET: APIRoute = async ({ params, url, request, clientAddress }) => {
   const { filename } = params;
   if (!filename) return jsonError(400, "Missing filename");
   const tag = url.searchParams.get("tag")?.trim() || "";
   const source = downloadSource(url.searchParams.get("source"));
+  const ip = getClientIp(request, clientAddress);
+  const banned = recordDownload(ip, `${tag}/${filename}`);
+  if (banned > 0) {
+    return new Response(JSON.stringify({ error: "Too many downloads from this IP; try again later." }), {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "Retry-After": String(Math.ceil(banned / 1000)),
+      },
+    });
+  }
+  const userAgent = request.headers.get("user-agent");
+  const admitted = source !== "github" && mayUseMirror(ip, userAgent);
+  const wantsMirror = admitted && getClientCountry(request) === "CN";
+  const wantsPan123 = admitted && isPan123Updater(userAgent);
 
   try {
     const { value: releases, stale } = await releaseCache().lookup(
@@ -119,28 +142,25 @@ export const GET: APIRoute = async ({ params, url }) => {
       return jsonError(404, `Asset "${filename}" not found in release "${release.tag_name}"`);
     }
 
-    // 只有 GitHub 新鲜元数据确认的 tag + asset 才有资格获得 OSS 签名。
+    // 只有 GitHub 新鲜元数据确认的 tag + asset 才有资格获得镜像链接；探测结果按资产缓存。
     // 过期缓存只允许 GitHub 公共 URL：撤回/转草稿后由 GitHub 自身拒绝访问。
-    if (source === "auto" && !stale) {
-      const cdn = cdnDownloadUrl(releaseObjectKey(release.tag_name, asset.name), release.tag_name);
-      // 不先 HEAD OSS：即使源站离线，边缘仍可能持有完整缓存。
-      if (cdn) return downloadRedirect(cdn, "cdn");
-    }
-    if (mayProbeOss(source, ossConfigured, stale)) {
+    if (!stale && (wantsPan123 || wantsMirror)) {
       const key = releaseObjectKey(release.tag_name, asset.name);
-      if (await ossHasAsset(key, asset.size)) {
-        try {
-          const target = ossDownloadUrl(key);
-          if (target) return downloadRedirect(target, "oss");
-        } catch {
-          // 签名失败同样遵循强制 OSS 的 503 / auto 与旧客户端的 GitHub 兜底策略。
+      if (wantsPan123 && pan123Configured && isUpdateAsset(release.tag_name, asset.name) && hasPan123Quota(ip)) {
+        const link = await pan123DownloadUrl(key, asset.size);
+        if (link) {
+          recordPan123Link(ip);
+          return downloadRedirect(link, "pan123");
         }
       }
+      if (wantsMirror && cdnConfigured && ossConfigured && await ossHasAsset(key, asset.size)) {
+        return downloadRedirect(cdnDownloadUrl(key), "cdn");
+      }
     }
-    if (source === "oss") return ossUnavailable();
+    if (source === "oss" && wantsMirror) return ossUnavailable();
     return downloadRedirect(asset.browser_download_url, "github", stale);
   } catch (error) {
-    if (source === "oss") return ossUnavailable();
+    if (source === "oss" && wantsMirror) return ossUnavailable();
     if (error instanceof DownloadLookupError && error.transient) {
       return jsonError(503, error.message);
     }

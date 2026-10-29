@@ -1,7 +1,7 @@
 //! 账户能力状态：登录会话、云设备、局域网配对与配置同步的快照/事件应用，
 //! 以及需要一次性提示的状态转换（会话被结束、新的入站配对请求）。
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fluxdown_protocol::{
@@ -33,9 +33,10 @@ pub struct AccountController {
     discovered: Vec<LinkDiscoveredPeer>,
     pairing_requests: Vec<LinkPairingRequestDto>,
     lan_enabled: bool,
+    lan_active: bool,
     stale: bool,
     /// 已经提示过的入站配对请求，避免重连快照重复弹窗。
-    seen_requests: BTreeSet<String>,
+    seen_requests: BTreeMap<String, i64>,
 }
 
 impl AccountController {
@@ -51,8 +52,9 @@ impl AccountController {
             discovered: Vec::new(),
             pairing_requests: Vec::new(),
             lan_enabled: false,
+            lan_active: false,
             stale: true,
-            seen_requests: BTreeSet::new(),
+            seen_requests: BTreeMap::new(),
         }
     }
 
@@ -71,6 +73,7 @@ impl AccountController {
         self.pairing_requests
             .clone_from(&snapshot.link_pairing_requests);
         self.lan_enabled = snapshot.gateway.lan_enabled;
+        self.lan_active = snapshot.gateway.lan_active;
         self.stale = false;
         Transition {
             new_pairing_requests: self.take_new_requests(),
@@ -129,6 +132,7 @@ impl AccountController {
             AgentEvent::GatewayChanged(gateway) => {
                 transition.changed = true;
                 self.lan_enabled = gateway.lan_enabled;
+                self.lan_active = gateway.lan_active;
             }
             _ => {}
         }
@@ -136,19 +140,31 @@ impl AccountController {
     }
 
     /// 已存在的入站请求集合里首次出现的 ID；同时丢弃已消失请求的记录。
+    /// 首次看到时记下本机截止时刻（收到时刻 + `ttlMs`），之后不再随快照重放而变。
     fn take_new_requests(&mut self) -> Vec<String> {
-        self.seen_requests.retain(|id| {
+        self.seen_requests.retain(|id, _| {
             self.pairing_requests
                 .iter()
                 .any(|request| &request.session_id == id)
         });
+        let now = crate::link::now_unix_ms();
         let mut fresh = Vec::new();
         for request in &self.pairing_requests {
-            if self.seen_requests.insert(request.session_id.clone()) {
+            if !self.seen_requests.contains_key(&request.session_id) {
+                let deadline =
+                    crate::link::local_deadline_ms(request.ttl_ms, request.expires_at_unix_ms, now);
+                self.seen_requests
+                    .insert(request.session_id.clone(), deadline);
                 fresh.push(request.session_id.clone());
             }
         }
         fresh
+    }
+
+    /// 入站请求的本机截止时刻（Unix 毫秒）；请求不存在时为 `None`。
+    #[must_use]
+    pub fn pairing_deadline_ms(&self, session_id: &str) -> Option<i64> {
+        self.seen_requests.get(session_id).copied()
     }
 
     pub fn mark_stale(&mut self) {
@@ -175,6 +191,28 @@ impl AccountController {
 
     pub(crate) fn device_presence(&self, device: &CloudDevice) -> Option<bool> {
         (!self.stale && self.cloud_connected()).then_some(device.is_online)
+    }
+
+    /// 因同时在线设备数已达上限而在等待名额（连接未建立，原因为 `OnlineDeviceLimit`）。
+    pub(crate) fn online_limit_waiting(&self) -> bool {
+        !self.stale
+            && self.session.is_some()
+            && !self.cloud_connected()
+            && self.cloud_connection.last_error_reason == Some(ErrorReason::OnlineDeviceLimit)
+    }
+
+    /// 能否让该设备下线：非本机、列表标记在线，且在线状态可信（已连接）或正在等待名额。
+    pub(crate) fn can_disconnect_device(&self, device: &CloudDevice) -> bool {
+        !device.is_current
+            && device.is_online
+            && (self.device_presence(device) == Some(true) || self.online_limit_waiting())
+    }
+
+    /// 套餐的同时在线设备上限（`maxOnlineDevices`）；缺失或 0（不限）为 `None`。
+    pub(crate) fn max_online_devices(&self) -> Option<u64> {
+        self.session
+            .as_ref()
+            .and_then(|session| crate::device_list::max_online_devices(&session.entitlements))
     }
 
     pub(crate) fn device_presence_key(&self, device: &CloudDevice) -> &'static str {
@@ -209,6 +247,12 @@ impl AccountController {
     #[must_use]
     pub fn lan_enabled(&self) -> bool {
         self.lan_enabled
+    }
+
+    /// 本机网关本次运行是否实际监听非回环地址（`lan_enabled` 只是下次启动生效的持久化配置）。
+    #[must_use]
+    pub fn lan_active(&self) -> bool {
+        self.lan_active
     }
 
     #[must_use]
@@ -277,6 +321,7 @@ mod tests {
             },
             entitlements: Entitlements::default(),
             current_plan: None,
+            active_subscription: None,
             device: device("me", true),
         }
     }
@@ -288,6 +333,8 @@ mod tests {
             peer_fingerprint: "fp".to_owned(),
             peer_platform: None,
             sas: "123456".to_owned(),
+            requests_control: false,
+            ttl_ms: 0,
             expires_at_unix_ms: 0,
         }
     }

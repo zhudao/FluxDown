@@ -39,6 +39,8 @@ type ManifestBack = Rc<dyn Fn(&mut Window, &mut App)>;
 pub(crate) struct ManifestView {
     translator: Entity<Translator>,
     selection: ManifestSelection,
+    /// Identity of the plugin that produced the manifest; copied into the group request.
+    plugin_id: String,
     base: CreateTaskRequest,
     queues: Vec<NewDownloadQueue>,
     group_name: Entity<InputState>,
@@ -108,6 +110,7 @@ impl ManifestView {
         Self {
             translator,
             selection: ManifestSelection::new(manifest.items),
+            plugin_id: manifest.plugin_id,
             base,
             queues,
             group_name,
@@ -177,6 +180,7 @@ impl ManifestView {
             self.group_name.read(cx).value().as_str(),
             self.save_dir.read(cx).value().as_str(),
             queue,
+            &self.plugin_id,
             paused,
         ) else {
             return;

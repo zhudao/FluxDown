@@ -33,7 +33,7 @@ struct QueueEditorView: View {
         let running = snapshot?.isRunning ?? model.detail?.isRunning ?? true
         let name = snapshot?.displayName ?? model.detail?.name ?? ""
         let pending = queueId.map {
-            QueueOrdering.pending(in: $0, tasks: state.tasks, positions: state.queuePositions)
+            QueueOrdering.pending(in: $0, tasks: state.tasks, order: state.queueOrder)
         } ?? []
         Form {
             if readOnly || model.errorText != nil {
@@ -56,12 +56,17 @@ struct QueueEditorView: View {
                     nameSection(draft: $form.draft, running: running, displayName: name, issue: model.issue)
                     limitsSection(draft: $form.draft, issue: model.issue)
                     defaultsSection(draft: $form.draft)
-                    QueueScheduleSection(draft: $form.draft, issue: model.issue)
+                    if QueueIds.canSchedule(queueId ?? "") || model.isCreating {
+                        QueueScheduleSection(draft: $form.draft, issue: model.issue)
+                    } else {
+                        Section { Text(L("mainQueueAlwaysRunningHint")).font(.footnote).foregroundStyle(.secondary) }
+                    }
                     if !model.isCreating {
                         QueuePendingOrderSection(
                             serverTasks: pending,
                             override: model.orderOverride,
                             readOnly: readOnly,
+                            loading: state.tasksLoading,
                             editMode: $editMode,
                             onReorder: { ids in Task { await model.reorder(ids, session: container.session) } }
                         )
@@ -207,17 +212,21 @@ struct QueueEditorView: View {
         }
     }
 
+    @ViewBuilder
     private func actionsSection(running: Bool, displayName: String) -> some View {
+        let canStop = QueueIds.canStop(queueId ?? "")
         Section {
-            Button {
-                Task { await setRunning(!running, name: displayName) }
-            } label: {
-                Label(
-                    L(running ? "stopQueueAction" : "startQueueAction"),
-                    systemImage: running ? FluxSymbol.pause : FluxSymbol.resume
-                )
+            if !running || canStop {
+                Button {
+                    Task { await setRunning(!running, name: displayName) }
+                } label: {
+                    Label(
+                        L(running ? "stopQueueAction" : "startQueueAction"),
+                        systemImage: running ? FluxSymbol.pause : FluxSymbol.resume
+                    )
+                }
+                .disabled(model.isWorking)
             }
-            .disabled(model.isWorking)
             if !model.isBuiltin {
                 Button(role: .destructive) {
                     confirmingDelete = true

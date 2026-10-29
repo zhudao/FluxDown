@@ -18,6 +18,8 @@ pub struct LaunchOptions {
     pub capture_only: bool,
     /// 直接打开或聚焦设置窗口，不打开主窗口。
     pub settings: bool,
+    /// 直接打开新建下载窗口（agent 全局快捷键「新建下载」拉起；已有主实例时转交它处理）。
+    pub new_download: bool,
     /// 仅唤起已有 UI；绝不新建 UI 或启动本机后台服务。
     pub activate_existing: bool,
     /// 需要交给 agent 的外部链接。
@@ -29,6 +31,9 @@ pub struct LaunchOptions {
     /// 应用内更新完成后由 agent / 安装器拉起：旧桌面进程仍在退出，需等其释放单实例锁，
     /// 且就绪后提示已更新（不影响「普通启动」判定）。
     pub after_update: bool,
+    /// 托盘「重启」由 agent 拉起：与 `--after-update` 一样要等旧实例释放单实例锁，但没有
+    /// 更新发生，不提示已更新（同样不影响「普通启动」判定）。
+    pub relaunch: bool,
 }
 
 impl LaunchOptions {
@@ -41,8 +46,10 @@ impl LaunchOptions {
                 "--minimized" | "--start-minimized" => options.minimized = true,
                 "--capture" => options.capture_only = true,
                 "--settings" => options.settings = true,
+                "--new-download" => options.new_download = true,
                 "--activate-existing" => options.activate_existing = true,
                 "--after-update" => options.after_update = true,
+                "--relaunch" => options.relaunch = true,
                 "--progress-task" => {
                     options.progress_task = args.next().filter(|task_id| !task_id.is_empty());
                 }
@@ -64,6 +71,7 @@ impl LaunchOptions {
         !self.minimized
             && !self.capture_only
             && !self.settings
+            && !self.new_download
             && !self.activate_existing
             && self.urls.is_empty()
             && self.torrent_files.is_empty()
@@ -158,6 +166,10 @@ mod tests {
         let options = LaunchOptions::from_args(["--after-update"].map(str::to_owned));
         assert!(options.after_update);
         assert!(options.is_plain(), "after-update stays a plain launch");
+        let options = LaunchOptions::from_args(["--relaunch"].map(str::to_owned));
+        assert!(options.relaunch);
+        assert!(!options.after_update, "relaunch must not claim an update");
+        assert!(options.is_plain(), "relaunch stays a plain launch");
         let file = std::env::temp_dir().join(format!("fluxdown-{}.torrent", std::process::id()));
         std::fs::write(&file, b"d8:announce0:e").expect("write");
         let options = LaunchOptions::from_args([file.display().to_string()]);
@@ -200,6 +212,7 @@ mod tests {
             "--minimized",
             "--capture",
             "--settings",
+            "--new-download",
             "--activate-existing",
             "magnet:?xt=urn:btih:abc",
         ] {

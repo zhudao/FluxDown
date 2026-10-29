@@ -41,7 +41,9 @@ private struct NewDownloadContent: View {
     @State private var showDiscard = false
     @State private var showImporter = false
     @State private var importerKind: ImporterKind = .text
+    #if FULL_FLAVOR
     @State private var importingTorrent = false
+    #endif
     @State private var dropTargeted = false
     @State private var path: [NewDownloadRoute] = []
     /// 「下载到」候选的分区缓存（云端 presence）。
@@ -77,7 +79,9 @@ private struct NewDownloadContent: View {
         NavigationStack(path: $path) {
             ScrollViewReader { proxy in
                 Form {
+                    #if FULL_FLAVOR
                     if let probe = form.probe { probeSection(probe) }
+                    #endif
                     linksSection(entries, remote: target != nil)
                     if !entries.isEmpty { previewSection(entries) }
                     if !targets.isEmpty { targetSection(targets, selected: target) }
@@ -122,8 +126,10 @@ private struct NewDownloadContent: View {
                 switch route {
                 case .advanced:
                     AdvancedOptionsView(form: form)
+                #if FULL_FLAVOR
                 case let .manifest(source, base):
                     ManifestSelectView(source: source, base: base, close: close)
+                #endif
                 }
             }
         }
@@ -140,21 +146,28 @@ private struct NewDownloadContent: View {
             }
         }
         .fluxAnimation(.snappy, value: dropTargeted)
+        // 预测输入（第一条链接的文件名 / 链接 / 重命名）变化，及打开表单时：重算分类目录并按「自动」规则跟随。
+        .onChange(of: form.categoryPredictionKey, initial: true) {
+            form.followCategory(session: container.session)
+        }
         .interactiveDismissDisabled(form.isDirty || form.submitting)
         .fileImporter(
             isPresented: $showImporter,
-            allowedContentTypes: importerKind == .torrent ? [TorrentImport.contentType] : [.plainText, .text, .data],
+            allowedContentTypes: importerContentTypes,
             allowsMultipleSelection: true
         ) { result in
             switch importerKind {
             case .text: importFiles(result)
+            #if FULL_FLAVOR
             case .torrent: importTorrentFiles(result)
+            #endif
             }
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 
+    #if FULL_FLAVOR
     // MARK: 清单探测（N5 · 解析中）
 
     private func probeSection(_ probe: ManifestProbe) -> some View {
@@ -182,13 +195,14 @@ private struct NewDownloadContent: View {
             .id(Self.probeId)
         }
     }
+    #endif
 
     // MARK: 链接
 
     private func linksSection(_ entries: [UrlEntry], remote: Bool) -> some View {
         let hasText = !form.urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let error: String? =
-            if hasText, entries.isEmpty { L("newDownloadNoValidUrl") }
+            if hasText, entries.isEmpty { L(BuildFlavor.key(full: "newDownloadNoValidUrl", store: "newDownloadNoValidUrlGeneric")) }
             else if !hasText, form.showEmptyError { L("mobileEnterUrl") }
             else { nil }
         return Section {
@@ -202,7 +216,7 @@ private struct NewDownloadContent: View {
                 .frame(minHeight: 110)
                 .overlay(alignment: .topLeading) {
                     if form.urlText.isEmpty {
-                        Text(L("batchUrlPlaceholder"))
+                        Text(L(BuildFlavor.key(full: "batchUrlPlaceholder", store: "batchUrlPlaceholderGeneric")))
                             .font(.callout.monospaced())
                             .foregroundStyle(.tertiary)
                             .padding(.top, 8)
@@ -219,7 +233,9 @@ private struct NewDownloadContent: View {
                     .foregroundStyle(Color.fdStatusFailedText)
             }
             pasteButton
+            #if FULL_FLAVOR
             torrentButton(remote: remote)
+            #endif
             importButton
         } header: {
             HStack {
@@ -232,7 +248,7 @@ private struct NewDownloadContent: View {
                 }
             }
         } footer: {
-            Text(L("batchDownloadDesc"))
+            Text(L(BuildFlavor.key(full: "batchDownloadDesc", store: "batchDownloadDescGeneric")))
         }
     }
 
@@ -256,6 +272,7 @@ private struct NewDownloadContent: View {
         .disabled(form.submitting)
     }
 
+    #if FULL_FLAVOR
     /// 种子文件只能在当前主机建任务，「下载到」选了其他设备时禁用（同 GPUI）。
     private func torrentButton(remote: Bool) -> some View {
         Button {
@@ -271,6 +288,7 @@ private struct NewDownloadContent: View {
         .disabled(form.submitting || importingTorrent || form.probe != nil || remote)
         .accessibilityHint(importingTorrent ? L("btProbing") : "")
     }
+    #endif
 
     private var importButton: some View {
         Button(L("importTxtFile"), systemImage: "text.document") {
@@ -278,6 +296,13 @@ private struct NewDownloadContent: View {
             showImporter = true
         }
         .disabled(form.submitting)
+    }
+
+    private var importerContentTypes: [UTType] {
+        #if FULL_FLAVOR
+        if importerKind == .torrent { return [TorrentImport.contentType] }
+        #endif
+        return [.plainText, .text, .data]
     }
 
     // MARK: 预览
@@ -372,7 +397,9 @@ private struct NewDownloadContent: View {
     // MARK: 目录 / 文件名
 
     private func destinationSection(_ entries: [UrlEntry]) -> some View {
-        Section {
+        let options = categoryOptions
+        return Section {
+            if !options.isEmpty { categoryPicker(options) }
             if container.isLocalHost {
                 LabeledContent(L("saveDir")) {
                     Text(form.saveDir.isEmpty ? LocalPaths.documents.path : form.saveDir)
@@ -395,6 +422,56 @@ private struct NewDownloadContent: View {
                 }
             }
             renameField(entries)
+        } footer: {
+            if !options.isEmpty, let hint = categoryHint { Text(hint) }
+        }
+    }
+
+    // MARK: 分类
+
+    /// 能产生分类路由的分类（可见、非「全部」、目录非空）；为空 = 不显示选择器、行为与无分类时一致。
+    private var categoryOptions: [CustomCategoryDto] {
+        SaveDirCategoryState.options(CustomCategoryDto.fromPreference(state.preferences[CustomCategoryDto.preferenceKey]))
+    }
+
+    /// 「自动」「不分类」，分隔后是各分类（分类图标同设置页）。「自动」命中时标题带上命中分类名。
+    private func categoryPicker(_ options: [CustomCategoryDto]) -> some View {
+        let matched = SaveDirCategoryState.matched(options, predicted: form.predictedCategoryDir)
+        let autoTitle = matched.map { L("saveDirCategoryAutoMatched", ["name": GeneralCategoryText.displayName($0)]) }
+            ?? L("saveDirCategoryAuto")
+        return Picker(L("saveDirCategory"), selection: categoryBinding(options)) {
+            Label(autoTitle, systemImage: "sparkles").tag(SaveDirCategoryMode.auto)
+            Label(L("saveDirCategoryNone"), systemImage: FluxSymbol.folder).tag(SaveDirCategoryMode.noCategory)
+            Section {
+                ForEach(options) { entry in
+                    Label(GeneralCategoryText.displayName(entry), systemImage: GeneralCategoryIcon.symbol(entry.icon))
+                        .tag(SaveDirCategoryMode.category(entry.id))
+                }
+            }
+        }
+        .pickerStyle(.menu)
+        .disabled(form.submitting)
+    }
+
+    /// 所选分类已从列表消失（被隐藏 / 删除 / 清空目录）时读作「自动」，避免选择器空白。
+    private func categoryBinding(_ options: [CustomCategoryDto]) -> Binding<SaveDirCategoryMode> {
+        Binding(
+            get: {
+                if case let .category(id) = form.categoryState.mode, !options.contains(where: { $0.id == id }) {
+                    return .auto
+                }
+                return form.categoryState.mode
+            },
+            set: { form.selectCategory($0, options: options, session: container.session) }
+        )
+    }
+
+    /// 当前模式的一句话说明（固定到某分类时目录已在下方「保存目录」行显示，无需再说明）。
+    private var categoryHint: String? {
+        switch form.categoryState.mode {
+        case .auto: L("saveDirCategoryAutoDesc")
+        case .noCategory: L("saveDirCategoryNoneDesc")
+        case .category: nil
         }
     }
 
@@ -660,6 +737,14 @@ private struct NewDownloadContent: View {
             form.showEmptyError = true
             return
         }
+        #if !FULL_FLAVOR
+        // 商店构建不含 P2P：任何主机（本机 / 远端 / 下发到其它设备）都不提交 magnet / ed2k。
+        if form.entries.contains(where: { P2PLink.isP2P($0.url) }) {
+            reject()
+            container.toasts.show(text: L("webChangeUrlErrProtocolUnsupported"), tone: .warning)
+            return
+        }
+        #endif
         if !container.isLocalHost, !form.saveDirValid {
             reject()
             return
@@ -670,14 +755,18 @@ private struct NewDownloadContent: View {
         }
         let manualProxy = manualProxyUrl(state.config)
         let requests = form.buildRequests(startPaused: startPaused, queue: queueId, manualProxy: manualProxy)
+        #if FULL_FLAVOR
         // N5：单条 http(s) 链接先探测插件多文件清单；未命中 / 失败 / 超时都静默回退为普通建任务。
+        // store 构建不含插件，不探测。
         if requests.count == 1, let request = requests.first, shouldProbeManifest(request.url) {
             probeManifest(request, requests: requests, startPaused: startPaused, queueId: queueId, manualProxy: manualProxy)
             return
         }
+        #endif
         createTasks(requests, startPaused: startPaused)
     }
 
+    #if FULL_FLAVOR
     private func shouldProbeManifest(_ url: String) -> Bool {
         ManifestSelection.isPreviewable(url) && !TorrentFile.isTorrentFileName(URL(string: url)?.path ?? "")
     }
@@ -713,6 +802,7 @@ private struct NewDownloadContent: View {
             }
         }
     }
+    #endif
 
     private func createTasks(_ requests: [CreateTaskRequest], startPaused: Bool) {
         form.submitting = true
@@ -827,6 +917,7 @@ private struct NewDownloadContent: View {
         }
     }
 
+    #if FULL_FLAVOR
     private func importTorrentFiles(_ result: Result<[URL], Error>) {
         switch result {
         case let .failure(error):
@@ -857,8 +948,9 @@ private struct NewDownloadContent: View {
             close()
         }
     }
+    #endif
 
-    /// iPad 拖放：`.torrent` → 导入；`.txt/.url/.list` → TXT 导入路径；其余 → 不支持提示。
+    /// iPad 拖放：`.txt/.url/.list` → TXT 导入路径；full 构建另支持 `.torrent` → 导入；其余 → 不支持提示。
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         guard !providers.isEmpty, !form.submitting else { return false }
         Task {
@@ -866,14 +958,15 @@ private struct NewDownloadContent: View {
             defer { DroppedFiles.discard(loaded.files) }
             if loaded.rejected > 0 {
                 FluxHaptic.warning.play()
-                container.toasts.show(text: L("unsupportedDropHint"), tone: .warning)
+                container.toasts.show(text: L(BuildFlavor.key(full: "unsupportedDropHint", store: "unsupportedDropHintGeneric")), tone: .warning)
             }
             if loaded.failed > 0 {
                 FluxHaptic.error.play()
                 container.toasts.show(text: L("dropReadFailed", ["count": loaded.failed]), tone: .error)
             }
-            let torrents = loaded.files.filter { $0.kind == .torrent }.map(\.url)
             let texts = loaded.files.filter { $0.kind == .text }.map(\.url)
+            #if FULL_FLAVOR
+            let torrents = loaded.files.filter { $0.kind == .torrent }.map(\.url)
             if !torrents.isEmpty {
                 if form.target(in: dispatchTargets) != nil {
                     FluxHaptic.warning.play()
@@ -882,6 +975,7 @@ private struct NewDownloadContent: View {
                     await importTorrents(torrents)
                 }
             }
+            #endif
             if !texts.isEmpty { await mergeTextFiles(texts) }
         }
         return true
@@ -901,14 +995,30 @@ private struct NewDownloadContent: View {
     }
 }
 
+/// 队列显示名：主队列 / 稍后下载用本地化名，其余取队列自带名称（N1 与清单选择共用）。
+func newTaskQueueLabel(_ q: TaskQueue) -> String {
+    switch q.queueId {
+    case "", TaskQueue.main: L("mainQueue")
+    case TaskQueue.later: L("downloadLater")
+    default: q.name
+    }
+}
+
 nonisolated enum NewDownloadRoute: Hashable {
     case advanced
+    #if FULL_FLAVOR
     /// 插件清单选择（N5）：来源 + 组级基础选项。
     case manifest(ManifestSource, ManifestBaseOptions)
+    #endif
 }
 
 /// 文件选择器的用途：决定可选类型与结果去向。
-private nonisolated enum ImporterKind { case text, torrent }
+private nonisolated enum ImporterKind {
+    case text
+    #if FULL_FLAVOR
+    case torrent
+    #endif
+}
 
 /// 读取文本文件（上限 2 MiB，防止误选大文件）；需要 security-scoped 访问。读取失败向上抛出，由调用方提示。
 private nonisolated func readTextFile(_ url: URL) throws -> String {

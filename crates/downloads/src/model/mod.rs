@@ -1,23 +1,30 @@
+pub(crate) mod aria2c;
 pub(crate) mod categories;
 pub(crate) mod counts;
 pub(crate) mod devices;
 pub(crate) mod dispatch;
 pub(crate) mod file_conflict;
 pub(crate) mod file_rescan;
+pub(crate) mod group_tree;
 pub(crate) mod manifest;
 pub(crate) mod new_download;
 pub(crate) mod preview;
 pub(crate) mod progress_window;
 pub(crate) mod refresh_gate;
 pub(crate) mod row_order;
+pub(crate) mod save_dir_category;
+pub(crate) mod save_dir_history;
+pub(crate) mod share;
 pub(crate) mod shutdown;
 pub(crate) mod source_composition;
+pub(crate) mod speed_limit_recent;
 pub(crate) mod store;
+pub(crate) mod task_route;
 pub(crate) mod view_prefs;
 
 pub(crate) use categories::CategoryIndex;
 use std::rc::Rc;
-pub(crate) use store::{RowId, TaskStore};
+pub(crate) use store::{RowChange, RowId, TaskStore};
 
 use fluxdown_protocol::TaskRuntimeDto;
 use fluxdown_ui_icon_pack::FileKind;
@@ -27,16 +34,22 @@ use gpui::SharedString;
 pub(crate) enum DownloadStatusFilter {
     All,
     Completed,
+    Seeding,
     Incomplete,
     Failed,
     Paused,
 }
 
 impl DownloadStatusFilter {
-    pub(crate) const ALL: [Self; 5] = [
+    /// 状态项数量（`slot` 取值范围）。
+    pub(crate) const COUNT: usize = 6;
+
+    /// 侧栏顺序：「做种中」紧随「已完成」。
+    pub(crate) const ALL: [Self; Self::COUNT] = [
         Self::All,
         Self::Incomplete,
         Self::Completed,
+        Self::Seeding,
         Self::Failed,
         Self::Paused,
     ];
@@ -56,13 +69,16 @@ impl DownloadStatusFilter {
             Self::Incomplete => 2,
             Self::Failed => 3,
             Self::Paused => 4,
+            Self::Seeding => 5,
         }
     }
 
-    pub(crate) fn matches(self, state: TaskState) -> bool {
+    pub(crate) fn matches(self, task: &DownloadTaskView) -> bool {
+        let state = task.state;
         match self {
             Self::All => true,
             Self::Completed => state == TaskState::Completed,
+            Self::Seeding => task.is_seeding(),
             // 下载中筛选包含下载中与等待中的任务。
             Self::Incomplete => matches!(state, TaskState::Downloading | TaskState::Pending),
             Self::Failed => state == TaskState::Failed,
@@ -73,13 +89,13 @@ impl DownloadStatusFilter {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StatusFolderMotion {
-    from: [f32; 5],
-    to: [f32; 5],
+    from: [f32; DownloadStatusFilter::COUNT],
+    to: [f32; DownloadStatusFilter::COUNT],
 }
 
 impl StatusFolderMotion {
     pub(crate) fn settled(open: Option<DownloadStatusFilter>) -> Self {
-        let mut amounts = [0.; 5];
+        let mut amounts = [0.; DownloadStatusFilter::COUNT];
         if let Some(status) = open {
             amounts[status.slot()] = 1.;
         }
@@ -91,11 +107,11 @@ impl StatusFolderMotion {
 
     pub(crate) fn retarget(self, progress: f32, next: Option<DownloadStatusFilter>) -> Self {
         let progress = progress.clamp(0., 1.);
-        let mut from = [0.; 5];
+        let mut from = [0.; DownloadStatusFilter::COUNT];
         for (slot, amount) in from.iter_mut().enumerate() {
             *amount = self.from[slot] + (self.to[slot] - self.from[slot]) * progress;
         }
-        let mut to = [0.; 5];
+        let mut to = [0.; DownloadStatusFilter::COUNT];
         if let Some(status) = next {
             to[status.slot()] = 1.;
         }
@@ -137,7 +153,7 @@ impl DownloadFilter {
     }
 
     pub(crate) fn matches(&self, task: &DownloadTaskView, categories: &CategoryIndex) -> bool {
-        self.status.matches(task.state)
+        self.status.matches(task)
             && self
                 .category
                 .as_deref()
@@ -206,6 +222,18 @@ pub(crate) enum TaskState {
 }
 
 impl TaskState {
+    /// 引擎原始 status → 展示态。5（准备中：探测 / 插件解析 / 分配）归入 `Pending`，
+    /// 由 [`DownloadTaskView::preparing`] 区分；状态文案统一经 `DownloadStrings` 的行级规则。
+    pub(crate) fn from_status(status: i32) -> Self {
+        match status {
+            0 | 5 => Self::Pending,
+            1 => Self::Downloading,
+            2 => Self::Paused,
+            3 => Self::Completed,
+            _ => Self::Failed,
+        }
+    }
+
     /// 状态优先级（「状态」列排序、按状态分组的组顺序）：
     /// 下载中 > 等待 > 失败 > 暂停 > 完成。失败排在暂停前：失败需要用户处理，暂停是主动操作。
     pub(crate) fn status_rank(self) -> u8 {
@@ -296,6 +324,8 @@ pub(crate) struct DownloadTaskView {
     pub(crate) size_bytes: u64,
     pub(crate) downloaded_bytes: u64,
     pub(crate) speed_bytes_per_second: Option<u64>,
+    /// 本地任务实时上传速度（字节/秒）：仅下载中 / 做种中有值，其余为 0；远程任务恒为 0。
+    pub(crate) upload_speed_bytes_per_second: u64,
     pub(crate) runtime: Option<Rc<TaskRuntimeDto>>,
     pub(crate) runtime_connected: bool,
     pub(crate) eta_seconds: Option<u64>,
@@ -310,8 +340,10 @@ pub(crate) struct DownloadTaskView {
     pub(crate) preparing: bool,
     /// 队列内插入序（`TaskDto::queue_order`，每队列 MAX+1）；打破同一秒批量添加的平局。
     pub(crate) queue_order: i32,
-    /// 引擎待启动队列中的位置（1 起；0 = 不在队列中）。
-    pub(crate) queue_position: u32,
+    /// 引擎待启动队列里的排序键（`QueuePositionDto::order`；`None` = 不在队列中）。任务在队列
+    /// 期间不变，只在进出队列时变化；展示序号 = 键在有序键集合中的名次
+    /// （[`TaskStore::queue_rank`]），渲染可见行时二分得到，不存进行里。
+    pub(crate) queue_key: Option<i64>,
     pub(crate) metadata_pending: bool,
     pub(crate) url: String,
     pub(crate) origin_url: String,
@@ -439,6 +471,7 @@ impl DownloadTaskView {
             size_bytes,
             downloaded_bytes: downloaded,
             speed_bytes_per_second,
+            upload_speed_bytes_per_second: 0,
             runtime: None,
             runtime_connected: false,
             eta_seconds,
@@ -446,16 +479,10 @@ impl DownloadTaskView {
             completed_at_secs: 0,
             progress,
             progress_label: format!("{:.1}%", progress * 100.0),
-            state: match status {
-                0 | 5 => TaskState::Pending,
-                1 => TaskState::Downloading,
-                2 => TaskState::Paused,
-                3 => TaskState::Completed,
-                _ => TaskState::Failed,
-            },
+            state: TaskState::from_status(status),
             preparing: status == 5,
             queue_order: 0,
-            queue_position: 0,
+            queue_key: None,
             metadata_pending,
             site: url_host(url).to_owned(),
             url: url.to_owned(),
@@ -485,6 +512,29 @@ impl DownloadTaskView {
     /// 已完成但文件跟踪扫描判定产物已不在下载目录（被删除或移走）。
     pub(crate) fn is_file_missing(&self) -> bool {
         self.state == TaskState::Completed && self.file_missing
+    }
+
+    /// 本地做种中：已完成且 seeding_status 为 1（做种）或 8（排队等待做种名额）。
+    pub(crate) fn is_seeding(&self) -> bool {
+        self.key.is_local()
+            && self.state == TaskState::Completed
+            && matches!(self.seeding_status, 1 | 8)
+    }
+
+    /// 可恢复做种：本地已完成、seeding_status 2..=7（比例 / 时长达标、用户停止等）且产物仍在。
+    pub(crate) fn can_resume_seeding(&self) -> bool {
+        self.key.is_local()
+            && self.state == TaskState::Completed
+            && (2..=7).contains(&self.seeding_status)
+            && !self.file_missing
+    }
+
+    /// 用户停止做种且产物仍在：「全部开始」会重新启动它。
+    pub(crate) fn is_resume_all_seed(&self) -> bool {
+        self.key.is_local()
+            && self.state == TaskState::Completed
+            && self.seeding_status == 4
+            && !self.file_missing
     }
 
     /// 本机最终产物可被打开 / 拖出：本地、已完成且文件仍在下载目录。
@@ -681,6 +731,75 @@ mod tests {
             &local
         ));
         assert!(!SidebarSelection::device_matches("dev-b", &local));
+    }
+
+    fn local_task(status: i32, seeding_status: i32, file_missing: bool) -> DownloadTaskView {
+        let dto = serde_json::from_value::<fluxdown_protocol::TaskDto>(json!({
+            "taskId":"s1","url":"magnet:?xt=urn:btih:abc","fileName":"s.bin","saveDir":"/tmp",
+            "status":status,"downloadedBytes":1,"totalBytes":1,"errorMessage":"","createdAt":"1",
+            "proxyUrl":"","queueId":"main","checksum":""
+        }))
+        .expect("local task");
+        let mut view = DownloadTaskView::local(&dto, None, false);
+        view.seeding_status = seeding_status;
+        view.file_missing = file_missing;
+        view
+    }
+
+    #[test]
+    fn seeding_folder_holds_only_seeding_and_queued_seeding_completed_tasks() {
+        use super::DownloadStatusFilter;
+        for seeding in [1, 8] {
+            let view = local_task(3, seeding, false);
+            assert!(view.is_seeding());
+            assert!(DownloadStatusFilter::Seeding.matches(&view));
+            // 做种中的任务仍属于「已完成」。
+            assert!(DownloadStatusFilter::Completed.matches(&view));
+        }
+        for seeding in [0, 2, 3, 4, 5, 6, 7] {
+            assert!(!DownloadStatusFilter::Seeding.matches(&local_task(3, seeding, false)));
+        }
+        // 非完成态即使带做种状态也不进「做种中」。
+        for status in [0, 1, 2, 4] {
+            assert!(!DownloadStatusFilter::Seeding.matches(&local_task(status, 1, false)));
+        }
+        // 远程任务没有做种语义。
+        let remote = serde_json::from_value::<fluxdown_protocol::RemoteTaskDto>(json!({
+            "id":"r1","url":"https://example.com/a","status":"completed","downloadedBytes":0
+        }))
+        .expect("remote task");
+        let mut remote = DownloadTaskView::remote(&remote);
+        remote.seeding_status = 1;
+        assert!(!DownloadStatusFilter::Seeding.matches(&remote));
+        assert!(!remote.can_resume_seeding());
+        // 做种项紧随「已完成」。
+        let order = DownloadStatusFilter::ALL;
+        let completed = order
+            .iter()
+            .position(|s| *s == DownloadStatusFilter::Completed);
+        let seeding = order
+            .iter()
+            .position(|s| *s == DownloadStatusFilter::Seeding);
+        assert_eq!(seeding, completed.map(|ix| ix + 1));
+    }
+
+    #[test]
+    fn resume_seeding_requires_stopped_seed_status_and_existing_files() {
+        for seeding in 2..=7 {
+            assert!(local_task(3, seeding, false).can_resume_seeding());
+            assert!(!local_task(3, seeding, true).can_resume_seeding());
+        }
+        // 普通已完成（seeding_status 0）、做种中 / 排队、非完成态都不可恢复做种（#935）。
+        for seeding in [0, 1, 8] {
+            assert!(!local_task(3, seeding, false).can_resume_seeding());
+        }
+        for status in [0, 1, 2, 4] {
+            assert!(!local_task(status, 4, false).can_resume_seeding());
+        }
+        // 「全部开始」只额外计入用户停止（4）且文件仍在的任务。
+        assert!(local_task(3, 4, false).is_resume_all_seed());
+        assert!(!local_task(3, 4, true).is_resume_all_seed());
+        assert!(!local_task(3, 2, false).is_resume_all_seed());
     }
 
     #[test]

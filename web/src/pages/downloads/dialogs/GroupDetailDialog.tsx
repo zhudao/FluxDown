@@ -3,12 +3,14 @@
 import { Copy, Download, MoreHorizontal, Pause, Play, RotateCw, Trash2 } from 'lucide-react'
 import { useEffect, useMemo } from 'react'
 import { useT } from '../../../i18n'
-import { TASK_STATUS, downloadTaskFile, rpc, useDaemon, useTasks } from '../../../lib/rpc'
+import { TASK_STATUS, downloadTaskFile, rpc, useDaemon, useTasks, useTasksLoading } from '../../../lib/rpc'
 import type { GroupDto, TaskDto } from '../../../lib/rpc'
 import { ActionMenu, Badge, Button, Dialog, EmptyState, Icon, ProgressBar, SectionHeader, Tooltip, confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
+import { copyText } from '../../../lib/copy'
 import type { MenuEntry } from '../../../ui'
 import { closeGroupDetail } from './store'
+import { localizeTaskError } from '../model/taskError'
 import { formatBytes } from './utils'
 
 
@@ -43,6 +45,7 @@ export function GroupDetailDialog({ groupId }: { groupId: string }) {
   const t = useT()
   const group = useDaemon((daemon) => daemon.groups.find((item) => item.groupId === groupId), undefined)
   const tasks = useTasks()
+  const loading = useTasksLoading()
   const members = useMemo(() => tasks.filter((task) => task.groupId === groupId), [tasks, groupId])
   const summary = useMemo(() => summarize(members), [members])
 
@@ -53,11 +56,17 @@ export function GroupDetailDialog({ groupId }: { groupId: string }) {
   if (!group) return null
 
   return (
-    <Dialog open onOpenChange={(open) => !open && closeGroupDetail()} size="lg" title={group.name || group.groupId} description={statusLine(t, summary)}>
+    <Dialog open onOpenChange={(open) => !open && closeGroupDetail()} size="lg" title={group.name || group.groupId} description={loading ? t('tasksLoadingTitle') : statusLine(t, summary)}>
       <div className="flex flex-col gap-3 pb-2">
         <Overview group={group} summary={summary} />
         <SectionHeader>{t('groupDetailMembersTab')}</SectionHeader>
-        {members.length === 0 ? <EmptyState icon={Download} title={t('groupDetailNoMembers')} className="py-6" /> : <MemberTable members={members} />}
+        {loading ? (
+          <EmptyState icon={Download} title={t('tasksLoadingTitle')} className="py-6" />
+        ) : members.length === 0 ? (
+          <EmptyState icon={Download} title={t('groupDetailNoMembers')} className="py-6" />
+        ) : (
+          <MemberTable members={members} />
+        )}
       </div>
     </Dialog>
   )
@@ -98,13 +107,9 @@ function Overview({ group, summary }: { group: GroupDto; summary: GroupSummary }
     { type: 'item', key: 'delete-files', label: t('groupDeleteWithFiles'), icon: Trash2, destructive: true, onSelect: () => void deleteGroup(true) },
   ]
 
-  const copySource = async () => {
-    try {
-      await navigator.clipboard.writeText(group.sourceUrl)
-      toast.key('urlCopied', 'success')
-    } catch (error) {
-      toast.error(error, t('copyFileFailed'))
-    }
+  const copySource = () => {
+    copyText(group.sourceUrl)
+    toast.key('urlCopied', 'success')
   }
 
   const created = Number(group.createdAt)
@@ -116,7 +121,7 @@ function Overview({ group, summary }: { group: GroupDto; summary: GroupSummary }
           <span className="min-w-0 flex-1 break-all">{group.sourceUrl || '—'}</span>
           {group.sourceUrl ? (
             <Tooltip content={t('groupCopySourceLink')}>
-              <Button variant="ghost" iconOnly aria-label={t('groupCopySourceLink')} onClick={() => void copySource()}>
+              <Button variant="ghost" iconOnly aria-label={t('groupCopySourceLink')} onClick={copySource}>
                 <Icon icon={Copy} />
               </Button>
             </Tooltip>
@@ -261,7 +266,7 @@ function MemberRow({ task }: { task: TaskDto }) {
           {size} · <span className={STATUS_COLOR[task.status] ?? 'text-text-tertiary'}>{t(statusKey(task.status))}</span>
           {percent ? ` · ${percent}` : ''}
         </div>
-        {task.status === TASK_STATUS.error && task.errorMessage ? <div className="truncate text-xs text-destructive" title={task.errorMessage}>{task.errorMessage}</div> : null}
+        {task.status === TASK_STATUS.error && task.errorMessage ? <div className="truncate text-xs text-destructive" title={localizeTaskError(t, task.errorMessage)}>{localizeTaskError(t, task.errorMessage)}</div> : null}
       </div>
       <span className="tabular hidden text-right text-xs text-muted-foreground desktop:block">{size}</span>
       <div className="col-span-2 flex items-center gap-2 empty:hidden desktop:col-span-1 desktop:empty:flex">

@@ -46,8 +46,8 @@ class FluxSpace(
     /** compact 16dp；medium / expanded 20dp（由 FluxTheme 按窗口宽度注入）。 */
     val screenMargin: Dp = 16.dp,
     val touch: Dp = 48.dp,
-    /** 导航坞与新建球的常态高度。 */
-    val dockHeight: Dp = 56.dp,
+    /** 导航坞与新建球的常态高度（坞内图标在上、标签在下）。 */
+    val dockHeight: Dp = 64.dp,
     /** 有坞页面底部留白：坞高 + 底距 8 + 内容气隙 16；页面另加系统导航栏 inset。 */
     val dockClearance: Dp = dockHeight + 24.dp,
     /** 推入页（无坞）内容底部留白。 */
@@ -83,18 +83,22 @@ class FluxMotion(val reduce: Boolean) {
     val orbHoldMs = 380L
 }
 
-/** 触感映射（§9）：直接取 View 常量，遵守系统触摸反馈总开关，无 App 内开关。 */
+/**
+ * 触感映射（§9）：直接取 View 常量，遵守系统触摸反馈总开关，无 App 内开关。
+ * CONFIRM / REJECT / GESTURE_* 为 Android 11 常量，更低版本系统不认（静默无反馈），换成同类旧常量。
+ */
 @Stable
 class FluxHaptics(private val view: View) {
     private var lastFrequent = 0L
+    private val modern = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
 
     fun tick() = fire(if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.SEGMENT_TICK else HapticFeedbackConstants.CLOCK_TICK)
-    fun confirm() = fire(HapticFeedbackConstants.CONFIRM)
-    fun reject() = fire(HapticFeedbackConstants.REJECT)
+    fun confirm() = fire(if (modern) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY)
+    fun reject() = fire(if (modern) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS)
     fun longPress() = fire(HapticFeedbackConstants.LONG_PRESS)
     fun click() = fire(HapticFeedbackConstants.VIRTUAL_KEY)
-    fun gestureStart() = fire(HapticFeedbackConstants.GESTURE_START)
-    fun gestureEnd() = fire(HapticFeedbackConstants.GESTURE_END)
+    fun gestureStart() = fire(if (modern) HapticFeedbackConstants.GESTURE_START else HapticFeedbackConstants.CLOCK_TICK)
+    fun gestureEnd() = fire(if (modern) HapticFeedbackConstants.GESTURE_END else HapticFeedbackConstants.CLOCK_TICK)
 
     /** 连续拖动刻度，限频 ≥ 40ms。 */
     fun frequent() {

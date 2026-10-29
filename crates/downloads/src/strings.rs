@@ -7,6 +7,14 @@ pub(crate) const SEARCH_SHORTCUT_HINT: &str = "⌘F";
 #[cfg(not(target_os = "macos"))]
 pub(crate) const SEARCH_SHORTCUT_HINT: &str = "Ctrl+F";
 
+/// 组计数行一段的语气：下载中用强调色，失败用破坏色，其余为三级文字。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupCountTone {
+    Plain,
+    Active,
+    Failed,
+}
+
 #[derive(Clone)]
 pub(crate) struct DownloadStrings {
     pub(crate) category_archive: SharedString,
@@ -39,6 +47,13 @@ pub(crate) struct DownloadStrings {
     pub(crate) too_many_windows_hint: SharedString,
     pub(crate) confirm: SharedString,
     pub(crate) cancel: SharedString,
+    import_progress: SharedString,
+    import_retrying: SharedString,
+    pub(crate) import_cancelling: SharedString,
+    delete_progress: SharedString,
+    delete_cancelled: SharedString,
+    delete_partial: SharedString,
+    deleted_count: SharedString,
     pub(crate) disconnected: SharedString,
     pub(crate) action_failed: SharedString,
     pub(crate) metadata_loading: SharedString,
@@ -51,38 +66,72 @@ pub(crate) struct DownloadStrings {
     pub(crate) pause_all: SharedString,
     pub(crate) resume: SharedString,
     pub(crate) resume_all: SharedString,
+    /// 状态栏批量按钮禁用时的 tooltip：说明为什么当前不可点。
+    pub(crate) pause_all_unavailable: SharedString,
+    pub(crate) resume_all_unavailable: SharedString,
+    pub(crate) resume_all_queue_stopped: SharedString,
     pub(crate) main_queue: SharedString,
     pub(crate) open_file: SharedString,
     pub(crate) open_folder: SharedString,
+    /// 右键「复制文件」：把产物以文件写入系统剪贴板。
+    pub(crate) copy_file: SharedString,
     pub(crate) remote_tasks: SharedString,
     pub(crate) sidebar_queues: SharedString,
     pub(crate) status_all: SharedString,
     pub(crate) status_completed: SharedString,
     pub(crate) status_downloading: SharedString,
     pub(crate) status_error: SharedString,
+    pub(crate) task_error_post_only_endpoint: SharedString,
+    pub(crate) task_error_post_only_resume: SharedString,
     pub(crate) status_incomplete: SharedString,
     pub(crate) status_paused: SharedString,
+    pub(crate) status_seeding: SharedString,
+    pub(crate) seeding_status_queued: SharedString,
     pub(crate) status_pending: SharedString,
     pub(crate) today: SharedString,
     pub(crate) yesterday: SharedString,
     pub(crate) this_week: SharedString,
     pub(crate) this_month: SharedString,
     pub(crate) older: SharedString,
-    pub(crate) ungrouped: SharedString,
     pub(crate) site_bt: SharedString,
     pub(crate) ignore_plugin_retry: SharedString,
     pub(crate) ignore_plugin_retry_title: SharedString,
     pub(crate) ignore_plugin_retry_msg: SharedString,
     pub(crate) boost_download: SharedString,
     pub(crate) cancel_boost: SharedString,
+    /// 对已完成任务点「优先下载」的提示。
+    pub(crate) boost_task_completed: SharedString,
+    /// 对已失败（已结束）任务点「优先下载」的提示。
+    pub(crate) boost_task_ended: SharedString,
     pub(crate) rename_task: SharedString,
     pub(crate) rename_task_title: SharedString,
     pub(crate) rename_task_placeholder: SharedString,
+    /// 右键「更换链接」及其对话框。
+    pub(crate) change_url: SharedString,
+    pub(crate) change_url_title: SharedString,
+    pub(crate) change_url_label: SharedString,
+    pub(crate) change_url_placeholder: SharedString,
+    /// 右键「修改线程数」及其对话框（含「已下进度保留」说明与成功提示）。
+    pub(crate) edit_threads: SharedString,
+    pub(crate) edit_threads_title: SharedString,
+    pub(crate) edit_threads_hint: SharedString,
+    pub(crate) edit_threads_label: SharedString,
+    pub(crate) edit_threads_zero_hint: SharedString,
+    pub(crate) edit_threads_invalid: SharedString,
+    pub(crate) threads_changed: SharedString,
+    /// 右键「完整性校验」（已完成 BT 任务）。
+    pub(crate) verify_integrity: SharedString,
     pub(crate) redownload_task: SharedString,
     pub(crate) copy_url: SharedString,
     /// 复制下载地址后的成功提示。
     pub(crate) url_copied: SharedString,
     pub(crate) move_to_queue: SharedString,
+    /// 右键「选择」：以当前选区进入多选模式。
+    pub(crate) select_tasks: SharedString,
+    /// 右键「全选」。
+    pub(crate) select_all_tasks: SharedString,
+    /// 行首图标格悬停复选框的提示。
+    pub(crate) select_task_tooltip: SharedString,
     /// 右键「详情」：在停靠面板中查看。
     pub(crate) detail: SharedString,
     /// 详情面板头部「在独立窗口打开」。
@@ -96,10 +145,27 @@ pub(crate) struct DownloadStrings {
     pub(crate) group_delete_with_files: SharedString,
     group_delete_confirm_with_file: SharedString,
     pub(crate) open_group_in_window: SharedString,
+    group_items_count: SharedString,
+    group_done_count: SharedString,
+    group_downloading_count: SharedString,
+    group_pending_count: SharedString,
+    group_paused_count: SharedString,
+    group_failed_count: SharedString,
+    group_done_of_total: SharedString,
+    group_eta_remaining: SharedString,
+    group_dir_count: SharedString,
+    group_detail_subtitle: SharedString,
+    pub(crate) group_detail_source: SharedString,
+    pub(crate) group_detail_save_dir: SharedString,
+    pub(crate) group_detail_created_at: SharedString,
+    pub(crate) group_detail_queue: SharedString,
     pub(crate) search_tasks_placeholder: SharedString,
     pub(crate) unsupported_drop_hint: SharedString,
     pub(crate) sidebar_status: SharedString,
     pub(crate) sidebar_devices: SharedString,
+    pub(crate) device_download_to_this: SharedString,
+    pub(crate) linked_device_rename: SharedString,
+    pub(crate) linked_device_unpair: SharedString,
     pub(crate) device_presence_unknown: SharedString,
     pub(crate) this_device: SharedString,
     pub(crate) all_devices: SharedString,
@@ -108,6 +174,25 @@ pub(crate) struct DownloadStrings {
     pub(crate) status_file_missing: SharedString,
     pub(crate) conflict_pending: SharedString,
     pub(crate) conflict_pending_tooltip: SharedString,
+    pub(crate) share: SharedString,
+    pub(crate) share_switch_bridge: SharedString,
+    pub(crate) share_providing_badge: SharedString,
+    pub(crate) share_stop_providing: SharedString,
+    pub(crate) share_swarm_quota_chip: SharedString,
+    pub(crate) share_swarm_login_chip: SharedString,
+    share_path_direct_lan: SharedString,
+    share_path_direct_wan: SharedString,
+    share_path_relay: SharedString,
+    share_path_cdn: SharedString,
+    share_path_bridge: SharedString,
+    share_path_swarm: SharedString,
+    share_peers: SharedString,
+    share_path_unknown: SharedString,
+    share_disabled_incomplete: SharedString,
+    share_disabled_missing: SharedString,
+    share_disabled_remote: SharedString,
+    share_disabled_signed_out: SharedString,
+    share_disabled_selection: SharedString,
     pub(crate) add_category: SharedString,
     pub(crate) edit_category: SharedString,
     pub(crate) hide_section: SharedString,
@@ -119,6 +204,9 @@ pub(crate) struct DownloadStrings {
     pub(crate) tab_failed: SharedString,
     pub(crate) empty_title: SharedString,
     pub(crate) empty_subtitle: SharedString,
+    /// 任务表分页载入期间的标题 / 说明模板（`{total}` = 服务端报告的任务总数）。
+    pub(crate) tasks_loading_title: SharedString,
+    tasks_loading_subtitle: SharedString,
 }
 
 impl DownloadStrings {
@@ -145,7 +233,16 @@ impl DownloadStrings {
             confirm: shared(translator.text("confirm")),
             empty_title: shared(translator.text("emptyTitle")),
             empty_subtitle: shared(translator.text("emptySubtitle")),
+            tasks_loading_title: shared(translator.text("tasksLoadingTitle")),
+            tasks_loading_subtitle: shared(translator.text("tasksLoadingSubtitle")),
             cancel: shared(translator.text("cancel")),
+            import_progress: shared(translator.text("importProgress")),
+            import_retrying: shared(translator.text("importRetrying")),
+            import_cancelling: shared(translator.text("importCancelling")),
+            delete_progress: shared(translator.text("deleteProgress")),
+            delete_cancelled: shared(translator.text("deleteCancelled")),
+            delete_partial: shared(translator.text("deletePartial")),
+            deleted_count: shared(translator.text("mobileToastDeletedN")),
             disconnected: shared(translator.text("localServiceDisconnected")),
             action_failed: shared(translator.text("localServiceActionFailed")),
             metadata_loading: shared(translator.text("statusPreparing")),
@@ -171,36 +268,60 @@ impl DownloadStrings {
             pause_all: shared(translator.text("pauseAll")),
             resume: shared(translator.text(keys::RESUME)),
             resume_all: shared(translator.text("resumeAll")),
+            pause_all_unavailable: shared(translator.text("pauseAllUnavailable")),
+            resume_all_unavailable: shared(translator.text("resumeAllUnavailable")),
+            resume_all_queue_stopped: shared(translator.text("resumeAllQueueStopped")),
             open_file: shared(translator.text("openFile")),
             open_folder: shared(translator.text("openFolder")),
+            copy_file: shared(translator.text("copyFileAction")),
             remote_tasks: shared(translator.text("remoteTasksGroup")),
             sidebar_queues: shared(translator.text(keys::SIDEBAR_QUEUES)),
             status_all: shared(translator.text(keys::TAB_ALL)),
             status_completed: shared(translator.text(keys::STATUS_COMPLETED)),
             status_downloading: shared(translator.text(keys::STATUS_DOWNLOADING)),
             status_error: shared(translator.text(keys::STATUS_ERROR)),
+            task_error_post_only_endpoint: shared(translator.text("taskErrorPostOnlyEndpoint")),
+            task_error_post_only_resume: shared(translator.text("taskErrorPostOnlyResume")),
             status_incomplete: shared(translator.text("tabDownloading")),
             status_paused: shared(translator.text(keys::STATUS_PAUSED)),
+            status_seeding: shared(translator.text("statusSeeding")),
+            seeding_status_queued: shared(translator.text("seedingStatusQueued")),
             status_pending: shared(translator.text("statusPending")),
             today: shared(translator.text(keys::TODAY)),
             yesterday: shared(translator.text("yesterday")),
             this_week: shared(translator.text("thisWeek")),
             this_month: shared(translator.text("thisMonth")),
             older: shared(translator.text("older")),
-            ungrouped: shared(translator.text("ungroupedTasks")),
             site_bt: shared(translator.text("viewSiteBt")),
             ignore_plugin_retry: shared(translator.text("taskIgnorePluginRetry")),
             ignore_plugin_retry_title: shared(translator.text("taskIgnorePluginRetryTitle")),
             ignore_plugin_retry_msg: shared(translator.text("taskIgnorePluginRetryMsg")),
             boost_download: shared(translator.text("boostDownload")),
             cancel_boost: shared(translator.text("cancelBoost")),
+            boost_task_completed: shared(translator.text("boostTaskCompleted")),
+            boost_task_ended: shared(translator.text("boostTaskEnded")),
             rename_task: shared(translator.text("renameTask")),
             rename_task_title: shared(translator.text("renameTaskTitle")),
             rename_task_placeholder: shared(translator.text("renameTaskPlaceholder")),
+            change_url: shared(translator.text("webChangeUrl")),
+            change_url_title: shared(translator.text("webChangeUrlTitle")),
+            change_url_label: shared(translator.text("webChangeUrlLabel")),
+            change_url_placeholder: shared(translator.text("webChangeUrlPlaceholder")),
+            edit_threads: shared(translator.text("editThreads")),
+            edit_threads_title: shared(translator.text("editThreadsTitle")),
+            edit_threads_hint: shared(translator.text("editThreadsResetHint")),
+            edit_threads_label: shared(translator.text("configuredThreads")),
+            edit_threads_zero_hint: shared(translator.text("queueDefaultSegmentsHint")),
+            edit_threads_invalid: shared(translator.text("editThreadsInvalid")),
+            threads_changed: shared(translator.text("threadsChanged")),
+            verify_integrity: shared(translator.text("verifyTaskIntegrity")),
             redownload_task: shared(translator.text("redownloadTask")),
             copy_url: shared(translator.text("copyUrl")),
             url_copied: shared(translator.text("urlCopied")),
             move_to_queue: shared(translator.text("moveToQueueAction")),
+            select_tasks: shared(translator.text("selectTasks")),
+            select_all_tasks: shared(translator.text("selectAll")),
+            select_task_tooltip: shared(translator.text("selectTaskTooltip")),
             detail: shared(translator.text("detail")),
             open_in_window: shared(translator.text("menuOpenInWindow")),
             group_pause_all: shared(translator.text("groupPauseAll")),
@@ -212,10 +333,27 @@ impl DownloadStrings {
             group_delete_with_files: shared(translator.text("groupDeleteWithFiles")),
             group_delete_confirm_with_file: shared(translator.text("deleteConfirmDescWithFile")),
             open_group_in_window: shared(translator.text("openGroupInWindowAction")),
+            group_items_count: shared(translator.text("groupItemsCount")),
+            group_done_count: shared(translator.text("groupDoneCount")),
+            group_downloading_count: shared(translator.text("groupDownloadingCount")),
+            group_pending_count: shared(translator.text("groupPendingCount")),
+            group_paused_count: shared(translator.text("groupPausedCount")),
+            group_failed_count: shared(translator.text("groupFailedCount")),
+            group_done_of_total: shared(translator.text("groupDoneOfTotal")),
+            group_eta_remaining: shared(translator.text("groupEtaRemaining")),
+            group_dir_count: shared(translator.text("groupDirCount")),
+            group_detail_subtitle: shared(translator.text("groupDetailSubtitle")),
+            group_detail_source: shared(translator.text("groupDetailSource")),
+            group_detail_save_dir: shared(translator.text("groupDetailSaveDir")),
+            group_detail_created_at: shared(translator.text("groupDetailCreatedAt")),
+            group_detail_queue: shared(translator.text("groupDetailQueue")),
             search_tasks_placeholder: shared(translator.text("searchTasksPlaceholder")),
             unsupported_drop_hint: shared(translator.text("unsupportedDropHint")),
             sidebar_status: shared(translator.text(keys::SIDEBAR_STATUS)),
             sidebar_devices: shared(translator.text("deviceSection")),
+            device_download_to_this: shared(translator.text("deviceDownloadToThis")),
+            linked_device_rename: shared(translator.text("linkedDeviceRename")),
+            linked_device_unpair: shared(translator.text("localDeviceUnpair")),
             device_presence_unknown: shared(translator.text("devicePresenceUnknown")),
             this_device: shared(translator.text("thisDevice")),
             all_devices: shared(translator.text("allDevices")),
@@ -224,6 +362,25 @@ impl DownloadStrings {
             status_file_missing: shared(translator.text("statusFileMissing")),
             conflict_pending: shared(translator.text("fileConflictPending")),
             conflict_pending_tooltip: shared(translator.text("fileConflictPendingTooltip")),
+            share: shared(translator.text("detailActionShare")),
+            share_switch_bridge: shared(translator.text("shareSwitchBridge")),
+            share_providing_badge: shared(translator.text("shareProvidingBadge")),
+            share_stop_providing: shared(translator.text("shareStopProviding")),
+            share_swarm_quota_chip: shared(translator.text("shareSwarmQuotaChip")),
+            share_swarm_login_chip: shared(translator.text("shareSwarmLoginChip")),
+            share_path_direct_lan: shared(translator.text("sharePathDirectLan")),
+            share_path_direct_wan: shared(translator.text("sharePathDirectWan")),
+            share_path_relay: shared(translator.text("sharePathRelay")),
+            share_path_cdn: shared(translator.text("shareBadgeCloud")),
+            share_path_bridge: shared(translator.text("shareBadgeBridge")),
+            share_path_swarm: shared(translator.text("sharePathSwarm")),
+            share_peers: shared(translator.text("shareBadgePeers")),
+            share_path_unknown: shared(translator.text("sharePathUnknown")),
+            share_disabled_incomplete: shared(translator.text("shareDisabledIncomplete")),
+            share_disabled_missing: shared(translator.text("shareDisabledMissing")),
+            share_disabled_remote: shared(translator.text("shareDisabledRemote")),
+            share_disabled_signed_out: shared(translator.text("shareDisabledSignedOut")),
+            share_disabled_selection: shared(translator.text("shareDisabledSelection")),
             add_category: shared(translator.text("addCategory")),
             edit_category: shared(translator.text("editCategory")),
             hide_section: shared(translator.text("hideSection")),
@@ -285,6 +442,109 @@ impl DownloadStrings {
         )
     }
 
+    /// 组计数行各段（调用方以 ` · ` 连接）：总数恒在，其余为 0 的段省略；剩余时间只在
+    /// 一天以内时给出。
+    pub(crate) fn group_count_segments(
+        &self,
+        counts: &crate::model::group_tree::GroupCounts,
+        eta_seconds: Option<u64>,
+    ) -> Vec<(GroupCountTone, SharedString)> {
+        let count = |template: &SharedString, value: usize| {
+            SharedString::from(template.replace("{n}", &value.to_string()))
+        };
+        let mut segments = vec![(
+            GroupCountTone::Plain,
+            count(&self.group_items_count, counts.total),
+        )];
+        for (value, template, tone) in [
+            (counts.done, &self.group_done_count, GroupCountTone::Plain),
+            (
+                counts.downloading,
+                &self.group_downloading_count,
+                GroupCountTone::Active,
+            ),
+            (
+                counts.pending,
+                &self.group_pending_count,
+                GroupCountTone::Plain,
+            ),
+            (
+                counts.paused,
+                &self.group_paused_count,
+                GroupCountTone::Plain,
+            ),
+            (
+                counts.failed,
+                &self.group_failed_count,
+                GroupCountTone::Failed,
+            ),
+        ] {
+            if value > 0 {
+                segments.push((tone, count(template, value)));
+            }
+        }
+        if let Some(eta) = eta_seconds.filter(|seconds| *seconds <= 86_400) {
+            segments.push((
+                GroupCountTone::Plain,
+                SharedString::from(
+                    self.group_eta_remaining
+                        .replace("{eta}", &self.format_eta(eta)),
+                ),
+            ));
+        }
+        segments
+    }
+
+    /// `{done}/{total}`。
+    pub(crate) fn format_group_done_of_total(&self, done: usize, total: usize) -> SharedString {
+        SharedString::from(
+            self.group_done_of_total
+                .replace("{done}", &done.to_string())
+                .replace("{total}", &total.to_string()),
+        )
+    }
+
+    /// 目录行文件数：`{count} 个文件`（目录大小在「大小」列）。
+    pub(crate) fn format_group_dir_count(&self, count: usize) -> SharedString {
+        SharedString::from(self.group_dir_count.replace("{count}", &count.to_string()))
+    }
+
+    /// 组概览副标题：`任务组 · {status}`。
+    pub(crate) fn format_group_subtitle(&self, status: &str) -> SharedString {
+        SharedString::from(self.group_detail_subtitle.replace("{status}", status))
+    }
+
+    /// 分享入口被禁用时的悬浮提示。
+    pub(crate) fn share_disabled(&self, block: crate::model::share::ShareBlock) -> SharedString {
+        use crate::model::share::ShareBlock;
+        match block {
+            ShareBlock::Incomplete => self.share_disabled_incomplete.clone(),
+            ShareBlock::Missing => self.share_disabled_missing.clone(),
+            ShareBlock::Remote => self.share_disabled_remote.clone(),
+            ShareBlock::SignedOut => self.share_disabled_signed_out.clone(),
+            ShareBlock::Selection => self.share_disabled_selection.clone(),
+        }
+    }
+
+    /// FluxMesh接收任务的路径徽标文案。
+    pub(crate) fn share_path(&self, kind: fluxdown_protocol::SharePathKind) -> SharedString {
+        use fluxdown_protocol::SharePathKind;
+        match kind {
+            SharePathKind::DirectLan => self.share_path_direct_lan.clone(),
+            SharePathKind::DirectWan => self.share_path_direct_wan.clone(),
+            SharePathKind::Relay => self.share_path_relay.clone(),
+            SharePathKind::Cdn => self.share_path_cdn.clone(),
+            SharePathKind::Bridge => self.share_path_bridge.clone(),
+            SharePathKind::Swarm => self.share_path_swarm.clone(),
+            SharePathKind::Unknown => self.share_path_unknown.clone(),
+        }
+    }
+
+    /// `+{count} 台设备`。
+    pub(crate) fn format_share_peers(&self, count: u32) -> SharedString {
+        SharedString::from(self.share_peers.replace("{count}", &count.to_string()))
+    }
+
     pub(crate) fn state_label(&self, state: crate::model::TaskState) -> SharedString {
         match state {
             crate::model::TaskState::Pending => self.status_pending.clone(),
@@ -295,26 +555,58 @@ impl DownloadStrings {
         }
     }
 
-    /// 行级状态名：已完成但产物已不在下载目录时显示「文件已删除」。
+    /// 行级状态名：已完成但产物已不在下载目录时显示「文件已删除」，引擎 status 5（探测 /
+    /// 插件解析）显示「准备中」。所有按任务展示状态名的地方都走这里，不得直接 `state_label`。
     pub(crate) fn task_state_label(&self, task: &crate::model::DownloadTaskView) -> SharedString {
         if task.is_file_missing() {
             self.status_file_missing.clone()
         } else if task.state == crate::model::TaskState::Pending && task.preparing {
             self.metadata_loading.clone()
+        } else if task.is_seeding() {
+            // seeding_status 8 = 排队等待做种名额；1 = 做种中。
+            if task.seeding_status == 8 {
+                self.seeding_status_queued.clone()
+            } else {
+                self.status_seeding.clone()
+            }
         } else {
             self.state_label(task.state)
         }
     }
 
-    /// 排队中（引擎待启动队列内、非准备中）的「排队 #n」；其余任务为 `None`。
-    pub(crate) fn queued_label(&self, task: &crate::model::DownloadTaskView) -> Option<String> {
-        (task.state == crate::model::TaskState::Pending
-            && !task.preparing
-            && task.queue_position > 0)
-            .then(|| {
-                self.subtitle_queued
-                    .replace("{pos}", &task.queue_position.to_string())
-            })
+    /// 单行状态（详情窗口状态行、进度窗口标题下）：排队中显示「排队 #n」，其余同
+    /// [`Self::task_state_label`]。
+    pub(crate) fn task_status_text(
+        &self,
+        task: &crate::model::DownloadTaskView,
+        store: &crate::model::TaskStore,
+    ) -> SharedString {
+        self.queued_label(task, store)
+            .map_or_else(|| self.task_state_label(task), SharedString::from)
+    }
+
+    /// 只有引擎原始 status 的场景（活动日志的状态变更）：与 [`Self::task_state_label`]
+    /// 同一规则，5 为「准备中」而非「等待中」。
+    pub(crate) fn status_code_label(&self, status: i32) -> SharedString {
+        if status == 5 {
+            self.metadata_loading.clone()
+        } else {
+            self.state_label(crate::model::TaskState::from_status(status))
+        }
+    }
+
+    /// 排队中（引擎待启动队列内、非准备中）的「排队 #n」；其余任务为 `None`。序号是行排序键
+    /// 在 `store` 排队键集合中的名次，渲染时二分得到。
+    pub(crate) fn queued_label(
+        &self,
+        task: &crate::model::DownloadTaskView,
+        store: &crate::model::TaskStore,
+    ) -> Option<String> {
+        if task.state != crate::model::TaskState::Pending || task.preparing {
+            return None;
+        }
+        let rank = store.queue_rank(task);
+        (rank > 0).then(|| self.subtitle_queued.replace("{pos}", &rank.to_string()))
     }
 
     pub(crate) fn date_bucket_label(
@@ -349,6 +641,15 @@ impl DownloadStrings {
         }
     }
 
+    /// 队列显示名：内置队列本地化，自定义队列用用户命名。
+    pub(crate) fn queue_name(&self, queue_id: &str, name: &str) -> SharedString {
+        match queue_id {
+            fluxdown_protocol::MAIN_QUEUE_ID => self.main_queue.clone(),
+            fluxdown_protocol::LATER_QUEUE_ID => self.later_queue.clone(),
+            _ => SharedString::from(name.to_owned()),
+        }
+    }
+
     /// 无 host 任务的站点标签：BT 用「BT · Magnet」，其余 `—`。
     pub(crate) fn site_unknown(&self, task: &crate::model::DownloadTaskView) -> SharedString {
         if task.protocol == crate::model::TaskProtocol::Bt {
@@ -356,6 +657,67 @@ impl DownloadStrings {
         } else {
             SharedString::from("—")
         }
+    }
+
+    /// 任务表载入态说明：`共 {total} 个任务，…`。
+    pub(crate) fn format_tasks_loading_subtitle(&self, total: usize) -> SharedString {
+        SharedString::from(
+            self.tasks_loading_subtitle
+                .replace("{total}", &group_digits(total)),
+        )
+    }
+
+    /// 导入进度：`正在添加 {done} / {total}`。
+    pub(crate) fn format_import_progress(&self, done: usize, total: usize) -> SharedString {
+        SharedString::from(
+            self.import_progress
+                .replace("{done}", &group_digits(done))
+                .replace("{total}", &group_digits(total)),
+        )
+    }
+
+    /// 导入重试等待：`连接中断，{seconds} 秒后重试（{attempt}/{max}）`。
+    pub(crate) fn format_import_retrying(
+        &self,
+        seconds: u64,
+        attempt: u32,
+        max: u32,
+    ) -> SharedString {
+        SharedString::from(
+            self.import_retrying
+                .replace("{seconds}", &seconds.to_string())
+                .replace("{attempt}", &attempt.to_string())
+                .replace("{max}", &max.to_string()),
+        )
+    }
+
+    /// 删除进度：`正在删除 {done} / {total}`。
+    pub(crate) fn format_delete_progress(&self, done: usize, total: usize) -> SharedString {
+        SharedString::from(
+            self.delete_progress
+                .replace("{done}", &group_digits(done))
+                .replace("{total}", &group_digits(total)),
+        )
+    }
+
+    /// 删除完成提示：`已删除 {n} 个任务`（与移动端共用 `mobileToastDeletedN`）。
+    pub(crate) fn format_deleted_count(&self, count: usize) -> String {
+        self.deleted_count.replace("{n}", &group_digits(count))
+    }
+
+    /// 已取消删除：`已取消删除：已删除 {done} / 共 {total}`。
+    pub(crate) fn format_delete_cancelled(&self, done: usize, total: usize) -> String {
+        self.delete_cancelled
+            .replace("{done}", &group_digits(done))
+            .replace("{total}", &group_digits(total))
+    }
+
+    /// 部分删除：`已删除 {done} / 共 {total}，{failed} 个失败`。
+    pub(crate) fn format_delete_partial(&self, done: usize, total: usize, failed: usize) -> String {
+        self.delete_partial
+            .replace("{done}", &group_digits(done))
+            .replace("{total}", &group_digits(total))
+            .replace("{failed}", &group_digits(failed))
     }
 
     /// 完整本地时间 `YYYY-MM-DD HH:MM:SS`（Unix 秒）：列表「创建时间」列与任务详情共用。
@@ -376,7 +738,17 @@ pub(crate) struct NewDownloadStrings {
     pub(crate) url_label: SharedString,
     pub(crate) url_placeholder: SharedString,
     url_count: SharedString,
+    pub(crate) probe_checking: SharedString,
+    probe_found: SharedString,
+    probe_size_unknown: SharedString,
+    pub(crate) probe_unavailable: SharedString,
     pub(crate) no_valid_url: SharedString,
+    pub(crate) share_receive: SharedString,
+    share_link_note: SharedString,
+    share_mixed_note: SharedString,
+    share_multiple_note: SharedString,
+    share_code_note: SharedString,
+    pub(crate) share_unavailable_note: SharedString,
     pub(crate) open_torrent: SharedString,
     pub(crate) select_torrent: SharedString,
     pub(crate) import_txt: SharedString,
@@ -385,6 +757,13 @@ pub(crate) struct NewDownloadStrings {
     pub(crate) save_dir: SharedString,
     pub(crate) save_dir_placeholder: SharedString,
     pub(crate) browse: SharedString,
+    pub(crate) category_auto: SharedString,
+    category_auto_matched: SharedString,
+    pub(crate) category_auto_desc: SharedString,
+    pub(crate) category_none: SharedString,
+    pub(crate) category_none_desc: SharedString,
+    /// 内置分类（`builtin_type` → 本地化显示名）。
+    category_builtin_names: Vec<(&'static str, SharedString)>,
     pub(crate) threads: SharedString,
     pub(crate) threads_auto: SharedString,
     pub(crate) threads_custom: SharedString,
@@ -453,9 +832,11 @@ pub(crate) struct NewDownloadStrings {
     path_invalid: SharedString,
     dispatched: SharedString,
     dispatched_offline: SharedString,
+    link_dispatched: SharedString,
     dispatch_partial: SharedString,
     pub(crate) dispatch_failed: SharedString,
-    pub(crate) created: SharedString,
+    import_cancelled: SharedString,
+    import_partial: SharedString,
 }
 
 impl NewDownloadStrings {
@@ -463,9 +844,19 @@ impl NewDownloadStrings {
         Self {
             subtitle: shared(translator.text("batchDownloadDesc")),
             url_label: shared(translator.text("downloadUrl")),
-            url_placeholder: shared(translator.text("batchUrlPlaceholder")),
+            url_placeholder: shared(translator.text("newDownloadUrlPlaceholder")),
             url_count: shared(translator.text("urlCount")),
+            probe_checking: shared(translator.text("newDownloadProbeChecking")),
+            probe_found: shared(translator.text("newDownloadProbeFound")),
+            probe_size_unknown: shared(translator.text("newDownloadProbeSizeUnknown")),
+            probe_unavailable: shared(translator.text("newDownloadProbeUnavailable")),
             no_valid_url: shared(translator.text("newDownloadNoValidUrl")),
+            share_receive: shared(translator.text("shareReceive")),
+            share_link_note: shared(translator.text("shareNewDownloadLink")),
+            share_mixed_note: shared(translator.text("shareNewDownloadMixed")),
+            share_multiple_note: shared(translator.text("shareNewDownloadMultiple")),
+            share_code_note: shared(translator.text("shareNewDownloadCode")),
+            share_unavailable_note: shared(translator.text("shareNewDownloadUnavailable")),
             open_torrent: shared(translator.text("openTorrentFile")),
             select_torrent: shared(translator.text("selectTorrentFile")),
             import_txt: shared(translator.text("importTxtFile")),
@@ -474,6 +865,23 @@ impl NewDownloadStrings {
             save_dir: shared(translator.text("saveDir")),
             save_dir_placeholder: shared(translator.text("selectSaveDir")),
             browse: shared(translator.text("browse")),
+            category_auto: shared(translator.text("saveDirCategoryAuto")),
+            category_auto_matched: shared(translator.text("saveDirCategoryAutoMatched")),
+            category_auto_desc: shared(translator.text("saveDirCategoryAutoDesc")),
+            category_none: shared(translator.text("saveDirCategoryNone")),
+            category_none_desc: shared(translator.text("saveDirCategoryNoneDesc")),
+            category_builtin_names: [
+                ("video", "categoryVideo"),
+                ("audio", "categoryAudio"),
+                ("document", "categoryDocument"),
+                ("image", "categoryImage"),
+                ("program", "categoryProgram"),
+                ("archive", "categoryArchive"),
+                ("other", "categoryOther"),
+            ]
+            .into_iter()
+            .map(|(kind, key)| (kind, shared(translator.text(key))))
+            .collect(),
             threads: shared(translator.text("threads")),
             threads_auto: shared(translator.text("auto")),
             threads_custom: shared(translator.text("customThreads")),
@@ -548,15 +956,72 @@ impl NewDownloadStrings {
             path_invalid: shared(translator.text("downloadToPathInvalid")),
             dispatched: shared(translator.text("downloadToDispatched")),
             dispatched_offline: shared(translator.text("downloadToDispatchedOffline")),
+            link_dispatched: shared(translator.text("linkDispatchedToDevice")),
             dispatch_partial: shared(translator.text("downloadToPartial")),
             dispatch_failed: shared(translator.text("dispatchFailed")),
-            created: shared(translator.text("taskCreatedToast")),
+            import_cancelled: shared(translator.text("importCancelled")),
+            import_partial: shared(translator.text("importPartial")),
         }
     }
 
     /// `{count} 个链接`。
     pub(crate) fn format_url_count(&self, count: usize) -> SharedString {
         SharedString::from(self.url_count.replace("{count}", &count.to_string()))
+    }
+
+    /// 链接框下的分享链接提示。
+    pub(crate) fn format_share_note(
+        &self,
+        note: crate::model::new_download::ShareNote,
+    ) -> SharedString {
+        use crate::model::new_download::ShareNote;
+        match note {
+            ShareNote::Link => self.share_link_note.clone(),
+            ShareNote::Code => self.share_code_note.clone(),
+            ShareNote::Mixed => self.share_mixed_note.clone(),
+            ShareNote::Multiple(count) => SharedString::from(
+                self.share_multiple_note
+                    .replace("{count}", &count.to_string()),
+            ),
+        }
+    }
+
+    /// 分类显示名：内置项走 i18n，自定义项用 `name`。
+    pub(crate) fn category_name(
+        &self,
+        category: &crate::model::save_dir_category::NewDownloadCategory,
+    ) -> SharedString {
+        category
+            .builtin_type
+            .as_deref()
+            .and_then(|kind| {
+                self.category_builtin_names
+                    .iter()
+                    .find(|(builtin, _)| *builtin == kind)
+            })
+            .map_or_else(
+                || SharedString::from(category.name.clone()),
+                |(_, label)| label.clone(),
+            )
+    }
+
+    /// 自动模式命中分类时的触发器文案：`自动 · {name}`。
+    pub(crate) fn format_category_auto_matched(&self, name: &str) -> SharedString {
+        SharedString::from(self.category_auto_matched.replace("{name}", name))
+    }
+
+    /// `已识别：{文件名 · 大小}`；大小未知（0）时显示「大小未知」。名称为空时只显示大小。
+    pub(crate) fn format_probe_found(&self, file_name: &str, total_bytes: i64) -> SharedString {
+        let size = match u64::try_from(total_bytes) {
+            Ok(bytes) if bytes > 0 => crate::model::format_bytes(bytes),
+            _ => self.probe_size_unknown.to_string(),
+        };
+        let info = if file_name.is_empty() {
+            size
+        } else {
+            format!("{file_name} · {size}")
+        };
+        SharedString::from(self.probe_found.replace("{info}", &info))
     }
 
     /// `已导入 {count} 个链接`。
@@ -612,8 +1077,18 @@ impl NewDownloadStrings {
         SharedString::from(self.path_invalid.replace("{example}", example))
     }
 
-    /// 下发成功提示；目标离线（云设备）时说明上线后才执行。
-    pub(crate) fn format_dispatched(&self, count: usize, device: &str, offline: bool) -> String {
+    /// 下发成功提示；目标离线（云设备）时说明上线后才执行；直连下发是一次性投递，
+    /// 提示进度要在目标设备上查看。
+    pub(crate) fn format_dispatched(
+        &self,
+        count: usize,
+        device: &str,
+        offline: bool,
+        direct: bool,
+    ) -> String {
+        if direct {
+            return self.link_dispatched.replace("{device}", device);
+        }
         let template = if offline {
             &self.dispatched_offline
         } else {
@@ -630,6 +1105,26 @@ impl NewDownloadStrings {
             .replace("{ok}", &ok.to_string())
             .replace("{failed}", &failed.to_string())
             .replace("{device}", device)
+    }
+
+    /// 已取消导入：`已取消导入：已添加 {added} / 共 {total}`。
+    pub(crate) fn format_import_cancelled(&self, added: usize, total: usize) -> String {
+        self.import_cancelled
+            .replace("{added}", &group_digits(added))
+            .replace("{total}", &group_digits(total))
+    }
+
+    /// 部分添加：`已添加 {added} / 共 {total}；{failed} 个失败`。
+    pub(crate) fn format_import_partial(
+        &self,
+        added: usize,
+        total: usize,
+        failed: usize,
+    ) -> String {
+        self.import_partial
+            .replace("{added}", &group_digits(added))
+            .replace("{total}", &group_digits(total))
+            .replace("{failed}", &group_digits(failed))
     }
 }
 
@@ -650,6 +1145,9 @@ pub(crate) fn error_text(
         ErrorReason::PasswordChanged => Some("accountSessionRevokedPasswordChanged"),
         ErrorReason::PeerNotPaired => Some("errReasonPeerNotPaired"),
         ErrorReason::PeerOffline => Some("errReasonPeerOffline"),
+        ErrorReason::PeerOutdated => Some("errReasonPeerOutdated"),
+        ErrorReason::LinkUnavailable => Some("errReasonLinkUnavailable"),
+        ErrorReason::PeerClockSkew => Some("errReasonPeerClockSkew"),
         _ => None,
     });
     let key = reason_key.unwrap_or(match error.code {
@@ -668,6 +1166,62 @@ pub(crate) fn error_text(
     });
     translator.text(key).to_owned()
 }
+
+/// 更换链接失败文案：竞态等 RPC 失败走通用文案；`not-found`（任务已不存在）用专用文案。
+/// 输入类错误由对话框预校验拦截，不会到这里。
+pub(crate) fn change_url_error_text(
+    translator: &Translator,
+    error: &fluxdown_protocol::RpcErrorData,
+) -> String {
+    if error.code == fluxdown_protocol::ApplicationErrorCode::NotFound {
+        translator.text("webChangeUrlErrNotFound").to_owned()
+    } else {
+        error_text(translator, error)
+    }
+}
+
+/// 修改线程数失败文案：daemon 对「已完成 / 不存在」的任务返回 `not-found`。
+pub(crate) fn set_segments_error_text(
+    translator: &Translator,
+    error: &fluxdown_protocol::RpcErrorData,
+) -> String {
+    if error.code == fluxdown_protocol::ApplicationErrorCode::NotFound {
+        translator.text("threadsChangeRejected").to_owned()
+    } else {
+        error_text(translator, error)
+    }
+}
+
+/// 千分位分组（`1234567` → `1,234,567`），进度与计数提示共用。
+fn group_digits(value: usize) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
+impl DownloadStrings {
+    /// 任务错误消息的显示文本：引擎两条稳定错误整串匹配（trim 后）时返回本地化文案，
+    /// 其余原样返回。仅用于显示 / 复制，逻辑判断仍用原始 `error_message`。
+    pub(crate) fn task_error_text<'a>(&'a self, raw: &'a str) -> &'a str {
+        match raw.trim() {
+            POST_ONLY_ENDPOINT_MESSAGE => &self.task_error_post_only_endpoint,
+            POST_ONLY_RESUME_MESSAGE => &self.task_error_post_only_resume,
+            _ => raw,
+        }
+    }
+}
+
+/// 镜像引擎 `native/engine/src/downloader.rs` 的 `POST_ONLY_ENDPOINT_MESSAGE`；改动须同步。
+const POST_ONLY_ENDPOINT_MESSAGE: &str =
+    "This link only accepts POST requests (HTTP 405); start the download from the browser";
+/// 镜像引擎 `native/engine/src/downloader.rs` 的 `POST_ONLY_RESUME_MESSAGE`；改动须同步。
+const POST_ONLY_RESUME_MESSAGE: &str = "This task was started by a browser POST request and cannot be resumed; start it again from the browser";
 
 fn shared(value: &str) -> SharedString {
     SharedString::from(value.to_owned())
@@ -698,5 +1252,93 @@ mod tests {
             "2026-03-19 00:00:00"
         );
         assert_eq!(DownloadStrings::format_datetime(i64::MAX).as_ref(), "—");
+    }
+
+    #[test]
+    fn digit_grouping_uses_thousands_separators() {
+        use super::group_digits;
+        for (value, expected) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (1_234, "1,234"),
+            (10_000, "10,000"),
+            (1_234_567, "1,234,567"),
+        ] {
+            assert_eq!(group_digits(value), expected);
+        }
+    }
+
+    #[test]
+    fn post_only_errors_are_localized_and_others_pass_through()
+    -> Result<(), fluxdown_ui_i18n::I18nError> {
+        let catalog = std::sync::Arc::new(fluxdown_ui_i18n::I18nCatalog::load_embedded()?);
+        let translator = catalog.translator("en");
+        let strings = DownloadStrings::from_translator(&translator);
+        assert_eq!(
+            strings.task_error_text(super::POST_ONLY_ENDPOINT_MESSAGE),
+            translator.text("taskErrorPostOnlyEndpoint")
+        );
+        assert_eq!(
+            strings.task_error_text(&format!("{}\n", super::POST_ONLY_RESUME_MESSAGE)),
+            translator.text("taskErrorPostOnlyResume")
+        );
+        assert_eq!(strings.task_error_text("disk full"), "disk full");
+        Ok(())
+    }
+
+    /// 引擎 status 5（探测 / 插件解析）在任务表、详情、进度窗口与活动日志都是「准备中」，
+    /// 不得退回 `TaskState::Pending` 的「等待中」；排队位置只属于未开始准备的等待任务。
+    #[test]
+    fn preparing_status_is_labelled_consistently_across_surfaces()
+    -> Result<(), fluxdown_ui_i18n::I18nError> {
+        let catalog = std::sync::Arc::new(fluxdown_ui_i18n::I18nCatalog::load_embedded()?);
+        let translator = catalog.translator("en");
+        let strings = DownloadStrings::from_translator(&translator);
+        let task = |status: i32, queue_key: Option<i64>| {
+            let dto = serde_json::from_value::<fluxdown_protocol::TaskDto>(serde_json::json!({
+                "taskId": "t",
+                "url": "https://www.youtube.com/watch?v=x",
+                "fileName": "video.mp4",
+                "saveDir": "/tmp",
+                "status": status,
+                "downloadedBytes": 0,
+                "totalBytes": 0,
+                "errorMessage": "",
+                "createdAt": "1",
+                "proxyUrl": "",
+                "queueId": "main",
+                "checksum": ""
+            }))
+            .expect("task");
+            let mut view = crate::model::DownloadTaskView::local(&dto, None, false);
+            view.queue_key = queue_key;
+            view
+        };
+        let store = crate::model::TaskStore::default();
+        store.replace_queue_keys(vec![30, 10, 20]);
+        let preparing = translator.text("statusPreparing");
+        let pending = translator.text("statusPending");
+
+        let resolving = task(5, Some(30));
+        assert_eq!(strings.task_state_label(&resolving).as_ref(), preparing);
+        assert_eq!(
+            strings.task_status_text(&resolving, &store).as_ref(),
+            preparing
+        );
+        assert_eq!(strings.status_code_label(5).as_ref(), preparing);
+
+        assert_eq!(
+            strings.task_status_text(&task(0, None), &store).as_ref(),
+            pending
+        );
+        assert_eq!(strings.status_code_label(0).as_ref(), pending);
+        assert_eq!(
+            strings
+                .task_status_text(&task(0, Some(20)), &store)
+                .as_ref(),
+            translator.text("subtitleQueued").replace("{pos}", "2")
+        );
+        Ok(())
     }
 }

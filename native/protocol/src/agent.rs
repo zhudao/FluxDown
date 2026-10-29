@@ -131,6 +131,41 @@ pub struct CloudPlan {
     pub campaign: Option<CloudPlanCampaign>,
     #[serde(default = "default_true")]
     pub purchasable: bool,
+    /// 产品形态：会员（永久 / 会员卡）或流量包。
+    #[serde(default)]
+    pub product_kind: CloudProductKind,
+    /// 流量包规格（`productKind = pack` 时存在）。
+    #[serde(default)]
+    pub pack: Option<CloudPack>,
+    /// 周期会员卡的周期天数；`None` = 永久套餐（或流量包）。
+    #[serde(default)]
+    pub billing_period_days: Option<u32>,
+}
+
+/// 套餐产品形态（`CloudPlan.productKind`）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum CloudProductKind {
+    /// 会员套餐。
+    #[default]
+    Membership,
+    /// 流量包（消耗品，可重复购买、叠加）。
+    Pack,
+    /// 对端发送了本端不认识的形态。
+    #[serde(other)]
+    Unknown,
+}
+
+/// 流量包规格。
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct CloudPack {
+    pub kind: crate::ShareTrafficKind,
+    pub bytes: u64,
+    /// 支付后有效天数。
+    pub valid_days: u32,
 }
 
 fn default_badge_style() -> String {
@@ -162,6 +197,22 @@ pub struct CloudProfile {
     pub current_plan: Option<CloudPlan>,
     #[serde(default)]
     pub purchase_credit_minor: i64,
+    /// 当前生效的周期会员卡；没有为 `None`。
+    #[serde(default)]
+    pub active_subscription: Option<CloudSubscription>,
+}
+
+/// 生效中的周期会员卡（手动续费；到期回到永久套餐权益）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase", default)]
+pub struct CloudSubscription {
+    pub plan_code: String,
+    pub plan_name: String,
+    /// 开始时间（RFC 3339）。
+    pub starts_at: String,
+    /// 到期时间（RFC 3339）。
+    pub ends_at: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -276,6 +327,9 @@ pub struct AgentSessionDto {
     pub entitlements: Entitlements,
     pub current_plan: Option<CloudPlan>,
     pub device: CloudDevice,
+    /// 当前生效的周期会员卡；没有为 `None`。
+    #[serde(default)]
+    pub active_subscription: Option<CloudSubscription>,
 }
 
 /// 邮箱或设备验证步骤的无令牌元数据。
@@ -421,6 +475,35 @@ pub struct CloudReferralValidateResult {
     pub reason: Option<String>,
 }
 
+/// 插件市场收藏概览：全站计数 + 本人收藏。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFavoritesDto {
+    /// 仅含收藏数大于 0 的插件。
+    pub counts: std::collections::BTreeMap<String, u64>,
+    /// 本人收藏的插件 id（最近收藏在前）；未登录为空。
+    pub mine: Vec<String>,
+    pub signed_in: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFavoriteSetRequest {
+    pub plugin_id: String,
+    pub favorited: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFavoriteResultDto {
+    pub plugin_id: String,
+    pub favorited: bool,
+    pub count: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
@@ -548,9 +631,13 @@ pub struct GatewayStatusDto {
     /// server 模式或环境固定监听地址时为 false。
     #[serde(default = "default_true")]
     pub port_editable: bool,
-    /// 是否对局域网开放兼容 API；修改后下次 agent 启动生效。
+    /// 是否对局域网开放兼容 API（持久化配置）；修改后下次 agent 启动生效。
     #[serde(default)]
     pub lan_enabled: bool,
+    /// 本次运行的网关是否实际监听非回环地址（局域网 / 组网可达）。`lan_enabled` 已开但
+    /// 尚未重启时为 `false`，界面据此提示「重启后生效」；server 模式恒为 `true`。
+    #[serde(default)]
+    pub lan_active: bool,
 }
 
 impl Default for GatewayStatusDto {
@@ -565,6 +652,7 @@ impl Default for GatewayStatusDto {
             port: default_gateway_port(),
             port_editable: true,
             lan_enabled: false,
+            lan_active: false,
         }
     }
 }
@@ -622,6 +710,9 @@ pub struct ShellStatusDto {
     pub tray_unavailable_reason: Option<TrayUnavailableReason>,
     /// `true`：关闭全部 UI 只退出界面，agent + daemon 继续运行；`false`：随界面一起退出。
     pub resident: bool,
+    /// agent 全局快捷键后端与逐项注册状态（旧 agent 缺省 = 不可用）。
+    #[serde(default)]
+    pub global_shortcuts: crate::shortcuts::GlobalShortcutsStatusDto,
 }
 
 /// 完成后关机的调度状态（agent 拥有状态机与执行）。
@@ -691,6 +782,14 @@ pub struct LinkPairingRequestDto {
     /// 双方肉眼核对的短认证串。
     pub sas: String,
     pub expires_at_unix_ms: i64,
+    /// 生成本 DTO 时刻的剩余有效毫秒数：客户端以「收到 DTO 的本机时刻 + `ttl_ms`」计算过期，
+    /// 不依赖与主机的时钟对齐。旧主机没有此字段（`0`），回退 `expires_at_unix_ms`。
+    #[serde(default)]
+    pub ttl_ms: u64,
+    /// 对端在配对中请求「完全控制」本机：批准即授权它经 `/rpc` 操作本机（含访问密钥、下载任务、
+    /// 设置）。UI 必须明确警示。
+    #[serde(default)]
+    pub requests_control: bool,
 }
 
 /// 本机当前展示的局域网配对码（供对端输入）。
@@ -700,10 +799,24 @@ pub struct LinkPairingRequestDto {
 pub struct LinkPairingCodeDto {
     pub code: String,
     pub expires_at_unix_ms: i64,
+    /// 生成本 DTO 时刻的剩余有效毫秒数（语义同 [`LinkPairingRequestDto::ttl_ms`]）。
+    #[serde(default)]
+    pub ttl_ms: u64,
     /// 本机可被对端直连的地址（`http(s)://host:port`），供对端手动输入。
     pub addresses: Vec<String>,
     pub fingerprint: String,
     pub device_name: String,
+}
+
+/// `agent.link.stopPairing` 参数。带 `code` 时只有它仍是当前展示的配对码才作废（多个客户端
+/// 互不干扰：某个客户端关闭自己的面板，不会作废另一个客户端刚刷新出来的新码）；省略则无条件
+/// 作废当前配对码。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkStopPairingParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// `agent.link.discovery.set` 参数。
@@ -730,6 +843,11 @@ pub struct LinkAddressParams {
 pub struct LinkPairBeginParams {
     pub address: String,
     pub code: String,
+    /// 同时请求「完全控制」对端（对端用户批准后，本机可用 `agent.link.controlCredential` 取得
+    /// 对端 `/rpc` 的设备控制凭据）。对端必须声明支持（`/ping` 的 `linkControl >= 1`），否则
+    /// 返回 `pairingVersionMismatch`、不发出 hello。
+    #[serde(default)]
+    pub request_control: bool,
 }
 
 /// `agent.link.pairFinish` 参数：发起端核对 SAS 后确认 / 放弃。
@@ -750,12 +868,32 @@ pub struct LinkApproveParams {
     pub accept: bool,
 }
 
-/// `agent.link.remove` / `agent.link.rename` 的设备定位参数。
+/// `agent.link.remove` 的设备定位参数。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkDeviceParams {
     pub fingerprint: String,
+}
+
+/// `agent.link.controlCredential` 结果：本机可用来连接已配对主机 `/rpc` 的设备控制凭据
+/// （`fdl1.<发起方指纹>.<base64url(HMAC)>`，仅 `Authorization: Bearer` 使用）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkControlCredentialDto {
+    pub token: String,
+}
+
+/// `agent.link.rename` 参数：给已配对设备设置仅本机可见的备注名。`name` 省略、为空或全空白
+/// = 清除备注名，恢复显示对端自报名；非空时去首尾空白后须为 1–64 个字符且不含控制字符。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LinkRenameParams {
+    pub fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// `agent.link.dispatch` 参数：把下载直接下发到已配对的局域网设备。
@@ -963,6 +1101,18 @@ pub struct PlatformOpenPathParams {
     pub reveal: bool,
 }
 
+/// `agent.platform.copyTaskFiles` 参数：要写入系统剪贴板的任务（产物必须已在磁盘上）。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformCopyTaskFilesParams {
+    /// 非空；重复 id 只计一次，上限 [`PLATFORM_COPY_TASK_FILES_MAX`]。
+    pub task_ids: Vec<String>,
+}
+
+/// 一次 `agent.platform.copyTaskFiles` 最多写入的任务数（防止整表误选拖垮 daemon 逐个查询）。
+pub const PLATFORM_COPY_TASK_FILES_MAX: usize = 1000;
+
 /// 按文件（而非扩展名）取图标的扩展名（小写）：图标内嵌在文件自身里。其余类型的图标只由
 /// 扩展名关联决定，调用方按扩展名缓存即可。`.lnk` / `.url` 故意不在内：它们的图标路径可以
 /// 指向远程共享，按文件解析会向外发起认证。
@@ -1141,7 +1291,9 @@ pub enum UpdateInstallKind {
     Synology,
     Qnap,
     Openwrt,
-    /// Android APK（官网分发）：由 App 经系统安装器（PackageInstaller）安装。
+    /// 飞牛 fnOS 应用中心（.fpk）。
+    Fnos,
+    /// Android APK（官网分发）：由 App 交给安装程序（用户默认的 APK 安装程序）安装。
     AndroidApk,
     #[default]
     #[serde(other)]
@@ -1153,7 +1305,8 @@ pub enum UpdateInstallKind {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum UpdateManualReason {
-    /// 由包管理器 / 容器镜像管理（Docker、群晖、威联通、OpenWrt），具体见 `installKind`。
+    /// 由包管理器 / 容器镜像管理（Docker、群晖、威联通、OpenWrt，或归 AUR / 发行版仓库等
+    /// 非官方系统包所有的 `linuxDeb` / `linuxArch`），具体见 `installKind`。
     ManagedPackage,
     /// 程序所在目录对当前用户不可写（如放在受保护目录、只读卷）。
     NotWritable,
@@ -1254,13 +1407,16 @@ pub struct CustomCategoryDto {
     pub name: String,
     #[serde(default = "default_category_icon")]
     pub icon: String,
-    /// `extension` | `regex`。
+    /// `extension` | `regex` | `url`。
     #[serde(default = "default_category_match_mode")]
     pub match_mode: String,
     #[serde(default)]
     pub extensions: Vec<String>,
     #[serde(default)]
     pub regex_pattern: String,
+    /// `url` 模式的通配符模式（`*` 任意串、`?` 单字符、不分大小写、完整匹配整个网址）。
+    #[serde(default)]
+    pub url_pattern: String,
     #[serde(default)]
     pub position: i64,
     #[serde(default = "default_category_visible")]
@@ -1294,6 +1450,7 @@ impl CustomCategoryDto {
             match_mode: "extension".to_owned(),
             extensions: exts.iter().map(|ext| (*ext).to_owned()).collect(),
             regex_pattern: String::new(),
+            url_pattern: String::new(),
             position,
             visible: true,
             is_builtin: true,
@@ -1361,6 +1518,182 @@ impl CustomCategoryDto {
             .unwrap_or_else(Self::builtin_defaults);
         list.sort_by_key(|entry| entry.position);
         list
+    }
+}
+
+/// 分类保存目录路由：外部捕获未指定保存目录时，agent 把 `custom_categories` 中与落点
+/// 有关的规则随 `daemon.task.create` 交给 daemon；引擎建任务时按初始名定初始目录，
+/// 下载完成、最终文件名确定后（插件改名、按响应推断的名字、HLS 转封装后的 `.mp4`）
+/// 再按同一规则复核并把产物移入命中分类的目录。任务组成员与 BT / eD2K 任务不参与。
+///
+/// 匹配语义（唯一事实源为 agent `category_dir.rs` 与引擎 `category_route.rs`，两端共用
+/// 夹具 `native/engine/src/fixtures/category_route_cases.json`）：网址规则固定优先于
+/// 扩展名 / 正则分类（不看列表位置），网址规则之间按列表顺序取首个配置了目录且命中的；
+/// 未被网址规则认领的任务再按文件名规则取首个配置了目录且命中的普通分类；都不命中时
+/// 取「其他」的目录。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryRouteDto {
+    /// 可见普通分类（按 `position`），只保留会影响落点的条目。
+    #[serde(default)]
+    pub rules: Vec<CategoryRuleDto>,
+    /// 「其他」分类的目录；空 = 不兜底。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub other_dir: String,
+}
+
+/// [`CategoryRouteDto`] 的单条普通分类规则。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryRuleDto {
+    /// `extension` | `regex` | `url`。
+    #[serde(default = "default_category_match_mode")]
+    pub match_mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub regex_pattern: String,
+    /// `url` 模式的通配符模式；语义与 [`CustomCategoryDto::url_pattern`] 一致。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url_pattern: String,
+    /// 空 = 该分类不改变落点，只用于阻止「其他」兜底。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub save_dir: String,
+}
+
+impl CategoryRouteDto {
+    /// 由分类列表（已按 `position` 排序）构建路由；没有任何分类配置目录时为 `None`。
+    /// 「其他」无目录时，未配置目录的普通分类不影响结果，直接省略。
+    #[must_use]
+    pub fn from_categories(categories: &[CustomCategoryDto]) -> Option<Self> {
+        let visible = || categories.iter().filter(|category| category.visible);
+        let other_dir = visible()
+            .find(|category| category.builtin_type.as_deref() == Some("other"))
+            .map(|other| other.save_dir.trim().to_owned())
+            .unwrap_or_default();
+        let rules = visible()
+            .filter(|category| {
+                !matches!(category.builtin_type.as_deref(), Some("all" | "other"))
+                    && (!other_dir.is_empty() || !category.save_dir.trim().is_empty())
+            })
+            .map(|category| CategoryRuleDto {
+                match_mode: category.match_mode.clone(),
+                extensions: category.extensions.clone(),
+                regex_pattern: category.regex_pattern.clone(),
+                url_pattern: category.url_pattern.clone(),
+                save_dir: category.save_dir.trim().to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let routes = !other_dir.is_empty() || rules.iter().any(|rule| !rule.save_dir.is_empty());
+        routes.then_some(Self { rules, other_dir })
+    }
+
+    /// 由 `custom_categories` 偏好值（[`CUSTOM_CATEGORIES_PREF_KEY`] 对应的 JSON）构建路由；
+    /// 偏好缺失 / 无法解析 / 没有任何分类配置目录时为 `None`。
+    #[must_use]
+    pub fn from_preference(value: Option<&serde_json::Value>) -> Option<Self> {
+        Self::from_categories(&CustomCategoryDto::from_preference(value))
+    }
+
+    /// 表单提交的保存目录 `submitted` 是否仍是系统给出的、应继续按分类路由：为空、等于
+    /// 非空的表单初始目录 `offered`（预填分类之前显示的目录），或等于「其他」 / 任一分类
+    /// 规则的目录。用户改选了别的目录即返回 `false`，以用户选择为准。认任一分类目录而不只
+    /// 是命中的那个：多条链接并入同一张表单时目录框只预填第一条命中的分类目录。
+    ///
+    /// 两端都先去首尾空白再比较。
+    #[must_use]
+    pub fn follows(&self, submitted: &str, offered: &str) -> bool {
+        let submitted = submitted.trim();
+        if submitted.is_empty() {
+            return true;
+        }
+        let offered = offered.trim();
+        (!offered.is_empty() && submitted == offered) || self.is_category_dir(submitted)
+    }
+
+    /// 跟随路由时作为 `request.saveDir` 发送的基准目录（没有分类命中时的落点）：提交目录
+    /// 为空或本身是分类目录时取表单初始目录 `offered`，否则（等于 `offered` 或用户
+    /// 填的其他目录）取提交目录。结果已去首尾空白。
+    #[must_use]
+    pub fn base_dir(&self, submitted: &str, offered: &str) -> String {
+        let submitted = submitted.trim();
+        if submitted.is_empty() || self.is_category_dir(submitted) {
+            offered.trim().to_owned()
+        } else {
+            submitted.to_owned()
+        }
+    }
+
+    /// `dir`（已去空白）是否是「其他」或某条规则配置的分类目录；空串恒为 `false`。
+    #[must_use]
+    pub fn is_category_dir(&self, dir: &str) -> bool {
+        !dir.is_empty()
+            && (self.other_dir == dir || self.rules.iter().any(|rule| rule.save_dir == dir))
+    }
+}
+
+#[cfg(test)]
+mod category_route_helper_tests {
+    use serde_json::json;
+
+    use super::{CategoryRouteDto, CategoryRuleDto, CustomCategoryDto};
+
+    fn route() -> CategoryRouteDto {
+        CategoryRouteDto {
+            rules: vec![CategoryRuleDto {
+                match_mode: "extension".to_owned(),
+                extensions: vec!["jpg".to_owned()],
+                regex_pattern: String::new(),
+                url_pattern: String::new(),
+                save_dir: "/pictures".to_owned(),
+            }],
+            other_dir: "/other".to_owned(),
+        }
+    }
+
+    #[test]
+    fn category_follows_accepts_system_given_dirs_only() {
+        let route = route();
+        assert!(route.follows("", "/default"));
+        assert!(route.follows("  ", ""));
+        assert!(route.follows(" /default ", " /default "));
+        assert!(route.follows("/pictures", "/default"));
+        assert!(route.follows("/other", ""));
+        assert!(!route.follows("/elsewhere", "/default"));
+        // 空的 offered 不等同于空提交之外的任何目录。
+        assert!(!route.follows("/default", ""));
+    }
+
+    #[test]
+    fn category_base_dir_falls_back_to_offered_unless_user_chose() {
+        let route = route();
+        assert_eq!(route.base_dir("", " /default "), "/default");
+        assert_eq!(route.base_dir("/pictures", "/default"), "/default");
+        assert_eq!(route.base_dir("/other", "/default"), "/default");
+        assert_eq!(route.base_dir(" /default ", "/default"), "/default");
+        assert_eq!(route.base_dir("/elsewhere", "/default"), "/elsewhere");
+        assert_eq!(route.base_dir("", ""), "");
+    }
+
+    #[test]
+    fn category_from_preference_reads_custom_categories_value() {
+        assert_eq!(CategoryRouteDto::from_preference(None), None);
+        let mut categories = CustomCategoryDto::builtin_defaults();
+        for category in &mut categories {
+            if category.builtin_type.as_deref() == Some("other") {
+                category.save_dir = "/other".to_owned();
+            }
+        }
+        let value = serde_json::to_value(&categories).expect("serialize categories");
+        let route = CategoryRouteDto::from_preference(Some(&value)).expect("route");
+        assert_eq!(route.other_dir, "/other");
+        let as_text = json!(value.to_string());
+        assert_eq!(
+            CategoryRouteDto::from_preference(Some(&as_text)),
+            Some(route)
+        );
     }
 }
 

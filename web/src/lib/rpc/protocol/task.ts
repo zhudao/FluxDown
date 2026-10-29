@@ -1,4 +1,6 @@
 // 任务相关 DTO（daemon.rs TaskDto / CreateTaskRequest、task_activity.rs）。
+import type { CategoryRouteDto } from './agent';
+import type { RpcErrorData } from './error';
 
 /** `TaskDto.status` 取值。 */
 export const TASK_STATUS = {
@@ -68,7 +70,7 @@ export interface TaskDto {
   rssSourceId: string;
   /** 展示用原始来源链接（空 = 用 `url`）；`.torrent` 任务的 `url` 是 `torrent-file://local` 哨兵。 */
   originUrl: string;
-  /** ProxyMode=Auto 的最终链路标签：`direct` / `proxy:cached` 等（空 = 非 Auto 模式）。 */
+  /** Auto 路由或站点规则标签：`direct` / `proxy:cached` / `rule:custom` 等（空 = 非 Auto 且未命中规则）。 */
   autoRoute: string;
   /** 队列内启动顺序（0 = 未显式排序）。 */
   queueOrder: number;
@@ -89,11 +91,28 @@ export interface TaskDto {
   seedTimeLimitMinutes: number;
   /** 不活跃做种时长上限（分钟），哨兵同上。 */
   seedInactiveTimeLimitMinutes: number;
-  /** 做种上传限速（字节/秒），0 = 未设置（跟随全局）；旧 daemon 不返回。 */
-  seedUploadLimitBps?: number;
-  /** 持久化的加速路径字节（旧 daemon 不返回）。 */
-  sourceBytes?: TaskSourceBytesDto;
+  /** 做种上传限速（字节/秒），0 = 未设置（跟随全局）。 */
+  seedUploadLimitBps: number;
+  /** 持久化的加速路径字节。 */
+  sourceBytes: TaskSourceBytesDto;
 }
+
+/** 线上必带的 `TaskDto` 字段（其余默认值字段为 `skip_serializing_if`，缺省即默认值）。 */
+export type TaskDtoRequiredKey =
+  | 'taskId'
+  | 'url'
+  | 'fileName'
+  | 'saveDir'
+  | 'status'
+  | 'downloadedBytes'
+  | 'totalBytes'
+  | 'createdAt';
+
+/**
+ * 线上形态的 `TaskDto`（协议 v17）：默认值字段不上线，解码必须经 `normalizeTask`
+ * （见 `../normalize.ts`）补齐后才能进入 store。
+ */
+export type TaskDtoWire = Pick<TaskDto, TaskDtoRequiredKey> & Partial<Omit<TaskDto, TaskDtoRequiredKey>>;
 
 /** 文件字节区间进度；`active` 未知（null）时不要推断其传输状态。 */
 export interface TaskSegmentDto {
@@ -202,11 +221,70 @@ export interface DaemonCreateTaskParams {
   hintFileSize?: number | null;
   /** 参照文件名（浏览器捕获的原始名）：显式名缺扩展名时借它的扩展名补全。 */
   nameHint?: string | null;
+  /** 分类目录路由：`request.saveDir` 为未命中时的基准目录，引擎按初始名与完成时的最终文件名定落点。 */
+  categoryRoute?: CategoryRouteDto | null;
 }
 
 /** `daemon.task.create` 结果。 */
 export interface CreatedTask {
   taskId: string;
+}
+
+export type TaskVerifyStatus = 'intact' | 'damaged' | 'unverifiable';
+
+/** `daemon.task.verify` 结果（BT 已完成任务的分块完整性校验）。 */
+export interface TaskVerifyResult {
+  status: TaskVerifyStatus;
+  totalPieces: number;
+  verifiedPieces: number;
+  badPieces: number;
+  skippedPieces: number;
+  damagedFiles: string[];
+}
+
+/** `daemon.task.createMany` 单次调用的条目上限（`CREATE_TASKS_MAX_ITEMS`）；更大的导入须按块拆分。 */
+export const CREATE_TASKS_MAX_ITEMS = 512;
+/** `daemon.task.createMany` 幂等键 `batchId` 的最大长度（字节，`CREATE_TASKS_BATCH_ID_MAX_LEN`）。 */
+export const CREATE_TASKS_BATCH_ID_MAX_LEN = 128;
+
+/**
+ * `daemon.task.createMany` 参数：一块链接共享同一份建任务选项，整块一个事务落库。
+ *
+ * 幂等：同一 `batchId` 已成功落库时，重放返回首次结果、不再建任务；连接中断等结果不确定的
+ * 调用可以原样重发。
+ */
+export interface DaemonCreateTasksParams {
+  /** 调用方为每块生成的唯一键（非空，不超过 {@link CREATE_TASKS_BATCH_ID_MAX_LEN} 字节）。 */
+  batchId: string;
+  /**
+   * 整块共享的选项。`url` / `fileName` / `checksum` 由条目决定，这里必须为空；
+   * 不支持种子、音轨与自定义 method / body（这些只走 `daemon.task.create`）。
+   */
+  common: CreateTaskRequest;
+  /** 1..={@link CREATE_TASKS_MAX_ITEMS} 条。 */
+  items: CreateTaskItem[];
+  /** 分类目录路由：应用于整块每一条；`common.saveDir` 为未命中时的基准目录。 */
+  categoryRoute?: CategoryRouteDto | null;
+}
+
+/** `daemon.task.createMany` 的单条链接。 */
+export interface CreateTaskItem {
+  url: string;
+  /** 空 = 从 URL / Content-Disposition 推断；允许 `子目录/文件名`。 */
+  fileName?: string;
+  /** `algo=hexhash`（空 = 跳过校验）。 */
+  checksum?: string;
+}
+
+/** `daemon.task.createMany` 结果：`results` 与请求 `items` 逐条同序对应。 */
+export interface DaemonCreateTasksResult {
+  results: CreateTaskOutcome[];
+}
+
+/** 单条建任务结果：成功带 `taskId`（开启 URL 去重时可能是已有任务），失败带 `error`。 */
+export interface CreateTaskOutcome {
+  taskId?: string;
+  error?: RpcErrorData;
 }
 
 /** `agent.capture.submit` 的外部下载请求载荷（DownloadRequest）。除 `url` 外全部可省略。 */
@@ -225,4 +303,23 @@ export interface DownloadRequest {
   method?: string | null;
   body?: RequestBody | null;
   audioUrl?: string | null;
+}
+
+/** `daemon.task.speedHistory` 参数。 */
+export interface TaskSpeedHistoryQuery {
+  taskId: string;
+}
+
+/** 任务全生命周期速度曲线与统计；结果为 null = 无记录。平均速度 = transferredBytes / activeSecs。 */
+export interface TaskSpeedHistoryDto {
+  taskId: string;
+  /** 每点覆盖秒数（1、2、4…，服务端点数封顶后相邻合并、宽度翻倍）。 */
+  bucketSecs: number;
+  /** 每点平均 bytes/s，最旧在前；末点可能是尚在累计的不完整桶。 */
+  samples: number[];
+  /** 处于下载态的总秒数（暂停 / 排队 / 做种不计）。 */
+  activeSecs: number;
+  transferredBytes: number;
+  /** 逐秒峰值速度。 */
+  peakBps: number;
 }

@@ -2,10 +2,14 @@ name: CI
 
 # 合并前门禁：与 AGENTS.md 一致（fmt + clippy -D warnings），按 crate 分组 nextest（禁 --workspace），
 # 并构建 Web SPA / 官网 / 扩展，避免构建期问题只在 v* tag 发布流水线里暴露。
+# 发布对齐：按发布流水线原样的 cargo 命令 / Docker 构建上下文 / librqbit 来源做快速检查（check 级，
+# 不做 release 编译），把 v0.5.4–v0.5.8 那类「只有发布才会跑的路径」坏掉提前到合入时发现。
+# workflow_dispatch = 全量运行（忽略路径过滤）：发版前在发布分支上跑一遍，release.yml 的 CI 门禁认它。
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -32,6 +36,9 @@ jobs:
       website: ${{ steps.f.outputs.website }}
       extension: ${{ steps.f.outputs.extension }}
       android: ${{ steps.f.outputs.android }}
+      ios: ${{ steps.f.outputs.ios }}
+      sdk: ${{ steps.f.outputs.sdk }}
+      docker: ${{ steps.f.outputs.docker }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -46,13 +53,22 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.cargo/**'
+              - 'packages/plugin-sdk/types/**'
+              - 'third_party/**'
+              - '.github/scripts/verify_librqbit.py'
               - '.github/workflows/ci.yml'
             web:
               - 'web/**'
+              - 'crates/*/tests/fixtures/**'
+              - 'native/protocol/src/settings.rs'
               - 'assets/i18n/**'
               - 'website-v2/src/lib/gpui-theme/**'
               - 'assets/icon-packs/**'
               - 'crates/icon_pack/tests/fixtures/**'
+              - 'native/protocol/tests/fixtures/plugin_view_apply.json'
+              - 'native/protocol/src/plugin_view_tones.json'
+              - 'crates/extensions/tests/fixtures/consent_cases.json'
+              - 'native/engine/src/fixtures/category_route_cases.json'
               - '.github/workflows/ci.yml'
             website:
               - 'website-v2/**'
@@ -60,19 +76,65 @@ jobs:
               - '.github/workflows/ci.yml'
             extension:
               - 'fluxDown/**'
+              - 'scripts/sniff-rules/**'
+              - 'native/engine/src/naming/fixtures/**'
               - '.github/workflows/ci.yml'
             android:
               - 'mobile/Android/**'
               - 'native/**'
+              - 'crates/i18n/**'
+              - 'third_party/**'
+              - 'assets/logo/**'
               - 'assets/i18n/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - '.github/workflows/ci.yml'
+            ios:
+              - 'native/**'
+              - 'crates/i18n/**'
+              - 'third_party/**'
+              - 'assets/logo/**'
+              - 'assets/i18n/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'mobile/FluxDown/scripts/build-core.sh'
+              - '.github/workflows/ci.yml'
+            sdk:
+              - 'packages/plugin-sdk/**'
+              - 'native/engine/src/plugin/fixtures/**'
+              - 'native/protocol/src/plugin_view_schema.json'
+              - 'website-v2/src/lib/gpui-theme/registry.json'
+              - '.github/workflows/ci.yml'
+            docker:
+              - 'docker/**'
+              - '.dockerignore'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'native/**'
+              - 'crates/**'
+              - 'third_party/**'
+              - 'scripts/desktop-dev/**'
+              - 'assets/**'
+              - 'web/**'
+              - 'website-v2/src/lib/gpui-theme/**'
+              - '.github/workflows/ci.yml'
+
+  # 过滤器自检：上面的 filters 必须覆盖各门禁实际读取的路径（crate path 依赖闭包、include_*!、
+  # [patch] 路径、TS 跨目录引用的共享夹具等），否则只改这些文件的 PR 不会触发对应检查。
+  # 每次都跑（只读源码 + `cargo metadata --no-deps --offline`，秒级）。
+  ci-paths:
+    name: CI paths filter coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/scripts/check_ci_paths.py
 
   rust-lint:
     name: Rust fmt + clippy
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -99,15 +161,28 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --check
 
-      # native/server 已冻结（不构建、不接收改动），不进门禁。测试代码同样过 clippy：
-      # 测试里允许 unwrap/expect（clippy.toml），其余 lint 一视同仁。
+      # 测试代码同样过 clippy：测试里允许 unwrap/expect（clippy.toml），其余 lint 一视同仁。
       - name: cargo clippy
-        run: cargo clippy --workspace --exclude fluxdown_server --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # 插件桌面类型由 gpui-shell 组件目录 + fluxdown 宿主模块生成，入库副本必须与生成结果一致。
+      - name: plugin desktop typings drift
+        run: cargo run --locked -p fluxdown_ui_plugin_ui --example gen_plugin_typings -- --check packages/plugin-sdk/types/desktop.d.ts
+
+      # 发布对齐：librqbit 必须解析自钉死 rev 的 MSE fork（release.yml verify-engine 同一脚本）。
+      - name: librqbit fork source
+        run: python3 .github/scripts/verify_librqbit.py
+
+      # 发布对齐：Linux 桌面包与 release.yml build-linux 同一条命令（同 runner 镜像）。agent 的
+      # desktop 特性与 GPUI 同次构建时依赖特性合并（v0.5.8 ashpd tokio+async-io compile_error），
+      # 只有这条组合能暴露。check 不做代码生成，几分钟内完成。
+      - name: release desktop build combination (check)
+        run: cargo check --locked -p fluxdown_ui_app -p fluxdown_agent -p fluxdown_daemon -p fluxdown_nmh --features fluxdown_agent/desktop --bins
 
   rust-test:
     name: Test (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: needs.changes.outputs.rust == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -115,6 +190,9 @@ jobs:
         include:
           - name: engine
             packages: "-p fluxdown_engine"
+          # 插件运行时（quickjs-jit）与常驻宿主只在 feature 下编译，单独成组。
+          - name: engine-plugins
+            packages: "-p fluxdown_engine --features plugins,components"
           - name: core
             packages: "-p fluxdown_api -p fluxdown_protocol -p fluxdown_daemon -p fluxdown_engine_protocol -p fluxdown_link -p fluxdown_logfile -p fluxdown_cli"
           - name: agent
@@ -122,7 +200,7 @@ jobs:
           - name: mobile
             packages: "-p fluxdown_mobile"
           - name: gpui
-            packages: "-p fluxdown_ui_account -p fluxdown_ui_app -p fluxdown_ui_command_palette -p fluxdown_ui_components -p fluxdown_ui_downloads -p fluxdown_ui_extensions -p fluxdown_ui_i18n -p fluxdown_ui_rss -p fluxdown_ui_settings -p fluxdown_ui_shell -p fluxdown_ui_theme"
+            packages: "-p fluxdown_ui_account -p fluxdown_ui_app -p fluxdown_ui_command_palette -p fluxdown_ui_components -p fluxdown_ui_downloads -p fluxdown_ui_extensions -p fluxdown_ui_i18n -p fluxdown_ui_plugin_ui -p fluxdown_ui_rss -p fluxdown_ui_settings -p fluxdown_ui_share -p fluxdown_ui_shell -p fluxdown_ui_theme"
     steps:
       - uses: actions/checkout@v4
 
@@ -152,7 +230,7 @@ jobs:
   web:
     name: Web SPA (lint + test + build)
     needs: changes
-    if: needs.changes.outputs.web == 'true'
+    if: needs.changes.outputs.web == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -168,7 +246,7 @@ jobs:
   website-v2:
     name: Website v2 tests
     needs: changes
-    if: needs.changes.outputs.website == 'true'
+    if: needs.changes.outputs.website == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -179,10 +257,28 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run test
 
+  plugin-sdk:
+    name: Plugin SDK (gen + typecheck + test + build)
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/plugin-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # 重新生成 view / theme 类型与 youtube-down 示例的 resolve.js 打包物，并与入库文件逐字比较（脚本内比较，不依赖 git）。
+      - run: bun run gen:check
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+
   extension:
     name: Browser extension build
     needs: changes
-    if: needs.changes.outputs.extension == 'true'
+    if: needs.changes.outputs.extension == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -193,8 +289,23 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
+      - uses: oven-sh/setup-bun@v2
+      - run: bun test
+      - run: npm run typecheck
       - run: npm run build
       - run: npm run build:firefox
+      # 规则仓与扩展不漂移：vendor 的校验器 / 求值器打包物、内置官方规则种子都必须与规则仓 main 一致。
+      - uses: actions/checkout@v4
+        with:
+          repository: zerx-lab/fluxdown-sniff-rules
+          ref: main
+          path: sniff-rules-repo
+          persist-credentials: false
+      - name: Sniff rules repo drift check
+        working-directory: .
+        run: |
+          bun scripts/sniff-rules/sync-repo.ts vendor --check --repo sniff-rules-repo
+          bun scripts/sniff-rules/sync-repo.ts seed --check --repo sniff-rules-repo
 
   # 原生 Android：Kotlin 单测（含经 UniFFI 生成绑定的本机主机端到端冒烟）+ 组装 APK + lint。
   # :bridge 经 cargo-ndk 交叉编译 fluxdown_mobile；门禁只编 arm64-v8a 以控制时长。
@@ -203,7 +314,7 @@ jobs:
   android:
     name: Native Android (test + assemble + lint)
     needs: changes
-    if: needs.changes.outputs.android == 'true'
+    if: needs.changes.outputs.android == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -230,3 +341,51 @@ jobs:
           ./gradlew --no-daemon -Pfluxdown.abis=arm64-v8a
           :core:testDebugUnitTest :fluxui:testDebugUnitTest :bridge:testDebugUnitTest
           :app:assembleDebug :app:lintDebug
+
+  # 发布对齐：iOS 核心（fluxdown_mobile）只在 ios-sideload / ios-testflight 打包时交叉编译，
+  # Linux 门禁覆盖不到 Apple 移动目标的 cfg（libc 0.2.190 把路由 / in6 符号收窄到仅 macOS，
+  # FluxMesh iroh → netwatch / netdev 因此只在 iOS 上编译失败）。两种 flavor 与 build-core.sh 同参数，
+  # check 级（不链接、不生成 xcframework），几分钟内完成。
+  ios-core:
+    name: iOS core cross-check (full + store)
+    needs: changes
+    if: needs.changes.outputs.ios == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    env:
+      # 与 build-core.sh / Xcode 工程的最低部署版本一致（cc 构建的 C 依赖按它编译）。
+      IPHONEOS_DEPLOYMENT_TARGET: "26.1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-ios-core
+          cache-on-failure: true
+      - name: full flavor (sideload)
+        run: cargo check --locked -p fluxdown_mobile --lib --target aarch64-apple-ios
+      - name: store flavor (TestFlight)
+        run: cargo check --locked -p fluxdown_mobile --lib --target aarch64-apple-ios --no-default-features
+
+  # 发布对齐：Docker 构建上下文（.dockerignore 白名单 + Dockerfile COPY 清单）缺东西时，
+  # 发布流水线要到 Docker 编译才失败（历史 5 次：crates/*、scripts/desktop-dev、assets/logo、
+  # third_party、assets/icon-packs）。这里构建 server-check 阶段（含 Web 前端 + cargo check，
+  # 单架构、不做 release 编译），workspace 成员 / [patch] / include_bytes! / build.rs 读文件都会被解析。
+  docker-context:
+    name: Docker build context (server-check)
+    needs: changes
+    if: needs.changes.outputs.docker == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/server.Dockerfile
+          target: server-check
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=server-check
+          cache-to: type=gha,scope=server-check,mode=max

@@ -18,6 +18,159 @@ impl AgentDownloadsPort {
     }
 }
 
+/// Shared by every window through AgentClient. Waiting submissions retain their
+/// unsubmitted commands in run_submission, including after their window closes.
+pub(crate) struct SubmissionGate {
+    state: tokio::sync::watch::Sender<SubmissionState>,
+    boundary: Arc<tokio::sync::Mutex<()>>,
+    controls: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub(crate) interruption: tokio::sync::watch::Sender<Option<String>>,
+    /// 系统打开 / 拖入的链接或种子文件被 agent 拒绝（分享链接解析失败、不支持等）：
+    /// 界面据此提示用户，而不是静默什么都不发生。每次发送都会唤醒订阅者。
+    pub(crate) capture_failure: tokio::sync::watch::Sender<Option<fluxdown_protocol::RpcErrorData>>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SubmissionState {
+    ready: bool,
+    paused: bool,
+    control_pending: bool,
+    revision: u64,
+    pause_generation: u64,
+}
+
+impl SubmissionState {
+    /// 导入被「全部暂停」或结果不确定的提交挂起，直到「全部开始」成功才解除。
+    pub(crate) fn suspended(self) -> bool {
+        self.paused
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ControlRevision {
+    sequence: u64,
+    pause_generation: u64,
+}
+
+impl Default for SubmissionGate {
+    fn default() -> Self {
+        Self {
+            state: tokio::sync::watch::channel(SubmissionState::default()).0,
+            boundary: Arc::new(tokio::sync::Mutex::new(())),
+            controls: std::sync::Mutex::new(None),
+            interruption: tokio::sync::watch::channel(None).0,
+            capture_failure: tokio::sync::watch::channel(None).0,
+        }
+    }
+}
+
+impl SubmissionGate {
+    fn control_turn(
+        &self,
+    ) -> (
+        Option<tokio::sync::oneshot::Receiver<()>>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (done, next) = tokio::sync::oneshot::channel();
+        let mut controls = match self.controls.lock() {
+            Ok(controls) => controls,
+            Err(error) => {
+                log::error!("recovering poisoned submission control queue");
+                error.into_inner()
+            }
+        };
+        let previous = controls.replace(next);
+        (previous, done)
+    }
+
+    pub(crate) fn set_ready(&self, ready: bool) {
+        self.state.send_modify(|state| state.ready = ready);
+    }
+
+    /// 订阅闸门状态（主窗口据此让「全部开始」在导入挂起时保持可点）。
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SubmissionState> {
+        self.state.subscribe()
+    }
+
+    fn begin_control(&self, pause: bool) -> ControlRevision {
+        let mut revision = ControlRevision::default();
+        self.state.send_modify(|state| {
+            // Resume only blocks admission temporarily; its failure must not
+            // create a new persistent pause (including overlapping resumes).
+            state.paused |= pause;
+            if pause {
+                state.pause_generation = state.pause_generation.wrapping_add(1);
+            }
+            state.control_pending = true;
+            state.revision = state.revision.wrapping_add(1);
+            revision = ControlRevision {
+                sequence: state.revision,
+                pause_generation: state.pause_generation,
+            };
+        });
+        revision
+    }
+
+    fn pause(&self) -> ControlRevision {
+        let revision = self.begin_control(true);
+        self.complete_control(revision, false, false);
+        revision
+    }
+
+    #[cfg(test)]
+    fn resume(&self, revision: ControlRevision) {
+        self.complete_control(revision, true, true);
+    }
+
+    fn complete_control(&self, revision: ControlRevision, resume: bool, succeeded: bool) {
+        self.state.send_modify(|state| {
+            // A later Resume does not revoke an earlier successful Resume.
+            // Only a newer Pause or uncertain submission creates a new intent.
+            if resume && succeeded && state.pause_generation == revision.pause_generation {
+                state.paused = false;
+            }
+            if state.revision == revision.sequence {
+                state.control_pending = false;
+            }
+        });
+    }
+
+    pub(crate) async fn admit(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, fluxdown_protocol::RpcErrorData> {
+        let mut state = self.state.subscribe();
+        loop {
+            let current = *state.borrow_and_update();
+            if current.ready && !current.paused && !current.control_pending {
+                let guard = self.boundary.clone().lock_owned().await;
+                let current = *state.borrow();
+                if current.ready && !current.paused && !current.control_pending {
+                    return Ok(guard);
+                }
+            }
+            if state.changed().await.is_err() {
+                log::error!("submission admission channel closed");
+                return Err(fluxdown_protocol::RpcErrorData::new(
+                    fluxdown_protocol::ApplicationErrorCode::Unavailable,
+                    true,
+                ));
+            }
+        }
+    }
+}
+
+/// 失败后结果不确定的提交：服务端可能已落库，重发会造成重复，所以结果不确定时暂停整条导入。
+/// `CreateMany` 按 `batchId` 幂等，调用方可原样重发，不属于此类。
+fn is_non_idempotent_submission(command: &DownloadsCommand) -> bool {
+    matches!(
+        command,
+        DownloadsCommand::Create(_)
+            | DownloadsCommand::CreateGroup { .. }
+            | DownloadsCommand::SubmitTorrentFile { .. }
+            | DownloadsCommand::Redownload(..)
+    ) || matches!(command, DownloadsCommand::CaptureResolve(params) if params.accepted)
+}
+
 fn queue_fields(fields: &fluxdown_ui_downloads::QueueFields) -> Value {
     json!({
         "name": fields.name,
@@ -32,6 +185,75 @@ fn queue_fields(fields: &fluxdown_ui_downloads::QueueFields) -> Value {
 
 impl DownloadsPort for AgentDownloadsPort {
     fn execute(&self, command: DownloadsCommand) -> PortFuture<DownloadsResult> {
+        let submission = is_non_idempotent_submission(&command);
+        let source = match &command {
+            DownloadsCommand::Create(params) => Some(params.request.url.clone()),
+            DownloadsCommand::CreateGroup { context, .. } => Some(context.url.clone()),
+            DownloadsCommand::CaptureResolve(params) => {
+                params.request.as_ref().map(|request| request.url.clone())
+            }
+            DownloadsCommand::SubmitTorrentFile { path, .. } => Some(path.clone()),
+            DownloadsCommand::Redownload(request, _) => Some(request.url.clone()),
+            _ => None,
+        };
+        let pause = matches!(&command, DownloadsCommand::PauseAll);
+        let resume = matches!(&command, DownloadsCommand::ResumeAll);
+        // Close admission synchronously, before this RPC future can be scheduled.
+        let revision = (pause || resume).then(|| self.client.submissions.begin_control(pause));
+        let turn = revision.map(|_| self.client.submissions.control_turn());
+        let client = self.client.clone();
+        let operation = self.execute_rpc(command);
+        Box::pin(async move {
+            let done = if let Some((previous, done)) = turn {
+                if let Some(previous) = previous
+                    && previous.await.is_err()
+                {
+                    log::debug!("previous global download command was cancelled");
+                }
+                Some(done)
+            } else {
+                None
+            };
+            let _boundary = if pause || resume {
+                Some(client.submissions.boundary.lock().await)
+            } else {
+                None
+            };
+            let result = operation.await;
+            if let Some(revision) = revision {
+                client
+                    .submissions
+                    .complete_control(revision, resume, result.is_ok());
+            }
+            if submission
+                && result.as_ref().is_err_and(|error| {
+                    matches!(
+                        error.code,
+                        fluxdown_protocol::ApplicationErrorCode::Unavailable
+                            | fluxdown_protocol::ApplicationErrorCode::Timeout
+                    )
+                })
+            {
+                // The server may have committed this command. Never retry it;
+                // retain the remaining list until explicit ResumeAll after reconnect.
+                client.submissions.pause();
+                client.submissions.interruption.send_replace(source);
+                log::warn!(
+                    "download import suspended after an unavailable response; the uncertain command will not be retried"
+                );
+            }
+            if let Some(done) = done
+                && done.send(()).is_err()
+            {
+                log::debug!("global download command successor released");
+            }
+            result
+        })
+    }
+}
+
+impl AgentDownloadsPort {
+    fn execute_rpc(&self, command: DownloadsCommand) -> PortFuture<DownloadsResult> {
         let client = self.client.clone();
         Box::pin(async move {
             let (method, params) = match command {
@@ -41,6 +263,12 @@ impl DownloadsPort for AgentDownloadsPort {
                         .await?;
                     return Ok(DownloadsResult::TaskActivity(page));
                 }
+                DownloadsCommand::TaskSpeedHistory(query) => {
+                    let history = client
+                        .call(method::DAEMON_TASK_SPEED_HISTORY, Some(query))
+                        .await?;
+                    return Ok(DownloadsResult::TaskSpeedHistory(history));
+                }
                 DownloadsCommand::FileIcon(params) => {
                     let icon: fluxdown_protocol::PlatformFileIconDto = client
                         .call(method::AGENT_PLATFORM_FILE_ICON, Some(params))
@@ -49,6 +277,12 @@ impl DownloadsPort for AgentDownloadsPort {
                         .decode(icon.png)
                         .map_err(|_| internal_error())?;
                     return Ok(DownloadsResult::FileIcon(png));
+                }
+                DownloadsCommand::CreateMany(params) => {
+                    let result = client
+                        .call(method::DAEMON_TASK_CREATE_MANY, Some(params))
+                        .await?;
+                    return Ok(DownloadsResult::CreateMany(result));
                 }
                 DownloadsCommand::Create(params) => {
                     (method::DAEMON_TASK_CREATE, serialize(params)?)
@@ -63,6 +297,23 @@ impl DownloadsPort for AgentDownloadsPort {
                     method::DAEMON_TASK_RENAME,
                     json!({ "taskId": task_id, "fileName": file_name }),
                 ),
+                DownloadsCommand::ChangeUrl { task_id, url } => (
+                    method::DAEMON_TASK_CHANGE_URL,
+                    serialize(fluxdown_protocol::ChangeTaskUrlParams { task_id, url })?,
+                ),
+                DownloadsCommand::SetSegments { task_id, segments } => (
+                    method::DAEMON_TASK_SET_SEGMENTS,
+                    serialize(fluxdown_protocol::SetTaskSegmentsParams { task_id, segments })?,
+                ),
+                DownloadsCommand::VerifyTask { task_id } => {
+                    let result = client
+                        .call(
+                            method::DAEMON_TASK_VERIFY,
+                            Some(json!({ "taskId": task_id })),
+                        )
+                        .await?;
+                    return Ok(DownloadsResult::TaskVerify(result));
+                }
                 DownloadsCommand::Delete {
                     task_id,
                     delete_files,
@@ -109,6 +360,7 @@ impl DownloadsPort for AgentDownloadsPort {
                             unattended: false,
                             hint_file_size: None,
                             name_hint: None,
+                            category_route: None,
                         })?,
                     )
                 }
@@ -256,6 +508,10 @@ impl DownloadsPort for AgentDownloadsPort {
                     method::DAEMON_SITE_AUTH_MATCH,
                     serialize(fluxdown_protocol::SiteAuthMatchParams { url })?,
                 ),
+                DownloadsCommand::ProbeLink { url } => (
+                    method::DAEMON_LINK_PROBE,
+                    serialize(fluxdown_protocol::LinkProbeParams { url })?,
+                ),
                 DownloadsCommand::RemoteDispatch(params) => {
                     (method::AGENT_REMOTE_DISPATCH, serialize(params)?)
                 }
@@ -285,6 +541,11 @@ impl DownloadsPort for AgentDownloadsPort {
                 DownloadsCommand::RevealTask { task_id } => (
                     method::AGENT_PLATFORM_REVEAL_TASK,
                     json!({ "taskId": task_id }),
+                ),
+                // 剪贴板不涉及前台授权，Windows 同样由常驻 agent 写入（进程常驻，X11 剪贴板内容不丢）。
+                DownloadsCommand::CopyTaskFiles { task_ids } => (
+                    method::AGENT_PLATFORM_COPY_TASK_FILES,
+                    serialize(fluxdown_protocol::PlatformCopyTaskFilesParams { task_ids })?,
                 ),
                 DownloadsCommand::RescanFiles => (method::DAEMON_TASK_RESCAN, json!({})),
                 DownloadsCommand::SubmitTorrentFile {
@@ -379,6 +640,42 @@ mod tests {
     use serde_json::json;
 
     use super::torrent_file_params;
+
+    #[tokio::test]
+    async fn new_import_waits_while_paused_and_stale_resume_cannot_reopen_gate() {
+        let gate = super::SubmissionGate::default();
+        gate.set_ready(true);
+        let first = gate.pause();
+        let admission = gate.admit();
+        tokio::pin!(admission);
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        let latest = gate.pause();
+        gate.resume(first);
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        gate.resume(latest);
+        let guard = admission.await.expect("resumed admission");
+        drop(guard);
+        gate.set_ready(false);
+        let admission = gate.admit();
+        tokio::pin!(admission);
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        gate.set_ready(true);
+        drop(admission.await.expect("reconnected admission"));
+    }
+
+    #[tokio::test]
+    async fn global_controls_keep_call_order_even_when_polled_in_reverse() {
+        let gate = super::SubmissionGate::default();
+        let (first, first_done) = gate.control_turn();
+        let (second, second_done) = gate.control_turn();
+        assert!(first.is_none());
+        let second = second.expect("prior control");
+        tokio::pin!(second);
+        assert!(futures_util::poll!(&mut second).is_pending());
+        first_done.send(()).expect("second control remains queued");
+        second.await.expect("first control completed");
+        second_done.send(()).expect("gate retains control tail");
+    }
 
     #[test]
     fn user_initiated_torrent_carries_form_options() {

@@ -24,11 +24,17 @@ import {
   useDaemonValue,
   useDaemonBool,
   usePrefBoolean,
+  usePrefRaw,
+  setPref,
   useSettingsReadOnly,
 } from '../../kit'
+import { SAVE_DIR_HISTORY_ENABLED_PREF, SAVE_DIR_HISTORY_PREF, readSaveDirHistory } from '../../../../lib/saveDirHistory'
 import { RateLimitRow } from './RateLimitField'
 import { DirPickerDialog } from './DirPickerDialog'
 import { UserAgentRow } from './UserAgentField'
+import { AutoCountRow } from './AutoCountRow'
+import { RetentionRow } from './RetentionRow'
+import { CategoriesGroup } from './CategoriesGroup'
 
 const NO_QUEUES: readonly QueueDto[] = []
 const selectQueues = (daemon: { queues: readonly QueueDto[] }) => daemon.queues
@@ -37,6 +43,7 @@ const DEFAULT_QUEUE = '__default__'
 
 export function DownloadSettings() {
   const t = useT()
+  const readOnly = useSettingsReadOnly()
   return (
     <SettingsPage title={t('settingsCatDownload')} description={t('settingsCatDownloadDesc')}>
       <SaveLocationSection />
@@ -46,6 +53,7 @@ export function DownloadSettings() {
       <SettingsSection title={t('settingsGroupAdvanced')}>
         <UserAgentRow />
       </SettingsSection>
+      <CategoriesGroup disabled={readOnly} />
     </SettingsPage>
   )
 }
@@ -67,7 +75,23 @@ function SaveLocationSection() {
       </SettingsRow>
       <DirPickerDialog open={picking} onOpenChange={setPicking} initialPath={dir} onPick={(path) => setDaemon('default_save_dir', path)} />
       <PrefSwitchRow prefKey="download.remember_last_save_dir" fallback={false} titleKey="rememberLastSaveDir" descKey="rememberLastSaveDirDesc" />
+      <PrefSwitchRow prefKey={SAVE_DIR_HISTORY_ENABLED_PREF} fallback titleKey="saveDirHistory" descKey="saveDirHistoryDesc" />
+      <ClearSaveDirHistoryRow />
     </SettingsSection>
+  )
+}
+
+/** 清空新建下载的保存目录历史（设备本地偏好，写 null 移除）；没有记录时按钮置灰。 */
+function ClearSaveDirHistoryRow() {
+  const t = useT()
+  const readOnly = useSettingsReadOnly()
+  const empty = readSaveDirHistory(usePrefRaw(SAVE_DIR_HISTORY_PREF)).length === 0
+  return (
+    <SettingsRow title={t('clearSaveDirHistory')} description={optionalText(t, 'clearSaveDirHistoryDesc')}>
+      <Button variant="outline" className="shrink-0" disabled={readOnly || empty} onClick={() => setPref(SAVE_DIR_HISTORY_PREF, null)}>
+        {t('clearSaveDirHistoryAction')}
+      </Button>
+    </SettingsRow>
   )
 }
 
@@ -108,6 +132,7 @@ function BehaviorSection() {
       <DaemonSwitchRow configKey="use_server_time" titleKey="useServerTime" descKey="useServerTimeDesc" />
       <DaemonEnumRow configKey="file_exists_behavior" titleKey="fileExistsBehavior" descKey="fileExistsBehaviorDesc" labelPrefix="fileExists" />
       <DaemonEnumRow configKey="file_missing_action" titleKey="fileMissingAction" descKey="fileMissingActionDesc" labelPrefix="fileMissing" />
+      <RetentionRow />
       <DaemonSwitchRow configKey="idle_file_scan" titleKey="idleFileScan" descKey="idleFileScanDesc" />
       <DefaultQueueRow />
     </SettingsSection>
@@ -161,15 +186,16 @@ function ConnectionSection() {
   const cdnMulti = useDaemonBool('cdn_multi_enabled')
   return (
     <SettingsSection title={t('settingsGroupConnection')}>
-      <DaemonNumberRow
+      <AutoCountRow
         configKey="default_segments"
+        customDefault={16}
         titleKey="defaultThreads"
         descKey="defaultThreadsDesc"
         footer={(segments) => <ThreadsRiskCallout segments={segments} contentClassName="pb-3" />}
       />
       {autoSegments ? <DaemonNumberRow configKey="auto_max_connections" titleKey="autoMaxConnections" descKey="autoMaxConnectionsDesc" /> : null}
       <DaemonSwitchRow configKey="cdn_multi_enabled" titleKey="cdnMultiEnabled" descKey="cdnMultiEnabledDesc" />
-      {cdnMulti ? <DaemonNumberRow configKey="cdn_max_nodes" titleKey="cdnMaxNodes" descKey="cdnMaxNodesDesc" /> : null}
+      {cdnMulti ? <AutoCountRow configKey="cdn_max_nodes" customDefault={2} titleKey="cdnMaxNodes" descKey="cdnMaxNodesDesc" /> : null}
       <MultiNicRow />
       <ConnPolicyRow />
       <DaemonNumberRow configKey="max_concurrent_tasks" titleKey="maxConcurrent" descKey="maxConcurrentDesc" />

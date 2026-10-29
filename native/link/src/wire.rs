@@ -70,12 +70,26 @@ pub async fn classify_failure(resp: reqwest::Response) -> LinkError {
     classify_status_body(status, location.as_deref(), &body)
 }
 
+/// 对端 401 响应里的诊断：`{"reason":"notPaired"|"clockSkew"|"unauthorized","serverTime":秒}`。
+/// 响应本身未经认证，只用来在日志里留下线索，并让发起方给出「两台设备时间相差过大」的准确
+/// 提示（[`LinkError::ClockSkew`]）；**不得**据此改变任何持久化状态。返回 `reason`。
+fn log_auth_rejection(body: &[u8]) -> Option<String> {
+    let json = serde_json::from_slice::<Value>(body).ok()?;
+    let reason = json.get("reason").and_then(Value::as_str)?;
+    let server_time = json.get("serverTime").and_then(Value::as_i64);
+    tracing::warn!(reason, server_time, "the peer rejected the link request");
+    Some(reason.to_owned())
+}
+
 fn classify_status_body(
     status: reqwest::StatusCode,
     location: Option<&str>,
     body: &[u8],
 ) -> LinkError {
     if let Some(message) = fluxdown_error_message(body) {
+        if status.as_u16() == 401 && log_auth_rejection(body).as_deref() == Some("clockSkew") {
+            return LinkError::ClockSkew;
+        }
         return LinkError::from_wire_message(&message).unwrap_or_else(|| match status.as_u16() {
             400 => LinkError::BadPayload(message),
             401 => LinkError::Unauthorized,
@@ -182,5 +196,27 @@ mod tests {
             classify_status_body(StatusCode::BAD_REQUEST, None, body),
             LinkError::BadPayload(_)
         ));
+    }
+
+    #[test]
+    fn peer_401_reasons_are_diagnostics_except_clock_skew() {
+        // reason / serverTime 只作诊断：发起方不会据此推断「对端已解除配对」之类的持久化结论；
+        // 唯一例外是时钟偏差——它是临时的、可由用户修正的，要给出准确提示。
+        for (reason, skew) in [
+            ("notPaired", false),
+            ("clockSkew", true),
+            ("unauthorized", false),
+        ] {
+            let body = serde_json::json!({
+                "success": false,
+                "message": "unauthorized",
+                "reason": reason,
+                "serverTime": 1_700_000_000,
+            })
+            .to_string();
+            let error = classify_status_body(StatusCode::UNAUTHORIZED, None, body.as_bytes());
+            assert_eq!(matches!(error, LinkError::ClockSkew), skew, "{reason}");
+            assert_eq!(matches!(error, LinkError::Unauthorized), !skew, "{reason}");
+        }
     }
 }

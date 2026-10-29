@@ -25,6 +25,12 @@ export interface TaskChangeUrlParams {
   url: string;
 }
 
+/** `daemon.task.setSegments`：`segments <= 0` = 自动，上限 `MAX_TASK_SEGMENTS`（512）。 */
+export interface TaskSetSegmentsParams {
+  taskId: string;
+  segments: number;
+}
+
 export interface TaskDeleteParams {
   taskId: string;
   /** 同时删除磁盘文件，缺省 false。 */
@@ -162,6 +168,12 @@ export interface PluginIdentityParams {
 export interface PluginSetEnabledParams {
   identity: string;
   enabled: boolean;
+}
+
+/** `daemon.plugin.setSiteDefault` 参数；`identity` 为 null = 移除条目（下次下载重新询问）。 */
+export interface PluginSetSiteDefaultParams {
+  site: string;
+  identity: string | null;
 }
 
 export interface PluginUpdateSettingsParams {
@@ -396,6 +408,11 @@ export interface LinkDiscoveryParams {
   enabled: boolean;
 }
 
+/** `agent.link.stopPairing`：带 `code` 时仅当它仍是当前配对码才作废（多客户端互不干扰）。 */
+export interface LinkStopPairingParams {
+  code?: string;
+}
+
 /** 接受 `host`、`host:port`、`http(s)://host[:port][/base]`。 */
 export interface LinkAddressParams {
   address: string;
@@ -404,6 +421,8 @@ export interface LinkAddressParams {
 export interface LinkPairBeginParams {
   address: string;
   code: string;
+  /** 请求「完全控制」对端；对端批准后其会签发设备控制凭据。 */
+  requestControl?: boolean;
 }
 
 export interface LinkPairFinishParams {
@@ -418,6 +437,12 @@ export interface LinkApproveParams {
 
 export interface LinkDeviceParams {
   fingerprint: string;
+}
+
+export interface LinkRenameParams {
+  fingerprint: string;
+  /** 省略 / 空白 = 清除备注名。 */
+  name?: string;
 }
 
 export interface LinkDispatchParams {

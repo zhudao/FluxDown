@@ -12,10 +12,9 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
     case analytics, linkHandling
     case sidebarStatus, sidebarQueues, sidebarCategory
     case activityRss, activityWebhooks, activityTheme
-    case categories
 
     nonisolated enum Group: CaseIterable {
-        case background, system, downloadsView, entries, categories
+        case background, system, downloadsView, entries
 
         var titleKey: String {
             switch self {
@@ -23,7 +22,6 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
             case .system: "settingsGroupSystem"
             case .downloadsView: "mobileGeneralGroupDownloadsView"
             case .entries: "mobileGeneralGroupEntries"
-            case .categories: "customCategories"
             }
         }
     }
@@ -36,7 +34,6 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
         case .analytics, .linkHandling: .system
         case .sidebarStatus, .sidebarQueues, .sidebarCategory: .downloadsView
         case .activityRss, .activityWebhooks, .activityTheme: .entries
-        case .categories: .categories
         }
     }
 
@@ -52,7 +49,6 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
         case .activityRss: "showActivityRss"
         case .activityWebhooks: "showActivityWebhooks"
         case .activityTheme: "showActivityTheme"
-        case .categories: "customCategories"
         }
     }
 
@@ -63,7 +59,6 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
         case .analytics: "analyticsEnabledDesc"
         case .linkHandling: "mobileGeneralLinkHandlingDesc"
         case .sidebarCategory: "showSidebarCategoryNestedDesc"
-        case .categories: "categoryPriorityDragNote"
         case .sidebarStatus, .sidebarQueues, .activityRss, .activityWebhooks, .activityTheme: nil
         }
     }
@@ -79,7 +74,7 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
         case .activityRss: "ui.show_activity_rss"
         case .activityWebhooks: "ui.show_activity_webhooks"
         case .activityTheme: "ui.show_activity_theme"
-        case .bgContinue, .linkHandling, .categories: nil
+        case .bgContinue, .linkHandling: nil
         }
     }
 
@@ -96,7 +91,6 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
         case .linkHandling: "link"
         case .sidebarStatus, .sidebarQueues, .sidebarCategory: "sidebar.left"
         case .activityRss, .activityWebhooks, .activityTheme: "square.grid.2x2.fill"
-        case .categories: "folder.fill"
         }
     }
 
@@ -104,8 +98,18 @@ nonisolated enum GeneralRow: String, CaseIterable, Identifiable {
     static var entriesRows: [GeneralRow] {
         FeatureFlags.webhooks ? [.activityRss, .activityWebhooks, .activityTheme] : [.activityRss, .activityTheme]
     }
+
+    /// 本构建是否提供该行（store 构建没有 magnet / ed2k / .torrent 打开方式声明，不展示「链接与文件」）。
+    var isAvailable: Bool {
+        #if FULL_FLAVOR
+        return true
+        #else
+        return self != .linkHandling
+        #endif
+    }
 }
 
+#if FULL_FLAVOR
 // MARK: - 链接与文件打开方式
 
 /// iOS 的打开方式是 Info.plist 的静态声明（无法检测是否被其它 App 抢占）；这里只如实读取本 App 的声明。
@@ -173,6 +177,7 @@ enum GeneralLinkHandling {
         }
     }
 }
+#endif
 
 // MARK: - 分类图标
 
@@ -222,11 +227,14 @@ enum GeneralCategoryText {
         return entry.name
     }
 
-    /// 详情行：`.ext, .ext` 或 `正则表达式: pattern`；无规则（全部 / 其他）为 nil。
+    /// 详情行：`.ext, .ext` / `正则表达式: pattern` / `网址模式: pattern`；无规则（全部 / 其他）为 nil。
     static func detail(_ entry: CustomCategoryDto) -> String? {
         guard entry.hasMatchRules else { return nil }
         if entry.isRegex {
             return entry.regexPattern.isEmpty ? nil : "\(L("regexLabel")): \(entry.regexPattern)"
+        }
+        if entry.isUrl {
+            return entry.urlPattern.isEmpty ? nil : "\(L("urlPatternLabel")): \(entry.urlPattern)"
         }
         return entry.extensions.isEmpty ? nil : entry.extensions.map { ".\($0)" }.joined(separator: ", ")
     }

@@ -4,7 +4,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use fluxdown_protocol::{CreateTaskRequest, MAX_TASK_SEGMENTS};
+use fluxdown_protocol::{
+    CreateTaskItem, CreateTaskRequest, MAX_TASK_SEGMENTS, capture_link::is_share_link,
+};
+
+use super::aria2c::{RequestHints, join_continuations, parse_command};
 
 /// 一条解析出的下载条目（aria2 风格：URL + 可选 `out=` / `checksum=` 选项行）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -45,8 +49,8 @@ pub(crate) fn capture_entry(url: &str, file_name: &str) -> UrlEntry {
     }
 }
 
-/// 百分号解码为 UTF-8；解码结果不是合法 UTF-8 时返回 `None`。非法 `%` 序列按字面保留。
-pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
+/// 百分号解码为字节；非法 `%` 序列按字面保留。
+fn percent_decode_bytes(text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -63,11 +67,21 @@ pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
             i += 1;
         }
     }
-    String::from_utf8(out).ok()
+    out
+}
+
+/// 百分号解码为 UTF-8；解码结果不是合法 UTF-8 时返回 `None`。非法 `%` 序列按字面保留。
+pub(crate) fn percent_decode_utf8(text: &str) -> Option<String> {
+    String::from_utf8(percent_decode_bytes(text)).ok()
+}
+
+/// 百分号解码为 UTF-8，非法字节以 U+FFFD 替换（与 agent 分类目录解析的 URL 末段解码一致）。
+pub(crate) fn percent_decode_lossy(text: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_bytes(text)).into_owned()
 }
 
 /// `scheme://host/a/b.zip?x#y` → `b.zip`；无路径或以 `/` 结尾时为 `None`。
-fn url_file_segment(url: &str) -> Option<&str> {
+pub(crate) fn url_file_segment(url: &str) -> Option<&str> {
     let rest = &url[url.find("://")? + 3..];
     let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
     let path = &rest[rest.find('/')?..];
@@ -78,16 +92,48 @@ fn url_file_segment(url: &str) -> Option<&str> {
 
 /// 解析多行文本为下载条目。
 ///
-/// - 原始行以空格 / Tab 开头 = 选项行，附着到上一条（`out=` / `checksum=`）；
+/// - 原始行以空格 / Tab 开头且不以链接开头 = 选项行，附着到上一条（`out=` / `checksum=`）；
+///   以链接开头的缩进行（从网页 / 聊天复制常带前导空白）按普通行解析；
+/// - 零宽字符与 BOM（U+200B/C/D、U+2060、U+FEFF）先整体剔除，它们不可见且不属于链接；
 /// - `#` 开头为注释，空行跳过；
 /// - 含 `magnet:?` / `ed2k://` 时从该位置截取到行尾；
-/// - 其余行：`loose` 为 true 时取行内首个 `http(s)/ftp` 链接并去掉尾部标点
-///   （TXT 导入），否则要求链接位于行首（手动输入）。
+/// - 其余行：`loose` 为 true 时取行内首个 `http(s)/ftp/thunder` 链接并去掉尾部标点
+///   （TXT 导入），否则要求链接位于行首（手动输入）。`thunder://` 原样保留，由引擎
+///   建任务时解出真实地址（#696）。
+/// - 行首为 `aria2c` 的命令（可带路径 / 引号，续行已合并）提取其中的链接与 `-o` /
+///   `--checksum`（#299，见 [`crate::model::aria2c`]）；不是 aria2c 的行不受影响。
 pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
+    parse_input(text, loose, 0).entries
+}
+
+/// [`parse_entries`] 的完整结果：条目 + 首条 aria2c 命令带出的请求信息 + FluxMesh分享链接 / 取件码。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ParsedInput {
+    pub(crate) entries: Vec<UrlEntry>,
+    /// 第一条产出了条目的 aria2c 命令的头部信息（其余命令的不采用）；没有时为空。
+    pub(crate) hints: RequestHints,
+    /// FluxMesh分享链接（`fluxdown://share/<slug>`、官网 `/s/<slug>`）与取件码（去掉空白 / `-`
+    /// 后的纯数字串，见 [`pickup_code_in_line`]），按出现顺序去重。
+    /// 它们不是下载链接：不进 `entries`，由对话框交给接收确认流程。
+    pub(crate) share_links: Vec<String>,
+}
+
+/// 解析规则见 [`parse_entries`]。行首为 `aria2c` 的命令（先合并其续行）按 shell 规则切词，
+/// 提取链接 / `-o` / `--checksum`（#299，详见 [`crate::model::aria2c`]），头部信息随结果
+/// 返回；其余行的行为不变。`pickup_code_length` = 云端取件码位数（0 视为默认 6 位）：整行去掉
+/// 空白与 `-` 后恰为该位数的纯数字时按取件码归入 `share_links`。
+pub(crate) fn parse_input(text: &str, loose: bool, pickup_code_length: u8) -> ParsedInput {
+    let visible = strip_invisible(text);
+    let text = join_continuations(&visible);
     let mut entries = Vec::new();
+    let mut share_links: Vec<String> = Vec::new();
+    let mut hints: Option<RequestHints> = None;
     let mut current: Option<UrlEntry> = None;
     for line in text.split('\n') {
-        if line.starts_with(' ') || line.starts_with('\t') {
+        if (line.starts_with(' ') || line.starts_with('\t'))
+            && !starts_with_link(line.trim())
+            && pickup_code_in_line(line.trim(), pickup_code_length).is_none()
+        {
             let Some(entry) = current.as_mut() else {
                 continue;
             };
@@ -106,13 +152,34 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
         if let Some(entry) = current.take() {
             entries.push(entry);
         }
+        if let Some(link) = share_link_in_line(trimmed, loose) {
+            if !share_links.iter().any(|known| known == link) {
+                share_links.push(link.to_owned());
+            }
+            continue;
+        }
+        if let Some(code) = pickup_code_in_line(trimmed, pickup_code_length) {
+            if !share_links.contains(&code) {
+                share_links.push(code);
+            }
+            continue;
+        }
+        if let Some(command) = parse_command(trimmed) {
+            let mut produced = command.entries;
+            if !produced.is_empty() && hints.is_none() {
+                hints = Some(command.hints);
+            }
+            current = produced.pop();
+            entries.extend(produced);
+            continue;
+        }
         let lower = trimmed.to_ascii_lowercase();
         if let Some(index) = lower.find("magnet:?") {
             current = Some(UrlEntry::with_url(&trimmed[index..]));
         } else if let Some(index) = lower.find("ed2k://") {
             current = Some(UrlEntry::with_url(&trimmed[index..]));
         } else if loose {
-            if let Some(url) = find_http_url(trimmed) {
+            if let Some(url) = find_url(trimmed) {
                 let url = trim_url_tail(url);
                 if !url.is_empty() {
                     current = Some(UrlEntry::with_url(url));
@@ -125,12 +192,105 @@ pub(crate) fn parse_entries(text: &str, loose: bool) -> Vec<UrlEntry> {
     if let Some(entry) = current {
         entries.push(entry);
     }
-    entries
+    ParsedInput {
+        entries,
+        hints: hints.unwrap_or_default(),
+        share_links,
+    }
 }
 
-/// `^(https?|ftp)://\S+`（忽略大小写）。
-fn leading_http_url(text: &str) -> Option<&str> {
-    let scheme = ["https://", "http://", "ftp://"]
+/// 默认取件码位数（云端未下发时）。
+const DEFAULT_PICKUP_CODE_LENGTH: usize = 6;
+
+/// 取件码：整行去掉空白与 `-` 后恰为 `length` 位 ASCII 数字（0 = 默认 6 位）。返回去分隔后的
+/// 数字串（接收窗口认的 wire 值）。夹杂其他字符（含全角数字、附注）的行不是取件码。
+pub(crate) fn pickup_code_in_line(line: &str, length: u8) -> Option<String> {
+    let want = if length == 0 {
+        DEFAULT_PICKUP_CODE_LENGTH
+    } else {
+        usize::from(length)
+    };
+    let mut code = String::with_capacity(want);
+    for c in line.chars() {
+        if c.is_whitespace() || c == '-' {
+            continue;
+        }
+        if !c.is_ascii_digit() || code.len() == want {
+            return None;
+        }
+        code.push(c);
+    }
+    (code.len() == want).then_some(code)
+}
+
+/// 分享项是取件码（纯数字）而不是分享链接。
+pub(crate) fn is_pickup_code(share_item: &str) -> bool {
+    !share_item.is_empty() && share_item.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// 行里的FluxMesh分享链接。手动输入只认行首的词（后面的内容是附注，与普通链接一致）；
+/// 宽松模式（TXT 导入）还接受行内任意位置并去掉末尾标点。
+fn share_link_in_line(line: &str, loose: bool) -> Option<&str> {
+    let first = line.split_whitespace().next()?;
+    if is_share_link(first) {
+        return Some(first);
+    }
+    if !loose {
+        return None;
+    }
+    let lower = line.to_ascii_lowercase();
+    let deep_link = lower
+        .find("fluxdown://share/")
+        .and_then(|index| line.get(index..)?.split_whitespace().next());
+    [deep_link, find_url(line)]
+        .into_iter()
+        .flatten()
+        .map(trim_url_tail)
+        .find(|candidate| is_share_link(candidate))
+}
+
+/// 对话框里分享链接的提示类别（见 [`share_note`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShareNote {
+    /// 只有一条分享链接：提交 = 打开接收确认。
+    Link,
+    /// 只有一个取件码：提交 = 打开接收确认。
+    Code,
+    /// 分享链接 / 取件码与普通链接混合：分享项打开接收确认，其余照常下载。
+    Mixed,
+    /// 多条分享链接 / 取件码：接收确认一次只处理一条，从第一条开始。
+    Multiple(usize),
+}
+
+/// `entries` 条普通链接、`pending` 条尚未交给接收流程的分享项（其中 `pending_codes` 个是取件码，
+/// 其余是分享链接）时应显示的提示。
+pub(crate) fn share_note(
+    entries: usize,
+    pending: usize,
+    pending_codes: usize,
+) -> Option<ShareNote> {
+    match (entries, pending) {
+        (_, 0) => None,
+        (0, 1) if pending_codes > 0 => Some(ShareNote::Code),
+        (0, 1) => Some(ShareNote::Link),
+        (_, 1) => Some(ShareNote::Mixed),
+        (_, count) => Some(ShareNote::Multiple(count)),
+    }
+}
+
+/// 剔除零宽字符与 BOM；无此类字符时不分配。
+fn strip_invisible(text: &str) -> std::borrow::Cow<'_, str> {
+    const INVISIBLE: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+    if text.contains(INVISIBLE) {
+        std::borrow::Cow::Owned(text.replace(INVISIBLE, ""))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// `^(https?|ftp|thunder)://\S+`（忽略大小写）。
+fn leading_url(text: &str) -> Option<&str> {
+    let scheme = ["https://", "http://", "ftp://", "thunder://"]
         .into_iter()
         .find(|scheme| {
             text.len() >= scheme.len()
@@ -145,7 +305,7 @@ fn leading_http_url(text: &str) -> Option<&str> {
 /// 照常请求，服务器据此命名，#131），所以链接已进入查询串时延伸到行尾或下一个链接
 /// 之前；没有查询串时空白之后的内容仍视为附注丢弃。
 fn leading_manual_url(text: &str) -> Option<&str> {
-    let head = leading_http_url(text)?;
+    let head = leading_url(text)?;
     if !head.contains('?') || head.len() == text.len() {
         return Some(head);
     }
@@ -159,20 +319,29 @@ fn leading_manual_url(text: &str) -> Option<&str> {
     Some(text[..end].trim_end())
 }
 
-/// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `magnet:?` / `ed2k://`，忽略大小写）。
-fn starts_with_link(text: &str) -> bool {
-    ["https://", "http://", "ftp://", "magnet:?", "ed2k://"]
-        .into_iter()
-        .any(|scheme| {
-            text.len() >= scheme.len()
-                && text.as_bytes()[..scheme.len()].eq_ignore_ascii_case(scheme.as_bytes())
-        })
+/// 是否以可建任务的链接开头（`http(s)://` / `ftp://` / `thunder://` / `magnet:?` /
+/// `ed2k://`，以及FluxMesh `fluxdown://share/` 深链，忽略大小写）。
+pub(super) fn starts_with_link(text: &str) -> bool {
+    [
+        "https://",
+        "http://",
+        "ftp://",
+        "thunder://",
+        "magnet:?",
+        "ed2k://",
+        "fluxdown://share/",
+    ]
+    .into_iter()
+    .any(|scheme| {
+        text.len() >= scheme.len()
+            && text.as_bytes()[..scheme.len()].eq_ignore_ascii_case(scheme.as_bytes())
+    })
 }
 
-/// 行内首个 `(https?|ftp)://\S+` 匹配（忽略大小写）。
-fn find_http_url(line: &str) -> Option<&str> {
+/// 行内首个 `(https?|ftp|thunder)://\S+` 匹配（忽略大小写）。
+fn find_url(line: &str) -> Option<&str> {
     line.char_indices()
-        .find_map(|(index, _)| leading_http_url(&line[index..]))
+        .find_map(|(index, _)| leading_url(&line[index..]))
 }
 
 /// 去掉 URL 末尾常见标点（TXT 文本中 URL 后可能跟随句号 / 逗号等）。
@@ -194,27 +363,8 @@ pub(crate) fn entry_to_text(entry: &UrlEntry) -> String {
     text
 }
 
-/// 把导入条目追加到现有文本：按 URL 去重（保留已有条目），返回新的文本框内容。
-pub(crate) fn merge_imported(existing_text: &str, imported: Vec<UrlEntry>) -> String {
-    let mut merged = parse_entries(existing_text, false);
-    let mut seen = merged
-        .iter()
-        .map(|entry| entry.url.clone())
-        .collect::<HashSet<_>>();
-    merged.extend(
-        imported
-            .into_iter()
-            .filter(|entry| seen.insert(entry.url.clone())),
-    );
-    merged
-        .iter()
-        .map(entry_to_text)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// 把条目追加到现有文本末尾：原文逐字保留（含注释 / 尚未输完的行），已存在的 URL
-/// 跳过。用于外部捕获陆续进入正在编辑的表单。
+/// 把条目追加到现有文本末尾：原文逐字保留（含注释 / 尚未输完的行 / aria2c 命令），已存在
+/// 的 URL 跳过。用于外部捕获与 TXT 导入陆续进入正在编辑的表单。
 pub(crate) fn append_entries(
     existing_text: &str,
     entries: impl IntoIterator<Item = UrlEntry>,
@@ -436,60 +586,99 @@ pub(crate) struct DraftOptions {
     pub(crate) save_site_auth: bool,
 }
 
-/// 每条条目一个 [`CreateTaskRequest`]，共享字段来自 [`DraftOptions`]。
+/// 一次提交的建任务请求：整批共享的 `common`（`url` / `fileName` / `checksum` 为空）+
+/// 逐条链接。共享选项只存一份，不随条目复制。
+#[derive(Clone, Debug)]
+pub(crate) struct BuiltRequests {
+    pub(crate) common: CreateTaskRequest,
+    pub(crate) items: Vec<CreateTaskItem>,
+}
+
+impl BuiltRequests {
+    /// 条目还原成完整的单条请求（单条预解析 / 外部捕获确认需要完整请求）。
+    pub(crate) fn request_for(&self, item: &CreateTaskItem) -> CreateTaskRequest {
+        compose_request(&self.common, item.clone())
+    }
+
+    /// 把一条完整请求拆回「共享选项 + 单条」（预解析后沿普通任务路径提交）。
+    pub(crate) fn from_single(mut request: CreateTaskRequest) -> Self {
+        let item = CreateTaskItem {
+            url: std::mem::take(&mut request.url),
+            file_name: std::mem::take(&mut request.file_name),
+            checksum: std::mem::take(&mut request.checksum),
+        };
+        Self {
+            common: request,
+            items: vec![item],
+        }
+    }
+}
+
+/// 共享选项 + 一条链接 → 完整请求。
+pub(crate) fn compose_request(
+    common: &CreateTaskRequest,
+    item: CreateTaskItem,
+) -> CreateTaskRequest {
+    let mut request = common.clone();
+    request.url = item.url;
+    request.file_name = item.file_name;
+    request.checksum = item.checksum;
+    request
+}
+
+/// 每条条目一个 [`CreateTaskItem`]，共享字段来自 [`DraftOptions`]。
 ///
 /// 单条时重命名优先于 `out=`、高级面板校验值优先于
 /// `checksum=`、附带 HTTP 认证；多条时仅使用条目自带的文件名 / 校验值。
-pub(crate) fn build_requests(
-    entries: &[UrlEntry],
-    options: &DraftOptions,
-) -> Vec<CreateTaskRequest> {
+pub(crate) fn build_requests(entries: &[UrlEntry], options: &DraftOptions) -> BuiltRequests {
     let single = entries.len() == 1;
-    entries
+    let items = entries
         .iter()
-        .map(|entry| {
-            let file_name = if single && !options.rename.is_empty() {
+        .map(|entry| CreateTaskItem {
+            url: entry.url.clone(),
+            file_name: if single && !options.rename.is_empty() {
                 options.rename.clone()
             } else {
                 entry.file_name.clone()
-            };
-            let checksum = if single && !options.checksum.is_empty() {
+            },
+            checksum: if single && !options.checksum.is_empty() {
                 options.checksum.clone()
             } else {
                 entry.checksum.clone()
-            };
-            CreateTaskRequest {
-                url: entry.url.clone(),
-                file_name,
-                save_dir: options.save_dir.clone(),
-                segments: options.segments,
-                cookies: options.cookies.clone(),
-                referrer: String::new(),
-                proxy_url: options.proxy_url.clone(),
-                user_agent: options.user_agent.clone(),
-                queue_id: options.queue_id.clone(),
-                checksum,
-                ignore_tls_errors: options.ignore_tls_errors,
-                headers: (!options.headers.is_empty()).then(|| options.headers.clone()),
-                torrent_b64: None,
-                method: None,
-                body: None,
-                audio_url: None,
-                start_paused: options.start_paused,
-                http_user: if single {
-                    options.http_user.clone()
-                } else {
-                    String::new()
-                },
-                http_password: if single {
-                    options.http_password.clone()
-                } else {
-                    String::new()
-                },
-                save_site_auth: single && options.save_site_auth,
-            }
+            },
         })
-        .collect()
+        .collect();
+    let common = CreateTaskRequest {
+        url: String::new(),
+        file_name: String::new(),
+        save_dir: options.save_dir.clone(),
+        segments: options.segments,
+        cookies: options.cookies.clone(),
+        referrer: String::new(),
+        proxy_url: options.proxy_url.clone(),
+        user_agent: options.user_agent.clone(),
+        queue_id: options.queue_id.clone(),
+        checksum: String::new(),
+        ignore_tls_errors: options.ignore_tls_errors,
+        headers: (!options.headers.is_empty()).then(|| options.headers.clone()),
+        torrent_b64: None,
+        method: None,
+        body: None,
+        audio_url: None,
+        start_paused: options.start_paused,
+        http_user: if single {
+            options.http_user.clone()
+        } else {
+            String::new()
+        },
+        http_password: if single {
+            options.http_password.clone()
+        } else {
+            String::new()
+        },
+        save_site_auth: single && options.save_site_auth,
+    };
+    BuiltRequests { common, items }
 }
 
 #[cfg(test)]
@@ -497,9 +686,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use super::{
-        DraftOptions, ProxyChoice, ThreadChoice, UrlEntry, append_entries, build_requests,
-        capture_entry, checksum_spec, custom_segments, detect_ua_preset, manual_proxy_url,
-        merge_imported, parse_entries,
+        DraftOptions, ProxyChoice, ShareNote, ThreadChoice, UrlEntry, append_entries,
+        build_requests, capture_entry, checksum_spec, custom_segments, detect_ua_preset,
+        is_pickup_code, manual_proxy_url, parse_entries, parse_input, share_note,
     };
 
     #[test]
@@ -615,9 +804,76 @@ mod tests {
         assert_eq!(entries[0].url, "https://a.example/x.zip");
     }
 
+    /// #696：`thunder://` 迅雷链接与 http(s)/ftp 同等识别（解封装由引擎建任务时完成）。
     #[test]
-    fn merge_imported_dedupes_by_url_and_keeps_option_lines() {
-        let merged = merge_imported(
+    fn parse_accepts_thunder_links() {
+        let strict = parse_entries(
+            "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=\n  out=c.zip\nTHUNDER://QUFodHRwOi8vYS5iL2QuemlwWlo= 迅雷\nhttps://a.example/x?q=1 2 thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=",
+            false,
+        );
+        assert_eq!(
+            strict,
+            vec![
+                UrlEntry {
+                    url: "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=".to_owned(),
+                    file_name: "c.zip".to_owned(),
+                    ..UrlEntry::default()
+                },
+                UrlEntry {
+                    url: "THUNDER://QUFodHRwOi8vYS5iL2QuemlwWlo=".to_owned(),
+                    ..UrlEntry::default()
+                },
+                UrlEntry {
+                    url: "https://a.example/x?q=1 2".to_owned(),
+                    ..UrlEntry::default()
+                },
+            ]
+        );
+        let loose = parse_entries("迅雷：thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=.\n", true);
+        assert_eq!(loose.len(), 1);
+        assert_eq!(loose[0].url, "thunder://QUFodHRwOi8vYS5iL2MuemlwWlo=");
+    }
+
+    /// 从网页 / 聊天复制的链接常带前导空白或零宽字符 / BOM：仍识别为链接，选项行语义不变。
+    #[test]
+    fn parse_tolerates_leading_whitespace_and_invisible_chars() {
+        let url = "https://a.example/x.exe";
+        for text in [
+            format!(" {url}"),
+            format!("\t{url}"),
+            format!("\u{200B}{url}"),
+            format!("\u{FEFF}{url}"),
+            format!("  \u{2060}{url}\u{200D}"),
+        ] {
+            let entries = parse_entries(&text, false);
+            assert_eq!(entries.len(), 1, "{text:?}");
+            assert_eq!(entries[0].url, url, "{text:?}");
+        }
+        let entries = parse_entries(
+            "https://a.example/a\n  out=a.bin\n  https://a.example/b\n\tchecksum=md5=ff",
+            false,
+        );
+        assert_eq!(
+            entries,
+            vec![
+                UrlEntry {
+                    url: "https://a.example/a".to_owned(),
+                    file_name: "a.bin".to_owned(),
+                    ..UrlEntry::default()
+                },
+                UrlEntry {
+                    url: "https://a.example/b".to_owned(),
+                    checksum: "md5=ff".to_owned(),
+                    ..UrlEntry::default()
+                },
+            ]
+        );
+        assert!(parse_entries("  out=orphan.bin", false).is_empty());
+    }
+
+    #[test]
+    fn import_appends_by_url_and_keeps_option_lines() {
+        let merged = append_entries(
             "https://a.example/x\n  out=x.bin",
             vec![
                 UrlEntry {
@@ -636,6 +892,32 @@ mod tests {
             merged,
             "https://a.example/x\n  out=x.bin\nhttps://b.example/y\n  checksum=md5=ff"
         );
+    }
+
+    /// TXT 导入不得改写已有文本：aria2c 命令（及其 Cookie 等头部信息）原样保留。
+    #[test]
+    fn import_keeps_existing_aria2c_command_and_its_hints() {
+        let existing = "aria2c -x16 \\\n  --header 'Cookie: sid=abc' \\\n  -o a.zip 'https://a.example/a?t=1&u=2'";
+        let imported = vec![
+            UrlEntry {
+                url: "https://b.example/b.zip".to_owned(),
+                ..UrlEntry::default()
+            },
+            UrlEntry {
+                url: "https://a.example/a?t=1&u=2".to_owned(),
+                ..UrlEntry::default()
+            },
+        ];
+        let text = append_entries(existing, imported);
+        assert_eq!(text, format!("{existing}\nhttps://b.example/b.zip"));
+        let parsed = parse_input(&text, false, 0);
+        assert_eq!(parsed.hints.cookie, "sid=abc");
+        let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://a.example/a?t=1&u=2", "https://b.example/b.zip"]
+        );
+        assert_eq!(parsed.entries[0].file_name, "a.zip");
     }
 
     #[test]
@@ -707,25 +989,33 @@ mod tests {
             checksum: "md5=ff".to_owned(),
         };
         let single = build_requests(std::slice::from_ref(&entry), &options);
-        assert_eq!(single.len(), 1);
-        assert_eq!(single[0].file_name, "renamed.bin");
-        assert_eq!(single[0].checksum, "sha-256=deadbeef");
-        assert_eq!(single[0].http_user, "u");
-        assert!(single[0].save_site_auth);
-        assert!(single[0].start_paused);
-        assert_eq!(single[0].queue_id, "later");
+        assert_eq!(single.items.len(), 1);
+        assert_eq!(single.items[0].file_name, "renamed.bin");
+        assert_eq!(single.items[0].checksum, "sha-256=deadbeef");
+        assert_eq!(single.common.http_user, "u");
+        assert!(single.common.save_site_auth);
+        assert!(single.common.start_paused);
+        assert_eq!(single.common.queue_id, "later");
         assert_eq!(
-            single[0].headers.as_ref().and_then(|h| h.get("X-Test")),
+            single.common.headers.as_ref().and_then(|h| h.get("X-Test")),
             Some(&"1".to_owned())
         );
+        // 共享选项里不带逐条字段，条目还原后才是完整请求。
+        assert!(single.common.url.is_empty());
+        assert!(single.common.file_name.is_empty());
+        assert!(single.common.checksum.is_empty());
+        let full = single.request_for(&single.items[0]);
+        assert_eq!(full.url, "https://a.example/x");
+        assert_eq!(full.file_name, "renamed.bin");
+        assert_eq!(full.checksum, "sha-256=deadbeef");
 
         let batch = build_requests(&[entry.clone(), entry], &options);
-        assert_eq!(batch.len(), 2);
-        assert_eq!(batch[0].file_name, "out.bin");
-        assert_eq!(batch[0].checksum, "md5=ff");
-        assert_eq!(batch[0].http_user, "");
-        assert!(!batch[0].save_site_auth);
-        assert_eq!(batch[0].segments, 8);
+        assert_eq!(batch.items.len(), 2);
+        assert_eq!(batch.items[0].file_name, "out.bin");
+        assert_eq!(batch.items[0].checksum, "md5=ff");
+        assert_eq!(batch.common.http_user, "");
+        assert!(!batch.common.save_site_auth);
+        assert_eq!(batch.common.segments, 8);
     }
 
     #[test]
@@ -737,6 +1027,146 @@ mod tests {
             }],
             &DraftOptions::default(),
         );
-        assert!(requests[0].headers.is_none());
+        assert!(requests.common.headers.is_none());
+    }
+
+    fn share_links(text: &str, loose: bool) -> Vec<String> {
+        parse_input(text, loose, 0).share_links
+    }
+
+    #[test]
+    fn share_links_are_recognised_and_never_become_download_entries() {
+        for link in [
+            "fluxdown://share/abc_DEF-1",
+            "https://fluxdown.com/s/abc",
+            "  https://fluxdown.com/s/abc/?x=1#y  ",
+            "HTTPS://FluxDown.COM/s/abc",
+            "FLUXDOWN://share/abc",
+            "https://fluxdown.zerx.dev/s/abc",
+        ] {
+            let parsed = parse_input(link, false, 0);
+            assert!(parsed.entries.is_empty(), "{link:?}");
+            assert_eq!(parsed.share_links, [link.trim()], "{link:?}");
+        }
+        // 同一主机上的其他路径是普通链接，不是分享。
+        let parsed = parse_input("https://fluxdown.com/download/x.zip", false, 0);
+        assert_eq!(parsed.entries.len(), 1);
+        assert!(parsed.share_links.is_empty());
+        // slug 含非法字符 / 为空：不是分享链接。
+        let parsed = parse_input("https://fluxdown.com/s/a$b", false, 0);
+        assert_eq!(parsed.entries.len(), 1);
+        assert!(parsed.share_links.is_empty());
+        assert!(share_links("fluxdown://share/", false).is_empty());
+    }
+
+    #[test]
+    fn mixed_batches_split_share_links_from_ordinary_entries() {
+        let text = "https://a.example/one.zip\nhttps://fluxdown.com/s/abc\n  out=ignored.bin\nmagnet:?xt=urn:btih:xyz\nfluxdown://share/def\nhttps://fluxdown.com/s/abc";
+        let parsed = parse_input(text, false, 0);
+        let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://a.example/one.zip", "magnet:?xt=urn:btih:xyz"]
+        );
+        // 去重并保持出现顺序；紧跟分享链接的 `out=` 行不附着到前一条普通链接。
+        assert_eq!(
+            parsed.share_links,
+            ["https://fluxdown.com/s/abc", "fluxdown://share/def"]
+        );
+        assert_eq!(parsed.entries[0].file_name, "");
+    }
+
+    #[test]
+    fn indented_share_links_are_links_not_option_lines() {
+        let parsed = parse_input("https://a.example/a\n  fluxdown://share/x\n", false, 0);
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.share_links, ["fluxdown://share/x"]);
+    }
+
+    #[test]
+    fn loose_parse_finds_inline_share_links_and_trims_punctuation() {
+        assert_eq!(
+            share_links(
+                "FluxMesh：fluxdown://share/abc.\nsee https://fluxdown.com/s/xyz). ok",
+                true
+            ),
+            ["fluxdown://share/abc", "https://fluxdown.com/s/xyz"]
+        );
+        // 手动输入只认行首的词。
+        assert!(share_links("see https://fluxdown.com/s/xyz", false).is_empty());
+        assert!(parse_entries("see https://fluxdown.com/s/xyz", false).is_empty());
+    }
+
+    #[test]
+    fn pickup_codes_are_recognised_after_stripping_separators() {
+        for text in ["123456", "123 456", "123-456", "  123456  ", "1-2 3\t4-5 6"] {
+            let parsed = parse_input(text, false, 6);
+            assert!(parsed.entries.is_empty(), "{text:?}");
+            assert_eq!(parsed.share_links, ["123456"], "{text:?}");
+        }
+        // 长度 0（云端未下发）按默认 6 位。
+        assert_eq!(parse_input("123456", false, 0).share_links, ["123456"]);
+        // 云端配置了其他位数时按该位数识别。
+        assert_eq!(parse_input("1234 5678", false, 8).share_links, ["12345678"]);
+        assert!(parse_input("123456", false, 8).share_links.is_empty());
+    }
+
+    #[test]
+    fn wrong_length_or_decorated_numbers_are_not_pickup_codes() {
+        for text in [
+            "12345",
+            "1234567",
+            "12 34 5",
+            "123456 note",
+            "code 123456",
+            "12345a",
+            "１２３４５６",
+            "123.456",
+            "-",
+            "",
+        ] {
+            let parsed = parse_input(text, false, 0);
+            assert!(parsed.share_links.is_empty(), "{text:?}");
+            assert!(parsed.entries.is_empty(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn pickup_codes_mix_with_links_and_dedupe_by_digits() {
+        let text = "https://a.example/one.zip\n123 456\nfluxdown://share/def\n123-456\n  654321\nmagnet:?xt=urn:btih:xyz";
+        let parsed = parse_input(text, false, 6);
+        let urls: Vec<_> = parsed.entries.iter().map(|e| e.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://a.example/one.zip", "magnet:?xt=urn:btih:xyz"]
+        );
+        assert_eq!(
+            parsed.share_links,
+            ["123456", "fluxdown://share/def", "654321"]
+        );
+        // 缩进的取件码不是 `out=` / `checksum=` 选项行，也不附着到前一条普通链接。
+        assert_eq!(parsed.entries[0].file_name, "");
+    }
+
+    #[test]
+    fn pickup_code_items_are_told_apart_from_links() {
+        assert!(is_pickup_code("123456"));
+        assert!(!is_pickup_code(""));
+        assert!(!is_pickup_code("fluxdown://share/abc"));
+        assert!(!is_pickup_code("https://fluxdown.com/s/123456"));
+    }
+
+    #[test]
+    fn share_note_follows_pending_share_items() {
+        assert_eq!(share_note(3, 0, 0), None);
+        assert_eq!(share_note(0, 0, 0), None);
+        assert_eq!(share_note(0, 1, 0), Some(ShareNote::Link));
+        assert_eq!(share_note(0, 1, 1), Some(ShareNote::Code));
+        assert_eq!(share_note(2, 1, 0), Some(ShareNote::Mixed));
+        assert_eq!(share_note(2, 1, 1), Some(ShareNote::Mixed));
+        assert_eq!(share_note(0, 3, 0), Some(ShareNote::Multiple(3)));
+        // 取件码与链接一起计数。
+        assert_eq!(share_note(0, 2, 1), Some(ShareNote::Multiple(2)));
+        assert_eq!(share_note(5, 2, 2), Some(ShareNote::Multiple(2)));
     }
 }

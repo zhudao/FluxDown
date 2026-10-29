@@ -410,6 +410,33 @@ struct PreferencesProtocolTests {
         #expect(entry.matchMode == "regex" && entry.regexPattern == #".*\.(epub|mobi)$"# && entry.extensions.isEmpty)
     }
 
+    @Test func urlModeCarriesPatternRequiresItAndClearsOtherFields() throws {
+        var draft = CategoryDraft(existing: nil)
+        draft.name = "Site"
+        draft.matchMode = "url"
+        draft.extensionsText = "zip"
+        draft.regexText = "x"
+        draft.urlText = "   "
+        #expect(CategoryRules.build(draft, nowMs: 1) == .failure(.urlPatternRequired))
+        #expect(CategoryValidationError.urlPatternRequired.i18nKey == "urlPatternRequired")
+        draft.urlText = "  https://example.com/*  "
+        let entry = try CategoryRules.build(draft, nowMs: 1).get()
+        #expect(entry.matchMode == "url" && entry.urlPattern == "https://example.com/*")
+        #expect(entry.extensions.isEmpty && entry.regexPattern.isEmpty)
+
+        // 编辑既有网址分类：草稿带出模式与模式文本；未改动保存不丢规则，改动写入新值，切走模式清空。
+        var editing = CategoryDraft(existing: entry)
+        #expect(editing.matchMode == "url" && editing.urlText == "https://example.com/*")
+        editing.saveDir = "/mod"
+        #expect(try CategoryRules.build(editing, nowMs: 2).get().urlPattern == "https://example.com/*")
+        editing.urlText = "https://mirror.test/*"
+        #expect(try CategoryRules.build(editing, nowMs: 2).get().urlPattern == "https://mirror.test/*")
+        editing.matchMode = "extension"
+        editing.extensionsText = "zip"
+        let switched = try CategoryRules.build(editing, nowMs: 2).get()
+        #expect(switched.matchMode == "extension" && switched.urlPattern.isEmpty && switched.extensions == ["zip"])
+    }
+
     @Test func builtinCategoriesKeepIdentityAndSkipRequiredChecks() throws {
         let video = try #require(CustomCategoryDto.builtinDefaults.first { $0.builtinType == "video" })
         var draft = CategoryDraft(existing: video)

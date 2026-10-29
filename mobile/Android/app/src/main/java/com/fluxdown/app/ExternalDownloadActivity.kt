@@ -160,7 +160,7 @@ class ExternalDownloadActivity : ComponentActivity() {
         val plan = SilentCapture.plan(request, state)
         if (plan != null && silentDirUsable(container, plan)) {
             try {
-                container.session.callUnit(HostMethod.daemonTaskCreate, plan.params())
+                container.session.createTask(plan.request)
                 keepLocalDownloadsAlive(container)
                 if (navigator.sheet == null) finishAndRemoveTask()
                 return
@@ -183,7 +183,7 @@ class ExternalDownloadActivity : ComponentActivity() {
 
     /** 本机建了任务：趁窗口仍可见拉起前台服务（Android 12+ 禁止后台启动），服务在本机空闲后自行停止。 */
     private fun keepLocalDownloadsAlive(container: AppContainer) {
-        if (container.host.value is HostRef.Local) DownloadServiceController.start(this)
+        if (container.host.value is HostRef.Local) DownloadServiceController.start(this, "external download")
     }
 
     /** 分享取文本，VIEW 取 data 与浏览器 extra。 */
@@ -237,7 +237,9 @@ private fun ExternalDownloadStage(
     val scope = rememberCoroutineScope()
     val haptics = FluxTheme.haptics
     val actions = remember(overlays, haptics) {
-        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics)
+        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics) {
+            container.host.value is HostRef.Local
+        }
     }
     val close by rememberUpdatedState(onClosed)
     CompositionLocalProvider(LocalFluxOverlays provides overlays, LocalTaskActions provides actions) {

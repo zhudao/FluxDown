@@ -28,15 +28,14 @@
 //! `tasks.auto_route` 并广播 [`crate::events::EngineEvent::TaskRouteChanged`]，
 //! 标签见 [`route`] 常量组。
 
-use crate::logger::log_info;
-use crate::proxy_config::{ProxyConfig, ProxyMode, detect_system_proxy};
+use crate::proxy_config::{ProxyConfig, ProxyMode};
 
 // ---------------------------------------------------------------------------
 // 路由标签（wire 契约：DB `tasks.auto_route`、TaskRouteChanged 事件、
 // api TaskDto.autoRoute 与 Web WS 逐字一致）
 // ---------------------------------------------------------------------------
 
-/// `tasks.auto_route` 的 wire 标签。空串 = 非 Auto 模式（或任务尚未启动过）。
+/// `tasks.auto_route` 的 wire 标签。空串 = 非 Auto 且未命中站点规则（或任务尚未启动过）。
 ///
 /// 代理类标签带候选来源后缀 `:system`（系统代理检测）/ `:manual`（手动
 /// 字段回退），UI 通用解析后缀展示「最终用的是谁」；无后缀的裸标签是
@@ -65,6 +64,20 @@ pub mod route {
     pub const PROXY_CACHED_MANUAL: &str = "proxy:cached:manual";
     pub const PROXY_FAILOVER_SYSTEM: &str = "proxy:failover:system";
     pub const PROXY_FAILOVER_MANUAL: &str = "proxy:failover:manual";
+    /// 站点规则决定任务出口，实际直连（`direct` 动作、`system` 未检测到代理、
+    /// `manual` 未配置）。
+    pub const RULE_DIRECT: &str = "rule:direct";
+    /// 站点规则决定任务出口，经系统代理。
+    pub const RULE_SYSTEM: &str = "rule:system";
+    /// 站点规则决定任务出口，经手动代理。
+    pub const RULE_MANUAL: &str = "rule:manual";
+    /// 站点规则决定任务出口，经规则自带的自定义代理。
+    pub const RULE_CUSTOM: &str = "rule:custom";
+
+    /// 是否为站点规则标签（Auto 故障转移等 Auto 专属逻辑必须跳过这类任务）。
+    pub fn is_rule_label(label: &str) -> bool {
+        label.starts_with("rule:")
+    }
 
     /// 代理基础标签 + 候选来源 → 带后缀标签（非代理基础标签原样返回）。
     pub fn with_source(base: &'static str, source: CandidateSource) -> &'static str {
@@ -149,14 +162,10 @@ pub struct ProxyCandidate {
 ///
 /// 仅对 `mode == Auto` 的配置有意义；其余模式返回空列表。
 pub fn resolve_candidates(config: &ProxyConfig) -> Vec<ProxyCandidate> {
-    let system = match detect_system_proxy() {
-        Ok(system) => system,
-        Err(error) => {
-            log_info!("[auto-proxy] 系统代理检测失败: {error}");
-            None
-        }
-    };
-    resolve_candidates_with_system(config, system)
+    if config.mode != ProxyMode::Auto {
+        return Vec::new();
+    }
+    resolve_candidates_with_system(config, crate::proxy_config::detect_auto_system_proxy())
 }
 
 fn resolve_candidates_with_system(
@@ -171,6 +180,8 @@ fn resolve_candidates_with_system(
     if !config.host.is_empty() && config.port != 0 {
         let mut manual = config.clone();
         manual.mode = ProxyMode::Manual;
+        // 派生出口配置不携带站点规则（规则只挂在全局配置上）。
+        manual.rules = None;
         candidates.push(ProxyCandidate {
             config: manual,
             source: CandidateSource::ManualFields,
@@ -247,9 +258,14 @@ fn strip_url_context(lower: &str) -> String {
     out
 }
 
-/// 路由切换可能修复的传输层错误。覆盖建连失败与 body 中途断流；HTTP
-/// 状态、校验失败等永久错误不应靠换链路重试。
+/// 路由切换可能修复的传输层错误。HTTP 下载器写入的文案带类型化分类标签
+/// （[`crate::net_failure::tag_of`]），有标签即以标签为准；无标签的文案
+/// （FTP / HLS / DASH 下载器、旧库存量）回退英文关键词。HTTP 状态、校验
+/// 失败等永久错误不应靠换链路重试。
 pub fn is_route_transport_error(msg: &str) -> bool {
+    if crate::net_failure::tag_of(msg).is_some() {
+        return true;
+    }
     let lower = strip_url_context(&msg.to_lowercase());
     let lower = lower.as_str();
     lower.contains("connection refused")
@@ -269,6 +285,23 @@ pub fn is_route_transport_error(msg: &str) -> bool {
         || lower.contains("error decoding response body")
 }
 
+/// 路由标签 → 路径。裸 `proxy:*`（旧库存量，无来源后缀）无法确定是哪条
+/// 代理 → `None`；空标签（非 Auto）→ `None`。
+#[must_use]
+pub fn route_of_label(label: &str) -> Option<RoutePath> {
+    if label.starts_with("direct") {
+        Some(RoutePath::Direct)
+    } else if !label.starts_with("proxy") {
+        None
+    } else if label.ends_with(":system") {
+        Some(RoutePath::Proxy(CandidateSource::System))
+    } else if label.ends_with(":manual") {
+        Some(RoutePath::Proxy(CandidateSource::ManualFields))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -284,6 +317,7 @@ mod tests {
             username: String::new(),
             password: String::new(),
             no_proxy_list: String::new(),
+            rules: None,
         }
     }
 

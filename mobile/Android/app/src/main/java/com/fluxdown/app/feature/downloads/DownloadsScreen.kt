@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -38,8 +39,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
@@ -59,10 +58,10 @@ import com.fluxdown.app.actions.LocalTaskActions
 import com.fluxdown.app.feature.devices.localizedName
 import com.fluxdown.app.i18n.fill
 import com.fluxdown.app.i18n.str
-import com.fluxdown.app.nav.AppNavigator
 import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.SheetRoute
 import com.fluxdown.app.shell.LocalAppContainer
+import com.fluxdown.app.feature.newtask.ImportProgressBanner
 import com.fluxdown.app.ui.fileCategory
 import com.fluxdown.app.ui.label
 import com.fluxdown.core.format.Format
@@ -112,6 +111,7 @@ internal fun StatusFolder.label(): String = stringResource(
         StatusFolder.All -> R.string.tabAll
         StatusFolder.Active -> R.string.tabDownloading
         StatusFolder.Completed -> R.string.tabCompleted
+        StatusFolder.Seeding -> R.string.statusSeeding
         StatusFolder.Failed -> R.string.tabError
         StatusFolder.Paused -> R.string.tabPaused
     },
@@ -256,27 +256,6 @@ internal class ListTracker(private val state: LazyListState, private val topInse
     }
 }
 
-/** 下滑列表 > 5dp 收坞为迷你态；上滑 > 5dp 或回到顶部（< 24dp）展开。 */
-private class DockScrollConnection(
-    private val nav: AppNavigator,
-    private val thresholdPx: Float,
-) : NestedScrollConnection {
-    private var acc = 0f
-
-    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-        val dy = available.y
-        if (dy == 0f) return Offset.Zero
-        if ((dy < 0f) != (acc < 0f)) acc = 0f
-        acc += dy
-        if (acc < -thresholdPx) {
-            if (!nav.dockMini) nav.dockMini = true
-        } else if (acc > thresholdPx) {
-            if (nav.dockMini) nav.dockMini = false
-        }
-        return Offset.Zero
-    }
-}
-
 // ── 列表 ─────────────────────────────────────────────────────────────────────
 
 @Composable
@@ -288,6 +267,7 @@ private fun DownloadsListBody(
     filtersHeightPx: () -> Int,
 ) {
     val view = LocalDownloadsView.current
+    val imports = LocalAppContainer.current.imports
     val nav = LocalNavigator.current
     val swipe = LocalSwipeRevealCoordinator.current
     val density = LocalDensity.current
@@ -303,15 +283,9 @@ private fun DownloadsListBody(
     val style = remember(prefs?.density, prefs?.fields) { prefs?.let { RowStyle(it.density, it.fields) } }
     val gate = rememberFlowInGate()
     val a11y = rememberTouchExploration()
-    val dockConnection = remember(nav, density) { DockScrollConnection(nav, with(density) { 5.dp.toPx() }) }
-    val nearTopPx = with(density) { 24.dp.toPx() }
     val motion = FluxTheme.motion
     var tailPx by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(listState, nearTopPx) {
-        snapshotFlow { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset < nearTopPx }
-            .collect { if (it) nav.dockMini = false }
-    }
     if (!expanded) {
         LaunchedEffect(tracker) {
             snapshotFlow { tracker.tailNeed() }.collect { need -> if (need != null) tailPx = need }
@@ -337,7 +311,6 @@ private fun DownloadsListBody(
                     }
                 }
             }
-            .nestedScroll(dockConnection)
             .then(if (swipe != null) Modifier.nestedScroll(swipe.nestedScrollConnection) else Modifier),
         contentPadding = PaddingValues(top = topInset, bottom = clearance),
     ) {
@@ -353,6 +326,12 @@ private fun DownloadsListBody(
                     modifier = Modifier.padding(start = margin, end = margin, bottom = 14.dp),
                 )
             }
+        }
+
+        // 进行中的批量导入（多于一块才有进度）：跨「新建下载」Sheet 的关闭存活，每个导入各自可取消
+        val importRuns = imports.runs.filter { it.showsProgress }
+        items(importRuns, key = { "import-${it.id}" }, contentType = { ContentType.Banner }) { run ->
+            ImportProgressBanner(run, Modifier.padding(start = margin, end = margin, bottom = 14.dp))
         }
 
         if (!expanded) {
@@ -383,8 +362,25 @@ private fun DownloadsListBody(
         val st = style
         if (!list.loaded || st == null || (list.taskTotal == 0 && view.connecting)) {
             item(key = "skeleton", contentType = ContentType.Skeleton) {
-                Box(Modifier.padding(horizontal = margin).cardSegment(first = true, last = true)) {
-                    FluxSkeletonRows(rows = 4, loadingLabel = str(R.string.mobileLoading))
+                val loading = list.loading
+                val label = when {
+                    loading == null -> str(R.string.mobileLoading)
+                    loading.total > 0 -> str(R.string.mobileTasksLoadingProgress, "n" to loading.total)
+                    else -> str(R.string.mobileTasksLoading)
+                }
+                Column(Modifier.padding(horizontal = margin)) {
+                    Box(Modifier.cardSegment(first = true, last = true)) {
+                        FluxSkeletonRows(rows = 4, loadingLabel = label)
+                    }
+                    // 任务表分页载入期间给出可见的进度文案（列表此时为空，不能显示空态）。
+                    if (loading != null) {
+                        FluxText(
+                            label,
+                            style = FluxTheme.type.monoS,
+                            color = FluxTheme.colors.inkFaint,
+                            modifier = Modifier.padding(top = 12.dp),
+                        )
+                    }
                 }
             }
         } else if (list.entries.isEmpty()) {

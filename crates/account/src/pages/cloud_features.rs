@@ -2,16 +2,16 @@
 //! （无独立开关，登录后自动可用，展示当前在线设备数）。
 
 use fluxdown_protocol::{CloudDevice, SyncLocalOnlyParams, SyncStatusDto};
-use fluxdown_ui_components::{ButtonVariant, FluxIcon, button, card, tabular_numbers};
+use fluxdown_ui_components::{
+    ButtonVariant, FluxIcon, button, card, tabular_numbers, tooltip_view,
+};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::{SemanticThemeTokens, active_theme};
 use gpui::{
     App, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement as _, Styled, div, prelude::FluentBuilder as _,
 };
-use gpui_component::{
-    Disableable as _, Icon, IconNamed, h_flex, switch::Switch, tooltip::Tooltip, v_flex,
-};
+use gpui_component::{Disableable as _, Icon, IconNamed, h_flex, switch::Switch, v_flex};
 
 use crate::errors::{ErrorContext, sync_reason_key};
 use crate::link::now_unix_ms;
@@ -19,15 +19,26 @@ use crate::sync_scope::{SyncPhase, can_sync_now, relative_time, sync_groups, syn
 use crate::view::AccountView;
 use crate::{AccountCommand, t, t_with, ui};
 
+/// 云功能分组的瞬时状态：登录态、断线只读。
+#[derive(Clone, Copy)]
+pub(crate) struct CloudFeaturesState {
+    pub logged_in: bool,
+    pub disabled: bool,
+}
+
 pub(crate) fn render(
     translator: &Translator,
     tokens: &SemanticThemeTokens,
-    logged_in: bool,
+    state: CloudFeaturesState,
     sync: &SyncStatusDto,
     devices: Option<&[CloudDevice]>,
-    disabled: bool,
+    max_online: Option<u64>,
     cx: &mut Context<AccountView>,
 ) -> impl IntoElement {
+    let CloudFeaturesState {
+        logged_in,
+        disabled,
+    } = state;
     let heading = t(translator, "accountGroupCloudFeatures");
     let desc = t(translator, "accountCloudFeaturesDesc");
 
@@ -49,7 +60,9 @@ pub(crate) fn render(
                         .child(scope_block(translator, tokens, sync, disabled, cx))
                 })
                 .child(ui::row_divider(cx))
-                .child(multi_device_row(translator, tokens, logged_in, devices, cx)),
+                .child(multi_device_row(
+                    translator, tokens, logged_in, devices, max_online, cx,
+                )),
         )
 }
 
@@ -195,9 +208,7 @@ fn config_sync_row(
         } else {
             div()
                 .id("account-sync-login-required")
-                .tooltip(move |window, cx| {
-                    Tooltip::new(login_required_label.clone()).build(window, cx)
-                })
+                .tooltip(move |window, cx| tooltip_view(login_required_label.clone(), window, cx))
                 .child(switch)
                 .into_any_element()
         })
@@ -294,15 +305,12 @@ fn multi_device_row(
     tokens: &SemanticThemeTokens,
     logged_in: bool,
     devices: Option<&[CloudDevice]>,
+    max_online: Option<u64>,
     cx: &App,
 ) -> impl IntoElement {
     let title = t(translator, "multiDeviceTitle");
     let desc = t(translator, "multiDeviceDesc");
-    let online_count = devices
-        .unwrap_or_default()
-        .iter()
-        .filter(|device| device.is_online && !device.is_current)
-        .count();
+    let online_count = crate::device_list::online_count(devices.unwrap_or_default());
     let caption = active_theme(cx).extended().caption;
 
     h_flex()
@@ -325,11 +333,21 @@ fn multi_device_row(
                     .font_features(tabular_numbers())
                     .text_color(tokens.colors.muted_foreground)
                     .child(if devices.is_some() {
-                        t_with(
-                            translator,
-                            "devicesOnlineCount",
-                            &[("count", &online_count.to_string())],
-                        )
+                        match max_online {
+                            Some(max) => t_with(
+                                translator,
+                                "devicesOnlineCountOf",
+                                &[
+                                    ("count", &online_count.to_string()),
+                                    ("max", &max.to_string()),
+                                ],
+                            ),
+                            None => t_with(
+                                translator,
+                                "devicesOnlineCount",
+                                &[("count", &online_count.to_string())],
+                            ),
+                        }
                     } else {
                         t(translator, "devicePresenceUnknown")
                     }),

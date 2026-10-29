@@ -13,6 +13,9 @@ enum class TaskStatus(val wire: Int) {
     /** 活跃 = 下载中或准备中（与 `event.rs` 的 `matches!(status, 1 | 5)` 一致）。 */
     val isActive: Boolean get() = this == Downloading || this == Preparing
 
+    /** 运行时（分段图 / 传输读数）仍有可见用途：完成任务不保留（与 `event.rs` 的 `runtime_retained` 一致）。 */
+    val retainsRuntime: Boolean get() = this != Completed
+
     companion object {
         fun of(wire: Int): TaskStatus = entries.firstOrNull { it.wire == wire } ?: Unknown
     }
@@ -66,6 +69,28 @@ data class Task(
     /** 复制链接：读 originUrl，空则回退 url（torrent 任务的 url 是哨兵）。 */
     val shareUrl: String get() = originUrl.ifEmpty { url }
 
+    /** 做种中（含排队等做种槽位）：已完成且 seeding_status ∈ {1, 8}；只对本地任务有意义。 */
+    val isSeeding: Boolean
+        get() = status == TaskStatus.Completed &&
+            (seedingStatus == SeedingStatus.Seeding || seedingStatus == SeedingStatus.QueuedForSlot)
+
+    /** 可恢复做种：已完成、seeding_status ∈ 2..=7（已停止做种）且文件仍在；其余已完成任务不可恢复（#935）。 */
+    val canResumeSeeding: Boolean
+        get() = status == TaskStatus.Completed && !fileMissing && seedingStatus.wire in 2..7
+
+    /** 用户手动停止做种且文件仍在：「全部恢复」会重新启动它。 */
+    val isUserStoppedSeed: Boolean
+        get() = status == TaskStatus.Completed && !fileMissing && seedingStatus == SeedingStatus.UserStopped
+
+    /** 可暂停：下载中 / 等待 / 准备中，或正在做种。 */
+    val canPause: Boolean
+        get() = status == TaskStatus.Downloading || status == TaskStatus.Pending ||
+            status == TaskStatus.Preparing || isSeeding
+
+    /** 可恢复：已暂停 / 失败，或可恢复做种的已完成任务。 */
+    val canResume: Boolean
+        get() = status == TaskStatus.Paused || status == TaskStatus.Failed || canResumeSeeding
+
     val protocol: TaskProtocol
         get() = when {
             url.startsWith("magnet:") || url.startsWith("torrent-file://") -> TaskProtocol.Bt
@@ -79,6 +104,15 @@ data class Task(
     val progress: Float?
         get() = if (totalBytes > 0) (downloadedBytes.toDouble() / totalBytes).toFloat().coerceIn(0f, 1f) else null
 }
+
+/**
+ * 「全部暂停」：没有活跃 / 等待中的传输、没有做种中的任务（做种也算可暂停），
+ * 且存在可由「全部恢复」重新启动的任务（已暂停，或用户停止做种且文件仍在）。
+ */
+fun allTasksPaused(tasks: List<Task>, activeTasks: Int, pendingTasks: Int): Boolean =
+    activeTasks == 0 && pendingTasks == 0 &&
+        tasks.none { it.isSeeding } &&
+        tasks.any { it.status == TaskStatus.Paused || it.isUserStoppedSeed }
 
 /** `TaskSegmentDto`：真实字节区间；[active] = null 表示未知，不得推断为空闲。 */
 data class Segment(
@@ -155,6 +189,8 @@ sealed interface SelectionKind {
     data class Hls(val options: List<HlsOption>) : SelectionKind
     data class Bt(val files: List<BtFile>) : SelectionKind
     data class Variant(val options: List<VariantOption>) : SelectionKind
+    /** 多个启用插件的解析器都匹配同一 URL：让用户选一个（`candidates` 按 identity 升序）。 */
+    data class Plugin(val site: String, val url: String, val candidates: List<PluginCandidate>) : SelectionKind
 
     /** 保存目录里已有同名普通文件（`file_exists_behavior = ask`）；字段由主机算好。 */
     data class FileExists(
@@ -176,6 +212,7 @@ enum class FileExistsAction { Rename, Overwrite, Skip }
 
 data class HlsOption(val index: Int, val bandwidth: Long, val width: Long, val height: Long)
 data class BtFile(val index: Int, val path: String, val size: Long)
+data class PluginCandidate(val identity: String, val name: String, val version: String, val description: String)
 data class VariantOption(
     val index: Int,
     val label: String,
@@ -190,6 +227,7 @@ sealed interface SelectionOutcome {
     data class Hls(val index: Int) : SelectionOutcome
     data class Bt(val indices: List<Int>) : SelectionOutcome
     data class Variant(val index: Int) : SelectionOutcome
+    data class Plugin(val identity: String, val remember: Boolean) : SelectionOutcome
     data class FileExists(val action: FileExistsAction) : SelectionOutcome
     data object Cancelled : SelectionOutcome
 }
@@ -215,7 +253,16 @@ sealed interface HostRef {
         }
     }
 
-    data class Remote(override val id: String, override val displayName: String, val endpoint: String) : HostRef
+    /**
+     * [linkFingerprint] 非空 = 经局域网配对加入的主机：保存的「访问密钥」其实是本机对该主机的设备专属控制凭据，
+     * 值为主机在本机配对名册里的指纹（64 位小写 hex）；null = 手输访问密钥加入。
+     */
+    data class Remote(
+        override val id: String,
+        override val displayName: String,
+        val endpoint: String,
+        val linkFingerprint: String? = null,
+    ) : HostRef
 }
 
 /** RSS 订阅（`RssSourceDto` 的 UI 子集）。 */
@@ -246,7 +293,7 @@ data class CloudDevice(
     val pathStyle: String? = null,
 )
 
-/** 局域网已配对设备（`LinkDeviceInfo` 子集）。 */
+/** 局域网已配对设备（`LinkDeviceInfo`）；[name] 已是生效名（备注名优先）。 */
 data class LinkDevice(
     val fingerprint: String,
     val name: String,
@@ -256,4 +303,20 @@ data class LinkDevice(
     val defaultSaveDir: String? = null,
     /** 设备自报的路径风格 wire 名（`windows` / `posix`）；null = 未上报，按 [platform] 推断。 */
     val pathStyle: String? = null,
+    /** 本机备注名（`agent.link.rename`）；null = 未设置，[name] 即对端自报名。 */
+    val customName: String? = null,
+    /** 对端自报的客户端版本。 */
+    val appVersion: String? = null,
+    /** 对端自报的云设备 id：本机云名册里存在同 id 时与云条目合并展示。 */
+    val cloudDeviceId: String? = null,
+    /** 对端已解除与本机的配对：不可下发，只能删除或重新配对。 */
+    val revoked: Boolean = false,
+    /** 配对时间（Unix 毫秒）。 */
+    val pairedAt: Long = 0,
+    /** 最近一次确认在线的时间（Unix 毫秒，0 = 未知）。 */
+    val lastSeenAt: Long = 0,
+    /** 该设备被本机批准过完全控制（对方可凭设备凭据控制本机，`LinkDeviceInfo.grantsControl`）。 */
+    val grantsControl: Boolean = false,
+    /** 本机可控制该设备（本机以请求控制发起并配对完成，`LinkDeviceInfo.controllable`）。 */
+    val controllable: Boolean = false,
 )

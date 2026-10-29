@@ -18,6 +18,7 @@ export interface ReleaseInfo {
   published_at: string;
   total_downloads: number;
   extension_version?: string;
+  extension_crx_version?: string;
   assets: Assets<
     | "setup"
     | "portable"
@@ -25,6 +26,7 @@ export interface ReleaseInfo {
     | "portable_arm64"
     | "extension"
     | "firefox_extension"
+    | "chrome_crx"
     | "macos_dmg_arm64"
     | "macos_dmg_x64"
     | "macos_tarball_arm64"
@@ -47,12 +49,17 @@ export interface ReleaseInfo {
       | "openwrt_x64"
       | "openwrt_arm64"
       | "openwrt_luci"
+      | "openwrt_apk_x64"
+      | "openwrt_apk_arm64"
+      | "openwrt_apk_luci"
       | "qnap_x64"
       | "qnap_arm64"
       | "synology_dsm7_x64"
       | "synology_dsm7_arm64"
       | "synology_dsm6_x64"
       | "synology_dsm6_arm64"
+      | "fnos_x64"
+      | "fnos_arm64"
     >;
   } | null;
   cli: {
@@ -64,6 +71,11 @@ export interface ReleaseInfo {
     version: string;
     tag: string;
     assets: Assets<"android_arm64" | "android_armv7" | "android_x64" | "android_universal">;
+  } | null;
+  ios: {
+    version: string;
+    tag: string;
+    assets: Assets<"sideload_ipa">;
   } | null;
 }
 

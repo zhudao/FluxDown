@@ -8,8 +8,8 @@
 //! - **仅 agent 退出**（SIGTERM / Ctrl-C）：只取消 agent，daemon 继续运行，UI 可重拉 agent。
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -24,6 +24,14 @@ const DAEMON_EXIT_BUDGET: Duration = Duration::from_secs(20);
 /// daemon 未连接或无响应时，`system.shutdown` 调用本身的上限。
 const DAEMON_SHUTDOWN_CALL_BUDGET: Duration = Duration::from_secs(5);
 
+/// 完全退出（不含重启）开始前的收尾：在 daemon 还活着时执行，返回后才继续关停。
+/// 实现自己负责有界等待——退出流程不会再替它设超时。
+#[async_trait::async_trait]
+pub trait BeforeQuit: Send + Sync {
+    /// 执行收尾。
+    async fn before_quit(&self);
+}
+
 pub struct Lifecycle {
     cancel: CancellationToken,
     quit_requested: AtomicBool,
@@ -32,6 +40,7 @@ pub struct Lifecycle {
     supervisor: Arc<DaemonSupervisor>,
     daemon_data_dir: PathBuf,
     shutdown_config: Option<DaemonClientConfig>,
+    before_quit: OnceLock<Arc<dyn BeforeQuit>>,
 }
 
 impl Lifecycle {
@@ -50,6 +59,7 @@ impl Lifecycle {
             supervisor,
             daemon_data_dir,
             shutdown_config: None,
+            before_quit: OnceLock::new(),
         }
     }
 
@@ -58,6 +68,13 @@ impl Lifecycle {
     pub fn with_shutdown_config(mut self, config: DaemonClientConfig) -> Self {
         self.shutdown_config = Some(config);
         self
+    }
+
+    /// 登记退出前收尾（FluxMesh：退出时把仍有接收方的实时分享转为云端暂存）。只接受第一次登记。
+    pub fn set_before_quit(&self, hook: Arc<dyn BeforeQuit>) {
+        if self.before_quit.set(hook).is_err() {
+            tracing::warn!("a before-quit hook is already registered");
+        }
     }
 
     /// 是否处于完全退出流程（决定 UI 连接的关闭原因）。
@@ -77,8 +94,9 @@ impl Lifecycle {
         });
     }
 
-    /// 应用更新后的完全退出：流程与 [`Self::request_quit`] 相同，另外标记为重启——
-    /// agent 运行期结束后由 `update::restart::run_pending` 重新拉起程序。幂等，立即返回。
+    /// 重启式完全退出（应用更新、托盘「重启」）：流程与 [`Self::request_quit`] 相同，另外标记为
+    /// 重启——调用方须先经 `update::restart::schedule` 登记计划，agent 运行期结束后由
+    /// `update::restart::run_pending` 重新拉起程序。幂等，立即返回。
     pub fn request_restart(self: &Arc<Self>) {
         self.restart_requested.store(true, Ordering::Release);
         self.request_quit();
@@ -87,8 +105,9 @@ impl Lifecycle {
     /// UI 连接在 agent 退出时的 WebSocket 关闭原因。
     ///
     /// 完全退出为 `service-quit`（客户端停止重连）；headless 服务器为更新而重启时为
-    /// `service-restart`（浏览器保持重连，服务版本变化后重新加载页面）——桌面形态的更新重启
-    /// 仍是 `service-quit`，由 agent 退出后重新拉起的桌面程序接管界面；其余为 `agent-shutdown`。
+    /// `service-restart`（浏览器保持重连，服务版本变化后重新加载页面）——桌面形态的重启（更新或
+    /// 托盘「重启」）仍是 `service-quit`，由 agent 退出后重新拉起的桌面程序接管界面；其余为
+    /// `agent-shutdown`。
     #[must_use]
     pub fn close_reason(&self) -> &'static str {
         if !self.quit_requested() {
@@ -104,6 +123,11 @@ impl Lifecycle {
 
     async fn run_quit(&self) {
         tracing::info!("full quit requested: stopping fluxdownd before fluxdown-agent");
+        if !self.restart_requested.load(Ordering::Acquire)
+            && let Some(hook) = self.before_quit.get()
+        {
+            hook.before_quit().await;
+        }
         self.supervisor.stop();
         let call = self
             .daemon
@@ -153,6 +177,12 @@ async fn wait_daemon_released(data_dir: &Path, budget: Duration) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// 本数据目录是否有 daemon 持有进程租约（`daemon.lock`）。探测拿到锁会立刻释放；租约文件
+/// 不存在或无法探测时按「未持有」处理。
+pub(crate) fn daemon_lease_held(lock_path: &Path) -> bool {
+    !daemon_lease_released(lock_path)
 }
 
 fn daemon_lease_released(lock_path: &Path) -> bool {

@@ -2,7 +2,7 @@
 // JSON 形态：`{"type":"taskProgress","taskId":"…",…}`（`type` 判别 + 扁平 camelCase 字段）。
 
 import type { BtFileDto, HlsQualityOptionDto, ResolveVariantOptionDto } from './selection';
-import type { GroupDto, QueueDto, QueuePositionDto } from './queue';
+import type { GroupDto, QueueDto, QueueOrderEntryDto, QueuePositionDto } from './queue';
 import type { RssItemDto, RssSourceDto } from './rss';
 import type { TaskDto } from './task';
 import type { WebhookDeliveryDto } from './webhook';
@@ -99,9 +99,14 @@ export type WsServerMsg =
   | { type: 'taskMetaProbed'; taskId: string; fileName: string; totalBytes: number }
   | { type: 'queuesChanged'; queues: QueueDto[] }
   | { type: 'taskQueueChanged'; taskId: string; queueId: string }
-  /** 自动代理链路决策落定；`route` 同 `TaskDto.autoRoute`，恒非空。 */
+  /** 自动代理链路或站点规则决策落定；`route` 同 `TaskDto.autoRoute`，恒非空。 */
   | { type: 'taskRouteChanged'; taskId: string; route: string }
   | { type: 'queuePositionsChanged'; positions: QueuePositionDto[] }
+  /**
+   * 队列顺序增量：先移除 `removed`，再按 `order` 插入 / 更新 `added`（同 id 多次以最后一项为准），
+   * 结果按键升序，`position` = 名次（语义同 Rust `apply_queue_order`）。
+   */
+  | { type: 'queueOrderChanged'; removed: string[]; added: QueueOrderEntryDto[] }
   | { type: 'fileMissingChanged'; updates: FileMissingUpdateDto[] }
   /** Boost 优先任务变化。 */
   | { type: 'priorityTaskChanged'; priorityTaskId: string; autoPausedCount: number }
@@ -115,7 +120,7 @@ export type WsServerMsg =
       options: ResolveVariantOptionDto[];
     }
   | { type: 'pong' }
-  /** 插件因熔断被自动禁用（`reason` 固定 `CircuitBreaker`）。 */
+  /** 插件被自动禁用（`reason` 为 `CircuitBreaker` 熔断或 `Revoked` 被插件市场撤回）。 */
   | { type: 'pluginAutoDisabled'; identity: string; reason: string }
   /** BT 重复添加：占位任务 `taskId` 已被删除，已有任务为 `existingTaskId`。 */
   | {

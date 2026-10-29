@@ -14,16 +14,28 @@ actions!(
         DeleteSelected,
         DeleteSelectedWithFiles,
         SelectAllTasks,
+        /// 以当前选区进入显式多选模式（右键「选择」）。
+        EnterMultiSelect,
         ClearSelection,
         PauseAll,
         ResumeAll,
         OpenSelected,
         RevealSelected,
+        /// 把选中的已完成任务产物以文件写入系统剪贴板（右键「复制文件」）。
+        CopySelectedFiles,
         OpenSelectedInWindow,
         /// 在停靠详情面板中查看选中任务（右键「详情」）。
         ShowSelectedDetail,
         CopySelectedUrl,
         RenameSelected,
+        /// 更换选中任务的下载链接（右键「更换链接」）。
+        ChangeSelectedUrl,
+        /// 修改选中任务的线程数（右键「修改线程数」）。
+        ChangeSelectedSegments,
+        /// 校验选中的已完成 BT 任务（右键「完整性校验」）。
+        VerifySelected,
+        /// 分享选中的已完成任务（右键「分享」、选择条、命令面板）。
+        ShareSelected,
         RedownloadSelected,
         ToggleBoostSelected,
         FocusSearch,

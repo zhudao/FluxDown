@@ -20,6 +20,9 @@ const noindexPathnames = new Set([
   // 产品短片录制舞台
   "/film",
   "/zh/film",
+  // FluxMesh说明页(分享落地页 /s/<slug> 是 SSR 动态页,不在静态路径里)
+  "/s",
+  "/zh/s",
 ]);
 
 // 构建时刻(ISO8601),用作 sitemap lastmod —— 每次部署刷新站点 freshness 信号。
@@ -27,7 +30,7 @@ const BUILD_TIME = new Date().toISOString();
 
 // 站点语言路由:en 在根路径,zh 在 /zh 前缀(与 src/i18n/routing.ts 同契约;
 // config 无法 import TS 模块,双处以注释互指)。docs 自带 /docs/<lang>/ 结构,不走此映射。
-const SITE = "https://fluxdown.zerx.dev";
+const SITE = "https://fluxdown.com";
 
 // 站点挂载前缀:根部署留空;预览部署到子路径时构建期注入(如 SITE_BASE=/v2,见 Dockerfile)。
 // 运行期代码经 import.meta.env.BASE_URL 读取(src/lib/base.ts),与这里同源。
@@ -126,8 +129,11 @@ export default defineConfig({
   },
 
   // 日文站点已下线(v2 仅 en + zh);旧链接永久跳转到英文首页。
+  // macOS 构建已签名 + 公证,「已损坏」指南下线;旧链接跳下载页。
   redirects: {
     "/ja": { status: 301, destination: `${BASE}/` },
+    "/macos-gatekeeper": { status: 301, destination: `${BASE}/download/` },
+    "/zh/macos-gatekeeper": { status: 301, destination: `${BASE}/zh/download/` },
   },
 
   prefetch: { prefetchAll: false, defaultStrategy: "hover" },
@@ -193,10 +199,10 @@ export default defineConfig({
         optional: true,
       }),
 
-      // ── 可选：阿里云 OSS 发布资产源（/api/download 优先 302 到此处，缺失回退 GitHub）──
+      // ── 可选：阿里云 OSS 发布资产 + dl-cn 下载镜像（/api/download，见 src/lib/oss.ts）──
       // 对象布局 `<OSS_RELEASE_PREFIX>/<tag>/<file>`，与 .github/actions/oss-upload 一致。
-      // bucket 私有：官网用 AK/SK 做存在性探测；未配 AK/SK 时整条 OSS 路径关闭。
-      // 302 目标优先 OSS_CDN_BASE（Cloudflare 边缘缓存，见 cdn/oss-proxy.js），置空则签发 1h 预签名直链。
+      // bucket 私有：官网用 AK/SK 只做 HEAD 存在性探测；中国大陆访客（Cloudflare 国家码，client-ip.ts）与 source=oss
+      // 302 到 CN_CDN_BASE（URL 鉴权 A），其余访客走 GitHub。AK/SK 或 CN_CDN_AUTH_KEY 缺失时全部走 GitHub。
       OSS_ACCESS_KEY_ID: envField.string({
         context: "server",
         access: "secret",
@@ -222,10 +228,58 @@ export default defineConfig({
         access: "secret",
         default: "FluxDownRelease",
       }),
-      OSS_CDN_BASE: envField.string({
+      // dl-cn 下载镜像：现为 Cloudflare Worker（website-v2/cdn/oss-proxy.js，私有 OSS 回源），ICP 备案后
+      // 改回阿里云 CDN；两者都按「URL 鉴权 A 方式」校验 CN_CDN_AUTH_KEY，缺省则镜像关闭。
+      CN_CDN_BASE: envField.string({
         context: "server",
         access: "secret",
-        default: "https://dl-fluxdown.zerx.dev",
+        default: "https://dl-cn.fluxdown.com",
+      }),
+      CN_CDN_AUTH_KEY: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      // 123 云盘下载源（src/lib/pan123.ts）：.github/scripts/pan123_mirror.sh 经 WebDAV 上传到同一对象键；
+      // 仅 ≥ 0.6.0 的应用内更新（规则见 download-gate.ts::isPan123Updater）优先 302 到 123 直链（10 分钟有效），失败再走 dl-cn / GitHub；官网浏览器下载不走 123。
+      // WebDAV 账号 / 应用密码（只授权发布目录）用于 PROPFIND 确认资产；UID + 鉴权密钥用于签直链。缺任一项则关闭。
+      PAN123_WEBDAV_URL: envField.string({
+        context: "server",
+        access: "secret",
+        default: "https://webdav.123pan.cn/webdav",
+      }),
+      PAN123_WEBDAV_USER: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      PAN123_WEBDAV_PASSWORD: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      PAN123_UID: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      // 123「直链管理 → URL 鉴权」密钥（1–16 位字母数字）
+      PAN123_AUTH_KEY: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      // 空 = https://<PAN123_UID>.cdn.123clouddisk.cn（备用域名 123clouddisk.com）
+      PAN123_DIRECT_BASE: envField.string({
+        context: "server",
+        access: "secret",
+        default: "",
+      }),
+      // 已启用直链空间的根目录文件夹（即 WebDAV 授权目录）
+      PAN123_DIRECT_FOLDER: envField.string({
+        context: "server",
+        access: "secret",
+        default: "fd-release",
       }),
 
       // ── 赞助名录（Sponsor Wall）──

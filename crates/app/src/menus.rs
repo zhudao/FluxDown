@@ -1,8 +1,13 @@
 //! 应用菜单（macOS 原生 / Windows·Linux 标题栏菜单栏）、全局键位与应用级动作处理。
 
+use std::collections::BTreeMap;
+
 use fluxdown_ui_downloads::actions as dl;
 use fluxdown_ui_i18n::Translator;
-use gpui::{App, Entity, KeyBinding, Menu, MenuItem, SharedString, Window};
+use fluxdown_ui_shell::ShellView;
+use gpui::{
+    Action, App, Context, Entity, Focusable as _, Global, Menu, MenuItem, SharedString, Window,
+};
 use gpui_component::{GlobalState, menu::AppMenuBar};
 
 use crate::{
@@ -15,58 +20,16 @@ use crate::{
     windows::{WindowKey, WindowRegistry, confirm_active_tasks},
 };
 
-const WEBSITE_URL: &str = "https://fluxdown.zerx.dev";
+const WEBSITE_URL: &str = "https://fluxdown.com";
 
-fn primary() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "cmd"
-    } else {
-        "ctrl"
-    }
-}
+/// 设备本地偏好：Windows / Linux 标题栏是否显示应用菜单栏（缺省隐藏）。不在云同步目录内，
+/// 写入走 `sync:false`，只影响本机；macOS 走原生菜单，不读此键。
+pub(crate) const SHOW_MENU_BAR_PREF: &str = "ui.show_menu_bar";
 
-/// 注册全局键位。字母键只在下载页上下文生效（页面内再按聚焦输入框二次拦截）。
-///
-/// macOS 的 ⌘W / ⌘M / ⌘H / ⌃⌘F 由 AppKit 经菜单 key equivalent 分发，gpui 不会自动
-/// 提供；须像 Zed 一样显式绑定并在菜单树里给出对应项。
-pub fn bind_keys(cx: &mut App) {
-    let p = primary();
-    let dl_ctx = Some(dl::KEY_CONTEXT);
-    let mut bindings = vec![
-        KeyBinding::new(&format!("{p}-n"), dl::NewDownload, None),
-        KeyBinding::new(&format!("{p}-,"), OpenSettings, None),
-        KeyBinding::new(&format!("{p}-k"), ToggleCommandPalette, None),
-        KeyBinding::new(&format!("{p}-f"), dl::FocusSearch, dl_ctx),
-        KeyBinding::new(&format!("{p}-a"), dl::SelectAllTasks, dl_ctx),
-        KeyBinding::new("delete", dl::DeleteSelected, dl_ctx),
-        KeyBinding::new("backspace", dl::DeleteSelected, dl_ctx),
-        KeyBinding::new(&format!("{p}-backspace"), dl::DeleteSelected, dl_ctx),
-        KeyBinding::new("shift-delete", dl::DeleteSelectedWithFiles, dl_ctx),
-        KeyBinding::new("space", dl::TogglePauseSelected, dl_ctx),
-        KeyBinding::new("shift-d", dl::CycleDensity, dl_ctx),
-        KeyBinding::new("g", dl::CycleGroupBy, dl_ctx),
-        KeyBinding::new("s", dl::CycleSort, dl_ctx),
-        KeyBinding::new(&format!("{p}-i"), dl::ToggleDetailPanel, dl_ctx),
-        KeyBinding::new("escape", dl::ClearSelection, dl_ctx),
-        KeyBinding::new(
-            "space",
-            gpui_component::dialog::Confirm { secondary: false },
-            Some(fluxdown_ui_components::DIALOG_PRIMARY_KEY_CONTEXT),
-        ),
-    ];
-    if cfg!(target_os = "macos") {
-        bindings.extend([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-w", CloseWindow, None),
-            KeyBinding::new("cmd-m", MinimizeWindow, None),
-            KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
-            KeyBinding::new("cmd-h", Hide, None),
-            KeyBinding::new("alt-cmd-h", HideOthers, None),
-        ]);
-    }
-    cx.bind_keys(bindings);
-    fluxdown_ui_command_palette::bind_keys(cx);
-}
+/// Windows / Linux 标题栏菜单栏实体（所有主窗口共用；macOS 不创建）。
+struct TitleMenuBar(Entity<AppMenuBar>);
+
+impl Global for TitleMenuBar {}
 
 fn t(translator: &Translator, key: &str) -> SharedString {
     SharedString::from(translator.text(key).to_owned())
@@ -118,8 +81,12 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action(t(translator, "openFile"), dl::OpenSelected),
         MenuItem::action(t(translator, "openFolder"), dl::RevealSelected),
+        MenuItem::action(t(translator, "copyFileAction"), dl::CopySelectedFiles),
         MenuItem::action(t(translator, "copyUrl"), dl::CopySelectedUrl),
         MenuItem::action(t(translator, "renameTask"), dl::RenameSelected),
+        MenuItem::action(t(translator, "webChangeUrl"), dl::ChangeSelectedUrl),
+        MenuItem::action(t(translator, "editThreads"), dl::ChangeSelectedSegments),
+        MenuItem::action(t(translator, "verifyTaskIntegrity"), dl::VerifySelected),
         MenuItem::action(t(translator, "redownloadTask"), dl::RedownloadSelected),
         MenuItem::action(t(translator, "boostDownload"), dl::ToggleBoostSelected),
         MenuItem::action(t(translator, "menuOpenInWindow"), dl::OpenSelectedInWindow),
@@ -168,28 +135,54 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
     menus
 }
 
-/// 装配菜单：原生菜单 + 标题栏菜单栏；翻译变化时重建。
-pub fn install(cx: &mut App, translator: &Entity<Translator>) -> Entity<AppMenuBar> {
+/// 装配应用菜单：macOS 原生菜单栏；Windows / Linux 另建标题栏菜单栏（是否显示由
+/// [`SHOW_MENU_BAR_PREF`] 决定）。翻译变化时重建。
+pub fn install(cx: &mut App, translator: &Entity<Translator>) {
     apply_menus(translator, cx);
-    let menu_bar = AppMenuBar::new(cx);
-    let observed_bar = menu_bar.clone();
+    if !cfg!(target_os = "macos") {
+        let bar = AppMenuBar::new(cx);
+        cx.set_global(TitleMenuBar(bar));
+    }
     cx.observe(translator, move |translator, cx| {
         apply_menus(&translator, cx);
-        observed_bar.update(cx, |bar, cx| bar.reload(cx));
     })
     .detach();
-    menu_bar
 }
 
-fn apply_menus(translator: &Entity<Translator>, cx: &mut App) {
+pub(crate) fn apply_menus(translator: &Entity<Translator>, cx: &mut App) {
     let translator = translator.read(cx).clone();
     cx.set_menus(build_menus(&translator));
+    if cfg!(target_os = "macos") {
+        return;
+    }
     GlobalState::global_mut(cx).set_app_menus(
         build_menus(&translator)
             .into_iter()
             .map(Menu::owned)
             .collect(),
     );
+    if let Some(TitleMenuBar(bar)) = cx.try_global::<TitleMenuBar>() {
+        bar.clone().update(cx, |bar, cx| bar.reload(cx));
+    }
+}
+
+/// 偏好 → 标题栏菜单栏可见性；幂等，窗口创建与每次偏好变化都走这里。
+pub(crate) fn apply_menu_bar_visibility(
+    shell: &mut ShellView,
+    preferences: &BTreeMap<String, serde_json::Value>,
+    cx: &mut Context<ShellView>,
+) {
+    let visible = preferences
+        .get(SHOW_MENU_BAR_PREF)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let bar = visible
+        .then(|| {
+            cx.try_global::<TitleMenuBar>()
+                .map(|TitleMenuBar(bar)| bar.clone())
+        })
+        .flatten();
+    shell.set_menu_bar(bar, cx);
 }
 
 /// 应用级动作（不依赖具体窗口）。窗口级动作作用于当前活动窗口。
@@ -226,6 +219,96 @@ pub fn install_global_actions(cx: &mut App) {
         );
     });
     cx.on_action(|_: &ToggleCommandPalette, cx| crate::command_palette::toggle(cx));
+    install_download_fallbacks(cx);
+}
+
+/// 下载页动作的应用级兜底。这些动作的处理器挂在下载页根元素上，只有派发路径经过下载页才会
+/// 命中；Windows / Linux 标题栏菜单以「打开菜单时的焦点」为派发目标，焦点为空（启动后未点过
+/// 列表）、在标题栏搜索框或当前不在下载页时，动作只沿标题栏冒泡、无人处理。下载页处理过的
+/// 动作不会冒泡到这里，因此焦点在下载页内时行为不变。
+fn install_download_fallbacks(cx: &mut App) {
+    forward_to_downloads::<dl::OpenTorrentFile>(cx);
+    forward_to_downloads::<dl::PauseSelected>(cx);
+    forward_to_downloads::<dl::ResumeSelected>(cx);
+    forward_to_downloads::<dl::DeleteSelected>(cx);
+    forward_to_downloads::<dl::DeleteSelectedWithFiles>(cx);
+    forward_to_downloads::<dl::SelectAllTasks>(cx);
+    forward_to_downloads::<dl::PauseAll>(cx);
+    forward_to_downloads::<dl::ResumeAll>(cx);
+    forward_to_downloads::<dl::ClearFinished>(cx);
+    forward_to_downloads::<dl::OpenSelected>(cx);
+    forward_to_downloads::<dl::RevealSelected>(cx);
+    forward_to_downloads::<dl::CopySelectedFiles>(cx);
+    forward_to_downloads::<dl::CopySelectedUrl>(cx);
+    forward_to_downloads::<dl::RenameSelected>(cx);
+    forward_to_downloads::<dl::ChangeSelectedUrl>(cx);
+    forward_to_downloads::<dl::ChangeSelectedSegments>(cx);
+    forward_to_downloads::<dl::VerifySelected>(cx);
+    forward_to_downloads::<dl::RedownloadSelected>(cx);
+    forward_to_downloads::<dl::ToggleBoostSelected>(cx);
+    forward_to_downloads::<dl::OpenSelectedInWindow>(cx);
+    forward_to_downloads::<dl::CycleDensity>(cx);
+    forward_to_downloads::<dl::CycleGroupBy>(cx);
+    forward_to_downloads::<dl::CycleSort>(cx);
+    forward_to_downloads::<dl::ToggleDetailPanel>(cx);
+}
+
+fn forward_to_downloads<A: Action>(cx: &mut App) {
+    cx.on_action(|action: &A, cx| {
+        let action = action.boxed_clone();
+        cx.defer(move |cx| dispatch_in_downloads(action, cx));
+    });
+}
+
+/// 主窗口切到下载页、聚焦下载页根元素，再在其上派发动作。
+///
+/// 焦点已在下载页内说明下载页自己让出了该动作（如输入框聚焦时的字母键守卫），不再接管，
+/// 否则快捷键会抢走输入框焦点。刚切换路由时下载页尚未进入派发树，等它渲染一帧后再派发：
+/// 首个 next-frame 回调在该帧绘制前执行，第二个才能看到包含下载页的已渲染帧。
+fn dispatch_in_downloads(action: Box<dyn Action>, cx: &mut App) {
+    let Some(downloads) = Desktop::global(cx)
+        .main_downloads
+        .as_ref()
+        .and_then(gpui::WeakEntity::upgrade)
+    else {
+        return;
+    };
+    let Some(handle) = WindowRegistry::handle(cx, &WindowKey::Main) else {
+        return;
+    };
+    let focus = downloads.read(cx).focus_handle(cx);
+    let rendered = Desktop::global(cx)
+        .main_shell
+        .as_ref()
+        .and_then(gpui::WeakEntity::upgrade)
+        .is_some_and(|shell| {
+            shell.read(cx).active_route() == Some(&crate::activity::DOWNLOADS_ROUTE)
+        });
+    let declined = match handle.update(cx, |_, window, cx| focus.contains_focused(window, cx)) {
+        Ok(declined) => declined,
+        Err(error) => {
+            log::debug!("main window released before menu action dispatch: {error:#}");
+            return;
+        }
+    };
+    if declined {
+        return;
+    }
+    crate::command_palette::navigate_now(cx, crate::activity::DOWNLOADS_ROUTE);
+    if let Err(error) = handle.update(cx, move |_, window, cx| {
+        focus.focus(window, cx);
+        if rendered {
+            focus.dispatch_action(action.as_ref(), window, cx);
+        } else {
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| {
+                    focus.dispatch_action(action.as_ref(), window, cx);
+                });
+            });
+        }
+    }) {
+        log::debug!("main window released before menu action dispatch: {error:#}");
+    }
 }
 
 /// 全局动作里操作活动窗口必须 defer：有活动窗口时，菜单点击与键盘一样经
@@ -244,7 +327,7 @@ fn with_active_window(cx: &mut App, f: impl FnOnce(&Window) + 'static) {
 /// 确认「下载将暂停」。只退出界面、保留后台，走关闭窗口（托盘驻留时）。
 pub fn request_quit(cx: &mut App) {
     if Desktop::active_task_count(cx) == 0 {
-        crate::lifecycle::quit_everything(cx);
+        crate::lifecycle::quit_everything_gated(cx);
         return;
     }
     cx.defer(|cx| {
@@ -255,7 +338,9 @@ pub fn request_quit(cx: &mut App) {
             return;
         };
         if let Err(error) = window.update(cx, |_, window, cx| {
-            confirm_active_tasks(window, cx, |_, cx| crate::lifecycle::quit_everything(cx));
+            confirm_active_tasks(window, cx, |window, cx| {
+                crate::lifecycle::quit_everything_in(window, cx);
+            });
         }) {
             log::debug!("view or window released before lifecycle update: {error:#}");
         }

@@ -567,13 +567,20 @@ async fn task_notice_is_never_forwarded_to_ui_subscribers() {
     let events = AgentEventHub::new(AgentSnapshot::default());
     let (mut ui, _) = events.subscribe_and_snapshot();
     let (sender, mut receiver) = notice_channel();
+    let (sound_sender, mut sound_receiver) = crate::sound::channel();
 
     route_daemon_event(
         &events,
         &sender,
+        Some(&sound_sender),
         DaemonEvent::TaskNotice(notice("d1", "task.completed")),
     );
     assert!(ui.try_recv().is_err(), "TaskNotice 不得出现在 agent 事件流");
+    assert_eq!(
+        sound_receiver.try_recv().ok(),
+        Some(crate::sound::SoundKind::TaskCompleted),
+        "提示音模块同样收到该事件"
+    );
     let routed = receiver
         .try_recv()
         .expect("notice reaches the cloud module");
@@ -583,12 +590,60 @@ async fn task_notice_is_never_forwarded_to_ui_subscribers() {
     route_daemon_event(
         &events,
         &sender,
+        None,
         DaemonEvent::TaskDeleted {
             task_id: "t".to_owned(),
         },
     );
     assert!(ui.try_recv().is_ok());
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn plugin_view_events_are_forwarded_verbatim_to_ui_subscribers() {
+    use fluxdown_protocol::{AgentEvent, PluginViewFrameDto, ServiceEvent, ViewOp};
+
+    let events = AgentEventHub::new(AgentSnapshot::default());
+    let (mut ui, _) = events.subscribe_and_snapshot();
+    let (sender, mut receiver) = notice_channel();
+    let sent = [
+        DaemonEvent::PluginViewFrame(PluginViewFrameDto {
+            session: "s".to_owned(),
+            seq: 1,
+            ops: vec![ViewOp::Error {
+                message: "boom".to_owned(),
+            }],
+            effects: Vec::new(),
+        }),
+        DaemonEvent::PluginViewClosed {
+            session: "s".to_owned(),
+            reason: "pluginUnloaded".to_owned(),
+        },
+        DaemonEvent::PluginToast {
+            identity: "a@b".to_owned(),
+            level: "info".to_owned(),
+            text: "hi".to_owned(),
+        },
+    ];
+    for event in sent.iter().cloned() {
+        route_daemon_event(&events, &sender, None, event);
+    }
+    for expected in sent {
+        let frame = ui
+            .try_recv()
+            .expect("plugin view event reaches the UI stream");
+        let ServiceEvent::Agent(AgentEvent::Daemon(forwarded)) = frame.event else {
+            panic!("plugin view events travel as forwarded daemon events");
+        };
+        assert_eq!(
+            serde_json::to_value(&forwarded).expect("forwarded event serializes"),
+            serde_json::to_value(&expected).expect("sent event serializes"),
+        );
+    }
+    assert!(
+        receiver.try_recv().is_err(),
+        "cloud module sees none of them"
+    );
 }
 
 #[tokio::test]

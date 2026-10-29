@@ -13,7 +13,8 @@ use fluxdown_protocol::{
 };
 use fluxdown_ui_downloads::{
     DownloadsCommand, DownloadsPort, NewDownloadContext, NewDownloadSubmission, NewDownloadView,
-    SubmitNotice, new_download_context_from_snapshot, new_download_targets, run_submission,
+    SubmissionHooks, SubmitNotice, new_download_context_from_snapshot, new_download_targets,
+    run_submission,
 };
 use fluxdown_ui_i18n::keys;
 use fluxdown_ui_shell::{AuxiliaryWindowView, auxiliary_window_options};
@@ -92,9 +93,87 @@ pub fn open(cx: &mut App, context: NewDownloadContext) {
     open_with(cx, context, Vec::new());
 }
 
+/// 系统打开的链接被 agent 拒绝时在主窗口 toast（含启动时已发生的失败）；文案按错误原因取，
+/// 分享链接的原因（本机分享、分享方离线、已过期……）与接收窗口一致。
+fn install_capture_failure_notices(cx: &mut App) {
+    let mut failures = Desktop::global(cx)
+        .client
+        .submissions
+        .capture_failure
+        .subscribe();
+    cx.spawn(async move |cx| {
+        let mut pending = failures.borrow_and_update().clone();
+        loop {
+            if let Some(error) = pending.take() {
+                cx.update(|cx| {
+                    crate::windows::main::reveal(cx);
+                    let Some(main) = WindowRegistry::handle(cx, &WindowKey::Main) else {
+                        return;
+                    };
+                    let message = fluxdown_ui_share::error_text(
+                        Desktop::global(cx).translator.read(cx),
+                        &error,
+                    );
+                    if let Err(error) = main.update(cx, |_, window, cx| {
+                        window.push_notification(Notification::error(message), cx);
+                    }) {
+                        log::error!("could not display capture failure: {error:#}");
+                    }
+                });
+            }
+            if failures.changed().await.is_err() {
+                log::debug!("capture failure notification channel closed");
+                break;
+            }
+            pending = failures.borrow_and_update().clone();
+        }
+    })
+    .detach();
+}
+
 /// 订阅会话：待确认捕获出现 → 追加进新建下载表单（必要时打开）；启动时回放快照。
 pub fn install_captures(cx: &mut App) {
+    install_capture_failure_notices(cx);
     cx.set_global(CaptureDispatch::default());
+    let mut interruptions = Desktop::global(cx)
+        .client
+        .submissions
+        .interruption
+        .subscribe();
+    cx.spawn(async move |cx| {
+        loop {
+            if interruptions.changed().await.is_err() {
+                log::debug!("download import notification channel closed");
+                break;
+            }
+            let Some(source) = interruptions.borrow_and_update().clone() else {
+                continue;
+            };
+            cx.update(|cx| {
+                crate::windows::main::reveal(cx);
+                let Some(main) = WindowRegistry::handle(cx, &WindowKey::Main) else {
+                    return;
+                };
+                let translator = Desktop::global(cx).translator.read(cx);
+                let message = format!("{}\n{source}", translator.text("downloadImportInterrupted"));
+                let copy_label = translator.text("copyUrl").to_owned();
+                let notification = Notification::error(message).action(move |_, _, _| {
+                    let source = source.clone();
+                    gpui_component::button::Button::new("copy-interrupted-download")
+                        .label(copy_label.clone())
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.clone()));
+                        })
+                });
+                if let Err(error) = main.update(cx, |_, window, cx| {
+                    window.push_notification(notification, cx);
+                }) {
+                    log::error!("could not display download import interruption: {error:#}");
+                }
+            });
+        }
+    })
+    .detach();
     let session = Desktop::global(cx).session.clone();
     let initial = session.read(cx).agent_snapshot().map(|body| {
         (
@@ -123,6 +202,7 @@ pub fn install_captures(cx: &mut App) {
                         .map(|session| session.user.id.as_str()),
                 );
                 sync_targets(cx);
+                sync_categories(cx, body);
                 refresh_provisional_context(cx, body);
                 sync_captures(cx, &body.pending_captures);
             }
@@ -169,7 +249,10 @@ pub fn install_captures(cx: &mut App) {
             }
             _ => {}
         },
-        SessionSignal::Stale | SessionSignal::Fatal(_) | SessionSignal::ServiceStopped => {
+        SessionSignal::Stale
+        | SessionSignal::Fatal(_)
+        | SessionSignal::ServiceStopped
+        | SessionSignal::ServiceFailed(_) => {
             cx.global_mut::<CaptureDispatch>().agent_current = false;
             sync_targets(cx);
         }
@@ -194,6 +277,27 @@ fn cache_devices(
         Vec::new()
     };
     dispatch.linked_devices = linked.to_vec();
+}
+
+/// 把快照里最新的分类列表推给已打开的新建下载表单（快捷添加网址规则以它为写回基准）。
+fn sync_categories(cx: &mut App, snapshot: &AgentSnapshot) {
+    let form = cx
+        .global::<CaptureDispatch>()
+        .form
+        .as_ref()
+        .and_then(WeakEntity::upgrade);
+    let (Some(form), Some(handle)) = (form, WindowRegistry::handle(cx, &WindowKey::NewDownload))
+    else {
+        return;
+    };
+    let categories = new_download_context_from_snapshot(snapshot).custom_categories;
+    if let Err(error) = handle.update(cx, |_, window, cx| {
+        form.update(cx, |form, cx| {
+            form.set_custom_categories(categories, window, cx)
+        });
+    }) {
+        log::debug!("view or window released before lifecycle update: {error:#}");
+    }
 }
 
 /// 把最新设备名册（在线状态 / 默认目录 / 设备增减）推给已打开的新建下载表单。
@@ -339,6 +443,12 @@ fn open_with(cx: &mut App, context: NewDownloadContext, captures: Vec<PendingCap
                     cx,
                 )
             });
+            form.update(cx, |form, cx| {
+                form.set_open_share_receive(
+                    Some(crate::share_host::open_share_receive_opener()),
+                    cx,
+                );
+            });
             if !captures.is_empty() {
                 form.update(cx, |form, cx| form.add_captures(captures, window, cx));
             }
@@ -414,10 +524,18 @@ fn ignore_captures(captures: Vec<PendingCaptureDto>, port: &AgentDownloadsPort, 
 /// toast（成功 / 失败 / 下发汇总文案由下载能力按 `reason` 生成）。界面退出前等提交送达
 ///（外部捕获拉起的界面没有主窗口，关表单即最后一个窗口）。
 fn submit(submission: NewDownloadSubmission, port: &Arc<AgentDownloadsPort>, cx: &mut App) {
-    let main = Desktop::global(cx)
+    let mut main = Desktop::global(cx)
         .main_downloads
         .as_ref()
         .and_then(WeakEntity::upgrade);
+    // 超过一块的导入有进度条与取消入口，只在主窗口下载页显示：没有主窗口时先打开它。
+    if main.is_none() && submission.exceeds_one_chunk() {
+        crate::windows::main::reveal(cx);
+        main = Desktop::global(cx)
+            .main_downloads
+            .as_ref()
+            .and_then(WeakEntity::upgrade);
+    }
     let translator = Desktop::global(cx).translator.clone();
     let notice = match main {
         Some(downloads) => downloads.update(cx, |downloads, cx| {
@@ -427,12 +545,23 @@ fn submit(submission: NewDownloadSubmission, port: &Arc<AgentDownloadsPort>, cx:
             let starts_immediately = submission.starts_immediately();
             let port = Arc::clone(port);
             let translator = translator.clone();
+            let timer = cx.background_executor().clone();
             cx.spawn(async move |cx| {
-                let report = run_submission(submission, move |command| port.execute(command)).await;
+                let report = run_submission(
+                    submission,
+                    move |command| port.execute(command),
+                    SubmissionHooks::new(move |delay| timer.timer(delay)),
+                )
+                .await;
                 // 与主窗口下载页同一规则：恰好一个任务立即开始才弹进度窗口。
                 if let ([task_id], true) = (report.created_task_ids(), starts_immediately) {
                     let task_id = task_id.clone();
-                    cx.update(|cx| crate::progress_windows::user_started(task_id, cx));
+                    cx.update(|cx| {
+                        crate::progress_windows::user_started(
+                            fluxdown_ui_downloads::UserStartIntent::Created(task_id),
+                            cx,
+                        );
+                    });
                 }
                 cx.update(|cx| report.notice(translator.read(cx)))
             })
@@ -440,6 +569,10 @@ fn submit(submission: NewDownloadSubmission, port: &Arc<AgentDownloadsPort>, cx:
     };
     let task = cx.spawn(async move |cx| {
         let SubmitNotice { ok, message } = notice.await;
+        // 全部新建成功不提示：任务已在列表中，toast 只会遮挡列表顶部（#884）。
+        if ok && message.is_empty() {
+            return;
+        }
         cx.update(|cx| {
             let main = match WindowRegistry::handle(cx, &WindowKey::Main) {
                 Some(main) => main,
@@ -453,14 +586,10 @@ fn submit(submission: NewDownloadSubmission, port: &Arc<AgentDownloadsPort>, cx:
                     main
                 }
             };
-            let translator = translator.read(cx);
             let message = if message.is_empty() {
                 translator
-                    .text(if ok {
-                        "taskCreatedToast"
-                    } else {
-                        "localServiceActionFailed"
-                    })
+                    .read(cx)
+                    .text("localServiceActionFailed")
                     .to_owned()
             } else {
                 message

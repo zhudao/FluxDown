@@ -2,8 +2,11 @@ import { Check, ChevronDown, Globe } from 'lucide-react'
 import { useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useT } from '../../../i18n'
+import { enabledRuleCount } from '../../../lib/proxyRules'
 import { Icon, Popover, Tooltip } from '../../../ui'
 import { setDaemon, useDaemonValue } from '../../settings/kit/writeStore'
+import { popoverSide, RAIL_BUTTON, resolveSide, useDaemonReady } from './widget'
+import type { WidgetProps } from './widget'
 
 const MODES = [
   { value: 'none', labelKey: 'proxyModeNone' },
@@ -44,40 +47,57 @@ function focusMenuItem(event: KeyboardEvent<HTMLDivElement>): void {
   items[next]?.focus()
 }
 
-export function ProxyControl({ disabled }: { disabled: boolean }) {
+export function ProxyControl({ orientation = 'horizontal', side }: WidgetProps) {
   const t = useT()
+  const disabled = !useDaemonReady()
   const mode = useDaemonValue('proxy_mode')
   const host = useDaemonValue('proxy_host')
   const port = useDaemonValue('proxy_port')
+  const ruleCount = enabledRuleCount(useDaemonValue('proxy_rules'))
+  const ruleHint = ruleCount > 0 ? t('proxyRulesActiveHint', { count: ruleCount }) : ''
   const current = MODES.find((item) => item.value === mode) ?? MODES[0]
   const title = t('settingsCatProxy')
   const label = t(current.labelKey)
+  const summary = ruleHint ? `${title}: ${label} · ${ruleHint}` : `${title}: ${label}`
   const endpoint = proxyEndpoint(host, port)
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
 
+  const rail = orientation === 'rail'
   return (
     <Popover
       title={title}
+      side={popoverSide(orientation)}
       align="end"
       open={open}
       onOpenChange={(next) => {
         if (!disabled || !next) setOpen(next)
       }}
       trigger={
-        <Tooltip content={`${title}: ${label}`} side="top">
+        <Tooltip content={summary} side={resolveSide(orientation, side)}>
           <button
             ref={triggerRef}
             type="button"
             disabled={disabled}
-            aria-label={`${title}: ${label}`}
+            aria-label={summary}
             aria-haspopup="dialog"
             aria-expanded={open}
-            className="inline-flex h-status-control min-w-status-control shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm px-1.5 text-caption text-muted-foreground hover:bg-nav-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-50 coarse:min-h-touch coarse:min-w-touch"
+            className={
+              rail
+                ? RAIL_BUTTON
+                : 'inline-flex h-status-control min-w-status-control shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-sm px-1.5 text-caption text-muted-foreground hover:bg-nav-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-50 coarse:min-h-touch coarse:min-w-touch'
+            }
           >
-            <Icon icon={Globe} />
-            <span className="max-w-28 truncate narrow:max-w-20">{label}</span>
-            <Icon icon={ChevronDown} />
+            <Icon icon={Globe} size={rail ? 'xl' : 'lg'} />
+            {rail ? null : (
+              <>
+                <span className="max-w-28 truncate narrow:max-w-20">{label}</span>
+                {ruleCount > 0 ? (
+                  <span className="rounded-sm bg-muted px-1 text-caption tabular-nums text-muted-foreground">{ruleCount}</span>
+                ) : null}
+                <Icon icon={ChevronDown} />
+              </>
+            )}
           </button>
         </Tooltip>
       }
@@ -115,6 +135,9 @@ export function ProxyControl({ disabled }: { disabled: boolean }) {
               </span>
             </button>
           ))}
+          {ruleCount > 0 ? (
+            <div className="mt-1 border-t border-hairline px-2 pb-1 pt-1.5 text-caption text-muted-foreground">{ruleHint}</div>
+          ) : null}
         </div>
       )}
     </Popover>

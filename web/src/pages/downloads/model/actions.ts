@@ -1,15 +1,25 @@
 // 下载页命令：对应 GPUI 的 DownloadsCommand（downloads_port.rs），全部走 agent /rpc。
 // 本地任务 → `daemon.*`；远程任务 → `agent.remote.command`。失败统一 toast。
 // 「打开文件 / 在文件夹中显示」只在连接带 `agent.openTaskFiles` 能力（agent 与浏览器同机）时提供，
-// 其余情况由浏览器下载已完成文件替代。
+// 其余情况由浏览器下载已完成文件替代；「复制文件」另需 `agent.copyTaskFiles`（同机桌面会话），
+// 远程 / NAS 连接不提供（浏览器 Clipboard API 不能写入文件），同样以浏览器下载替代。
 
 import { copyText } from '../../../lib/copy'
 import { t } from '../../../i18n'
-import { CAPABILITY_AGENT_OPEN_TASK_FILES, RpcError, downloadTaskFile, rpc, rpcStore } from '../../../lib/rpc'
+import {
+  CAPABILITY_AGENT_COPY_TASK_FILES,
+  CAPABILITY_AGENT_OPEN_TASK_FILES,
+  RpcError,
+  downloadTaskFile,
+  rpc,
+  rpcStore,
+} from '../../../lib/rpc'
 import type { CreateTaskRequest, RemoteCommandParams } from '../../../lib/rpc'
 import { confirmDialog, toast } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
+import { rpcErrorKind, rpcErrorText } from '../../../lib/rpcErrorText'
 import { planTaskCommand } from './batchPlan'
+import { folderAnchorMember } from './groupTree'
 import { PLUGIN_ERROR_PREFIX, shareUrl } from './task'
 import type { DownloadTaskView } from './task'
 
@@ -103,11 +113,26 @@ export function moveViewsToQueue(views: readonly DownloadTaskView[], queueId: st
   )
 }
 
-/** Boost：同 id 再次调用即取消。 */
-export const toggleBoost = (taskId: string) => guarded(() => rpc.daemon.queue.boost({ id: taskId }))
+/** Boost：同 id 再次调用即取消。只有未结束的任务能优先下载：已完成 / 失败直接提示，不下发命令。 */
+export function toggleBoost(view: DownloadTaskView): Promise<boolean> {
+  if (view.state === 'completed' || view.state === 'failed') {
+    toast.warning(t(view.state === 'completed' ? 'boostTaskCompleted' : 'boostTaskEnded'))
+    return Promise.resolve(false)
+  }
+  return guarded(() => rpc.daemon.queue.boost({ id: view.taskId }))
+}
+
+/** 更换链接 / 修改线程数成功后，失败任务立即重试（暂停 / 等待保持原状态）；重试失败 toast。 */
+export async function resumeIfFailed(taskId: string, wasFailed: boolean): Promise<boolean> {
+  return wasFailed ? guarded(() => rpc.daemon.task.resume({ taskId })) : true
+}
 
 export function isPluginRetryError(view: DownloadTaskView): boolean {
-  return view.state === 'failed' && view.errorMessage.startsWith(PLUGIN_ERROR_PREFIX)
+  return (
+    view.state === 'failed' &&
+    view.groupId === '' &&
+    view.errorMessage.startsWith(PLUGIN_ERROR_PREFIX)
+  )
 }
 
 export async function confirmIgnorePluginRetry(taskId: string): Promise<boolean> {
@@ -198,6 +223,71 @@ export async function openTaskFile(taskId: string): Promise<void> {
 
 export const revealTaskFile = (taskId: string) => guarded(() => rpc.agent.platform.revealTask({ taskId }))
 
+/**
+ * 「复制文件」：可多选，全部本地已完成且文件仍在（对齐 GPUI `TaskMenuFacts::has_product_on_disk`），
+ * 且本连接带 `agent.copyTaskFiles`——agent 所在主机就是浏览器所在机器、有桌面剪贴板。
+ */
+export const canCopyTaskFiles = (views: readonly DownloadTaskView[]): boolean =>
+  views.length > 0 &&
+  (rpcStore.peek().hello?.capabilities.includes(CAPABILITY_AGENT_COPY_TASK_FILES) ?? false) &&
+  views.every(isDownloadable)
+
+/** 产物以文件写入主机剪贴板；文件已不在时立即重扫（同 `openTaskFile`），失败文案对齐 GPUI `task_copy.rs`。 */
+export async function copyTaskFiles(views: readonly DownloadTaskView[]): Promise<void> {
+  try {
+    await rpc.agent.platform.copyTaskFiles({ taskIds: views.map((view) => view.taskId) })
+    toast.success(t('fileCopiedToClipboard'))
+  } catch (error) {
+    if (error instanceof RpcError && error.is('notFound')) {
+      rpc.daemon.task.rescan().catch(() => {})
+      toast.error(t('copyFileErrNotFound'))
+    } else if (error instanceof RpcError && error.is('unsupported')) {
+      toast.error(t('copyFileErrUnsupported'))
+    } else {
+      toast.error(`${t('copyFileFailed')} ${rpcErrorText(error, t)}`)
+    }
+  }
+}
+
+/** 已损坏文件名文案：前 3 个，超出部分折叠为「等 N 个」（与 GPUI 同规则）。 */
+function damagedFilesText(files: readonly string[]): string {
+  const shown = files.slice(0, 3).join(', ')
+  return files.length > 3 ? t('verifyTaskMoreFiles', { files: shown, count: files.length - 3 }) : shown
+}
+
+/** BT 完整性校验：耗时可达数分钟，先提示已开始，结果与失败均以 toast 反馈。 */
+export async function verifyTaskIntegrity(view: DownloadTaskView): Promise<void> {
+  const name = view.name
+  toast.info(t('verifyTaskStarted', { name }))
+  try {
+    const result = await rpc.daemon.task.verify({ taskId: view.taskId })
+    switch (result.status) {
+      case 'intact':
+        toast.success(t('verifyTaskIntact', { name, count: result.verifiedPieces }))
+        break
+      case 'damaged':
+        toast.warning(
+          t('verifyTaskDamaged', {
+            name,
+            bad: result.badPieces,
+            total: result.totalPieces,
+            files: damagedFilesText(result.damagedFiles),
+          }),
+        )
+        break
+      case 'unverifiable':
+        toast.warning(t('verifyTaskUnverifiable', { name }))
+        break
+    }
+  } catch (error) {
+    if (error instanceof RpcError && rpcErrorKind(error) === 'conflict') {
+      toast.warning(t('verifyTaskBusy', { name }))
+    } else {
+      toast.error(t('verifyTaskFailed', { name, error: rpcErrorText(error, t) }))
+    }
+  }
+}
+
 // ── 任务组 ──
 
 export const pauseGroup = (groupId: string) => guarded(() => rpc.daemon.group.pause({ groupId }))
@@ -226,4 +316,14 @@ export function copySourceLink(url: string): void {
   if (url === '') return
   copyText(url)
   toast.key('urlCopied', 'success')
+}
+
+/** 「打开组文件夹」：agent 与浏览器同机时可用（与「在文件夹中显示」同一能力）。 */
+export const canOpenGroupFolder = (): boolean => hostOpensTaskFiles()
+
+/** 打开任务组文件夹：定位一个位于组根目录的成员，没有则第一个成员。`views` 为全部视图（取该组成员）。 */
+export async function openGroupFolder(views: readonly DownloadTaskView[], groupId: string, groupDir: string): Promise<boolean> {
+  const members = views.filter((view) => view.source === 'local' && view.groupId === groupId)
+  const anchor = folderAnchorMember(members, groupDir)
+  return anchor === undefined ? false : revealTaskFile(anchor.taskId)
 }

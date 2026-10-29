@@ -79,7 +79,7 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::RegistrationIncomplete => "accountErrorRegistrationIncomplete",
         ErrorReason::MailNotConfigured => "errReasonMailNotConfigured",
         ErrorReason::DeviceLimit => "accountErrorDeviceLimit",
-        ErrorReason::SyncDeviceLimit => "cloudSyncErrorDeviceLimit",
+        ErrorReason::OnlineDeviceLimit => "cloudSyncErrorOnlineLimit",
         ErrorReason::DeviceUntrusted => {
             if context == ErrorContext::Sync {
                 "cloudSyncErrorDeviceUntrusted"
@@ -97,6 +97,8 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         }
         ErrorReason::PairingCodeInvalid => "errReasonPairingCodeInvalid",
         ErrorReason::PairingSessionExpired => "errReasonPairingSessionExpired",
+        ErrorReason::PairingTimeout => "errReasonPairingTimeout",
+        ErrorReason::PeerClockSkew => "errReasonPeerClockSkew",
         ErrorReason::PairingPeerUnreachable => "errReasonPairingPeerUnreachable",
         ErrorReason::PairingNotFluxDown => "errReasonPairingNotFluxDown",
         ErrorReason::PairingThrottled => "errReasonPairingThrottled",
@@ -106,10 +108,46 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         ErrorReason::PairingVersionMismatch => "errReasonPairingVersionMismatch",
         ErrorReason::PeerNotPaired => "errReasonPeerNotPaired",
         ErrorReason::PeerOffline => "errReasonPeerOffline",
+        ErrorReason::PeerOutdated => "errReasonPeerOutdated",
+        ErrorReason::LinkUnavailable => "errReasonLinkUnavailable",
         ErrorReason::TargetDeviceOffline => "errReasonTargetDeviceOffline",
         ErrorReason::TaskStateConflict => "errReasonTaskStateConflict",
         ErrorReason::TaskDeviceMismatch => "errReasonTaskDeviceMismatch",
         ErrorReason::SaveDirUnavailable => "errReasonSaveDirUnavailable",
+        ErrorReason::ShareUnavailable => "errReasonShareUnavailable",
+        ErrorReason::ShareNotFound => "errReasonShareNotFound",
+        ErrorReason::ShareExpired => "errReasonShareExpired",
+        ErrorReason::ShareStopped => "errReasonShareStopped",
+        ErrorReason::ShareCodeInvalid => "errReasonShareCodeInvalid",
+        ErrorReason::ShareRateLimited => "errReasonShareRateLimited",
+        ErrorReason::ShareTurnstileRequired => "errReasonShareTurnstileRequired",
+        ErrorReason::ShareFileChanged => "errReasonShareFileChanged",
+        ErrorReason::ShareSenderOffline => "errReasonShareSenderOffline",
+        ErrorReason::ShareTaskNotShareable => "errReasonShareTaskNotShareable",
+        ErrorReason::ShareBridgeUnavailable => "errReasonShareBridgeUnavailable",
+        ErrorReason::ShareQuotaExceeded => "errReasonShareQuotaExceeded",
+        ErrorReason::ShareCloudNotReady => "errReasonShareCloudNotReady",
+        ErrorReason::ShareTrafficExhausted => "errReasonShareTrafficExhausted",
+        ErrorReason::ShareCloudUnavailable => "errReasonShareCloudUnavailable",
+        ErrorReason::ShareOwnShare => "errReasonShareOwnShare",
+        ErrorReason::ShareSourceMissing => "errReasonShareSourceMissing",
+        ErrorReason::ShareSwarmLocked => "errReasonShareSwarmLocked",
+        ErrorReason::ShareSwarmQuotaExhausted => "errReasonShareSwarmQuotaExhausted",
+        ErrorReason::ShareSwarmLoginRequired => "errReasonShareSwarmLoginRequired",
+        ErrorReason::ShareStrikeLimited => "errReasonShareStrikeLimited",
+        ErrorReason::ShareAppealExists => "errReasonShareAppealExists",
+        ErrorReason::PaymentDisabled
+        | ErrorReason::PaymentGatewayFailed
+        | ErrorReason::PlanNotPurchasable
+        | ErrorReason::PlanAlreadyOwned
+        | ErrorReason::PlanNotUpgrade
+        | ErrorReason::PlanTierNotHigher
+        | ErrorReason::SubscriptionConflict
+        | ErrorReason::ReferralCodeInvalid
+        | ErrorReason::ReferralSelfUse
+        | ErrorReason::ReferralAlreadyUsed
+        | ErrorReason::ReferralPlanExcluded
+        | ErrorReason::ReferralCodeTaken => return crate::billing::billing_reason_key(reason),
         // 插件市场、Doctor、API 服务切换与云端推送由各自页面展示；这里退回按 code 的通用文案。
         ErrorReason::MarketUnreachable
         | ErrorReason::MarketIndexInvalid
@@ -130,6 +168,7 @@ pub(crate) fn reason_key(reason: ErrorReason, context: ErrorContext) -> Option<&
         | ErrorReason::NotifyChannelLimit
         | ErrorReason::NotifyDisabled
         | ErrorReason::NotifyTargetInvalid
+        | ErrorReason::SoundUnplayable
         | ErrorReason::Unknown => return None,
     })
 }
@@ -164,11 +203,13 @@ fn code_key(error: &RpcErrorData, context: ErrorContext) -> &'static str {
                 return "cloudSyncErrorNetwork";
             }
         }
-        ErrorContext::Pairing => match error.code {
-            Code::InvalidArgument => return "localPairingAddressInvalid",
-            _ if network => return "errReasonPairingPeerUnreachable",
-            _ => {}
-        },
+        ErrorContext::Pairing => {
+            // 不带 reason 的 Unavailable 是本机服务 / 远端主机断开：落到通用的「服务已断开」，
+            // 真正的对端不可达由 `PairingPeerUnreachable` reason 表达。
+            if error.code == Code::InvalidArgument {
+                return "localPairingAddressInvalid";
+            }
+        }
         ErrorContext::General => {}
     }
     generic_key(error.code)
@@ -253,6 +294,22 @@ mod tests {
     }
 
     #[test]
+    fn billing_reasons_use_plan_and_referral_keys() {
+        let taken =
+            error(ApplicationErrorCode::Conflict).with_reason(ErrorReason::ReferralCodeTaken);
+        assert_eq!(
+            error_key(&taken, ErrorContext::General),
+            "accountReferralCodeTaken"
+        );
+        let gateway =
+            error(ApplicationErrorCode::Unavailable).with_reason(ErrorReason::PaymentGatewayFailed);
+        assert_eq!(
+            error_key(&gateway, ErrorContext::General),
+            "accountPlanErrorGateway"
+        );
+    }
+
+    #[test]
     fn retryable_unavailable_is_network_in_auth_contexts() {
         let offline = RpcErrorData::new(ApplicationErrorCode::Unavailable, true);
         assert_eq!(
@@ -302,12 +359,44 @@ mod tests {
     fn sync_reason_without_mapping_uses_generic_sync_failure() {
         assert_eq!(sync_reason_key(None), "cloudSyncErrorGeneric");
         assert_eq!(
-            sync_reason_key(Some(ErrorReason::SyncDeviceLimit)),
-            "cloudSyncErrorDeviceLimit"
+            sync_reason_key(Some(ErrorReason::OnlineDeviceLimit)),
+            "cloudSyncErrorOnlineLimit"
         );
         assert_eq!(
             sync_reason_key(Some(ErrorReason::Unknown)),
             "cloudSyncErrorGeneric"
+        );
+    }
+
+    #[test]
+    fn link_unavailable_is_not_reported_as_peer_unreachable_in_pairing() {
+        let unavailable = RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+            .with_reason(ErrorReason::LinkUnavailable);
+        assert_eq!(
+            error_key(&unavailable, ErrorContext::Pairing),
+            "errReasonLinkUnavailable"
+        );
+        let outdated =
+            error(ApplicationErrorCode::Unavailable).with_reason(ErrorReason::PeerOutdated);
+        assert_eq!(
+            error_key(&outdated, ErrorContext::General),
+            "errReasonPeerOutdated"
+        );
+    }
+
+    #[test]
+    fn reasonless_unavailable_in_pairing_is_a_local_disconnect_not_peer_unreachable() {
+        // 不带 reason 的 Unavailable 是本机服务 / 远端主机断开，不能说成「无法连接对端地址」。
+        let offline = RpcErrorData::new(ApplicationErrorCode::Unavailable, true);
+        assert_eq!(
+            error_key(&offline, ErrorContext::Pairing),
+            "localServiceDisconnected"
+        );
+        let unreachable = RpcErrorData::new(ApplicationErrorCode::Unavailable, true)
+            .with_reason(ErrorReason::PairingPeerUnreachable);
+        assert_eq!(
+            error_key(&unreachable, ErrorContext::Pairing),
+            "errReasonPairingPeerUnreachable"
         );
     }
 
@@ -352,12 +441,14 @@ mod tests {
             ErrorReason::RegistrationIncomplete,
             ErrorReason::MailNotConfigured,
             ErrorReason::DeviceLimit,
-            ErrorReason::SyncDeviceLimit,
+            ErrorReason::OnlineDeviceLimit,
             ErrorReason::DeviceUntrusted,
             ErrorReason::SessionExpired,
             ErrorReason::CloudUnreachable,
             ErrorReason::PairingCodeInvalid,
             ErrorReason::PairingSessionExpired,
+            ErrorReason::PairingTimeout,
+            ErrorReason::PeerClockSkew,
             ErrorReason::PairingPeerUnreachable,
             ErrorReason::PairingNotFluxDown,
             ErrorReason::PairingThrottled,
@@ -367,6 +458,8 @@ mod tests {
             ErrorReason::PairingVersionMismatch,
             ErrorReason::PeerNotPaired,
             ErrorReason::PeerOffline,
+            ErrorReason::PeerOutdated,
+            ErrorReason::LinkUnavailable,
             ErrorReason::TargetDeviceOffline,
             ErrorReason::TaskStateConflict,
             ErrorReason::TaskDeviceMismatch,

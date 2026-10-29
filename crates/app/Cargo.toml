@@ -26,6 +26,7 @@ fluxdown_ui_i18n = { path = "../i18n" }
 fluxdown_ui_icon_pack = { path = "../icon_pack" }
 fluxdown_ui_rss = { version = "0.1.0", path = "../rss" }
 fluxdown_ui_settings = { path = "../settings" }
+fluxdown_ui_share = { version = "0.1.0", path = "../share" }
 fluxdown_ui_shell = { path = "../shell" }
 fluxdown_ui_theme = { path = "../theme" }
 futures-util = "0.3.32"
@@ -44,6 +45,7 @@ mimalloc = "0.1.52"
 log = "0.4"
 fluxdown_logfile = { version = "0.1.0", path = "../../native/logfile" }
 base64 = "0.22"
+fluxdown_ui_plugin_ui = { version = "0.1.0", path = "../plugin_ui" }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

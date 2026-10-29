@@ -5,7 +5,6 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -18,6 +17,7 @@ import com.fluxdown.app.AppContainer
 import com.fluxdown.app.HomeActivity
 import com.fluxdown.app.R
 import com.fluxdown.app.data.DeviceSettings
+import com.fluxdown.app.i18n.localizedTaskError
 import com.fluxdown.app.i18n.str
 import com.fluxdown.app.nav.AppNavigator
 import com.fluxdown.app.nav.AppTab
@@ -216,7 +216,8 @@ object DownloadNotifier {
     private fun process(container: AppContainer, context: Context, tracker: NotificationTracker, state: HostState, hostId: String) {
         val delta = tracker.ingest(
             hostId = hostId,
-            isLive = state.connection == Connection.Live,
+            // 任务表载入中视同未就绪：丢弃基线，等完整表到达再静默播种（否则历史完成项会被当作新事件）。
+            isLive = state.connection == Connection.Live && !state.tasksLoading,
             tasks = state.tasks,
             selections = state.selections,
             now = System.currentTimeMillis() / 1000,
@@ -301,7 +302,7 @@ object DownloadNotifier {
                 builder.build()
             }
             NotificationEvent.Kind.Failed -> {
-                val reason = event.errorMessage.trim()
+                val reason = context.localizedTaskError(event.errorMessage.trim())
                 val body = if (reason.isEmpty()) event.fileName else "${event.fileName}\n$reason"
                 NotificationCompat.Builder(context, CHANNEL_FAILED)
                     .setSmallIcon(R.drawable.ic_stat_download)
@@ -363,7 +364,7 @@ object DownloadNotifier {
 
     /**
      * 完成通知的「打开」「分享」：任务属于本机主机且是普通文件时才提供（目录 / 远端文件无法打开或分享）；
-     * 文件不在 FileProvider 声明的根目录内（如外置存储卡）时同样不提供。
+     * 文件不在 FileProvider 声明的根目录内时同样不提供。
      */
     private fun addFileActions(builder: NotificationCompat.Builder, context: Context, hostId: String, state: HostState, taskId: String, code: Int) {
         if (hostId != HostRef.Local.ID) return
@@ -376,9 +377,11 @@ object DownloadNotifier {
         } catch (e: IllegalArgumentException) {
             return
         }
-        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
-        val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+        val mime = com.fluxdown.app.actions.mimeForFile(file.name)
+        fun viewIntent(type: String) = Intent(Intent.ACTION_VIEW).setDataAndType(uri, type)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        // PendingIntent 无法事后重试：精确类型无人处理时退回 */*（保持以前至少能弹选择器）
+        val view = viewIntent(mime).takeIf { it.resolveActivity(context.packageManager) != null } ?: viewIntent("*/*")
         val send = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         val chooser = Intent.createChooser(send, task.fileName).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

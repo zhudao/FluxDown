@@ -62,14 +62,31 @@ private struct SelectionHost: View {
     private func content(_ request: SelectionRequest) -> some View {
         let task = container.store.state.task(request.taskId)
         switch request.kind {
+        #if FULL_FLAVOR
         case let .bt(files):
             BtSelectionView(request: request, files: files, task: task, resolver: resolver, close: { dismiss() })
                 .id(request.requestId)
-        case let .hls(options):
-            HlsSelectionView(request: request, options: options, task: task, resolver: resolver, close: { dismiss() })
-                .id(request.requestId)
         case let .variant(options):
             VariantSelectionView(request: request, options: options, task: task, resolver: resolver, close: { dismiss() })
+                .id(request.requestId)
+        case let .plugin(site, url, candidates):
+            PluginChoiceView(
+                request: request,
+                site: site,
+                url: url,
+                candidates: candidates,
+                task: task,
+                resolver: resolver,
+                close: { dismiss() }
+            )
+            .id(request.requestId)
+        #else
+        case .bt, .variant, .plugin:
+            // store 构建不处理（`SelectionRequest.isPresentable`），根视图不会以此路由呈现。
+            EmptyView()
+        #endif
+        case let .hls(options):
+            HlsSelectionView(request: request, options: options, task: task, resolver: resolver, close: { dismiss() })
                 .id(request.requestId)
         case .fileExists:
             // 聚合进 `.fileConflicts` 路由（`FileConflictSheet`），不会以单请求 Sheet 呈现。
@@ -82,6 +99,7 @@ private func hlsLabel(height: Int64, bandwidth: Int64) -> String {
     height > 0 ? "\(height)p" : L("mobileKbps", ["n": bandwidth / 1000])
 }
 
+#if FULL_FLAVOR
 // MARK: - X1 · BT 文件
 
 private struct BtSelectionView: View {
@@ -286,6 +304,7 @@ private struct BtSelectionView: View {
         .accessibilityHidden(true)
     }
 }
+#endif
 
 // MARK: - X2 · HLS 画质
 
@@ -382,6 +401,7 @@ private struct HlsSelectionView: View {
     }
 }
 
+#if FULL_FLAVOR
 // MARK: - X3 · 插件变体
 
 private struct VariantSelectionView: View {
@@ -481,3 +501,140 @@ private struct VariantSelectionView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
+
+// MARK: - 插件选择（同站点多个插件命中）
+
+private struct PluginChoiceView: View {
+    let request: SelectionRequest
+    let site: String
+    let url: String
+    let candidates: [PluginCandidate]
+    let task: DownloadTask?
+    let resolver: SelectionResolver
+    let close: SelectionClose
+
+    @State private var timing: SelectionTiming
+    @State private var selected: String?
+    @State private var remember = false
+    private let defaultIdentity: String?
+
+    init(
+        request: SelectionRequest,
+        site: String,
+        url: String,
+        candidates: [PluginCandidate],
+        task: DownloadTask?,
+        resolver: SelectionResolver,
+        close: @escaping SelectionClose
+    ) {
+        self.request = request
+        self.site = site
+        self.url = url
+        self.candidates = candidates
+        self.task = task
+        self.resolver = resolver
+        self.close = close
+        var fallback: String?
+        if case let .plugin(identity, _) = request.defaultChoice { fallback = identity }
+        defaultIdentity = fallback
+        _timing = State(initialValue: SelectionTiming(request))
+        _selected = State(initialValue: candidates.first { $0.identity == fallback }?.identity ?? candidates.first?.identity)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    SelectionTaskRow(task: task)
+                    Text(url)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } header: {
+                    Text(L("pluginChoiceDesc", ["count": candidates.count, "site": site])).textCase(nil)
+                }
+                Section {
+                    ForEach(candidates, id: \.identity) { candidate in
+                        Button {
+                            selected = candidate.identity
+                            FluxHaptic.selection.play()
+                        } label: {
+                            row(candidate)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(candidate.identity == selected ? [.isSelected] : [])
+                    }
+                }
+                Section {
+                    Toggle(L("pluginChoiceRemember", ["site": site]), isOn: $remember)
+                } footer: {
+                    Text(L("pluginChoiceRememberHint"))
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle(L("pluginChoiceTitle"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(L("cancel"), systemImage: FluxSymbol.close) { resolver.cancel(request, onSuccess: close) }
+                }
+            }
+            .toolbar {
+                SelectionBar(timing: timing, onExpire: { resolver.applyDefault(request, onSuccess: close) }) {
+                    Button {
+                        guard let pick = candidates.first(where: { $0.identity == selected }) else { return }
+                        resolver.resolve(
+                            request,
+                            .plugin(identity: pick.identity, remember: remember),
+                            successToast: L("mobileSelectionPicked", ["label": pick.name]),
+                            userInitiated: true,
+                            onSuccess: close
+                        )
+                    } label: {
+                        Text(L("pluginChoiceConfirm"))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selected == nil)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func row(_ candidate: PluginCandidate) -> some View {
+        let isSelected = candidate.identity == selected
+        return HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(candidate.name).fontWeight(.medium)
+                    if candidate.identity == defaultIdentity {
+                        Text(L("pluginChoiceDefaultBadge"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tint)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(.tint.opacity(0.15), in: Capsule())
+                    }
+                }
+                Text("v\(candidate.version) · \(candidate.identity)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !candidate.description.isEmpty {
+                    Text(candidate.description)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.tertiary))
+                .imageScale(.large)
+        }
+        .contentShape(Rectangle())
+    }
+}
+#endif

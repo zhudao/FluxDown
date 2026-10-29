@@ -26,6 +26,8 @@ use crate::{AccountCommand, t, t_with};
 struct PairingPrompt {
     host: Entity<AccountHost>,
     request: LinkPairingRequestDto,
+    /// 本机截止时刻（收到时刻 + `ttlMs`）；到点自动拒绝。
+    deadline_ms: i64,
     remaining: u64,
     busy: bool,
     /// 已向 agent 提交过决定（含超时自动拒绝），不再重复提交。
@@ -49,6 +51,9 @@ pub fn open(host: &Entity<AccountHost>, session_id: &str, window: &mut Window, c
         return;
     }
     let queue = cx.default_global::<PromptQueue>();
+    if queue.active.as_deref() == Some(session_id) {
+        return;
+    }
     if queue.active.is_some() {
         if !queue.waiting.iter().any(|id| id == session_id) {
             queue.waiting.push_back(session_id.to_owned());
@@ -84,9 +89,29 @@ impl PairingPrompt {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let remaining = seconds_until(request.expires_at_unix_ms, now_unix_ms());
+        let deadline_ms = host
+            .read(cx)
+            .pairing_deadline_ms(&request.session_id)
+            .unwrap_or(request.expires_at_unix_ms);
+        let remaining = seconds_until(deadline_ms, now_unix_ms());
         let session_id = request.session_id.clone();
-        // 请求从快照消失（对端取消 / 过期 / 已处理）→ 关闭确认框。
+        // 承载窗口被关闭 / 实体被释放而请求仍未处理：清空队列的 active，否则之后所有请求都只会排队；
+        // 并把本请求与排队中的请求重新抛给 app，在仍存在（或重新打开）的窗口里再弹。
+        let released_id = session_id.clone();
+        let released_host = host.clone();
+        cx.on_release(move |this: &mut Self, cx| {
+            if this.answered {
+                return;
+            }
+            let queue = cx.default_global::<PromptQueue>();
+            if queue.active.as_deref() == Some(released_id.as_str()) {
+                queue.active = None;
+            }
+            let mut ids = vec![released_id.clone()];
+            ids.extend(queue.waiting.drain(..));
+            released_host.update(cx, |host, cx| host.reemit_pairing_requests(ids, cx));
+        })
+        .detach();
         cx.observe_in(&host, window, move |this, host, window, cx| {
             if host.read(cx).pairing_request(&session_id).is_none() {
                 this.finish(window, cx);
@@ -94,7 +119,7 @@ impl PairingPrompt {
         })
         .detach();
         spawn_ticker(window, cx, |this: &mut Self, window, cx| {
-            this.remaining = seconds_until(this.request.expires_at_unix_ms, now_unix_ms());
+            this.remaining = seconds_until(this.deadline_ms, now_unix_ms());
             // 到期仍无人处理：自动拒绝（agent 侧也会过期，这里让请求方立刻得到结果）。
             if this.remaining == 0 {
                 this.respond(false, window, cx);
@@ -105,6 +130,7 @@ impl PairingPrompt {
         Self {
             host,
             request,
+            deadline_ms,
             remaining,
             busy: false,
             answered: false,
@@ -139,6 +165,13 @@ impl PairingPrompt {
         self.busy = true;
         self.error = None;
         cx.notify();
+        if accept {
+            // 批准只是提交本机决定；「已配对」提示等已配对列表出现对端指纹后再给。
+            let fingerprint = self.request.peer_fingerprint.clone();
+            let name = self.request.peer_name.clone();
+            self.host
+                .update(cx, |host, _| host.await_pairing(&fingerprint, &name));
+        }
         let params = serde_json::to_value(LinkApproveParams {
             session_id: self.request.session_id.clone(),
             accept,
@@ -157,6 +190,11 @@ impl PairingPrompt {
                         this.finish(window, cx);
                     }
                     Err(error) => {
+                        if accept {
+                            let fingerprint = this.request.peer_fingerprint.clone();
+                            this.host
+                                .update(cx, |host, _| host.cancel_awaited_pairing(&fingerprint));
+                        }
                         this.error = Some(error_text(
                             this.host.read(cx).translator().read(cx),
                             &error,
@@ -209,6 +247,17 @@ impl Render for PairingPrompt {
                     })
                     .child(field_hint(self.t("incomingPairingHint", cx), cx)),
             )
+            .when(self.request.requests_control, |column| {
+                column.child(crate::ui::notice(
+                    crate::ui::NoticeTone::Danger,
+                    SharedString::from(format!(
+                        "{}\n{}",
+                        self.t("linkControlRequestTag", cx),
+                        self.t("linkControlRequestWarning", cx)
+                    )),
+                    cx,
+                ))
+            })
             .child(
                 div()
                     .w_full()
@@ -247,7 +296,11 @@ impl Render for PairingPrompt {
                     .child(
                         Button::new("incoming-pairing-accept")
                             .primary()
-                            .label(self.t("incomingPairingAccept", cx))
+                            .label(if self.request.requests_control {
+                                self.t("linkControlApprove", cx)
+                            } else {
+                                self.t("incomingPairingAccept", cx)
+                            })
                             .control(cx)
                             .busy(self.busy)
                             .disabled(self.busy)

@@ -1,0 +1,147 @@
+# FluxDown 踩坑清单
+
+> **用途**：这里记的是「踩过才知道」的约束。**改某个领域前先读对应小节；新踩的坑，修复时同回合补一条（带坐标）。**
+> 收录标准：必须有代码坐标、回归测试或修复提交为证，无证据的推测不写。
+> 与 `AGENTS.md` 的分工：AGENTS.md §4 是硬不变式的**权威源**，本文件不复制其条目，只在各节首交叉引用；
+> 本文件也不维护会漂移的枚举清单（见 `rule://agent-docs-maintenance` 维护约定）。
+> 条目格式：`- **约束一句话**：为什么（触发现象） → 坐标 path::symbol / 回归测试`。路径以仓库根为基准。
+
+---
+
+## 引擎：下载与分段
+
+另见 AGENTS.md §4：anyhow 错误一律 `{e:#}`、pg 字节列必须 `BIGINT`、一个 data_dir 只有一个引擎写入者、RSS 无人值守链路、宿主下载走统一出口。
+
+- **换链接后的续传必须对新链接真实探测，并零容差比对新旧文件大小**：沿用库存大小当 hint 会跳过探测——任务被换成更小文件时分段越界、持续 416；新版本仅大几百 KB 时被当作 CDN 误差拼成坏文件。大小一致（如签名过期换新链接）才续传，否则清空分段与旧临时文件重下 → `native/engine/src/db.rs::task_source_changed`、`native/engine/src/download_manager.rs`（`source_changed` 分支）、回归 `native/engine/tests/engine/change_url_resume.rs::switching_to_a_different_file_restarts_from_zero` / `switching_to_a_resigned_link_of_the_same_file_keeps_progress`。
+- **纯 Range 续传也必须校验服务器版本标识**：不发 If-Range 时若不验 validator，会把旧任务进度与新文件分段静默拼接 → 回归 `native/engine/tests/engine/realtest.rs::validated_plain_range_rejects_changed_version`（`#[ignore]`，需 `--ignored`）。
+- **多段下载取消退出前要把已落库的分段进度单调回写任务级进度**：多段运行期只周期写任务级 `downloaded_bytes`，开头几秒内暂停会显示 0% 或旧值。回写受 `segments_epoch` 守卫，防止与「重新下载」删段归零交错复活旧进度 → `native/engine/src/db.rs::sync_task_progress_from_segments`、回归 `db.rs::task_progress_syncs_from_segments_monotonically`。
+- **段内落库偏移只能记已被 fdatasync 覆盖的字节（`durable_offset` 不变式「DB 偏移 ≤ 已持久化字节」）**：周期落库在读循环里同步等 `sync_data` 会让所有连接每 3s 停读一次（macOS 上是 `F_FULLFSYNC`，256MB 脏页实测 242ms），所以改为后台 fdatasync + 快照覆盖提交；段完成路径则同步等覆盖 → `native/engine/src/segment_coordinator.rs::FileSyncGate`（`kick_background` / `sync_covering`）、回归 `sync_covering_returns_start_ge_snap_t` 等。
+- **段截断（收到字节少于请求区间）必须返回 Err 走单段指数退避重试，不能当成功**：否则留下内容空洞，只被末尾聚合检查捕获，迫使整任务重启 → `native/engine/src/segment_coordinator.rs::do_segment`。
+- **`rebuild_seg_states` 必须保留 worker 维护的 `downloaded_bytes`**：用 coordinator 内存映射里可能陈旧的值覆盖，会让活跃段进度倒退、向 `try_split_largest` 喂过期 split point → 回归 `native/engine/src/segment_coordinator.rs::rebuild_preserves_worker_downloaded_bytes`。
+- **rename 前的 `sync_all` 必须在可写句柄上做，且重做只在多段路径**：Windows 的 `FlushFileBuffers` 要求写权限，只读句柄返回 `ERROR_ACCESS_DENIED`，下载会在 100% 后、rename 前失败；单流路径已 flush + `sync_data` 同一写句柄，再 reopen 只是重复整盘刷写 → `native/engine/src/downloader.rs::run_download_inner`（「F034」注释段）。
+- **凭据刷新上限只计「连续无效换发」，不计累计次数**：多连接共用每请求一次性令牌时，「每次运行最多 5 次」很快耗尽，任务以 403 失败。各请求点成功后 `DownloadSpec::confirm` 记录身份可用；插件看到的 `refreshCount` 仍是累计值 → `native/engine/src/intercept/refresh.rs::MAX_UNCONFIRMED_REFRESHES`、`native/engine/src/downloader.rs`（`ledger.unconfirmed`）。
+- **带子目录的文件名必须在落库前并入 `save_dir`**：下载器只把 `file_name` 当单个组件清洗（防穿越），否则子目录被压平成 `子目录_文件名`（#716）；BT 名字另有语义不拆 → `native/engine/src/download_manager.rs`（`is_bt` / `has_subdir` 分支）。
+- **用户重命名的新名必须是 `naming::sanitize_filename` 的不动点**：HTTP / FTP / HLS / DASH / eD2K 续传都按清洗后的名字重建 `<名>.fdownloading`，`a:b.iso`、`CON.txt`、以点结尾、超 200 字节这类名字改名后续传找不到临时文件，进度归零并遗留孤儿临时文件；BT 一律拒绝改名（落盘名由完成布局 + `bt_custom_name` 决定，四端菜单按 `can_rename` 隐藏） → `native/engine/src/download_manager.rs::rename_task`、回归 `rename_task_rejects_conflict_active_bt_and_invalid`；客户端门控 `crates/downloads/src/components/task_table.rs::TaskMenuFacts::can_rename` ↔ `web/src/pages/downloads/model/taskEdit.ts::canRename`。
+- **HLS 小响应拉取不得在共享 client 上设全局 timeout，播放列表首行带 BOM 要先剥**：全局 timeout 会误伤普通 HTTP 长下载；`m3u8_rs` 要求首行就是 `#EXTM3U` → `native/engine/src/hls_downloader.rs::fetch_small` / `trim_playlist_prefix`。
+- **下载结束到完成帧之间有长收尾（remux / mux / 插件后处理）的协议，必须在收尾前发一帧「总量 = 已落盘」且能越过 manager 节流的帧**：manager 对状态 1 帧按 `MIN_DART_INTERVAL_MS`（500ms）节流，被吞的帧不会补发；HLS 写完最后一段的帧常落在节流窗口内，ffmpeg 转封装期间界面一直停在 9x%。携带非空 `file_name` 的帧必定转发；进度估值另须保证「有未落盘段 < 100%、全部落盘 = 100%」→ `native/engine/src/hls_downloader.rs::run_hls_download_inner`（「全部分段已落盘」注释段）、`hls_downloader/size_estimate.rs`、回归 `vod_progress_estimates_total_and_converges_to_actual_bytes`。
+- **订阅源正文无有效 tracker 必须算该源失败**：HTML 错误页或空页若当「成功 + 空列表」，会覆盖宿主缓存并在刷新间隔内丢光订阅 tracker → `native/engine/src/tracker_subscription.rs::parse_source_body`。
+- **浏览器 POST 接管的任务恢复 / 重试不得改发 GET**：请求体（OneDrive 打包下载含一次性 `access_token`）不落库，旧逻辑恢复时按 GET 发 HEAD + Range 探测，只收 POST 的端点恒 405（#970），表单端点则下回错误内容。建任务时只把非 GET 方法记入 `tasks.request_method`，恢复体首据此以 `POST_ONLY_RESUME_MESSAGE` 失败；以 GET 撞上 `405 + Allow` 只含 POST 时探测标 `405 post-only`、立即停止并报 `POST_ONLY_ENDPOINT_MESSAGE`。两条文案由 GPUI / Web / Android / iOS 按全文匹配本地化（`taskErrorPostOnly*`），改文案须同步各端镜像 → `native/engine/src/downloader.rs`（`allows_only_post` / `probe_post_only`）、`native/engine/src/download_manager.rs::fail_post_only_resume`、回归 `native/engine/tests/engine/post_only.rs`（`#[ignore]`，需 `--ignored`）。
+- **传输失败不得靠错误文本关键词判定**：reqwest 0.12 的 `Display` 只有「error sending request for url (…)」，根因全在 `source()` 链；探测阶段旧代码 `format!("network-error: {}", e)` 丢链后，直连被拒 / 黑洞超时的任务既不触发 Auto 换路也不进通用自动重试，黑洞要等约 63s 才失败；中文 Windows 的 OS 错误描述还是本地化文本。一律经 `net_failure::classify`（`io::ErrorKind` / reqwest 标志 / 库固定前缀）分类并以 `[net:<code>]` 标签写进文案，消费端只解析标签 → `native/engine/src/net_failure.rs`、`downloader.rs::network_desc`、回归 `downloader.rs::refused_probe_error_is_classified_for_failover_and_retry`、`auto_probe.rs::refused_direct_is_taken_over_by_proxy_without_waiting`。
+- **下载请求不得交给 reqwest 自动跟随重定向，凭据要按锚点逐跳重建**：reqwest 换主机即删 `Cookie` / `Authorization`，扩展以请求头传入的浏览器 Cookie 在 `www.tiktok.com/aweme/v1/play` → `v16-webapp-prime.tiktok.com` 这类同站跨子域跳转上丢失（`tk=tt_chain_token` 终点 403）；同主机跳转时手动 Cookie 头又会挡住 jar，302 下发的 `Set-Cookie` 发不出去；Referer 还会被改写成上一跳 URL。新的下载发送点一律经 `downloader::build_request`（必要时 `.anchor(凭据所属 URL)`），不要在下载 client 上直接 `client.get` → `native/engine/src/http_request.rs`（回归 `redirect_hops_carry_credentials_by_scope` / `cookies_set_during_redirect_merge_with_captured`）、`native/engine/src/credential_scope.rs`。
+
+## BT / eD2K
+
+另见 AGENTS.md §4：BT 判定只认 `magnet:` 与 `torrent-file://`、「复制链接」读 `origin_url`、`dht.json` 撞端口排除区间。
+
+- **种子内相对路径必须过 `torrent_relative_path_is_safe`，且 Windows 规则只对 Windows 强加**：Windows 下组件内的 `:`（盘符前缀 / ADS）、控制字符、设备保留名会改写基路径或落到设备；这些在其他平台是合法文件名，不得误杀 → `native/engine/src/bt_downloader.rs::torrent_relative_path_is_safe`（含 `a:b` 非 Windows 放行断言）。
+- **完成后的整目录 rename 在 Windows 上会因做种句柄存活而 ACCESS_DENIED，必须保留逐文件降级**：librqbit 对种子内全部文件持句柄直到任务删除，`pause()` 只转移不关闭（BUG-BT-DIR-RENAME-2X）；文件级 rename 对 FULL-share 句柄免疫且仍是同卷零拷贝 → `native/engine/src/bt_downloader.rs::move_path_with_file_replace` / `move_dir_recursive`（回归 `move_dir_recursive_continues_after_child_error` 等）。
+- **完成布局的批内重名判定用小写折叠名**：种子内仅大小写不同的 basename 在 Windows 上是同一 dst，精确比较会漏判并互相覆盖 → `native/engine/src/bt_downloader.rs::compute_completion_layout`（`taken`）。
+- **Windows 上 BT 新增选项必须经 `build_add_torrent_options` 注入 sparse 工厂**：新建任务不应物理预留全部空间 → `native/engine/src/bt_downloader.rs::build_add_torrent_options`、回归 `native/engine/tests/engine/bt_sparse_add.rs::fresh_add_creates_sparse_files_without_physical_reservation`（`cfg(all(windows, feature = "bt"))`）。
+- **文件选择对话框期间的「先暂停」只能落在已转 Live 的种子上**：librqbit 在初检中接受 `pause` 的方式是中止初检，种子停在 Initializing 且无检查在跑；Path B 随后的 `apply_only_files_after_init` 等初检结束永远等不到——部分选择或带 BEP-47 padding 文件的种子（选择框隐藏 padding，「全选」也少于 `file_count`）卡在「准备中」，手动暂停再继续（删句柄重新 add）才恢复 → `native/engine/src/bt_downloader.rs`（对话框后台暂停任务的 `handle.live()` 门槛）、回归 `selection_save_lifecycle::bt_dialog_partial_selection_reaches_downloading`。
+- **eD2K 根哈希的输入序列只能经 `build_root_input` 构造**：块数恰为 part_size 整数倍时的 off-by-one（尾部空块）集中在这一个转换点处理 → `native/engine/src/ed2k/hash.rs::build_root_input`、回归 `build_root_input_phantom_tail_appends_empty`。
+- **Kad 收包循环遇 Windows `WSAECONNRESET(10054)` 必须忽略并继续等到 deadline**：向已死节点发包触发的 ICMP 端口不可达，会被 Windows 报在**下一次** `recv_from` 上；据此返回 `None` 会让一个死节点终止整个接收窗口、漏掉其后存活节点的回包 → `native/engine/src/ed2k/kad/node.rs::recv_within`。
+- **磁力交给 librqbit 前必须经 `normalize_magnet`**：librqbit `Magnet::parse` 对**每个** `xt` 要求精确前缀 `urn:btih:` / `urn:btmh:1220`（区分大小写），多协议磁力（并列 `urn:ed2k:` / `urn:sha1:` / `urn:aich:`）、`urn:BTIH:`、小写 base32 都整条拒绝（`expected xt to start with btih or btmh`），而建任务只校验 `magnet:?` 前缀、剪贴板按小写匹配放行，任务建出来后每次启动都失败。规范化只作用于 librqbit 输入（`info_hash_hex` / `add_input` 两处），DB 原始链接不改；无 BT `xt` 或已规范时原样借出 → `native/engine/src/bt_downloader.rs::normalize_magnet`、回归 `normalize_magnet_*`。
+
+## 插件运行时
+
+另见 AGENTS.md §4：quickjs-jit 与 gpui-shell 同版本、持有引擎的 actor 必须 drain `resolve_rx` / `plugin_retry_rx`、插件页面脚本只经 `userScripts`。
+
+- **QuickJS 抛 `null` 要按异常值识别为 OOM**：内存紧贴上限时 QuickJS 连 `"out of memory"` 错误对象都分配不出，改抛 `null`，字符串匹配的 `reclassify_oom` 认不出，该次 OOM 不计入熔断；必须在仍持有异常值时判定（代价：插件主动 `throw null` 也计 OOM） → `native/engine/src/plugin/quickjs.rs::caught_error`、回归 `null_exception_sentinel_counts_as_memory_limit_exceeded`。
+- **外部工具子进程要补全登录 shell 的 PATH**：macOS 从 Dock / 访达启动只继承 `/usr/bin:/bin:/usr/sbin:/sbin`，yt-dlp 找不到 node / bun，带 Cookie 解析 YouTube 报 "The page needs to be reloaded"；取 PATH 的等待不计入插件脚本墙钟 → `native/engine/src/plugin/tool_path.rs::apply_full_path_env`（`read_login_shell_path` / `merge_path_lists`）。
+- **插件安装期校验必须覆盖拦截器入口脚本**：只校验主入口会让拦截器语法错误的插件装上后运行期才炸 → `native/engine/src/plugin/manager.rs`、回归 `native/engine/tests/engine/plugin_interceptors.rs::broken_interceptor_script_is_rejected_at_install`。
+- **resolve 占位期间的重复恢复必须直接忽略**：此时 DB 仍是 error(4)/paused，并非终态残留；不拦会移除占位并再起一个并发 resolve → `native/engine/src/download_manager.rs::has_pending_resolve`（`resume_task_inner` 的判定）。
+- **resolver 的 `audioUrl: ""` 是「无音轨」，不能当轨对**：`Some("")` 曾让任务走 DASH 下载器、把直链当 MPD 拉取解析而失败（YouTube「仅音频」档、变体切到无音轨档都会命中）；空串在落入 `QueuedTask` 时就要归一成 `None` → `native/engine/src/download_manager.rs::apply_resolve_to_queued`、回归 `native/engine/tests/engine/plugin_lazy_resolve.rs::explicit_empty_audio_url_downloads_single_file`。
+- **`ephemeral` 结果的 `totalBytes` 只能给准确值**：引擎跳过探测并按它切 Range，估算值（码率 × 时长）偏大时尾段 416 反复重试直到任务失败；拿不到准确长度就给 0 / 不给 → `packages/plugin-sdk/examples/youtube-down/src/formats.js::toVariant`（YouTube 音画合一的 itag 18 没有 `contentLength`）。
+- **在 QuickJS 里跑 yt-dlp-ejs 要放宽 resolver 堆上限**：冷解析约 3 MB 的播放器 JS（meriyah AST）峰值 160–180 MiB，默认 64 MiB 必 OOM；预处理产物缓存进 `flux.fs` 后热路径约 50–64 MiB → manifest `resolvers[0].memoryLimitMb`（`native/engine/src/plugin/manager.rs::resolve_budget_for`、`RESOLVE_MEMORY_CEILING`），示例 `packages/plugin-sdk/examples/youtube-down/src/player.js`。
+- **可移植视图的动作 / 关闭事件可能先于 `view.open` 应答到达客户端**：插件在 `init` 里 `ctx.navigate()` / `ctx.close()` 时，事件经广播通道、应答经 RPC 通道各自送达，客户端按会话 id 找宿主会扑空而静默丢失；daemon 也会在登记前收到关闭、留下永不清理的存储条目。客户端在 open 进行中按会话缓存动作、登记时执行，daemon 登记后用 `has_view_session` 补清 → GPUI `crates/plugin_ui/src/portable/mod.rs::PortableSessions::{stash,register}`、Web `web/src/pages/plugins/view/viewStore.ts::stashEarly`、`native/daemon/src/plugin_host_rpc.rs`（`DAEMON_PLUGIN_VIEW_OPEN`）；回归 `actions_arriving_before_the_open_reply_run_once_the_session_registers`、`actions_from_init_reach_clients_and_closed_session_is_not_stored`。
+- **插件状态变化必须经 `PluginManager::publish_state` 广播，不能只发 `PluginAutoDisabled`**：熔断曾只发 `PluginAutoDisabled`，GPUI 贡献点（任务右键命令 / 详情页签 / 活动页）只认 `PluginsChanged` 而一直残留；插件 `flux.settings.update`、站点默认写入也曾无事件，两端显示旧值。新写入点一律在结束时调 `publish_state`，daemon handler 不再自己发 → `native/engine/src/plugin/manager.rs::publish_state`、回归 `circuit_breaker_trip_publishes_disabled_state_before_notice` / `host_settings_update_publishes_new_values`。
+- **二段解析任务绝不能以原始链接起跑**：组成员 / 插件订阅条目的 `url` 是分享页，绑定被清空（卸载、旧版 fail-closed 行、忽略插件重试）后起跑会把 HTML 存成文件。起跑 / 恢复 / 解析回流都要先重绑、无插件即 fail-closed，`ignoreRetry` 对其拒绝 → `native/engine/src/download_manager.rs::{rebind_second_stage,fail_second_stage_unavailable}`、回归 `native/engine/tests/engine/plugin_state_freshness.rs`。
+- **预解析与建组必须用同一个插件**：成员任务曾在建组时按 `route_resolver` 重选（含非 multi 插件、字母序取首个），与预解析用的 `match_multi_resolver` 不一致就把 `resolverItem` 交给别的插件。客户端回传 `ResolvePreviewResponse.pluginId` → `CreateGroupRequest.resolverPluginId`（GPUI / Web / iOS） → `download_manager.rs::plugin_bind_resolver`。
+- **插件解析出的媒体直链常绑定解析时的出口 IP（googlevideo `ip=`、网盘签名链接），下载必须走同一出口**：Auto 下解析曾恒直连、下载却按先验 / 多路径 / 换路走代理，换路重试时还先重新解析（仍直连）再强制走代理，结果 403 且 403 不触发换路；站点规则又只按媒体链接匹配，`youtube.com` 规则管不到 googlevideo。现在解析按源链接制定出口计划并在 Auto 断网时换路重跑，下载以源链接定出口、Auto 下单路径钉在解析所用路径、禁用多网卡；Auto 换路判据来自 bridge 的类型化观测（被墙时多为墙钟超时而非插件抛错文案）→ `native/engine/src/plugin/call_egress.rs`、`native/engine/src/plugin/manager.rs::run_planned`、`native/engine/src/download_manager.rs::{resolve_egress_plan,absorb_resolve_egress,take_start_route}`，回归 `native/engine/tests/engine/plugin_resolve_egress.rs`。
+
+## daemon / agent 本机服务
+
+另见 AGENTS.md §4：本机端口默认宽松显式严格（WSAEACCES 回退）、远程控制凭据与会话撤销、空闲静默、遥测只有两条匿名事件。
+
+- **回环 daemon 的 HTTP 客户端必须 `.no_proxy()`**：否则会话凭据与文件字节会经环境 / 系统代理离开本机 → `native/agent/src/capture.rs::DaemonBlobClient::new`。
+- **macOS 上 reqwest 的「系统代理」不读 `ExceptionsList`**：hyper-util `Matcher::from_system` 只取 SCDynamicStore 的 HTTP / HTTPS 地址，直连名单只认 `NO_PROXY` 环境变量（GUI 进程没有）→ 回环、局域网、`.local` 全进代理；本机开 Clash 时 agent 连 127.0.0.1 的云端 / 更新 / 网关测试因此失败。agent 外网客户端一律经 `system_proxy::follow_system` 显式装配（环回恒直连 + `NO_PROXY` + 系统槽并入例外列表，其余照常走代理），不得裸用 reqwest 默认代理；引擎 System 模式同样把 `ExceptionsList` 归一化进 `no_proxy_list` → `native/agent/src/system_proxy.rs`（`LazyHttpClient`、`Network::SystemDefault`）、`native/engine/src/proxy_config.rs::parse_scutil_exceptions`、回归 `system_proxy_bypasses_only_exceptions_and_loopback`。
+- **客户端 WebSocket 的帧上限与消息上限必须一起放宽到 `MAX_INBOUND_RPC_MESSAGE_BYTES`**：tungstenite 默认 16 MiB；snapshot 与整表替换事件只带头部、任务表经 `system.taskPage` 分页，新增大应答不要回到「单帧带全量」。桌面、agent、移动端远端三处连接都必须应用同一常量 → `native/protocol/src/rpc.rs::MAX_INBOUND_RPC_MESSAGE_BYTES`、`crates/app/src/agent_client.rs`、`native/agent/src/daemon_client.rs`、`native/mobile/src/remote.rs`。
+- **server 模式 Origin 同源校验：Host 不带端口时只比主机，带端口时必须等于 Origin 的有效端口，非 http(s) Origin 一律拒绝**：nginx `Host $host` 与 Nginx Proxy Manager 会丢掉对外非默认端口，严格比端口会把反代部署整体挡掉 → `native/agent/src/server_mode.rs::origin_allowed`、回归 `origin_must_match_host_when_present`。
+- **跨进程文件锁争用要识别 Windows 的 `ERROR_LOCK_VIOLATION`**：std 不把它映射为 `WouldBlock`，只看 `kind()` 会把「已有写入者」误当 IO 故障 → `native/engine/src/db.rs::acquire_engine_file_lease`、`native/agent/src/state.rs::is_lock_contended`。
+- **系统托盘：macOS 不挂常驻菜单、不设 tooltip，Linux 托盘 id 固定**：`NSStatusItem` 一旦挂菜单，任何点击都直接弹菜单，左键「显示窗口」失效，故右键时经事件循环投递 `ShowMenu` 由主线程临时挂菜单弹出；macOS 27 的状态栏 tooltip 收不到移出事件会常驻（#953），倒计时改显示在菜单项；Linux SNI Id 不能随 PID 变（GNOME 顶栏扩展靠它记位置），图标临时文件按进程分目录，避免并存实例退出时删掉对方仍引用的图标 → `native/agent/src/shell/host.rs`（`HostEvent::ShowMenu` / `pop_up_menu` / `TRAY_ID` / `linux::IconDir::for_process`）、`native/agent/src/shell/tray_model.rs::COUNTDOWN_IN_MENU`。
+- **残留的旧版 / 无主 agent、daemon 会被新版本复用**：macOS 带 quarantine 的 App（如经 FluxDown 自己下载的 DMG 拖出，引擎按 `mark_of_the_web` 打 `…;FluxDown;` 标记）启动时被系统挪到只读随机路径运行，副本回收后旧 agent 仍占端口，`desktop_executable()` 找不到同级桌面，扩展唤不醒；新桌面复用它时更新状态来自旧版本（关于页「当前 v0.6.3」却提示「发现新版本 v0.6.3」）。同类还有 Linux AppImage 挂载卸载、系统包卸载，以及 agent 单独退出后 daemon 按设计存活、被升级后的新 agent 复用。修复两层、全平台一致：握手时对端应用版本**确定更旧**就请求其 `system.shutdown` 并重拉同级进程（桌面 → agent、agent → daemon，只换更旧的，避免降级已迁移的 DB；比较只在 protocol 一处）；桌面宿主 agent 每 30s 重新解析自身程序路径，连续两次缺失即完全退出（server 模式不启用）→ `native/protocol/src/rpc.rs::is_older_app_version`、`crates/app/src/agent_client.rs`（`ConnectError::Outdated`）、`native/agent/src/daemon_client.rs`（`ConnectError::Outdated`）、`native/agent/src/bundle_watch.rs`。
+- **macOS 上浏览器进程树里的进程写出的文件全带 `com.apple.quarantine`**：浏览器都开 `LSFileQuarantineEnabled`，进程级隔离沿 fork/exec 继承（`open` 经 launchd 拉起的进程不继承）。旧版 `fluxdown_nmh` 直接 spawn agent，agent 下载的更新包、`ditto` 暂存的新 bundle 每个文件都带 `…;Google Chrome;` 标记，装进 `/Applications` 后每次经 Launch Services 打开都被 App Translocation（日志里 exe 在 `…/AppTranslocation/<UUID>/d/FluxDown.app`），程序列表丢图标、`readOnlyLocation` 拒绝自更新，手动用 Finder 覆盖安装才恢复。修复三层：中继在 macOS 经 `open -g` 拉起辅助 bundle；更新器校验后 `xattr -s -d -r` 清隔离（`-s` 防悬空符号链接报错），换位后刷新 mtime + `lsregister -f`；启动自愈清「应用程序」文件夹里已带隔离的 bundle（agent 原位运行时自己清，翻译运行时由中继冷启动前清）→ `native/nmh/src/main.rs`（`launch_app` / `release_installed_bundle`）、`native/agent/src/update/install/macos.rs`（`release_from_quarantine` / `heal_installed_quarantine`）、回归 `quarantine_is_released_from_every_file_in_the_bundle`。
+- **FluxMesh状态文件写入必须串行，且快照要在锁内取**：`ShareStore::write_private` 用固定临时文件名（`shares.tmp`）再改名，两个任务同时 `persist_shares` 会交错写同一临时文件，撕裂的 `shares.json` 下次启动被当作损坏丢弃（整张分享表消失，云端暂存续传随之不再恢复）；锁外取快照还会让旧快照晚于新快照落盘 → `ShareService::persist`（`persist_shares` / `persist_records` / `set_local_config` 共用）、回归 `share::tests::concurrent_share_persists_never_tear_or_reorder`（`upload_resumes_after_restart_and_sends_only_missing_parts` 偶发超时的根因）。
+- **FluxMesh领取次数靠两条路刷新**：FluxCloud 对每次新领取都向所有者账号推 `share.changed`（开了领取通知改推 `share.claimed`），只推登录账号；游客分享没有推送，靠发送方会话建立（接收方连上来）后 1 秒合并的一次对账 → FluxCloud `share/resolve.rs`（回归 `new_claim_pushes_share_changed_when_notify_is_off`）、agent `lifecycle.rs::schedule_share_sync`（`share_end_to_end_with_mock_cloud` 断言领取次数）。
+- **FluxMesh对账不能用在途期间过期的列表覆盖本机修改**：`GET /share/shares` 在途时本机停止 / 新建 / 改了分享，旧列表落地会把停掉的分享复活（适配器继续服务）、把新建的判为已停止。本机修改与每次落地都给 `Inner::share_epoch` 加一，对账落地前比对、不一致就重新请求（最多 3 轮）→ `native/agent/src/share/lifecycle.rs::sync_shares`、回归 `share::tests::stale_share_list_never_overrides_local_changes`。
+
+## GPUI（gpui-fast 保留模式）
+
+另见 AGENTS.md §4：render 读的状态必须在 entity / global / `ListState` / `ScrollHandle` 内，父 view notify 不再重建子 view，渲染期不得无条件写 entity / global。
+
+- **渲染期要「先读后写」，值没变就不 `update`**：gpui-fast 把渲染期的 entity 写入记为外部修改，每帧写会让读该状态的其他 view（如 shell 顶栏）每帧重建 → `crates/components/src/sidebar/mod.rs`（`sample` 后的只读分支）、`crates/downloads/src/components/sidebar_layout.rs`。
+- **事件回调里写表格状态前先读，没变化就返回**：没有高亮行时每次左键都写表格，会让 gpui-fast 把表格记为已变化 → `crates/downloads/src/components/task_table.rs`（`right_clicked_row().is_none()` 早退）。
+- **鼠标移动 / 滚轮路径不得写表格 entity**：每次写都会让随后的滚动 notify 变成整页重建；行序「保持期」只在刷新 / 重排定时器（非渲染路径）里读取 → `crates/downloads/src/model/row_order.rs`。
+- **悬停 / 按下 / 动画的状态层必须是挂在元素状态里的小视图，且不被外层视图观察**：`Window::use_keyed_state` 会让外层视图观察状态实体，动画帧就会重建整页 → `crates/components/src/motion.rs`（模块头注释）。
+- **不可缩放窗口不能用 gpui-component 的 `TitleBar` 自带窗口控件**：其 `WindowControls` 私有且在 Windows / Linux 总绘制最大化按钮，`is_resizable = false` 时最大化区域退化为拖动区、点了无效，因此自绘只含最小化 + 关闭的标题栏（Windows 靠 `WindowControlArea` 交原生非客户区命中测试）→ `crates/shell/src/window_controls.rs`。
+- **Windows 上最小化的窗口边界报告为 `Windowed`，最大化状态要与平台标志取或**：只看 bounds 会把「最小化的最大化窗口」存成普通窗口 → `crates/app/src/windows/bounds.rs::resolve_maximized`、回归 `minimized_maximized_window_keeps_maximized`。
+- **进度 / 完成窗口里「打开文件 / 文件夹」不等打开命令返回**：Windows 上它要等系统打开调用返回，可能比对方出现在前台还晚，窗口该关而不关；会关窗时点击即请宿主等对方接管前台 → `crates/downloads/src/pages/progress_window.rs::hand_off`。
+- **Windows / Linux 标题栏菜单（gpui-component `AppMenuBar`）以「打开菜单时的焦点」为派发目标**：焦点为空（启动后未点列表）、在标题栏搜索框或不在下载页时，挂在下载页元素上的动作只沿标题栏冒泡、点了无效，且菜单项从不置灰；下载页动作须有应用级兜底（切到下载页、聚焦后派发；焦点已在下载页内视为下载页主动让出，不接管）。兜底里 `update` 窗口必须用 `AnyWindowHandle`，`WindowHandle<V>` 会租借根视图，冒泡到根视图监听器即 panic → `crates/app/src/menus.rs::dispatch_in_downloads`。
+- **GPUI 剪贴板写不了文件**：`ClipboardEntry::ExternalPaths` 在 gpui-fast 三个平台的写入路径都是空操作（macOS `pasteboard.rs::write`、Windows `clipboard.rs::write_to_clipboard`、Linux 只 `set_text`），`cx.write_to_clipboard` 不报错但剪贴板没有文件；「复制文件」改由常驻 agent 经 arboard `Set::file_list` 写入（Linux X11 内容归写入进程，实例须常驻）→ `native/agent/src/platform/clipboard_files.rs`、入口 `crates/downloads/src/pages/task_copy.rs`。
+- **`overflow_y_scrollbar` 页面里的定高 `uniform_list`：收不到滚轮，或滚到边后把页面「卡住」**：gpui-kit `Scrollable` 内的 `ScrollBounce` 在子树之前的捕获监听里认领指针下的滚轮、在子树之后的捕获监听里滚动并 `stop_propagation`，裸 `uniform_list` 只在冒泡阶段滚动，于是列表纹丝不动；而给列表再包一层 `gpui_base::ScrollBounce` 又走另一个极端——它按平台惯例让最内层独占整个手势、到边也不交还，列表滚到顶后指针停在列表上就再也滚不动页面。内嵌列表改用 `NestedScroll::area`：自己在两次页面监听之间注册捕获监听，按手势锁定归属（手势开始时列表还能朝该方向滚 → 整次手势归列表并截停；已在边上 / 不溢出 → 不动作交给页面；停顿 ≥250ms 或触控板 `Started` 重新判定）→ `crates/share/src/nested_scroll.rs`（使用方 `network.rs` 指标表 / 日志 / 原始快照）。
+
+## Web SPA
+
+- **新建下载等处生成 UUID 不得用 `crypto.randomUUID()`，一律 `randomUuid()`**：浏览器只在安全上下文（HTTPS / localhost）暴露它，NAS / Docker 经 `http://<局域网 IP>:17800` 访问时缺失，调用即抛错；`getRandomValues` 无此限制 → `web/src/lib/uuid.ts::randomUuid`（使用方 `web/src/pages/downloads/dialogs/importRunner.ts`）。
+
+## 浏览器扩展
+
+另见 AGENTS.md §4：插件页面脚本只经浏览器 `userScripts` API 执行。
+
+- **表单 POST 的 method / body 不得经重定向回退到下载 URL**：表单 POST 经 301 / 302 / 303 跳到直链后浏览器改发 GET，旧逻辑按 `originalUrl` 回查请求事务，把跳转前的 POST 体安到直链上；`file.xiecdn.com` 这类 CDN 对 POST 直接断连（`connection closed before message completed`），而 POST 任务恢复被引擎拒绝，任务必失败（0.6.0 靠改发 GET 的自动重试掩盖）。只认下载 URL 自身的记录，307 / 308 由 `onBeforeRedirect` 把事务带到目标 URL → `fluxDown/background/request-record.ts::carryAcrossRedirect`。
+- **共享 NMH 端口是一问一答串行的，队首卡死必须断开换新端口，但「排在合法慢请求后面而超时」不得回收**：中继与 agent 连接串行，队首卡住后排队请求全部超时，原先超时不换端口会让任务面板与能力探测一直「未连接」直到 SW 重启；旧端口迟到的断开事件也不得波及新端口 → `fluxDown/utils/nmh-shared.ts::createSharedChannel`、回归 `fluxDown/utils/nmh-shared.test.ts`（三条用例：队首卡死回收 / 慢请求之后不回收 / 迟到断开不波及新端口）。
+- **扩展必须跳过自己配置的远端 FluxDown 服务发起的「下载到本地」请求**：否则扩展拦截该下载、再回投同一远端，形成持续创建任务的死循环；判定依据含 referrer / URL 的 origin 与 server 文件导出端点路径（覆盖反代 / 不同主机名访问 Web UI） → `fluxDown/utils/settings.ts::isFluxDownServerDownload`、测试 `fluxDown/utils/settings.test.ts`。
+- **`contextMenus.create` 必须带回调读 `runtime.lastError`，且「removeAll 后重建」要在失败时整体再建一次**：create 的失败不抛错也不 reject，不读就报 `Unchecked runtime.lastError`；浏览器启动 / 启用扩展时 Chrome 异步恢复上次持久化的菜单（`MenuManager::ReadFromStorage`），落在 removeAll 与 create 之间就报 `Cannot create item with duplicate id` 并残留旧项，恢复每次加载只发生一次 → `fluxDown/background/menu-build.ts::rebuildMenus`（最多 2 轮）、适配 `background/menus.ts::browserMenus`、回归 `background/menu-build.test.ts`。
+- **内容脚本 Shadow DOM 样式不得用 WXT `cssInjectionMode: "ui"`**：它在页面里 `fetch(runtime.getURL(css))`，请求走页面的 fetch 上下文；YouTube（受 SW 控制 + Connection-Allowlist）报 `Unsafe attempt to load URL chrome-extension://<GUID>/content-scripts/*.css … Domains, protocols and ports must match` 并可能拦下样式，且 CSS 要暴露为 `use_dynamic_url` 的 web_accessible_resources。改为 `"manual"` + 构建期内联 → `fluxDown/wxt.config.ts::inlineContentCss`、`ui/content-css.ts::contentCss`（新增内容脚本 UI 同样传 `css: contentCss()`）。
+- **长连接端口的 `onDisconnect` 必须读 `runtime.lastError`；内容脚本端口在 `pagehide(persisted)` 主动断开、`pageshow(persisted)` 重连**：页面进 bfcache 时 Chrome 以 `The page keeping the extension port is moved into back/forward cache` 强制关端口，被动断开（含原生主机退出）不读 lastError 就报 Unchecked → `fluxDown/ui/hooks/useTabView.ts`、`background/ports.ts`、`background/host.ts::invokePool`。
+- **MAIN world 的 fetch 包装不得在自己的栈帧里直接调用原生 fetch**：页面自己被 CSP 拦下的请求（如 explore.microsoft.com 的 `connect-src` 违规、Cloudflare 质询的 `fetch("data:,")`）报错时，控制台来源取栈顶脚本；栈顶是 `page-hooks.js` 时 Chrome 按来源 URL 把它记进扩展错误列表（`ExtensionWebContentsObserver::OnDidAddMessageToConsole`）。做法：同步 `new Request(...args)` 固定请求（规范的 fetch 第一步同样如此），再以 `Promise.resolve().then(originalFetch.bind(this, request))` 发起，栈上没有扩展帧 → `fluxDown/page/hooks.ts`（fetch 段）。XHR 的 `send` 是同步语义无法这样处理，仍可能被归因。Cloudflare 质询帧另外整帧不装钩子（避免干扰环境检测；补注入是 allFrames，在运行期判断）→ `fluxDown/page/hooks.ts::start`（`CHALLENGE_FRAME_HOST`）。
+- **`onDeterminingFilename` 里取消下载后不得再 `suggest()`**：`downloads.cancel` 在浏览器里立即生效，Chrome 对不再 in_progress 的下载拒绝 `determineFilename`（`Download must be in progress`），binding 不给回调 → `Unchecked runtime.lastError`；取消后的待定文件名由 erase 或 15 s 决定超时结束。做法：发出 cancel 后紧接着 `downloads.search` 查状态（同一扩展的调用按序处理，不等 cancel 回复），仍是 in_progress 才 suggest → `fluxDown/utils/download-cancellation.ts::cancelBeforeFilenameResolution`、回归 `download-cancellation.test.ts`。
+- **扩展代码不用 `console.error` / `console.warn`，一律 `logError` / `logWarn`**（`fluxDown/utils/error-log.ts`）：前者会进浏览器扩展管理页的「错误」列表；后者记入扩展错误日志（background 唯一写入 `storage.local`，侧边栏「诊断 → 扩展错误」展示，连接诊断导出附带并脱敏），控制台只留 `console.info`。每个入口（background 第一步、popup / options / sidepanel、sensor / 面板）调 `installErrorCapture`，接管扩展脚本自己的未捕获异常与未处理 rejection（按扩展 origin 过滤，页面自己的错误不碰）。MAIN world（`page/`、`rules/`）不能引入它。
+
+## Android
+
+- **前台服务停止必须用 `stopSelfResult(lastStartId)`，并在每次启动请求重新计时空闲宽限**：用 `stopSelf()` 会拆掉在途、尚未来得及 `startForeground` 的启动请求，系统以 `ForegroundServiceDidNotStartInTimeException` 杀整个进程；外部唤起建任务后也不能被旧计时停掉 → `mobile/Android/app/src/main/java/com/fluxdown/app/service/DownloadService.kt::stopIfIdle`。
+- **FileProvider 要声明 `root-path` 覆盖 `/storage/`**：可移动存储卡上的文件（`/storage/6BF9-89B3/...`）否则生成不了 content URI，打开已下载文件会崩；文件不在声明根内时提示失败而不是抛异常 → `mobile/Android/app/src/main/res/xml/file_paths.xml`（`storage_volumes`）。
+- **叠层返回键的优先级：菜单 / 对话框在 Sheet 之上**：后注册的 Sheet 返回处理器会抢先，菜单打开时返回键应交给 `FluxOverlayHost` → `mobile/Android/fluxui/src/main/java/com/fluxdown/fluxui/overlay/FluxSheet.kt`（`canGoBack` 条件）。
+- **应用自更新不用 `PackageInstaller` 会话，交给「打开 APK」的默认安装程序，且只在界面可见时拉起**：会话的确认界面固定由系统安装器处理，无视用户设定的默认安装程序（小米机上总是小米安装器）；部分国行 MIUI 安装器对第三方会话直接回 `INSTALL_FAILED_ABORTED`（用户什么都没点，旧映射显示「已取消安装」）；从 `BroadcastReceiver` 拉确认界面在后台被系统静默拦截，状态永远停在「正在安装」。未持有 `UPDATE_PACKAGES_WITHOUT_USER_ACTION` 时会话本来也要确认。安装包经 FileProvider `app_update` 根（`../no_backup/updates/`，不可信应用不能硬链接）只读授权 → `mobile/Android/app/src/main/java/com/fluxdown/app/update/ApkInstaller.kt`、`UpdateEffects.kt`（交接 `LaunchedEffect`）、`res/xml/file_paths.xml`。
+- **「打开文件」要区分「当前查看的主机」与「任务所属的引擎」**：远端主机的 `saveDir` 是主机磁盘路径，`fileMissing` 也由主机 daemon 按主机磁盘算，只看 `Completed && !fileMissing` 会给远端任务显示「打开」并按本机路径报「文件不存在」；反过来，完成提示 / 通知里的本机任务（含 PC 下发到本机的）在用户正查看远端主机时仍须能打开，不能套当前主机门控 → `mobile/Android/app/src/main/java/com/fluxdown/app/actions/TaskActions.kt`（`hasLocalFile` / `open` 走当前主机门控，`openLocalFile` 供本机任务来源调用）、`feature/downloads/DownloadsView.kt::localHost`（行环钮文案），iOS 同规则见 `TaskActions.swift::hasLocalFile`、`DownloadsRowText.swift::ringAction`。
+- **会话信号流结束必须落到失败态，不能静默停在最后一帧**：Rust `next_signal` 返回 `None`（驱动意外退出等）时 `RustHostSession` 的流正常完成，`HostStore` 若什么都不做就冻结在上一帧——上一帧是加载态快照时首页永久骨架、无横幅无日志，只有重启能恢复。`HostStore.attach` 在流结束且未见 Fatal、未被 detach 取消时补发 Fatal；UniFFI `InternalException` 继承 `kotlin.Exception` 而非 `RuntimeException`，须按 `Exception` 捕获；连接 / 载入态切换记入 `app-events.log`，`fluxdown_mobile` 在 agent 默认日志名单内（重连原因）→ `mobile/Android/core/.../store/HostStore.kt::attach`（回归 `HostStoreTest.signalStreamEnding…`）、`app/.../FluxApplication.kt::connectionSummary`、iOS `FluxDomain/Store/HostStore.swift::attach`、`native/agent/src/logging.rs::FIRST_PARTY_TARGETS`。
+
+## iOS
+
+另见 AGENTS.md §4：iOS 构建依赖 `third_party/librqbit-dualstack-sockets`、商店 flavor 以 `--no-default-features` 剔除 BT / eD2K。
+
+- **iOS 上 Rust mDNS 不可用，局域网发现走 `NWBrowser`，且列表项要先解析成 IPv4 `host:port`**：本机主机（进程内）发现走 `PairingModel.browser`，远端主机才用它的 agent 发现 → `mobile/FluxDown/FluxDown/Features/Devices/DevicesScreen.swift::presentAddDevice`、`mobile/FluxDown/FluxDown/Features/Devices/LanBrowser.swift`。
+- **列表行的滑动删除不得用 `role: .destructive`，用红色 tint**：`List` 会立即动画移除该行而数据源仍有这一行，`UICollectionView` 行数不一致崩溃 → `mobile/FluxDown/FluxDown/Features/Devices/RemoteTaskRow.swift`（`swipeActions` 注释；本地任务行同）。
+- **`.searchable` 的 `placement` 必须恒定**：动态切换会在输入中丢焦点 → `mobile/FluxDown/FluxDown/Features/Downloads/DownloadsListScreen.swift`。
+- **本机主机是进程级单例，多个会话共享**：测试里两个场景必须串行（`@Suite(.serialized)`）；仅用于发 RPC 的会话要把 `signals` 流读干净，否则快照 / 事件在会话存活期间无限堆积 → `mobile/FluxDown/FluxKit/Tests/FluxBridgeTests/LocalHostSmokeTests.swift`、`mobile/FluxDown/FluxDown/Features/Devices/HostPairingFlow.swift`。
+- **build-core.sh 失败时旧的 xcframework / Swift 绑定原样留着，Xcode 报的是绑定陈旧（如 `Mapping.swift` 找不到新 DTO 字段 `urlPattern`），根因在 Rust 交叉编译**：先看 build-core.sh 的输出。iOS full flavor 的 iroh → netwatch / netdev 依赖 libc ≤ 0.2.189 的 Apple 符号，`libc` 钉在 `native/engine/Cargo.toml`；CI `ios-core` 按两种 flavor 做 `aarch64-apple-ios` check，`cargo update` 抬版本会在合入前失败 → `native/engine/Cargo.toml`（libc 注释）、`.github/workflows/ci.yml::ios-core`。
+
+## 构建与发布
+
+另见 AGENTS.md §4：`profile.release` 不设 `panic="abort"`、headless Web UI 编译期内嵌、iOS 依赖 dualstack-sockets 补丁。
+
+- **macOS 签名 / 公证 / 装订、TestFlight 上传对 Apple 侧瞬时错误必须退避重试，且公证拆为提交 / 等待 / 查询**：断网后只续等同一次公证提交，结论以 `notarytool info` 状态为准；TestFlight 只对瞬时错误（如 -19241 "A server error occurred"）重试，其余立即失败，避免掩盖真实签名错误 → `scripts/package_gpui_macos.sh::retry` / `stapler_retry`、`mobile/FluxDown/scripts/testflight.sh`（瞬时错误重试段）。
+- **Windows 安装器判定旧版已移除，看 UI 入口文件是否还在，不依赖 HKLM 卸载键**：对旧版全用户安装的卸载等待因此加固（提交 322a3901）；等待上限 60 秒，卸载器起不来要写日志 → `installer/windows/setup.iss`（`LegacyUninstallTimeoutMs`、「legacy copy counts as removed」注释段）。
+
+## Windows 专属
+
+另见 AGENTS.md §4：每个 console 子进程 spawn 必须包 `proc::no_console_window`、本机端口 WSAEACCES 回退、BT `dht.json` 撞端口排除区间。其余按领域散落在上面各节（`sync_all` 写句柄、`ERROR_LOCK_VIOLATION`、WSAECONNRESET、BT 目录 rename、最大化判定），此处只收仅在 Windows 触发且不属于上述领域的条目。
+
+- **Windows toast 线程不得逐条 `RoInitialize` / `RoUninitialize`**：headless `--server` 无其它 apartment，拆掉最后一个会卸载 WinRT 服务端，进程级缓存的激活工厂悬空，下一条通知 `0xC0000005` 崩溃。用从未初始化过 COM 的短命线程，让 windows-core 经 `CoIncrementMTAUsage` 常驻进程 MTA → `native/agent/src/notification/windows.rs`（`runtime::show` 调用处注释）、`native/agent/src/sound/backend.rs`（同模式）。
+- **写 `Zone.Identifier` 会刷新 NTFS 主文件修改时间**：开启「使用服务器文件时间」时必须写标记后回写原时间；设置时间只申请 `FILE_WRITE_ATTRIBUTES` 避免共享冲突；后台 fdatasync 要先释放复制句柄再通知（最后一个句柄关闭时 NTFS 会把修改时间刷成当前时间，晚于 `apply_server_mtime` 会覆盖服务器时间）→ `native/engine/src/mark_of_the_web.rs::spawn_mark_downloaded`（`keep_mtime`）、回归 `zone_identifier_keeps_mtime_only_when_requested`，`native/engine/src/segment_coordinator.rs::FileSyncGate::kick_background`。
+- **暂停 / 删除 / 重新下载清盘要给「写入方还没松手」留重试窗口**：`pause_task_silent` 只取消 token 不等 spawned task 退出，Windows 上被写入方持有的文件 `remove_file` 直接失败；残留的 `.fdownloading` 会被下一轮当成可续传数据，「从零重下」的承诺就破了 → `native/engine/src/download_manager.rs::remove_file_retrying`。
+- **测试删目录前必须先关连接池**：Windows 上 sqlite 文件句柄未释放时 `remove_dir_all` 静默失败，残留目录曾在 temp 累积 1400+ 个，并导致陈旧库被继承的历史 flaky → `native/engine/src/db.rs::close_test_db`（测试辅助）。
+- **自更新替换文件要把杀毒 / 搜索索引的短暂占用当瞬时错误重试**（拒绝访问、共享冲突、锁冲突、映射节被占用）→ `native/agent/src/update/install/replace.rs::is_transient`。
+- **局域网对端下发的保存目录（接单目录）必须拒绝 UNC / 设备命名空间路径与 `..` 段**：Windows 上对 `\\host\share`、`\\?\`、`\\.\` 创建目录会主动触发对外 SMB 认证 → `native/agent/src/link/service.rs::is_plain_local_dir`（由 `resolve_receive_dir` 调用，云端接单与局域网互联共用）。
+- **原生消息主机清单在 Windows 经 `%ComSpec% /d /c` 启动**：`ComSpec` 配置值不可用时浏览器起不来 NMH，诊断要能检出并修复 → `native/agent/src/diagnostics.rs`（`ComSpec` 段）。

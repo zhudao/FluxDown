@@ -5,38 +5,51 @@
 pub mod agent;
 pub mod capture_link;
 pub mod cloud_notify;
+pub mod coalesce;
 pub mod daemon;
 pub mod daemon_config;
 mod digest;
 pub mod error;
 pub mod event;
 pub mod handshake;
+pub mod local_service;
 pub mod method;
+pub mod plugin_view;
+pub mod proxy_rules;
 pub mod rpc;
 pub mod settings;
+pub mod share;
 pub mod shell_open;
+pub mod shortcuts;
+pub mod sound;
+pub mod table_sync;
 pub mod task_activity;
+pub mod update_prompt;
 pub use task_activity::{
     TaskActivityDto, TaskActivityPage, TaskActivityQuery, TaskRuntimeDto, TaskSegmentDto,
-    TaskSourceBytesDto,
+    TaskSourceBytesDto, TaskSpeedHistoryDto, TaskSpeedHistoryQuery,
 };
 
 pub use agent::{
     AgentLoginResult, AgentPreferencesDto, AgentPreferencesPatchResult, AgentSessionDto,
     AuthVerificationDto, CUSTOM_CATEGORIES_PREF_KEY, CaptureCreateGroupParams,
-    CapturePreviewParams, CaptureResolveParams, CloudConnectionDto, CloudConnectionState,
-    CloudDevice, CloudEndpointDto, CloudEndpointSetParams, CloudOrder, CloudPlan,
-    CloudPlanCampaign, CloudPlanCampaignStage, CloudProfile, CloudReferralCode,
+    CapturePreviewParams, CaptureResolveParams, CategoryRouteDto, CategoryRuleDto,
+    CloudConnectionDto, CloudConnectionState, CloudDevice, CloudEndpointDto,
+    CloudEndpointSetParams, CloudOrder, CloudPack, CloudPlan, CloudPlanCampaign,
+    CloudPlanCampaignStage, CloudProductKind, CloudProfile, CloudReferralCode,
     CloudReferralCodesResult, CloudReferralRecord, CloudReferralRecordsResult, CloudReferralRule,
-    CloudReferralSummary, CloudReferralValidateResult, CloudUser, CloudUserStatus,
-    CustomCategoryDto, DiagnosticCheckDto, DiagnosticLevel, DiagnosticRepairParams,
-    DiagnosticsReportDto, Entitlements, FILE_ICON_PER_FILE_EXTENSIONS, GatewayPatchParams,
-    GatewayStatusDto, LinkAddressParams, LinkApproveParams, LinkDeviceParams, LinkDiscoveryParams,
-    LinkDispatchParams, LinkDispatchResult, LinkPairBeginParams, LinkPairFinishParams,
-    LinkPairingCodeDto, LinkPairingRequestDto, LogExportParams, LogExportResult, LogPathsDto,
-    OriginIdCheckResult, PathStyle, PendingCaptureDto, PlatformFileIconDto, PlatformFileIconParams,
+    CloudReferralSummary, CloudReferralValidateResult, CloudSubscription, CloudUser,
+    CloudUserStatus, CustomCategoryDto, DiagnosticCheckDto, DiagnosticLevel,
+    DiagnosticRepairParams, DiagnosticsReportDto, Entitlements, FILE_ICON_PER_FILE_EXTENSIONS,
+    GatewayPatchParams, GatewayStatusDto, LinkAddressParams, LinkApproveParams,
+    LinkControlCredentialDto, LinkDeviceParams, LinkDiscoveryParams, LinkDispatchParams,
+    LinkDispatchResult, LinkPairBeginParams, LinkPairFinishParams, LinkPairingCodeDto,
+    LinkPairingRequestDto, LinkRenameParams, LinkStopPairingParams, LogExportParams,
+    LogExportResult, LogPathsDto, OriginIdCheckResult, PLATFORM_COPY_TASK_FILES_MAX, PathStyle,
+    PendingCaptureDto, PlatformCopyTaskFilesParams, PlatformFileIconDto, PlatformFileIconParams,
     PlatformIntegrationDto, PlatformOpenPathParams, PlatformToggleParams,
-    PlatformUrlProtocolParams, PowerArmParams, PowerStatusDto, ReleaseNoteDto, RemoteCommandAction,
+    PlatformUrlProtocolParams, PluginFavoriteResultDto, PluginFavoriteSetRequest,
+    PluginFavoritesDto, PowerArmParams, PowerStatusDto, ReleaseNoteDto, RemoteCommandAction,
     RemoteCommandParams, RemoteDispatchParams, RemoteDispatchResult, RemoteTaskDto,
     RemoteTaskStatus, ShellStatusDto, SyncLocalOnlyParams, SyncStatusDto, TrayUnavailableReason,
     UpdateCheckParams, UpdateFailure, UpdateInstallKind, UpdateManualReason, UpdatePhase,
@@ -54,36 +67,45 @@ pub use cloud_notify::{
     TaskNoticeTaskDto,
 };
 pub use daemon::{
-    ApiInfo, BtFileDto, CdnConfigApplyParams, CdnNodeDto, CdnReportAckParams, CdnReportLeaseDto,
-    ChangeTaskUrlParams, ComponentFfmpegStatus, ComponentInstallParams, ComponentKind,
-    ComponentParams, ComponentProbeDto, ComponentRepairParams, ComponentStatusDto,
-    ComponentVersions, ComponentYtdlpStatus, ConnPolicySummaryDto, CreateGroupRequest,
-    CreateGroupResponse, CreateQueueRequest, CreateTaskRequest, CreatedTask, DaemonConfigPatch,
-    DaemonConfigSnapshot, DaemonCreateTaskParams, DaemonDeleteTasksParams, DaemonRuntimeStatsDto,
-    DaemonTaskIdsParams, DiagnosticsProbeParams, DiagnosticsProbeResult, DownloadRequest,
-    Ed2kServerSubRefreshResponse, FileExistsAction, FileMissingUpdateDto, FsEntry, FsListResponse,
-    GatewayMigrationExport, GroupDto, GroupItemRequest, HlsQualityOptionDto, InstallFfmpegRequest,
-    InstallPluginDevRequest, InstalledPlugin, LATER_QUEUE_ID, LinkAuth, LinkCodeResponse,
-    LinkDeviceInfo, LinkDeviceTaskRequest, LinkDevicesResponse, LinkDiscoveredPeer,
-    LinkDiscoveredResponse, LinkDiscoveryRequest, LinkMigrationExport, LinkOkResponse,
-    LinkPairApproveRequest, LinkPairBeginRequest, LinkPairBeginResponse, LinkPairConfirmOutcome,
-    LinkPairConfirmRequest, LinkPairFinishRequest, LinkPairFinishResponse, LinkPairHelloRequest,
-    LinkPairHelloResponse, LinkPairRevealRequest, LinkPairRevealResponse, LinkPingInfo,
-    LinkProbeParams, LinkProbeRequest, LinkProbeResult, LinkProbeVerdict, LinkTaskRequest,
-    LogFileDto, LogsResponse, MAIN_QUEUE_ID, MarketEntryDto, MarketInstallRequest,
-    MigrationAckParams, MoveQueueRequest, PluginAuthRequest, PluginAuthResponse, PluginDto,
-    PreviewItemDto, PreviewVariantDto, ProxyTestRequest, ProxyTestResponse, QueueDto,
+    ApiInfo, BtFileDto, CREATE_TASKS_BATCH_ID_MAX_LEN, CREATE_TASKS_MAX_ITEMS,
+    CdnConfigApplyParams, CdnNodeDto, CdnReportAckParams, CdnReportLeaseDto, ChangeTaskUrlParams,
+    ComponentFfmpegStatus, ComponentInstallParams, ComponentKind, ComponentParams,
+    ComponentProbeDto, ComponentRepairParams, ComponentStatusDto, ComponentVersions,
+    ComponentYtdlpStatus, ConnPolicySummaryDto, CreateGroupRequest, CreateGroupResponse,
+    CreateQueueRequest, CreateTaskItem, CreateTaskOutcome, CreateTaskRequest, CreatedTask,
+    DaemonConfigPatch, DaemonConfigSnapshot, DaemonCreateTaskParams, DaemonCreateTasksParams,
+    DaemonCreateTasksResult, DaemonDeleteTasksParams, DaemonRuntimeStatsDto, DaemonTaskIdsParams,
+    DiagnosticsProbeParams, DiagnosticsProbeResult, DownloadRequest, Ed2kServerSubRefreshResponse,
+    EgressPlanDto, EgressPlanParams, EgressProxyDto, FileExistsAction, FileMissingUpdateDto,
+    FsEntry, FsListResponse, GatewayMigrationExport, GroupDto, GroupItemRequest,
+    HlsQualityOptionDto, InstallFfmpegRequest, InstallPluginDevRequest, InstalledPlugin,
+    LATER_QUEUE_ID, LinkAuth, LinkCodeResponse, LinkDeviceInfo, LinkDeviceTaskRequest,
+    LinkDevicesResponse, LinkDiscoveredPeer, LinkDiscoveredResponse, LinkDiscoveryRequest,
+    LinkMigrationExport, LinkOkResponse, LinkPairApproveRequest, LinkPairBeginRequest,
+    LinkPairBeginResponse, LinkPairConfirmOutcome, LinkPairConfirmRequest, LinkPairFinishRequest,
+    LinkPairFinishResponse, LinkPairHelloRequest, LinkPairHelloResponse, LinkPairRevealRequest,
+    LinkPairRevealResponse, LinkPingInfo, LinkProbeParams, LinkProbeRequest, LinkProbeResult,
+    LinkProbeVerdict, LinkTaskRequest, LogFileDto, LogsResponse, MAIN_QUEUE_ID, MarketEntryDto,
+    MarketInstallRequest, MigrationAckParams, MoveQueueRequest, PluginAuditClearParams,
+    PluginAuditEntryDto, PluginAuditListDto, PluginAuditListParams, PluginAuditRecordEntry,
+    PluginAuditRecordParams, PluginAuthRequest, PluginAuthResponse, PluginCandidateDto,
+    PluginCommandDeclDto, PluginConsentParams, PluginContributionsDto, PluginDesktopEntryDto,
+    PluginDto, PluginPageScriptDeclDto, PluginPageScriptDto, PluginPageScriptSourceDto,
+    PluginPageScriptSourceParams, PluginPageScriptsDto, PluginSetSiteDefaultParams,
+    PluginSiteDefaultDto, PluginSniffRulesDto, PluginViewDeclDto, PreviewItemDto,
+    PreviewVariantDto, ProxyRouteMatchDto, ProxyRouteRequest, ProxyRouteResponse,
+    ProxyRuleIssueDto, ProxyTestRequest, ProxyTestResponse, QueueDto, QueueOrderEntryDto,
     QueuePositionDto, QueueScheduleRequest, RenameTaskRequest, ReorderQueueRequest, RequestBody,
     ResolvePreviewRequest, ResolvePreviewResponse, ResolveVariantOptionDto, ResultMessage,
     RssItemActionRequest, RssItemDto, RssSourceDto, RssValidateRequest, RssValidateResponse,
     SegmentDetailDto, SelectionKind, SelectionOutcome, SelectionRequestDto, SelectionResolutionDto,
-    SetPluginEnabledRequest, SettingFieldDto, SettingOptionDto, SetupRequest, SetupStatusResponse,
-    SiteAuthCredentialDto, SiteAuthDeleteParams, SiteAuthEntryDto, SiteAuthGetParams,
-    SiteAuthMatchParams, SiteAuthSaveRequest, StatsResponse, StorageProbeDto, StorageProbeFailure,
-    StorageProbeRole, StorageProbeTarget, SystemProxyDto, TaskDto, TokenResponse,
-    TrackerSubRefreshResponse, UpdateQueueRequest, WebhookDeliveriesResponse, WebhookDeliveryDto,
-    WebhookPresetDto, WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse,
-    WsClientMsg, WsServerMsg,
+    SetPluginEnabledRequest, SetTaskSegmentsParams, SettingFieldDto, SettingOptionDto,
+    SetupRequest, SetupStatusResponse, SiteAuthCredentialDto, SiteAuthDeleteParams,
+    SiteAuthEntryDto, SiteAuthGetParams, SiteAuthMatchParams, SiteAuthSaveRequest, StatsResponse,
+    StorageProbeDto, StorageProbeFailure, StorageProbeRole, StorageProbeTarget, SystemProxyDto,
+    TaskDto, TaskVerifyResult, TaskVerifyStatus, TokenResponse, TrackerSubRefreshResponse,
+    UpdateQueueRequest, WebhookDeliveriesResponse, WebhookDeliveryDto, WebhookPresetDto,
+    WebhookSimulateResponse, WebhookTestRequest, WebhookTestResponse, WsClientMsg, WsServerMsg,
 };
 pub use daemon_config::{
     BT_MSE_MODES, BT_SEED_LIMIT_OPERATORS, BT_SEED_THEN_ACTIONS, BT_SEED_TIME_UNITS,
@@ -99,15 +121,27 @@ pub use error::{
     RpcErrorData, RpcErrorObject,
 };
 pub use event::{
-    AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, EventFrame, ServiceEvent, Snapshot,
-    SnapshotBody, WEBHOOK_DELIVERY_LIMIT, accepted_runtime_status, apply_agent_event,
-    apply_daemon_event, merge_webhook_deliveries,
+    AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, EventFrame, FrameVerdict, ServiceEvent,
+    Snapshot, SnapshotBody, TABLE_INLINE_LIMIT, WEBHOOK_DELIVERY_LIMIT, accepted_runtime_status,
+    apply_agent_event, apply_daemon_event, apply_queue_order, judge_frame,
+    merge_webhook_deliveries, runtime_retained,
+};
+pub use plugin_view::{
+    NAV_BUILTIN_TARGETS, PluginCommandParams, PluginInvokeParams, PluginPageInvokeParams,
+    PluginPageInvokeResultDto, PluginViewEventParams, PluginViewFrameDto,
+    PluginViewKeepaliveParams, PluginViewOpenParams, PluginViewOpenedDto, PluginViewSessionParams,
+    PluginViewSnapshotDto, VIEW_CLOSE_REASON_REQUESTED, VIEW_ERROR_PROP, VIEW_ROOT_ID,
+    VIEW_SCHEMA_JSON, VIEW_TONES_JSON, ViewEffect, ViewError, ViewEventDto, ViewEventPayloadType,
+    ViewEventSpec, ViewItemSpec, ViewKindSpec, ViewLimits, ViewNode, ViewOp, ViewPropFormat,
+    ViewPropSpec, ViewPropType, ViewSchema, apply_view_ops, diff_view, normalize_view,
+    plugin_route_id, view_schema,
 };
 pub use rpc::{
     APP_VERSION, CLOSE_REASON_SERVICE_QUIT, CLOSE_REASON_SERVICE_RESTART, ClientHello,
-    JSONRPC_VERSION, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION, RequestId, RpcFailureResponse,
-    RpcIncoming, RpcNotification, RpcRequest, RpcResponse, RpcSuccessResponse, ServiceHello,
-    ServiceRole, negotiate_protocol, validate_first_request,
+    JSONRPC_VERSION, MAX_INBOUND_RPC_MESSAGE_BYTES, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    RequestId, RpcFailureResponse, RpcIncoming, RpcNotification, RpcRequest, RpcResponse,
+    RpcSuccessResponse, ServiceHello, ServiceRole, is_older_app_version, negotiate_protocol,
+    validate_first_request,
 };
 pub use settings::{
     CUSTOM_THEMES_KEY, FILE_ICON_PACK_KEY, MAX_CUSTOM_THEME_ID_LEN, MAX_SYNC_VALUE_BYTES,
@@ -115,4 +149,28 @@ pub use settings::{
     custom_theme_id, custom_theme_key, daemon_config_to_value, is_custom_theme_id,
     is_icon_pack_ref, setting_spec, setting_value_kind, sync_scope_key, validate_value,
     value_to_daemon_config,
+};
+pub use share::{
+    DISPLAY_BYTES_CAP, SHARE_STATE_RECEIVE_RECORDS, ShareAppealDto, ShareAppealParams,
+    ShareAppealStatus, ShareCloudState, ShareConfigDto, ShareConnectionMode, ShareContributionDto,
+    ShareConvertToCloudParams, ShareCreateParams, ShareDiagnosticsDto, ShareDiagnosticsParams,
+    ShareDismissPendingParams, ShareDto, ShareEarnDto, ShareExitBehavior, ShareFileDto,
+    ShareGrantDto, ShareGrantSource, ShareHashingDto, ShareHomeRelayDto, ShareIdParams,
+    ShareKindUsageDto, ShareLocalConfigDto, ShareLogLevel, ShareLogLineDto, ShareLogsDto,
+    ShareLogsParams, ShareMode, ShareNatType, ShareNetReportDto, ShareNetSnapshotDto,
+    ShareNetStatusDto, SharePathEventDto, SharePathKind, SharePathSummaryDto,
+    SharePolicySummaryDto, ShareProgressDto, ShareProvideState, ShareReceiveParams,
+    ShareReceiveRecordDto, ShareReceiveRecordsPage, ShareReceiveRecordsParams,
+    ShareReceiveResultDto, ShareReceiveStatus, ShareReceiverDto, ShareRelayDto, ShareReportParams,
+    ShareReportReason, ShareResolveDto, ShareResolveParams, ShareSessionBytesDto,
+    ShareSessionDetailDto, ShareSessionKillParams, ShareSessionRole, ShareSessionSampleDto,
+    ShareSessionSummaryDto, ShareSourcesDto, ShareStateDto, ShareStatus, ShareStopProvidingParams,
+    ShareSwarmBlock, ShareSwarmServedFileDto, ShareSwitchToBridgeParams, ShareTaskFactsDto,
+    ShareTierDto, ShareTrafficKind, ShareUpdateParams, ShareUploadDto, ShareUploadStatus,
+    ShareUsageDto, ShareUsageEnforcedDto,
+};
+pub use table_sync::{
+    InvalidPageCursor, LoadedTables, TABLE_SYNC_BACKLOG_LIMIT, TASK_PAGE_DEFAULT_LIMIT,
+    TASK_PAGE_MAX_LIMIT, TablePage, TablePageParams, TableSection, TableSync, TableSyncError,
+    TaskListParams,
 };

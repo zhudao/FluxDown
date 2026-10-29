@@ -1,9 +1,10 @@
 // 分类匹配索引（移植 crates/downloads/src/model/categories.rs）：
-// 由偏好 `custom_categories` 构建，按扩展名 / 正则把任务归类。
+// 由偏好 `custom_categories` 构建，按扩展名 / 正则 / 网址通配符把任务归类。
 
 import type { CustomCategoryDto } from '../../../lib/rpc'
+import { compileWildcard } from '../../../lib/categoryRoute'
 import { compileEngineRegex } from '../../rss/filter'
-import { extensionOf } from './task'
+import { extensionOf, shareUrl } from './task'
 import type { DownloadTaskView } from './task'
 
 type Matcher =
@@ -11,6 +12,7 @@ type Matcher =
   | { type: 'other' }
   | { type: 'extensions'; set: ReadonlySet<string> }
   | { type: 'regex'; regex: RegExp | null }
+  | { type: 'url'; regex: RegExp | null }
 
 export interface CategoryRule {
   dto: CustomCategoryDto
@@ -29,6 +31,7 @@ export function builtinDefaults(): CustomCategoryDto[] {
     matchMode: 'extension',
     extensions,
     regexPattern: '',
+    urlPattern: '',
     position,
     visible: true,
     isBuiltin: true,
@@ -58,6 +61,7 @@ function coerceDto(raw: unknown): CustomCategoryDto | null {
     matchMode: typeof item.matchMode === 'string' ? item.matchMode : 'extension',
     extensions: Array.isArray(item.extensions) ? item.extensions.filter((ext): ext is string => typeof ext === 'string') : [],
     regexPattern: typeof item.regexPattern === 'string' ? item.regexPattern : '',
+    urlPattern: typeof item.urlPattern === 'string' ? item.urlPattern : '',
     position: typeof item.position === 'number' ? item.position : 0,
     visible: item.visible !== false,
     isBuiltin: item.isBuiltin === true,
@@ -83,6 +87,10 @@ export function categoriesFromPreference(value: unknown): CustomCategoryDto[] {
 
 export class CategoryIndex {
   readonly rules: readonly CategoryRule[]
+  /** 分类 id → 首条同 id 规则的下标（重复 id 只认首条）。 */
+  private readonly firstIndexById = new Map<string, number>()
+  /** 具体分类规则（非 all / other），保持规则顺序。 */
+  private readonly specific: readonly CategoryRule[]
 
   constructor(dtos: readonly CustomCategoryDto[]) {
     this.rules = dtos.map((dto): CategoryRule => {
@@ -93,6 +101,9 @@ export class CategoryIndex {
         const regex = dto.regexPattern === '' ? null : compileEngineRegex(dto.regexPattern)
         return { dto, matcher: { type: 'regex', regex } }
       }
+      if (dto.matchMode === 'url') {
+        return { dto, matcher: { type: 'url', regex: compileWildcard(dto.urlPattern) } }
+      }
       return {
         dto,
         matcher: {
@@ -101,6 +112,10 @@ export class CategoryIndex {
         },
       }
     })
+    this.rules.forEach((rule, index) => {
+      if (!this.firstIndexById.has(rule.dto.id)) this.firstIndexById.set(rule.dto.id, index)
+    })
+    this.specific = this.rules.filter((rule) => rule.matcher.type !== 'all' && rule.matcher.type !== 'other')
   }
 
   /** 可见规则（`visible=false` 的隐藏）。 */
@@ -108,39 +123,66 @@ export class CategoryIndex {
     return this.rules.filter((rule) => rule.dto.visible)
   }
 
-  private static ruleMatches(rule: CategoryRule, view: DownloadTaskView): boolean {
+  /** 分类 id 在规则列表中的位置（重复 id 取首条）；未知返回 -1。 */
+  indexOf(id: string): number {
+    return this.firstIndexById.get(id) ?? -1
+  }
+
+  /** `ext` 为任务扩展名；扫描多条规则时由调用方算一次传入，省略则现算。 */
+  private static ruleMatches(rule: CategoryRule, view: DownloadTaskView, ext: string | null = extensionOf(view.name)): boolean {
     const matcher = rule.matcher
     switch (matcher.type) {
       case 'all':
         return true
       case 'other':
         return false
-      case 'extensions': {
-        const ext = extensionOf(view.name)
+      case 'extensions':
         return ext !== null && matcher.set.has(ext)
-      }
       case 'regex':
         return matcher.regex !== null && matcher.regex.test(view.name)
+      case 'url':
+        return matcher.regex !== null && matcher.regex.test(shareUrl(view))
     }
   }
 
   /** 任务是否属于分类 `id`；未知 id 视为不匹配。 */
   matches(id: string, view: DownloadTaskView): boolean {
-    const rule = this.rules.find((item) => item.dto.id === id)
-    if (!rule) return false
-    if (rule.matcher.type === 'other') {
-      return !this.rules
-        .filter((other) => other.matcher.type !== 'all' && other.matcher.type !== 'other')
-        .some((other) => CategoryIndex.ruleMatches(other, view))
-    }
+    const index = this.firstIndexById.get(id)
+    if (index === undefined) return false
+    const rule = this.rules[index] as CategoryRule
+    if (rule.matcher.type === 'other') return !this.specific.some((other) => CategoryIndex.ruleMatches(other, view))
     return CategoryIndex.ruleMatches(rule, view)
   }
 
-  /** 任务命中的首个（非 all/other）分类 id；无 → `builtin_other`。 */
+  /** 任务命中的首个（非 all/other）分类 id；无 → `builtin_other`。网址规则固定优先。 */
   categoryOf(view: DownloadTaskView): string {
-    const hit = this.rules.find(
-      (rule) => rule.matcher.type !== 'all' && rule.matcher.type !== 'other' && CategoryIndex.ruleMatches(rule, view),
-    )
+    const isUrl = (rule: CategoryRule): boolean => rule.matcher.type === 'url'
+    const hit =
+      this.specific.find((rule) => isUrl(rule) && CategoryIndex.ruleMatches(rule, view)) ??
+      this.specific.find((rule) => !isUrl(rule) && CategoryIndex.ruleMatches(rule, view))
     return hit ? hit.dto.id : BUILTIN_OTHER_ID
+  }
+
+  /**
+   * 对任务命中的每个分类 id 调用一次 `emit`：与对每个不同 id 逐个调用 {@link matches} 等价
+   * （重复 id 只认首条规则；`other` 仅在没有任何具体分类命中时命中），但每条规则只对任务求值一次，
+   * 供一次扫描得出全部分类计数（对应 Rust `CategoryIndex::for_each_match`）。
+   */
+  forEachMatch(view: DownloadTaskView, emit: (id: string) => void): void {
+    let specificHit = false
+    let otherIds: string[] | null = null
+    const ext = extensionOf(view.name)
+    for (let index = 0; index < this.rules.length; index += 1) {
+      const rule = this.rules[index] as CategoryRule
+      const type = rule.matcher.type
+      const hit = type !== 'other' && CategoryIndex.ruleMatches(rule, view, ext)
+      if (hit && type !== 'all') specificHit = true
+      if (this.firstIndexById.get(rule.dto.id) !== index) continue
+      if (type === 'other') (otherIds ??= []).push(rule.dto.id)
+      else if (hit) emit(rule.dto.id)
+    }
+    if (!specificHit && otherIds !== null) {
+      for (const id of otherIds) emit(id)
+    }
   }
 }

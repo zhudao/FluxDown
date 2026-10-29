@@ -18,7 +18,7 @@ import AnnouncementPopup from "../components/site/AnnouncementPopup";
 import { SITE_ORIGIN, OG_IMAGE_URL, OG_IMAGE_WIDTH, OG_IMAGE_HEIGHT, HOME_META, buildGraph } from "../lib/seo";
 import { HREFLANG, HTML_LANG, LANGS, OG_LOCALE, type Lang } from "../i18n/config";
 import { common } from "../i18n/messages/common";
-import { PRODUCT_LINKS, COMMUNITY_LINKS, SPONSOR_LINK, docsPath } from "../lib/site-nav";
+import { PRODUCT_LINKS, COMMUNITY_LINKS, SPONSOR_LINK, docsPath, navHref } from "../lib/site-nav";
 import { href, switchLang } from "../i18n/routing";
 import { BASE, withBase } from "@/lib/base";
 
@@ -29,6 +29,8 @@ interface Props {
   canonicalUrl?: string;
   alternates?: { lang: string; href: string }[];
   noindex?: boolean;
+  /** 与 noindex 同用:追加 nofollow(分享落地页等不应被爬取的动态页)。 */
+  nofollow?: boolean;
   /** 页面级追加的 JSON-LD 节点(如 FAQPage / BreadcrumbList),并入全站 @graph。 */
   jsonLdNodes?: Record<string, unknown>[];
   ogImage?: string;
@@ -41,6 +43,7 @@ const {
   description = HOME_META[lang].description,
   canonicalUrl,
   noindex: pageNoindex = false,
+  nofollow = false,
   jsonLdNodes = [],
   ogImage = OG_IMAGE_URL,
   chrome = true,
@@ -71,7 +74,7 @@ const paletteLinks = [
   { label: t.nav.faq, href: href("/faq", lang) },
   ...[...PRODUCT_LINKS, ...COMMUNITY_LINKS, SPONSOR_LINK].map((link) => ({
     label: t.nav[link.label],
-    href: href(link.path, lang),
+    href: navHref(link, lang),
   })),
 ];
 
@@ -87,7 +90,7 @@ const autoZhHref = lang === "en" && Astro.props.alternates === undefined ? switc
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
-    {noindex && <meta name="robots" content="noindex" />}
+    {noindex && <meta name="robots" content={nofollow ? "noindex,nofollow" : "noindex"} />}
     {alternates.map((a) => <link rel="alternate" hreflang={a.lang} href={a.href} />)}
 
     <!-- 主题预绘制:在首帧前确定 data-theme,避免闪烁。默认跟随系统。 -->
@@ -199,5 +202,7 @@ const autoZhHref = lang === "en" && Astro.props.alternates === undefined ? switc
       baseUrl 是 http://127.0.0.1:5300,直连会让所有请求打到访客本机。
     -->
     <script is:inline defer data-title="FD助手" src={withBase("/api/langbot-widget.js")}></script>
+    <!-- Cloudflare Web Analytics（手动安装，不依赖区域代理的自动注入；区域侧须保持自动注入关闭以免重复计数） -->
+    <script is:inline defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "a19315d531084052929d5123a1a64dbe"}'></script>
   </body>
 </html>

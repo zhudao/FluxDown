@@ -26,6 +26,9 @@ import com.fluxdown.core.protocol.preferences
 import com.fluxdown.core.format.Format
 import com.fluxdown.core.format.Measure
 import com.fluxdown.core.model.FileConflicts
+import com.fluxdown.core.model.HostRef
+import com.fluxdown.core.model.QueueOrder
+import com.fluxdown.core.model.allTasksPaused
 import com.fluxdown.core.model.TaskStatus
 import com.fluxdown.core.store.Connection
 import com.fluxdown.core.store.HostState
@@ -110,6 +113,14 @@ class DownloadsView internal constructor(private val container: AppContainer) {
 
     /** 远程任务的目标设备名 / 在线状态（按 deviceId；名册或云端连接变化才更新）。 */
     internal var remoteTargets by mutableStateOf<Map<String, RemoteTarget>>(emptyMap())
+        private set
+
+    /** 排队顺序（稳定键 → 名次）；排队行读它得到「排队 #n」，顺序变化只重组读它的可见行。 */
+    internal var queueOrder by mutableStateOf(QueueOrder.Empty)
+        private set
+
+    /** 当前主机是本机：远端主机的已完成文件在主机磁盘上，行环钮改为「任务详情」（iOS `ringAction` 同规则）。 */
+    var localHost by mutableStateOf(true)
         private set
 
     /** 远程任务命令与行内过渡态。 */
@@ -197,6 +208,13 @@ class DownloadsView internal constructor(private val container: AppContainer) {
             container.store.state.map { it.speedHistory }.distinctUntilChanged().collect { wave.update(it) }
         }
         launch {
+            // 名次只在渲染可见排队行时按键二分取：顺序变化（队首出队等）只重组读它的可见行，不重建任务行模型。
+            container.store.state.map { it.queueOrder }.distinctUntilChanged().collect { queueOrder = it }
+        }
+        launch {
+            container.host.map { it is HostRef.Local }.distinctUntilChanged().collect { localHost = it }
+        }
+        launch {
             val cache = DeriveCache()
             var retry: Job? = null
             combine(
@@ -271,7 +289,7 @@ internal data class LiveStats(
 
 internal fun HostState.toLiveStats(): LiveStats {
     val st = stats
-    val allPaused = st.activeTasks == 0 && st.pendingTasks == 0 && tasks.any { it.status == TaskStatus.Paused }
+    val allPaused = allTasksPaused(tasks, st.activeTasks, st.pendingTasks)
     return LiveStats(
         down = st.totalDownloadBps,
         up = st.totalUploadBps,

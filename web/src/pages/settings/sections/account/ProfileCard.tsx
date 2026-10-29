@@ -7,9 +7,15 @@ import { useT } from '../../../../i18n'
 import { copyText } from '../../../../lib/copy'
 import { rpc } from '../../../../lib/rpc'
 import type { AgentSessionDto } from '../../../../lib/rpc'
-import { Button, Card, CheckRow, ConfirmFooter, Dialog, FieldError, FieldHint, Form, FormField, Icon, Input, Tooltip, toast } from '../../../../ui'
+import { Button, Card, CheckRow, ConfirmFooter, Dialog, FieldError, FieldHint, Form, FormField, Icon, Input, Switch, Tooltip, toast } from '../../../../ui'
+import { setPref, usePrefBoolean } from '../../kit'
+import { SHOW_REFERRAL_PREF } from '../referral/pref'
+import { localDate } from './billing'
 import { accountErrorKey } from './errorText'
 import { PlanBadge } from './PlanBadge'
+import { PlanDialog } from './PlanDialog'
+import { takePlanRequest } from './planRequest'
+import type { PlanDialogTab } from './planRequest'
 import { canEditOriginId, OriginIdEditor, trimmedNickname, validNickname } from './profileEditing'
 function displayName(session: AgentSessionDto): string {
   const nickname = session.user.nickname.trim()
@@ -144,6 +150,8 @@ export function ProfileCard({ session, disabled }: { session: AgentSessionDto; d
   const [refreshing, setRefreshing] = useState(false)
   const [errorKey, setErrorKey] = useState<string | null>(null)
   const [editing, setEditing] = useState<{ kind: 'nickname' | 'originId'; userId: string } | null>(null)
+  const [planOpen, setPlanOpen] = useState<PlanDialogTab | null>(() => takePlanRequest())
+  const showReferral = usePrefBoolean(SHOW_REFERRAL_PREF, false)
   const originEditable = canEditOriginId(session)
   const activeEditing = !disabled && editing?.userId === session.user.id ? editing.kind : null
   useEffect(() => {
@@ -239,7 +247,31 @@ export function ProfileCard({ session, disabled }: { session: AgentSessionDto; d
           </Button>
         </div>
       </div>
+      <div className="flex flex-wrap items-center gap-2 border-t border-hairline pt-3">
+        <span className="text-xs text-muted-foreground">{t('accountPlanLabel')}</span>
+        <span className="min-w-0 truncate text-sm font-medium text-foreground">{session.currentPlan ? session.currentPlan.name || session.currentPlan.code : '—'}</span>
+        {session.currentPlan ? <PlanBadge plan={session.currentPlan} ordinal={session.user.membershipOrdinal} /> : null}
+        {session.activeSubscription ? (
+          <span className="min-w-0 truncate text-xs text-muted-foreground tabular">
+            {t('accountSubscriptionUntil', { date: localDate(session.activeSubscription.endsAt) ?? '' })}
+          </span>
+        ) : null}
+        <Button className="ml-auto" disabled={disabled} onClick={() => setPlanOpen('packs')}>
+          {t('accountPackBuy')}
+        </Button>
+        <Button variant="primary" disabled={disabled} onClick={() => setPlanOpen('membership')}>
+          {t('accountPlanUpgrade')}
+        </Button>
+      </div>
+      <div className="flex items-center gap-3 border-t border-hairline pt-3">
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <div className="text-sm font-medium text-foreground">{t('accountFeatureReferral')}</div>
+          <div className="text-xs text-muted-foreground">{t('accountFeatureReferralDesc')}</div>
+        </div>
+        <Switch checked={showReferral} disabled={disabled} onCheckedChange={(next) => setPref(SHOW_REFERRAL_PREF, next)} aria-label={t('accountFeatureReferral')} />
+      </div>
       {errorKey ? <FieldError>{t(errorKey)}</FieldError> : null}
+      {planOpen && !disabled ? <PlanDialog session={session} initialTab={planOpen} onClose={() => setPlanOpen(null)} /> : null}
       {activeEditing === 'nickname' ? <NicknameDialog key={session.user.id} current={session.user.nickname} onClose={() => setEditing(null)} /> : null}
       {activeEditing === 'originId' && session.entitlements.originIdEdit === true ? <OriginIdDialog key={session.user.id} session={session} onClose={() => setEditing(null)} /> : null}
     </Card>

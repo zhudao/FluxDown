@@ -127,6 +127,12 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
         DaemonConfigKind::Enum(FILE_MISSING_ACTIONS),
         "keep",
     ),
+    // 已完成任务记录保留天数：超期的「已完成」记录被自动清理（只删记录，不删文件）；0 = 永不。
+    field(
+        "completed_record_retention_days",
+        DaemonConfigKind::Integer { min: 0, max: 3650 },
+        "0",
+    ),
     // 空闲（无活动/排队任务）时是否仍执行周期性文件跟踪扫描；默认关闭以免唤醒 NAS 硬盘。
     field("idle_file_scan", DaemonConfigKind::Bool, "false"),
     field("global_user_agent", DaemonConfigKind::Text, ""),
@@ -248,6 +254,8 @@ pub const DAEMON_CONFIG_FIELDS: &[DaemonConfigField] = &[
     field("proxy_username", DaemonConfigKind::Text, ""),
     field("proxy_password", DaemonConfigKind::Text, ""),
     field("proxy_no_list", DaemonConfigKind::Text, ""),
+    // 站点代理规则：JSON 数组（顺序即优先级），模型见 `crate::proxy_rules`。
+    field("proxy_rules", DaemonConfigKind::Text, ""),
     // ── Webhook ──
     field("webhook.endpoints", DaemonConfigKind::Text, ""),
     // ── 受管组件手动路径（空 = 自动解析）──

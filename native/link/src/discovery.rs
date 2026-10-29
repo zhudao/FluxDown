@@ -13,9 +13,10 @@
 //! `ver`（平台/版本）：局域网内任何主机都能被动监听或主动查询
 //! `_fluxdown._tcp.local.` 枚举出这些信息，完全不需要任何配对码。这是
 //! 「让本机可被发现」这一功能自身的代价，仅凭这些信息也拼不出配对所需的
-//! 临时密钥/共享密钥，无法完成配对。缓解手段：只在确实需要被添加时才开启
-//! 广播，配对完成或暂不需要被发现时调用 `LinkManager::stop_advertising`
-//! 停止广播，缩短暴露窗口。
+//! 临时密钥/共享密钥，无法完成配对。广播**不含**任何配对标志，也不含云账号信息。
+//! 配对窗口（配对码有效期）内会广播；名册里有未解除的已配对设备时保持常驻的存在性广播
+//! （让对端在本机换 IP / 端口后重新找到本机，见 `LinkManager::refresh_presence`）；
+//! 其余时候调用 `LinkManager::stop_advertising` 撤回，缩短暴露窗口。
 
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::time::Duration;
@@ -25,6 +26,7 @@ use tokio::sync::mpsc;
 
 use super::address::PeerAddress;
 use super::error::{LinkError, LinkResult};
+use super::text::{MAX_NAME_CHARS, MAX_PLATFORM_CHARS, MAX_VERSION_CHARS, sanitize_optional};
 use super::types::{DiscoveredPeer, DiscoveryKind};
 use super::wire::{classify_failure, read_json_object, send_failure};
 
@@ -62,8 +64,8 @@ impl MdnsAdvertiser {
         Ok(Self { daemon })
     }
 
-    /// 将已有广告重新通告为新端口，沿用同一 daemon、服务名与设备身份。
-    pub(crate) fn update_port(
+    /// 将已有广告重新通告为新的端口 / 设备名，沿用同一 daemon、服务名与设备身份。
+    pub(crate) fn update(
         &self,
         port: u16,
         fingerprint: &str,
@@ -107,24 +109,50 @@ impl Drop for MdnsAdvertiser {
     }
 }
 
+/// 浏览器汇出的事件：解析出一台设备，或一个服务实例消失（对端下线 / 记录 TTL 过期）。
+#[derive(Debug, Clone)]
+pub enum BrowseEvent {
+    Found(DiscoveredPeer),
+    /// 服务实例名：`<短指纹>._fluxdown._tcp.local.` 的第一段，即设备指纹的前 12 位
+    /// （见 `MdnsAdvertiser::service_info`）。
+    Lost {
+        instance: String,
+    },
+}
+
+/// mDNS 服务实例全名 → 实例名（第一段，非空）。
+fn instance_of(fullname: &str) -> Option<String> {
+    let first = fullname.split('.').next()?;
+    (!first.is_empty()).then(|| first.to_owned())
+}
+
+/// mDNS 浏览事件 → [`BrowseEvent`]（与网络无关的纯映射，便于单测）。
+fn browse_event(event: ServiceEvent) -> Option<BrowseEvent> {
+    match event {
+        ServiceEvent::ServiceResolved(info) => resolved_to_peer(&info).map(BrowseEvent::Found),
+        ServiceEvent::ServiceRemoved(_, fullname) => {
+            instance_of(&fullname).map(|instance| BrowseEvent::Lost { instance })
+        }
+        _ => None,
+    }
+}
+
 /// mDNS 浏览器：发现局域网内的 fluxdown 设备，解析后经 `sink` 汇出
-/// [`DiscoveredPeer`]。持有 daemon 句柄，`Drop` 时优雅关闭。
+/// [`BrowseEvent`]。持有 daemon 句柄，`Drop` 时优雅关闭。
 pub struct MdnsBrowser {
     daemon: ServiceDaemon,
 }
 
 impl MdnsBrowser {
-    /// 开始浏览，把解析出的设备推送到 `sink`（满时丢弃，关闭后退出，不阻塞）。
-    pub fn start(sink: mpsc::Sender<DiscoveredPeer>) -> LinkResult<Self> {
+    /// 开始浏览，把解析出的设备 / 消失的实例推送到 `sink`（满时丢弃，关闭后退出，不阻塞）。
+    pub fn start(sink: mpsc::Sender<BrowseEvent>) -> LinkResult<Self> {
         let daemon = ServiceDaemon::new().map_err(map_mdns_err)?;
         let receiver = daemon.browse(SERVICE_TYPE).map_err(map_mdns_err)?;
         tokio::spawn(async move {
             let mut full_reported = false;
             while let Ok(event) = receiver.recv_async().await {
-                if let ServiceEvent::ServiceResolved(info) = event
-                    && let Some(peer) = resolved_to_peer(&info)
-                {
-                    match sink.try_send(peer) {
+                if let Some(event) = browse_event(event) {
+                    match sink.try_send(event) {
                         Ok(()) => full_reported = false,
                         Err(mpsc::error::TrySendError::Full(_)) => {
                             if !full_reported {
@@ -155,27 +183,23 @@ impl Drop for MdnsBrowser {
 }
 
 /// 把解析出的 mDNS 服务映射为 [`DiscoveredPeer`]（IPv4 地址经 `pick_best_v4`
-/// 按可达性优先级挑选，而非不加区分地取第一个）。
+/// 按可达性优先级挑选，而非不加区分地取第一个）。广播内容来自局域网任意主机，一律不信任：
+/// 指纹必须是 64 位小写 hex，名称 / 平台 / 版本剔除控制与双向控制字符并限长。
 fn resolved_to_peer(info: &mdns_sd::ResolvedService) -> Option<DiscoveredPeer> {
     let candidates: Vec<Ipv4Addr> = info.get_addresses_v4().into_iter().collect();
     let addr = pick_best_v4(&candidates)?;
     let fingerprint = info
         .get_property_val_str(TXT_FINGERPRINT)
-        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
         .map(str::to_string);
-    let name = info
-        .get_property_val_str(TXT_NAME)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    let name = sanitize_optional(info.get_property_val_str(TXT_NAME), MAX_NAME_CHARS)
         .unwrap_or_else(|| addr.to_string());
-    let platform = info
-        .get_property_val_str(TXT_PLATFORM)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let app_version = info
-        .get_property_val_str(TXT_VERSION)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let platform = sanitize_optional(info.get_property_val_str(TXT_PLATFORM), MAX_PLATFORM_CHARS);
+    let app_version = sanitize_optional(info.get_property_val_str(TXT_VERSION), MAX_VERSION_CHARS);
     Some(DiscoveredPeer {
         fingerprint,
         name,
@@ -232,13 +256,14 @@ fn pick_best_v4(addrs: &[Ipv4Addr]) -> Option<Ipv4Addr> {
         .copied()
 }
 
-/// 手动地址探测：GET `{base}/ping`，解析设备身份/名称/平台/版本。
-/// 供「本地配对」的「手动输入地址」兜底路径（Docker bridge / AP 隔离等 mDNS 失效场景），
-/// 地址可以是 https / 域名 / 带反代子路径（见 [`PeerAddress`]）。
+/// GET `{base}/ping` 并确认应答来自 FluxDown，返回应答 JSON 对象。
 ///
 /// 错误语义：网络失败 → [`LinkError::Io`]（带完整根因）；对端（或反代）返回的不是
 /// FluxDown `/ping` 应答 → [`LinkError::NotFluxDown`]。
-pub async fn probe(client: &reqwest::Client, address: &PeerAddress) -> LinkResult<DiscoveredPeer> {
+async fn fetch_ping(
+    client: &reqwest::Client,
+    address: &PeerAddress,
+) -> LinkResult<serde_json::Value> {
     let resp = client
         .get(address.url("/ping"))
         .timeout(Duration::from_secs(3))
@@ -254,21 +279,47 @@ pub async fn probe(client: &reqwest::Client, address: &PeerAddress) -> LinkResul
             "/ping response is not from FluxDown".into(),
         ));
     }
+    Ok(json)
+}
+
+/// 手动地址探测：GET `{base}/ping`，解析设备身份/名称/平台/版本。
+/// 供「本地配对」的「手动输入地址」兜底路径（Docker bridge / AP 隔离等 mDNS 失效场景），
+/// 地址可以是 https / 域名 / 带反代子路径（见 [`PeerAddress`]）。
+///
+/// 错误语义见 [`fetch_ping`]。
+pub async fn probe(client: &reqwest::Client, address: &PeerAddress) -> LinkResult<DiscoveredPeer> {
+    let json = fetch_ping(client, address).await?;
     let get = |k: &str| {
         json.get(k)
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
+    // `/ping` 的名称 / 平台 / 版本来自对端自报，剔除控制 / 双向控制字符并限长后才展示。
+    let clean = |k: &str, max| sanitize_optional(json.get(k).and_then(|v| v.as_str()), max);
     Ok(DiscoveredPeer {
         fingerprint: get("linkFingerprint"),
-        name: get("linkName").unwrap_or_else(|| address.host().to_string()),
-        platform: get("linkPlatform"),
+        name: clean("linkName", MAX_NAME_CHARS).unwrap_or_else(|| address.host().to_string()),
+        platform: clean("linkPlatform", MAX_PLATFORM_CHARS),
         host: address.host().to_string(),
         port: address.port(),
-        app_version: get("version"),
+        app_version: clean("version", MAX_VERSION_CHARS),
         kind: DiscoveryKind::Manual,
     })
+}
+
+/// GET `{base}/ping` 读取对端自报的设备控制配对能力版本（`linkControl`；旧版对端没有该字段 = 0）。
+/// 发起方请求「完全控制」前用它预检，错误语义见 [`fetch_ping`]。
+pub async fn probe_link_control(
+    client: &reqwest::Client,
+    address: &PeerAddress,
+) -> LinkResult<u32> {
+    let json = fetch_ping(client, address).await?;
+    Ok(json
+        .get("linkControl")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|version| u32::try_from(version).ok())
+        .unwrap_or(0))
 }
 
 /// 计算本机朝向 `peer_host` 的出站本地 IP（UDP connect 技巧，不真正发包），
@@ -299,6 +350,34 @@ pub fn local_direct_addrs(peer_host: &str, api_port: u16) -> Vec<String> {
         }],
         Err(_) => Vec::new(),
     }
+}
+
+/// 本机各网段的可回连地址（`ip:port`，至多 [`crate::types::MAX_DIRECT_CANDIDATES`] 条）：对几个
+/// 常见目的地（公网 / 192.168 / 10 / 172.16 网段）各做一次出站网卡探测（UDP connect，不发包），
+/// 滤掉回环 / 通配 / link-local 后去重。没有具体对端地址可参照时（响应方在数据面信息交换里
+/// 自报地址）使用；只看得到各目的地的默认出站网卡，多网卡 / 容器 / VPN 环境下用
+/// `FLUXDOWN_LINK_ADVERTISE_ADDR` 覆盖。
+#[must_use]
+pub fn default_route_addrs(api_port: u16) -> Vec<String> {
+    let mut addrs: Vec<String> = Vec::new();
+    for target in ["8.8.8.8", "192.168.0.1", "10.0.0.1", "172.16.0.1"] {
+        for candidate in local_direct_addrs(target, api_port) {
+            let usable =
+                candidate
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|addr| match addr.ip() {
+                        IpAddr::V4(v4) => {
+                            !v4.is_loopback() && !v4.is_unspecified() && !v4.is_link_local()
+                        }
+                        IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified(),
+                    });
+            if usable && !addrs.contains(&candidate) {
+                addrs.push(candidate);
+            }
+        }
+    }
+    addrs.truncate(crate::types::MAX_DIRECT_CANDIDATES);
+    addrs
 }
 
 #[cfg(test)]
@@ -354,5 +433,28 @@ mod tests {
             Ipv4Addr::new(172, 17, 0, 2),
         ];
         assert!(pick_best_v4(&addrs).is_none());
+    }
+
+    #[test]
+    fn removed_service_instances_map_to_lost_events_keyed_by_the_short_fingerprint() {
+        let fingerprint = "ab12cd34ef56".repeat(5) + "abcd";
+        let short: String = fingerprint.chars().take(12).collect();
+        let removed = ServiceEvent::ServiceRemoved(
+            SERVICE_TYPE.to_owned(),
+            format!("{short}.{SERVICE_TYPE}"),
+        );
+        match browse_event(removed) {
+            Some(BrowseEvent::Lost { instance }) => assert_eq!(instance, short),
+            other => panic!("expected a Lost event, got {other:?}"),
+        }
+        // 没有实例名的残缺事件被忽略；与发现无关的事件不产生任何输出。
+        assert!(
+            browse_event(ServiceEvent::ServiceRemoved(
+                SERVICE_TYPE.to_owned(),
+                String::new()
+            ))
+            .is_none()
+        );
+        assert!(browse_event(ServiceEvent::SearchStopped(SERVICE_TYPE.to_owned())).is_none());
     }
 }

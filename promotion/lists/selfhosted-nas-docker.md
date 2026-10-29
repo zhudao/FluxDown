@@ -128,7 +128,7 @@ kebab-case 文件名，`master` 分支。
 
 ```yaml
 name: FluxDown
-website_url: https://fluxdown.zerx.dev
+website_url: https://fluxdown.com
 description: Multi-protocol download manager with a web UI, dynamic file segmentation and resume. Handles HTTP/FTP/BitTorrent/eD2K/HLS/DASH and exposes an aria2-compatible JSON-RPC API. (alternative to Internet Download Manager, aria2)
 licenses:
   - AGPL-3.0
@@ -158,7 +158,7 @@ source_code_url: https://github.com/zerx-lab/FluxDown
 
 `stargazers_count` / `updated_at` / `archived` / `current_release` / `commit_history` 由 `make update_metadata` 自动写入，**投稿时一律不要写**。同时删除所有注释与未使用的可选字段（PR 模板第 6 条）。
 
-`demo_url` 为可选字段。当前 headless 的演示模式由 agent 的 `FLUXDOWN_DEMO` / `FLUXDOWN_DEMO_URL` 配置（见 `.omp/knowledge/hosts-and-api.md`），不再以冻结的 `native/server` 为部署入口。若上线 demo，提交前按当前实例核实可交互性及所需凭据；**不上 demo 不影响准入。**
+`demo_url` 为可选字段。当前 headless 的演示模式由 agent 的 `FLUXDOWN_DEMO` / `FLUXDOWN_DEMO_URL` 配置（见 `.omp/knowledge/hosts-and-api.md`）。若上线 demo，提交前按当前实例核实可交互性及所需凭据；**不上 demo 不影响准入。**
 
 ### CONTRIBUTING 的硬性要求（逐条核对）
 
@@ -473,7 +473,7 @@ README → *App Store Suggestions*：
 App request: FluxDown
 
 Repo:     https://github.com/zerx-lab/FluxDown
-Website:  https://fluxdown.zerx.dev
+Website:  https://fluxdown.com
 License:  AGPL-3.0
 Image:    ghcr.io/zerx-lab/fluxdown-server:0.2.3
 Arch:     linux/amd64, linux/arm64 (multi-arch manifest)
@@ -586,7 +586,7 @@ changelog_url: https://github.com/zerx-lab/FluxDown/releases
 date_added: '2026-07-27'
 description: FluxDown is a multi-protocol download manager with a web UI, supporting
   HTTP/FTP/BitTorrent/eD2K/HLS/DASH with dynamic segmentation and crash-safe resume.
-home: https://fluxdown.zerx.dev/
+home: https://fluxdown.com/
 host_mounts: []
 icon: https://media.sys.truenas.net/apps/fluxdown/icons/icon.png
 keywords:
@@ -609,7 +609,7 @@ run_as_context:
 screenshots: []
 sources:
 - https://github.com/zerx-lab/FluxDown
-- https://fluxdown.zerx.dev/
+- https://fluxdown.com/
 title: FluxDown
 train: community
 version: 1.0.0

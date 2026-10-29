@@ -24,8 +24,8 @@ use crate::gateway::{GatewayService, GatewayShell, LocalConnection};
 use crate::lifecycle::Lifecycle;
 use crate::power::PowerService;
 use crate::runtime::{
-    CloudServices, daemon_socket_address, finalize_device_identity, fluxcloud_base_url,
-    spawn_daemon_projection, start_cloud_services,
+    CloudServices, finalize_device_identity, fluxcloud_base_url, spawn_daemon_projection,
+    start_cloud_services,
 };
 use crate::shell::{ShellHost, ShellServices, ShellState, TrayAvailability};
 use crate::state::{AgentState, StateError, StateStore};
@@ -80,6 +80,8 @@ pub enum AgentStartError {
 /// 运行中的嵌入式 agent。
 pub struct EmbeddedAgent {
     service: Arc<GatewayService>,
+    /// 宿主自身下载（App 自更新）经它取 daemon 的统一出口方案。
+    daemon: Arc<DaemonClient>,
     cancel: CancellationToken,
     tasks: Vec<(&'static str, JoinHandle<()>)>,
     /// 持有 `agent.lock` 直到关停。
@@ -101,8 +103,6 @@ pub async fn start_embedded(
         client_device_name,
         enable_link,
     } = config;
-    let daemon_address = daemon_socket_address(&daemon_url)
-        .map_err(|error| AgentStartError::DaemonEndpoint(format!("{error:#}")))?;
     let daemon_config = DaemonClientConfig::new(daemon_url, daemon_token);
     daemon_config
         .validate()
@@ -114,6 +114,8 @@ pub async fn start_embedded(
         Err(error) => return Err(error.into()),
     };
     let mut state = store.load().await?;
+    // 嵌入式宿主没有对外监听端口：不论持久化状态如何都不是局域网可达。
+    state.gateway.lan_active = false;
     let new_device = state.device_id.is_empty();
     if new_device {
         state.device_id = uuid::Uuid::new_v4().to_string();
@@ -130,7 +132,7 @@ pub async fn start_embedded(
     // 子令牌：启动失败或 daemon 致命错误只停止本 agent，不波及宿主的取消令牌。
     let cancel = cancel.child_token();
     // daemon 由宿主提供：监管器从一开始就处于「已停止」，连接被拒时只重连、永不拉起进程。
-    let supervisor = Arc::new(DaemonSupervisor::new(daemon_address));
+    let supervisor = Arc::new(DaemonSupervisor::new(None));
     supervisor.stop();
     let (daemon, daemon_events) =
         match DaemonClient::start_scoped(daemon_config.clone(), supervisor.clone(), cancel.clone())
@@ -187,6 +189,10 @@ pub async fn start_embedded(
         device_meta_task,
         cdn_task,
         notify_task,
+        #[cfg(feature = "share-p2p")]
+        share,
+        #[cfg(feature = "share-p2p")]
+        share_task,
     } = match start_cloud_services(
         // 宿主进程的环境不属于 agent：地址只取构建期注入值，缺省为本地默认。
         fluxcloud_base_url(None, option_env!("FLUXCLOUD_BASE_URL")),
@@ -215,9 +221,18 @@ pub async fn start_embedded(
         ("power", tokio::spawn(power.clone().run(cancel.clone()))),
         (
             "daemon event projection",
-            spawn_daemon_projection(daemon_events, events.clone(), notice_tx, cancel.clone()),
+            // 嵌入式宿主（移动端）由平台自己处理提示音：不接入 agent 提示音。
+            spawn_daemon_projection(
+                daemon_events,
+                events.clone(),
+                notice_tx,
+                None,
+                cancel.clone(),
+            ),
         ),
     ];
+    #[cfg(feature = "share-p2p")]
+    tasks.push(("share", share_task));
 
     let link = enable_link.then(|| {
         crate::link::LinkService::new(crate::link::LinkServiceParts {
@@ -228,6 +243,7 @@ pub async fn start_embedded(
             // 没有监听端口：互联只做出站（`reachable = false`）。
             bound: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             server_mode: false,
+            network: crate::link::LinkNetworkOptions::from_env(),
         })
     });
     if let Some(link) = &link {
@@ -237,11 +253,20 @@ pub async fn start_embedded(
         ));
     }
 
-    let capture = Arc::new(crate::capture::CaptureService::new(
-        daemon.clone(),
-        events.clone(),
-        shell.clone(),
-    ));
+    #[cfg(feature = "share-p2p")]
+    let share_links: Option<Arc<dyn crate::share_link::ShareLinkSink>> = share
+        .clone()
+        .map(|service| service as Arc<dyn crate::share_link::ShareLinkSink>);
+    #[cfg(not(feature = "share-p2p"))]
+    let share_links: Option<Arc<dyn crate::share_link::ShareLinkSink>> = None;
+    #[cfg(feature = "share-p2p")]
+    if let Some(service) = &share {
+        lifecycle.set_before_quit(service.clone());
+    }
+    let capture = Arc::new(
+        crate::capture::CaptureService::new(daemon.clone(), events.clone(), shell.clone())
+            .with_share_links(share_links),
+    );
     // 兼容 API 不存在：开关恒关、令牌为空，诊断省略网关 / 兼容 API / 硬盘休眠检查。
     let api_switches = Arc::new(fluxdown_api::server::ApiRuntimeSwitches::new(
         false, false, false, false, false,
@@ -262,6 +287,7 @@ pub async fn start_embedded(
     let update = Arc::new(crate::update::UpdateService::unsupported(
         events.clone(),
         store.data_dir().to_path_buf(),
+        crate::egress::Egress::daemon(daemon.clone()),
     ));
     let mut gateway = GatewayService::new(
         daemon.clone(),
@@ -293,6 +319,10 @@ pub async fn start_embedded(
     if let Some(link) = &link {
         gateway = gateway.with_link(link.clone());
     }
+    #[cfg(feature = "share-p2p")]
+    {
+        gateway = gateway.with_share(share);
+    }
     let service = Arc::new(gateway);
     tasks.push((
         "shell",
@@ -312,6 +342,7 @@ pub async fn start_embedded(
 
     let agent = EmbeddedAgent {
         service,
+        daemon,
         cancel,
         tasks,
         store,
@@ -341,16 +372,25 @@ impl EmbeddedAgent {
         self.service.connect_local(hello, self.cancel.clone()).await
     }
 
+    /// 宿主自身下载（原生 App 自更新）的统一出口来源：本机 daemon 的 `daemon.egress.plan`。
+    /// agent 停止后调用失败，调用方按系统默认网络处理。
+    #[must_use]
+    pub fn egress_source(&self) -> Arc<dyn crate::egress::EgressSource> {
+        self.daemon.clone()
+    }
+
     /// 停止 agent 并等待全部后台任务结束。已有的 [`LocalConnection`] 的事件流以 `Closed`
     /// 结束；它们持有的服务引用随连接丢弃而释放，重新启动前必须先丢弃所有连接，否则
     /// 数据目录锁（`agent.lock`）会保持到最后一个连接释放。
     pub async fn shutdown(self) {
         let Self {
             service,
+            daemon,
             cancel,
             tasks,
             store,
         } = self;
+        drop(daemon);
         cancel.cancel();
         for (task, handle) in tasks {
             match handle.await {

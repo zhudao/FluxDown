@@ -12,15 +12,24 @@ import com.fluxdown.app.data.DeviceSettings
 import com.fluxdown.app.data.HostRepo
 import com.fluxdown.app.data.SecretBox
 import com.fluxdown.app.data.ViewPrefsRepo
+import com.fluxdown.app.feature.devices.LinkApi
+import com.fluxdown.app.feature.newtask.ImportCenter
 import com.fluxdown.app.service.LocalActivity
+import com.fluxdown.app.diag.AppDiagnostics
+import com.fluxdown.app.service.DownloadServiceController
 import com.fluxdown.bridge.FluxBridge
 import com.fluxdown.core.host.CreateTaskRequest
 import com.fluxdown.core.host.HostErrorCode
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.host.HostSession
 import com.fluxdown.core.host.HostSignal
+import com.fluxdown.core.host.ImportBatch
+import com.fluxdown.core.host.ImportJob
+import com.fluxdown.core.host.ImportSummary
+import com.fluxdown.core.host.ImportUpdate
 import com.fluxdown.core.model.HostRef
 import com.fluxdown.core.model.SelectionOutcome
+import com.fluxdown.core.store.Connection
 import com.fluxdown.core.store.HostState
 import com.fluxdown.core.store.HostStore
 import com.fluxdown.app.update.AppUpdateController
@@ -39,6 +48,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -59,7 +69,12 @@ class FluxApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        AppDiagnostics.install(this)
         container = AppContainer(this)
+        // 本机出现下载活动时就尝试拉起前台服务——不限于界面在前台：RSS 自动下载、云端 / 局域网下发、
+        // 队列调度都可能在后台产生任务。Android 12+ 后台启动多数会被拒（已在电池优化白名单时豁免），
+        // 被拒记入诊断，回到前台由 DownloadServiceEffect 补拉。
+        DownloadServiceController.keepAliveWhileBusy(this, container)
         // 周期后台检查按「自动检查」开关登记 / 取消（幂等；不持久化，每次冷启动重登）。
         // 偏好读取与 JobScheduler binder 调用放 IO，不占冷启动主线程。
         container.appScope.launch(Dispatchers.IO) {
@@ -90,6 +105,9 @@ class AppContainer(context: Context) {
 
     val appearance = AppearanceRepo(context.prefs)
     val viewPrefs = ViewPrefsRepo(context.prefs)
+
+    /** 批量导入（进程级：关闭「新建下载」Sheet 后仍继续，进度显示在下载页）。 */
+    val imports = ImportCenter(appScope)
     val store = HostStore(storeScope)
 
     /** 应用自更新（惰性创建：首次用到才加载更新器；与当前主机无关）。 */
@@ -142,6 +160,11 @@ class AppContainer(context: Context) {
                 adopt(localRef, opened.getOrElse { UnavailableSession(it.asHostException()) })
             }
         }
+        // 连接 / 任务表载入状态的每次变化记入诊断事件：界面卡在加载 / 断连时，导出的日志能看出停在哪一态。
+        // 只在状态切换时写一行（StateFlow 的 10 Hz 发布经 distinctUntilChanged 折叠），不做周期写入。
+        appScope.launch(Dispatchers.IO) {
+            store.state.map(::connectionSummary).distinctUntilChanged().collect { AppDiagnostics.event("host $it") }
+        }
     }
 
     /**
@@ -153,8 +176,17 @@ class AppContainer(context: Context) {
         openOrFail(ref).map { adopt(ref, it) }
     }
 
-    /** 保存远端主机：先真实连接并拿到首个快照（鉴权 / 协议 / 可达性），通过后加密保存访问密钥。 */
-    suspend fun addRemoteHost(name: String, endpoint: String, accessKey: String): Result<HostRef.Remote> {
+    /**
+     * 保存远端主机：先真实连接并拿到首个快照（鉴权 / 协议 / 可达性），通过后加密保存凭据。
+     * [accessKey] 是手输的访问密钥，或局域网配对得到的设备控制凭据（此时 [linkFingerprint] = 主机指纹；
+     * 已有同指纹的主机则原地更新，不新增一条）。
+     */
+    suspend fun addRemoteHost(
+        name: String,
+        endpoint: String,
+        accessKey: String,
+        linkFingerprint: String? = null,
+    ): Result<HostRef.Remote> {
         val url = endpoint.trim()
         val key = accessKey.trim()
         return try {
@@ -163,11 +195,47 @@ class AppContainer(context: Context) {
             }
             val probe = FluxBridge.openRemote(url, key)
             awaitFirstSnapshot(probe)
-            Result.success(hostRepo.add(name.trim().ifEmpty { url.substringAfter("://") }, url, key))
+            val saved = hostRepo.add(name.trim().ifEmpty { url.substringAfter("://") }, url, key, linkFingerprint)
+            // 同一台主机重新配对（同指纹原地更新）而它正是当前主机：旧会话握着失效凭据，用新凭据重开。
+            if (linkFingerprint != null) reopenIfCurrent(saved)
+            Result.success(saved)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "add remote host failed: ${e.message}")
+            Result.failure(e.asHostException())
+        }
+    }
+
+    private suspend fun reopenIfCurrent(ref: HostRef.Remote) = switchLock.withLock {
+        if (_host.value.id == ref.id) openOrFail(ref).onSuccess { adopt(ref, it) }
+    }
+
+    /**
+     * 已配对主机被拒（设备凭据失效）后重新配对成功：先用新凭据真实连接，通过后原地替换同一台主机的地址、凭据与指纹
+     * （id、名称不变），并在它就是当前主机时用新凭据重开会话（旧会话握着失效凭据）。主机不存在 → NotFound。
+     */
+    suspend fun repairRemoteHost(
+        hostId: String,
+        endpoint: String,
+        credential: String,
+        linkFingerprint: String,
+    ): Result<HostRef.Remote> = switchLock.withLock {
+        val url = endpoint.trim()
+        val key = credential.trim()
+        try {
+            if (url.isEmpty() || key.isEmpty()) {
+                throw HostException(HostErrorCode.InvalidArgument, message = "endpoint and credential are required")
+            }
+            awaitFirstSnapshot(FluxBridge.openRemote(url, key))
+            val ref = hostRepo.replaceLinkCredential(hostId, url, key, linkFingerprint)
+                ?: throw HostException(HostErrorCode.NotFound, message = "host not saved")
+            if (_host.value.id == ref.id) adopt(ref, open(ref))
+            Result.success(ref)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "repair remote host failed: ${e.message}")
             Result.failure(e.asHostException())
         }
     }
@@ -185,6 +253,8 @@ class AppContainer(context: Context) {
     suspend fun updateRemoteAccessKey(accessKey: String): Result<Unit> = switchLock.withLock {
         val ref = _host.value as? HostRef.Remote
             ?: return@withLock Result.failure(HostException(HostErrorCode.InvalidArgument, message = "current host is local"))
+        // 局域网配对的主机用设备专属控制凭据：主机改访问密钥不影响它，这里不能把它覆盖成访问密钥。
+        if (ref.linkFingerprint != null) return@withLock Result.success(Unit)
         val saved = try {
             hostRepo.updateAccessKey(ref.id, accessKey.trim())
         } catch (e: CancellationException) {
@@ -200,14 +270,29 @@ class AppContainer(context: Context) {
         openOrFail(ref).map { adopt(ref, it) }
     }
 
-    /** 删除已保存的远端主机；正在使用时先回到本机。本机不可删除。 */
+    /**
+     * 删除已保存的远端主机；正在使用时先回到本机。本机不可删除。
+     * 局域网配对的主机同时对本机主机调 `agent.link.remove`（尽力而为，失败只记日志），让主机侧撤销该设备的控制权限。
+     */
     suspend fun removeHost(id: String) {
         if (id == HostRef.Local.ID) return
+        val fingerprint = (hosts.value.firstOrNull { it.id == id } as? HostRef.Remote)?.linkFingerprint
         switchLock.withLock {
             if (_host.value.id == id) {
                 adopt(localRef, openOrFail(localRef).getOrElse { UnavailableSession(it.asHostException()) })
             }
             hostRepo.remove(id)
+        }
+        if (fingerprint != null) unpairLinkedHost(fingerprint)
+    }
+
+    private suspend fun unpairLinkedHost(fingerprint: String) {
+        try {
+            withLocalSession { LinkApi(it).remove(fingerprint) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "unpair linked host failed: ${e.message}")
         }
     }
 
@@ -217,6 +302,7 @@ class AppContainer(context: Context) {
         throw e
     } catch (e: Exception) {
         Log.w(TAG, "open host ${ref.id} failed: ${e.message}")
+        AppDiagnostics.event("host open failed (${hostKind(ref)}): ${e.message}")
         Result.failure(e.asHostException())
     }
 
@@ -237,6 +323,7 @@ class AppContainer(context: Context) {
         val old = session
         session = next
         _host.value = ref
+        AppDiagnostics.event("host session attached (${hostKind(ref)})")
         old.close()
         store.attach(next)
         restartLocalMonitor(ref)
@@ -320,8 +407,11 @@ class AppContainer(context: Context) {
         }
     }
 
-    /** 打开（或复用进程内已有的）本机主机会话；每次返回新会话，关闭互不影响。 */
-    private suspend fun openLocalSession(): HostSession {
+    /**
+     * 对进程内本机主机新开一个独立会话（本机 agent 的 `agent.link.*` 等）；每次返回新会话，调用方负责 [HostSession.close]，
+     * 与当前主机选择无关（当前是远端主机时也照常可用）。
+     */
+    suspend fun openLocalSession(): HostSession {
         val (dataDir, saveDir) = withContext(Dispatchers.IO) {
             val data = File(appContext.filesDir, "fluxdown").also { it.mkdirs() }
             val save = com.fluxdown.app.ui.defaultLocalSaveDir(appContext)
@@ -329,6 +419,16 @@ class AppContainer(context: Context) {
             data.path to save.path
         }
         return FluxBridge.openLocal(dataDir = dataDir, saveDir = saveDir, platform = PLATFORM, deviceName = systemDeviceName())
+    }
+
+    /** 开一个本机独立会话跑 [block]，结束（含失败 / 取消）即关闭。 */
+    suspend fun <T> withLocalSession(block: suspend (HostSession) -> T): T {
+        val local = openLocalSession()
+        try {
+            return block(local)
+        } finally {
+            local.close()
+        }
     }
 
     /**
@@ -357,6 +457,20 @@ class AppContainer(context: Context) {
     }
 }
 
+/** 诊断事件里的连接摘要：连接态 + 任务表是否在分页载入（不含任务数据）。 */
+private fun connectionSummary(state: HostState): String {
+    val connection = when (val c = state.connection) {
+        Connection.Connecting -> "connecting"
+        Connection.Live -> "live"
+        Connection.Stale -> "stale"
+        is Connection.Failed -> "failed ${c.error.code}: ${c.error.message}"
+    }
+    return if (state.tasksLoading) "$connection, tasks loading (${state.taskTotal})" else connection
+}
+
+/** 诊断事件只记主机类别，不记远端地址。 */
+private fun hostKind(ref: HostRef): String = if (ref is HostRef.Local) "local" else "remote"
+
 /**
  * 没有可用连接时的占位会话：信号流只发 [HostSignal.Fatal]（store 显示失败态），命令一律抛同一个 [HostException]。
  * 用于本机引擎启动前 / 启动失败（如数据目录被占用）。
@@ -378,6 +492,18 @@ private class UnavailableSession(private val error: HostException) : HostSession
     override suspend fun rename(taskId: String, fileName: String): Unit = throw error
     override suspend fun changeUrl(taskId: String, url: String): Unit = throw error
     override suspend fun rescan(): Unit = throw error
+
+    override fun startImport(batches: List<ImportBatch>): ImportJob {
+        val total = batches.sumOf { it.items.size }
+        return object : ImportJob {
+            // 没有连接：整批失败（原因即会话不可用的原因），不产生进度；条目全部留给重试。
+            override val updates: Flow<ImportUpdate> =
+                flowOf(ImportUpdate.Finished(ImportSummary(total, 0, total, 0, false, error, batches.flatMap { it.items })))
+
+            override fun cancel() = Unit
+        }
+    }
+
     override suspend fun moveToQueue(taskId: String, queueId: String): Unit = throw error
     override suspend fun boost(taskId: String): Unit = throw error
     override suspend fun resolveSelection(requestId: String, outcome: SelectionOutcome): Unit = throw error

@@ -12,16 +12,47 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// （`LinkPairingRequestsChanged` / `LinkDiscoveredChanged`），v7 增加 CloudConnectionChanged，
 /// v8 增加应用内更新状态（`UpdateChanged` / `AgentSnapshot.update`），v9 增加「文件已存在」
 /// 交互选择（`SelectionKind::FileExists` / `SelectionOutcome::FileExists`），v10 增加云端推送
-/// （`DaemonEvent::TaskNotice`、`CloudNotifyChanged` / `AgentSnapshot.cloud_notify`）。
-pub const PROTOCOL_VERSION: u32 = 10;
-/// 旧客户端不能解析新增事件，必须在握手时拒绝混用而非运行中断连。
-pub const MIN_PROTOCOL_VERSION: u32 = 10;
+/// （`DaemonEvent::TaskNotice`、`CloudNotifyChanged` / `AgentSnapshot.cloud_notify`），v11 增加
+/// 批量建任务（`daemon.task.createMany`）与批量任务事实事件（`DaemonEvent::TasksChanged`），
+/// v12 增加批量删除事实事件（`DaemonEvent::TasksDeleted`），
+/// v13 增加插件可移植视图事件（`DaemonEvent::PluginViewFrame` / `PluginViewClosed` /
+/// `PluginToast`），v14 增加多插件冲突选择（`SelectionKind::Plugin` /
+/// `SelectionOutcome::Plugin`）与站点默认插件方法（`daemon.plugin.siteDefaults` /
+/// `daemon.plugin.setSiteDefault`），v15 增加队列顺序增量（`WsServerMsg::QueueOrderChanged`、
+/// `QueuePositionDto.order`）与落后订阅者的帧合并（`EventFrame.previous`，按
+/// [`crate::judge_frame`] 判定），v16 增加外部恢复任务通知（`AgentEvent::CaptureTasksResumed`），
+/// v17 取消全量任务单帧：快照与替换事件只带任务总数（`DaemonSnapshot.taskTotal` /
+/// `queueTotal`），任务表经 `system.taskPage` 分页载入（`DaemonEvent::TablesReloading`），
+/// `TaskDto` 默认值字段不再上线（反序列化须容忍缺省），v18 增加FluxMesh（临时文件分享）：
+/// `agent.share.*` 方法、`AgentEvent::ShareChanged` / `ShareProgress`（`AgentSnapshot.share`）与
+/// `ErrorReason::Share*`，v19 增加FluxMesh云端暂存 / 桥接：`agent.share.convertToCloud` /
+/// `deleteCloudCopy`、`ShareDto.cloudState` / `upload`、`SharePathKind::{Cdn, Bridge}`、
+/// `ShareSessionBytesDto.{cdn, bridge}` 与 `ErrorReason::Share{CloudNotReady, TrafficExhausted, CloudUnavailable}`，
+/// v20 增加FluxMesh「我的分享」恢复 / 删除：`agent.share.resume` / `delete`、`ShareDto.sourceMissing`
+/// 与 `ErrorReason::ShareSourceMissing`，v21 增加FluxMesh共享：`agent.share.stopProviding`、`SharePathKind::Swarm`、
+/// `ShareDto.swarm`、`ShareLocalConfigDto.{defaultSwarm, autoProvide}`、`ShareSourcesDto.swarmPeers`、
+/// `ShareTaskFactsDto.swarmPeers`、`ShareSessionBytesDto.peer`、`ShareReceiveRecordDto.provideState`，
+/// v22 增加FluxMesh额度：`agent.share.usageRefresh`、`ShareStateDto.usage`、`CloudPlan.productKind / pack`，
+/// v23 增加共享准入：`ShareTaskFactsDto.swarmBlock`、`ShareLocalConfigDto.{provideDailyCapBytes, provideDayOffsetSecs}`、
+/// `SharePolicySummaryDto.{swarmPriorityReservedSlots, provideDailyCapDefaultBytes}`、
+/// `ErrorReason::ShareSwarm{QuotaExhausted, LoginRequired}`，v24 增加合规：`agent.share.report` / `appeal`、
+/// `ShareStatus::Takedown`、`ShareDto.{takedownReason, appeal}`、`ErrorReason::Share{StrikeLimited, AppealExists}`，
+/// v25 增加周期会员卡：`CloudPlan.billingPeriodDays`、`CloudProfile` / `AgentSessionDto.activeSubscription`、
+/// `ErrorReason::SubscriptionConflict`
+/// （纯增量，旧客户端忽略未知字段与方法）。
+pub const PROTOCOL_VERSION: u32 = 25;
+/// 旧客户端不能解析新增的云端暂存 / 桥接方法与字段语义（UI 会把云端副本当成实时分享展示），必须在握手时拒绝混用。
+pub const MIN_PROTOCOL_VERSION: u32 = 19;
 /// 服务收到 `system.shutdown` 而退出时的 WebSocket 关闭原因：客户端据此停止重连与重拉。
 pub const CLOSE_REASON_SERVICE_QUIT: &str = "service-quit";
 /// headless 服务为应用更新而重启时的 WebSocket 关闭原因：浏览器客户端保持重连，
 /// 重连后服务版本变化即重新加载页面（SPA 内嵌于新二进制）。桌面形态的更新重启仍以
 /// [`CLOSE_REASON_SERVICE_QUIT`] 关闭，由 agent 退出后重新拉起桌面界面。
 pub const CLOSE_REASON_SERVICE_RESTART: &str = "service-restart";
+/// 客户端接收服务端 WebSocket 消息（含单帧）的上限。快照与整表替换都只带头部、任务表经
+/// `system.taskPage` 分页（每页 ≤ [`crate::TASK_PAGE_MAX_LIMIT`] 行，约 4 MB），任务数再多单帧
+/// 也不随之增长；上限留足 RSS 条目、日志等大应答的余量，同时让异常大帧尽早失败而不是吃满内存。
+pub const MAX_INBOUND_RPC_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 /// 产品版本：发布流水线经 `FLUXDOWN_APP_VERSION` 注入 tag 版本，本地构建回退到本 crate 的
 /// `CARGO_PKG_VERSION`。daemon / agent 对外自报版本、更新检查与诊断都以它为准，
 /// 各 crate 自己的 `Cargo.toml` 版本不代表产品版本。
@@ -29,6 +60,45 @@ pub const APP_VERSION: &str = match option_env!("FLUXDOWN_APP_VERSION") {
     Some(version) if !version.is_empty() => version,
     _ => env!("CARGO_PKG_VERSION"),
 };
+
+/// 握手对端自报的产品版本 `running` 是否**确定**旧于本进程的 `own`（`主.次.修[-预发布]`，
+/// 忽略 `+构建`）。任一方无法解析（开发版等）返回 `false`：拿不准时不替换。
+///
+/// 本机客户端据此替换残留的旧版服务进程（桌面 → agent、agent → daemon），只替换更旧的：
+/// 更新的 daemon 可能已迁移数据库，换回旧版本等于降级。
+///
+/// ```
+/// use fluxdown_protocol::is_older_app_version;
+/// assert!(is_older_app_version("0.6.2", "0.6.3"));
+/// assert!(!is_older_app_version("0.6.3", "0.6.3"));
+/// assert!(!is_older_app_version("dev", "0.6.3"));
+/// ```
+#[must_use]
+pub fn is_older_app_version(running: &str, own: &str) -> bool {
+    fn parse(version: &str) -> Option<([u64; 3], Option<&str>)> {
+        let version = version.trim().trim_start_matches('v');
+        let version = version.split_once('+').map_or(version, |(core, _)| core);
+        let (core, pre) = match version.split_once('-') {
+            Some((core, pre)) => (core, Some(pre)),
+            None => (version, None),
+        };
+        let mut parts = core.split('.');
+        let mut triple = [0_u64; 3];
+        for slot in &mut triple {
+            *slot = parts.next()?.parse().ok()?;
+        }
+        parts.next().is_none().then_some((triple, pre))
+    }
+    let (Some((running, running_pre)), Some((own, own_pre))) = (parse(running), parse(own)) else {
+        return false;
+    };
+    match running.cmp(&own) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        // 同一版本号：预发布旧于正式版；两个预发布之间不作判断。
+        std::cmp::Ordering::Equal => running_pre.is_some() && own_pre.is_none(),
+    }
+}
 
 /// 本机服务在 FluxDown 架构中的职责。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -459,5 +529,22 @@ mod tests {
         assert!(parse["id"].is_null());
         assert_eq!(parse["error"]["code"], -32700);
         Ok(())
+    }
+
+    /// 只认定确定更旧的版本：更新的服务可能已迁移数据库，开发版等无法解析时不替换。
+    #[test]
+    fn only_a_strictly_older_app_version_counts_as_older() {
+        use super::is_older_app_version;
+        assert!(is_older_app_version("0.6.2", "0.6.3"));
+        assert!(is_older_app_version("v0.5.9", "0.6.3"));
+        assert!(is_older_app_version("0.6.3-rc.2", "0.6.3"));
+        assert!(!is_older_app_version("0.6.3", "0.6.3"));
+        assert!(!is_older_app_version("0.6.4", "0.6.3"));
+        assert!(!is_older_app_version("0.6.3", "0.6.3-rc.1"));
+        assert!(!is_older_app_version("0.6.3-rc.1", "0.6.3-rc.2"));
+        assert!(!is_older_app_version("0.6.3+build.1", "0.6.3"));
+        assert!(!is_older_app_version("dev", "0.6.3"));
+        assert!(!is_older_app_version("0.6.2", "dev"));
+        assert!(!is_older_app_version("0.6", "0.6.3"));
     }
 }

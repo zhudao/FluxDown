@@ -34,14 +34,15 @@ struct RootView: View {
         @Bindable var router = container.router
         let state = container.store.state
         return tabs(selection: $router.tab)
-            .tabBarMinimizeBehavior(.onScrollDown)
             .bottomAccessory(suppressed: router.isBottomAccessorySuppressed)
             .sheet(item: $router.sheet, onDismiss: sheetDismissed) { route in
                 sheetContent(route)
                     .onAppear { presented = route }
             }
             .toastHost(container.toasts, dismissLabel: L("close"))
+            #if FULL_FLAVOR
             .pluginAutoDisabledToasts()
+            #endif
             .onOpenURL(perform: handle)
             .onChange(of: router.tab) { _, new in
                 if new == .newTask {
@@ -51,7 +52,7 @@ struct RootView: View {
                     previousTab = new
                 }
             }
-            .onChange(of: state.selections.map(\.requestId), initial: true) { presentNextSelection() }
+            .onChange(of: state.selections.presentable.map(\.requestId), initial: true) { presentNextSelection() }
             .onChange(of: router.sheet == nil) { presentNextSelection() }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { container.rescanOnForeground() }
@@ -112,11 +113,11 @@ struct RootView: View {
         }
     }
 
-    /// 选择请求（X1–X3）排队：无其他 Sheet 时呈现第一个未被用户划走的请求。
+    /// 选择请求（X1–X3）排队：无其他 Sheet 时呈现第一个未被用户划走、且本构建可处理的请求。
     private func presentNextSelection() {
         let router = container.router
         guard router.sheet == nil else { return }
-        let pending = container.store.state.selections
+        let pending = container.store.state.selections.presentable
         router.dismissedSelections.formIntersection(pending.map(\.requestId))
         if let next = pending.first(where: { !router.dismissedSelections.contains($0.requestId) }) {
             router.sheet = next.fileConflict == nil ? .selection(requestId: next.requestId) : .fileConflicts
@@ -139,12 +140,17 @@ struct RootView: View {
         }
     }
 
-    /// N4：`magnet:` / `ed2k://` / `fluxdown://…?url=` 唤起 → 预填「新建下载」；
-    /// N3：「文件」App 里「用 FluxDown 打开」`.torrent` → 直接导入（不支持的文件给出提示）。
+    /// N4：`fluxdown://…?url=` 唤起 → 预填「新建下载」（full 另接 `magnet:` / `ed2k://`）；
+    /// N3：「文件」App 里「用 FluxDown 打开」文件 → full 直接导入 `.torrent`，store 与不支持的文件一律给出提示。
     private func handle(_ url: URL) {
         if url.isFileURL {
             container.router.tab = .downloads
+            #if FULL_FLAVOR
             TorrentImport.openFromSystem(url, container: container)
+            #else
+            FluxHaptic.warning.play()
+            container.toasts.show(text: L("unsupportedDropHintGeneric"), tone: .warning)
+            #endif
             return
         }
         var link = url.absoluteString

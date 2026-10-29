@@ -4,6 +4,7 @@
 import type { JsonValue } from './common';
 import type { ErrorReason } from './error';
 import type { CreateGroupRequest } from './queue';
+import type { ShareTrafficKind } from './share';
 import type { CreateTaskRequest } from './task';
 
 // ── 账号 ──
@@ -55,6 +56,15 @@ export interface CloudPlanCampaign {
   effectivePriceMinor: number;
 }
 
+export type CloudProductKind = 'membership' | 'pack' | 'unknown';
+
+/** 流量包规格（`productKind = 'pack'`）。 */
+export interface CloudPack {
+  kind: ShareTrafficKind;
+  bytes: number;
+  validDays: number;
+}
+
 /** 套餐（`agent.plan.list` 元素）。金额单位为「分」（`*Minor`）。 */
 export interface CloudPlan {
   code: string;
@@ -75,6 +85,11 @@ export interface CloudPlan {
   sort: number;
   campaign: CloudPlanCampaign | null;
   purchasable: boolean;
+  /** 旧服务端缺失视为 `membership`。 */
+  productKind?: CloudProductKind;
+  pack?: CloudPack | null;
+  /** 周期会员卡周期天数；null / 缺失 = 永久套餐。 */
+  billingPeriodDays?: number | null;
 }
 
 /** 当前账户资料：用户字段平铺在顶层，与 `entitlements` / `currentPlan` 同级。 */
@@ -82,7 +97,16 @@ export type CloudProfile = CloudUser & {
   entitlements: Entitlements;
   currentPlan: CloudPlan | null;
   purchaseCreditMinor: number;
+  activeSubscription?: CloudSubscription | null;
 };
+
+/** 生效中的周期会员卡。 */
+export interface CloudSubscription {
+  planCode: string;
+  planName: string;
+  startsAt: string;
+  endsAt: string;
+}
 
 export interface OriginIdCheckResult {
   available: boolean;
@@ -157,6 +181,7 @@ export interface AgentSessionDto {
   user: CloudUser;
   entitlements: Entitlements;
   currentPlan: CloudPlan | null;
+  activeSubscription?: CloudSubscription | null;
   device: CloudDevice;
 }
 
@@ -253,6 +278,24 @@ export interface CloudReferralValidateResult {
   reason: string | null;
 }
 
+/** 插件市场收藏概览：`counts` 仅含收藏数大于 0 的插件；未登录时 `mine` 为空。 */
+export interface PluginFavoritesDto {
+  counts: Record<string, number>;
+  mine: string[];
+  signedIn: boolean;
+}
+
+export interface PluginFavoriteSetRequest {
+  pluginId: string;
+  favorited: boolean;
+}
+
+export interface PluginFavoriteResultDto {
+  pluginId: string;
+  favorited: boolean;
+  count: number;
+}
+
 // ── 跨设备任务 ──
 
 /** 远端任务状态；未识别的值 Rust 端解析为 `unknown`（不接单、不控制）。 */
@@ -295,6 +338,17 @@ export interface LinkDeviceInfo {
   /** 对端自报的默认下载目录；旧版对端省略。 */
   defaultSaveDir?: string;
   pathStyle?: PathStyle;
+  /** 本机备注名；`name` 已是生效名（备注名优先）。 */
+  customName?: string;
+  appVersion?: string;
+  /** 对端登录云账号时自报的云设备 id（用于与云设备合并）。 */
+  cloudDeviceId?: string;
+  /** 该对端可控制本机（本机批准过其「请求控制」配对）。 */
+  grantsControl?: boolean;
+  /** 本机可控制该对端。 */
+  controllable?: boolean;
+  /** 对端已解除配对。 */
+  revoked: boolean;
 }
 
 /** 局域网发现的对端（`agent.link.probe` 结果 / `linkDiscoveredChanged`）。 */
@@ -317,13 +371,19 @@ export interface LinkPairingRequestDto {
   peerPlatform?: string | null;
   /** 双方肉眼核对的短认证串。 */
   sas: string;
+  /** 对端请求「完全控制」本机（批准后其可远程控制本机）；旧版省略。 */
+  requestsControl?: boolean;
   expiresAtUnixMs: number;
+  /** 生成 DTO 时刻的剩余毫秒；旧主机省略。 */
+  ttlMs?: number;
 }
 
 /** 本机当前展示的局域网配对码。 */
 export interface LinkPairingCodeDto {
   code: string;
   expiresAtUnixMs: number;
+  /** 生成 DTO 时刻的剩余毫秒；客户端以收到时刻 + ttlMs 倒计时（免疫时钟偏差），旧主机省略。 */
+  ttlMs?: number;
   /** 空数组 = 网关仅监听 127.0.0.1，需开启局域网访问。 */
   addresses: string[];
   fingerprint: string;
@@ -342,6 +402,10 @@ export interface LinkPairFinishResponse {
   device?: LinkDeviceInfo;
 }
 
+export interface LinkControlCredentialDto {
+  token: string;
+}
+
 // ── 网关 / 外壳 / 电源 / 同步 / 偏好 ──
 
 /** UI Gateway 运行状态；永远不携带 token 文本（用 revealToken 获取）。 */
@@ -358,9 +422,30 @@ export interface GatewayStatusDto {
   portEditable: boolean;
   /** 是否对局域网开放兼容 API；修改后下次 agent 启动生效。 */
   lanEnabled: boolean;
+  /** 本次运行网关是否实际监听非回环地址。 */
+  lanActive: boolean;
 }
 
 export type TrayUnavailableReason = 'notBuilt' | 'noDisplay' | 'noHost' | 'initFailed';
+
+/** agent 全局快捷键后端（Rust `GlobalShortcutBackend`）。 */
+export type GlobalShortcutBackend = 'unavailable' | 'windows' | 'macOs' | 'x11' | 'waylandPortal';
+
+/** 单个全局快捷键的注册结果（Rust `GlobalShortcutState`）。 */
+export type GlobalShortcutState = 'active' | 'inUse' | 'unsupported' | 'permissionRequired' | 'failed';
+
+export interface GlobalShortcutStatusDto {
+  action: string;
+  /** 规范触发器文本，如 `ctrl-shift-d` / `double:ctrl`。 */
+  trigger: string;
+  state: GlobalShortcutState;
+  detail?: string | null;
+}
+
+export interface GlobalShortcutsStatusDto {
+  backend: GlobalShortcutBackend;
+  entries: GlobalShortcutStatusDto[];
+}
 
 /** agent 系统外壳状态。 */
 export interface ShellStatusDto {
@@ -368,6 +453,8 @@ export interface ShellStatusDto {
   trayUnavailableReason: TrayUnavailableReason | null;
   /** true：关闭全部 UI 后 agent + daemon 继续驻留。 */
   resident: boolean;
+  /** 桌面 agent 的全局快捷键状态（Web 不展示；旧 agent 缺省）。 */
+  globalShortcuts?: GlobalShortcutsStatusDto;
 }
 
 /** 完成后关机状态。 */
@@ -410,15 +497,37 @@ export interface CustomCategoryDto {
   id: string;
   name: string;
   icon: string;
-  /** `extension` | `regex`。 */
+  /** `extension` | `regex` | `url`。 */
   matchMode: string;
   extensions: string[];
   regexPattern: string;
+  /** `url` 模式的通配符模式（`*` 任意串、`?` 单字符、不分大小写、完整匹配整个网址）。 */
+  urlPattern: string;
   position: number;
   visible: boolean;
   isBuiltin: boolean;
   builtinType: string | null;
   saveDir: string;
+}
+
+/** 分类目录路由（`CategoryRouteDto`）：外部捕获未指定保存目录时随 `daemon.task.create` 交给 daemon。 */
+export interface CategoryRouteDto {
+  /** 可见普通分类（按 `position`），只保留影响落点的条目。 */
+  rules: CategoryRuleDto[];
+  /** 「其他」分类的目录；缺省 = 不兜底。 */
+  otherDir?: string;
+}
+
+/** `CategoryRouteDto.rules` 的单条普通分类。 */
+export interface CategoryRuleDto {
+  /** `extension` | `regex` | `url`。 */
+  matchMode: string;
+  extensions?: string[];
+  regexPattern?: string;
+  /** `url` 模式的通配符模式。 */
+  urlPattern?: string;
+  /** 缺省 = 不改变落点，只阻止「其他」兜底。 */
+  saveDir?: string;
 }
 
 // ── 外部捕获 ──
@@ -531,6 +640,7 @@ export type UpdateInstallKind =
   | 'synology'
   | 'qnap'
   | 'openwrt'
+  | 'fnos'
   | 'androidApk'
   | 'unknown';
 

@@ -6,8 +6,8 @@ package com.fluxdown.core.update
  * 逐条镜像桌面 `crates/settings/src/update_view.rs`（status_line / manual_line / can_install / can_cancel /
  * manual_url / download_percent / failure_key）。Android 差异只在文案：
  * - `Ready` 用「已下载，点按安装」（桌面是「重启即可完成」）；
- * - `Installing` 用「正在安装更新…」（桌面会重启）；
- * - `ElevationCancelled` 用「已取消安装」（Android = 系统安装确认被取消）；
+ * - `Installing` 用「正在安装更新…」（桌面会重启；Android = 已交给安装程序）；
+ * - `ElevationCancelled` 用「已取消安装」（Android = 安装前用户放弃）；
  * - `ManagedPackage` 用「应用商店安装」说明（桌面按 Docker / NAS 安装形态区分）；
  * - `Verify` 且详情为签名不符（[UpdatePolicy.SIGNATURE_MISMATCH]）用专门的签名说明。
  * 键为 [UpdateText]，由 `:app` 映射到 `R.string`。
@@ -123,5 +123,44 @@ object UpdateView {
         }
         previous?.let { (i, sectionStart) -> sections[i] = body.substring(sectionStart).trim() }
         return sections[if (chinese) 0 else 1] ?: sections[0] ?: sections[1] ?: body
+    }
+
+    /**
+     * 去掉正文开头与标题重复的版本标题（镜像 GPUI `sections/about.rs::strip_version_heading`）：
+     * `## 0.5.7 - 2026-10-15`、`## [0.5.6] - …`、`## v0.4.8 - …`。只认首个非空行、且标题文字以该版本号开头
+     * （其后不是版本号字符）；其它开头（如 `## 问题修复`、别的版本）原样保留。
+     */
+    fun stripVersionHeading(body: String, version: String): String {
+        val text = body.trimStart()
+        val wanted = version.trim().trimStart('v', 'V')
+        val newline = text.indexOf('\n')
+        val first = if (newline < 0) text else text.substring(0, newline)
+        val rest = if (newline < 0) "" else text.substring(newline + 1)
+        val title = atxHeadingText(first.trimEnd()) ?: return text
+        if (wanted.isEmpty()) return text
+        val label = title.trimStart('[').trimStart('v', 'V')
+        if (!label.startsWith(wanted)) return text
+        val next = label.getOrNull(wanted.length)
+        if (next != null && (next.isLetterOrDigit() || next in ".-+_")) return text
+        return rest.trimStart()
+    }
+
+    /** ATX 标题（1–6 个 `#` 后接空白或行尾）的标题文字；不是标题时为 null。 */
+    private fun atxHeadingText(line: String): String? {
+        val text = line.trimStart('#')
+        val level = line.length - text.length
+        if (level !in 1..6) return null
+        if (text.isNotEmpty() && text[0] != ' ' && text[0] != '\t') return null
+        return text.trim()
+    }
+
+    /** 发布时间（ISO 8601）的日期部分 `YYYY-MM-DD`（镜像 GPUI `release_date`）；不是该格式时为 null，标题只显示版本。 */
+    fun releaseDate(publishedAt: String): String? {
+        val value = publishedAt.trim()
+        if (value.length < 10) return null
+        val date = value.substring(0, 10)
+        val rest = value.substring(10)
+        val digits = date.withIndex().all { (index, char) -> if (index == 4 || index == 7) char == '-' else char in '0'..'9' }
+        return if (digits && (rest.isEmpty() || rest[0] in "Tt ")) date else null
     }
 }

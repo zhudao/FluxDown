@@ -1,8 +1,5 @@
 package com.fluxdown.app.feature.settings
 
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.StringRes
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -34,13 +31,10 @@ import com.fluxdown.app.nav.LocalNavigator
 import com.fluxdown.app.nav.SettingsPage
 import com.fluxdown.app.shell.LocalAppContainer
 import com.fluxdown.app.shell.hostState
-import com.fluxdown.app.ui.allFilesAccessIntent
-import com.fluxdown.app.ui.canRequestAllFilesAccess
 import com.fluxdown.app.ui.defaultLocalSaveDir
-import com.fluxdown.app.ui.isLocalDirWritable
 import com.fluxdown.app.ui.label
 import com.fluxdown.app.ui.publicDownloadSaveDir
-import com.fluxdown.app.ui.treeUriToPath
+import com.fluxdown.app.ui.rememberLocalDirectoryPicker
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.protocol.ConnPolicySummary
 import com.fluxdown.core.protocol.HostMethod
@@ -80,6 +74,12 @@ import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import com.fluxdown.app.feature.settings.general.CATEGORIES_ROW_ID
+import com.fluxdown.app.feature.settings.general.CategoryEditorSheet
+import com.fluxdown.app.feature.settings.general.CategoryStore
+import com.fluxdown.app.feature.settings.general.CategoryTarget
+import com.fluxdown.app.feature.settings.general.categoryRows
+import com.fluxdown.core.protocol.CustomCategoryDto
 
 /** 全局 User-Agent 预设（与 PC 端同一份取值）。 */
 private class UaPreset(val id: String, @StringRes val label: Int, val ua: String)
@@ -115,6 +115,7 @@ private enum class DlSection(val key: String, @StringRes val title: Int) {
     Connection("connection", R.string.settingsGroupConnection),
     Retry("retry", R.string.settingsGroupRetry),
     Advanced("advanced", R.string.settingsGroupAdvanced),
+    Categories("categories", R.string.customCategories),
 }
 
 /** 一行：iOS `SettingsDownloadRow` 的逐项对应（id / 配置键 / 文案 / 可见性）。 */
@@ -150,6 +151,10 @@ private val DlRows: List<DlRow> = listOf(
     DlRow(
         "download.fileMissingAction", "file_missing_action", DlSection.Behavior,
         R.string.fileMissingAction, R.string.fileMissingActionDesc,
+    ),
+    DlRow(
+        "download.completedRecordRetention", "completed_record_retention_days", DlSection.Behavior,
+        R.string.completedRecordRetention, R.string.completedRecordRetentionDesc,
     ),
     DlRow(
         "download.idleFileScan", "idle_file_scan", DlSection.Behavior, R.string.idleFileScan, R.string.idleFileScanDesc,
@@ -192,7 +197,12 @@ internal fun downloadSearchEntries(ctx: SettingsSearchContext): List<SettingsEnt
             row.id, SettingsPage.Download, row.section.key, row.title, row.desc,
             ctx.crumb(R.string.settingsCatDownload, row.section.title), FluxIcons.Download,
         )
-    }
+    } + listOf(
+        ctx.entry(
+            CATEGORIES_ROW_ID, SettingsPage.Download, DlSection.Categories.key, R.string.customCategories, R.string.categoryPriorityNote,
+            ctx.crumb(R.string.settingsCatDownload, DlSection.Categories.title), FluxIcons.Folder,
+        ),
+    )
 
 // ───────────────────────────── 页面 ─────────────────────────────
 
@@ -221,6 +231,7 @@ internal fun DownloadPage() {
     var showNicHelp by remember { mutableStateOf(false) }
     var showRemotePicker by remember { mutableStateOf(false) }
     var uaForceCustom by rememberSaveable { mutableStateOf(false) }
+    var retentionForceCustom by rememberSaveable { mutableStateOf(false) }
     var connCount by remember { mutableStateOf<Long?>(null) }
     var connFailed by remember { mutableStateOf(false) }
     var connClearing by remember { mutableStateOf(false) }
@@ -308,8 +319,43 @@ internal fun DownloadPage() {
         }
     }
 
+    // 自定义分类：编辑器 / 删除确认 / 重置确认；写路径唯一为 ConfigEditor.setPreference（见 CategoryStore）
+    val context = LocalContext.current
+    var editingCategory by remember { mutableStateOf<CategoryTarget?>(null) }
+    var reordering by rememberSaveable { mutableStateOf(false) }
+    val categoryStore = remember(ctx, overlays, context, scope) { CategoryStore(ctx, overlays, context, scope) }
+    val hasCategoryBase = categoryStore.defaultSaveDir.isNotEmpty()
+
+    fun confirmCategoryDelete(entry: CustomCategoryDto) {
+        overlays.showDialog(
+            FluxDialogSpec(
+                title = context.str(R.string.deleteCategory),
+                message = context.str(R.string.deleteCategoryConfirm),
+                icon = FluxIcons.Trash2,
+                buttons = listOf(
+                    FluxDialogButton(context.str(R.string.cancel)),
+                    FluxDialogButton(context.str(R.string.delete), FluxDialogButtonStyle.Destructive) { categoryStore.delete(entry) },
+                ),
+            ),
+        )
+    }
+
+    fun confirmCategoryReset() {
+        overlays.showDialog(
+            FluxDialogSpec(
+                title = context.str(R.string.resetBuiltinCategories),
+                message = context.str(R.string.resetAllCategoriesConfirm),
+                icon = FluxIcons.RotateCcw,
+                buttons = listOf(
+                    FluxDialogButton(context.str(R.string.cancel)),
+                    FluxDialogButton(context.str(R.string.resetBuiltinCategories), FluxDialogButtonStyle.Destructive) { categoryStore.resetBuiltin() },
+                ),
+            ),
+        )
+    }
+
     val shown = visibleDlRows(ctx.form, ctx.isLocalHost).mapTo(HashSet()) { it.id }
-    val sections = DlSection.entries.filter { s -> DlRows.any { it.section == s && it.id in shown } }
+    val sections = DlSection.entries.filter { s -> s == DlSection.Categories || DlRows.any { it.section == s && it.id in shown } }
     val legend = str(R.string.settingsSyncLegend)
 
     Box(Modifier.fillMaxSize()) {
@@ -328,11 +374,57 @@ internal fun DownloadPage() {
             }
             for (section in sections) {
                 val footer = if (section == sections.last()) legend else null
+                if (section == DlSection.Categories) {
+                    flowItem(index++, gate, section.key) {
+                        GlassSection(animateSize) {
+                            categoryRows(
+                                ctx = ctx,
+                                store = categoryStore,
+                                list = categoryStore.list,
+                                reordering = reordering,
+                                onReorderingChange = { reordering = it },
+                                onEdit = { editingCategory = CategoryTarget(it) },
+                                onDeleteRequest = ::confirmCategoryDelete,
+                            )
+                        }
+                    }
+                    flowItem(index++, gate, "categoryActions") {
+                        GlassSection(animateSize, footer = if (hasCategoryBase) footer else str(R.string.mobileGeneralAutoDirsNeedDefault)) {
+                            row(hasIcon = true) {
+                                FluxActionRow(
+                                    title = str(R.string.addCategory),
+                                    onClick = { editingCategory = CategoryTarget(null) },
+                                    icon = FluxIcons.Plus,
+                                    enabled = !readOnly,
+                                )
+                            }
+                            row(hasIcon = true) {
+                                FluxActionRow(
+                                    title = str(R.string.autoCategoryDirs),
+                                    onClick = { categoryStore.applyAutoDirs() },
+                                    icon = FluxIcons.FolderOpen,
+                                    enabled = hasCategoryBase && !readOnly,
+                                )
+                            }
+                            row(hasIcon = true) {
+                                FluxActionRow(
+                                    title = str(R.string.resetBuiltinCategories),
+                                    onClick = ::confirmCategoryReset,
+                                    tone = Tone.Coral,
+                                    icon = FluxIcons.RotateCcw,
+                                    enabled = !readOnly,
+                                )
+                            }
+                        }
+                    }
+                    continue
+                }
                 flowItem(index++, gate, section.key) {
                     GlassSection(animateSize, title = str(section.title), footer = footer) {
                         when (section) {
                             DlSection.Save -> saveRows(ctx, shown, onBrowse = { showRemotePicker = true })
-                            DlSection.Behavior -> behaviorRows(ctx, shown, queues)
+                            DlSection.Categories -> Unit
+                            DlSection.Behavior -> behaviorRows(ctx, shown, queues, retentionForceCustom) { retentionForceCustom = it }
                             DlSection.Connection -> connectionRows(
                                 ctx, shown, onCdnToggle, onNicHelp = { showNicHelp = true },
                                 policy = ConnPolicyUi(connCount, connFailed, connClearing),
@@ -352,6 +444,13 @@ internal fun DownloadPage() {
             startPath = ctx.form.string("default_save_dir"),
             onPick = { ctx.editor.set("default_save_dir", it, immediate = true) },
             onDismiss = { showRemotePicker = false },
+        )
+        CategoryEditorSheet(
+            target = editingCategory,
+            isLocalHost = ctx.isLocalHost,
+            onSave = { categoryStore.save(it) },
+            onDelete = { categoryStore.delete(it) },
+            onDismiss = { editingCategory = null },
         )
     }
 }
@@ -416,14 +515,7 @@ private fun RemoteSaveDirField(ctx: SettingsCtx, onBrowse: () -> Unit) {
     }
 }
 
-/**
- * 本机主机的保存目录：只读展示 + 系统目录选择器（SAF，映射为绝对路径）+ 快捷“系统 Download/FluxDown”
- * + 偏离默认时一键恢复。不提供手填：手填路径极易写成不可写目录（引擎下载时才报 EPERM）。
- *
- * 能否写入只看系统真实结果（[isLocalDirWritable]）；共享存储里需要“所有文件访问”的目录，
- * 不可写时引导授权，而不是在应用层另设白名单。系统选择器本身禁止选 Download 根 / Android/data
- * 等目录（Android 11+ 隐私限制），可在其下新建子文件夹选择，或直接用快捷项。
- */
+/** 本机目录浏览与授权共用同一入口；不使用禁止选择 Download 根目录的 SAF。 */
 @Composable
 private fun LocalSaveDirPicker(ctx: SettingsCtx) {
     val context = LocalContext.current
@@ -432,69 +524,29 @@ private fun LocalSaveDirPicker(ctx: SettingsCtx) {
     val current = ctx.form.string("default_save_dir")
     val defaultDir = remember(context) { defaultLocalSaveDir(context).path }
     val publicDir = remember { publicDownloadSaveDir().path }
-    val notWritable = str(R.string.mobileSaveDirNotWritable)
-    val unmappable = str(R.string.mobilePickDirUnmappable)
-    val grantTitle = str(R.string.mobileAllFilesTitle)
-    val grantDesc = str(R.string.mobileAllFilesDescNative)
-    val grantAction = str(R.string.mobileGoGrant)
-    val cancel = str(R.string.cancel)
-
-    fun apply(dir: String) {
-        when {
-            isLocalDirWritable(dir) -> if (dir != current) {
-                haptics.tick()
-                ctx.editor.set("default_save_dir", dir)
-            }
-            canRequestAllFilesAccess(dir) -> {
-                haptics.reject()
-                overlays.showDialog(
-                    FluxDialogSpec(
-                        title = grantTitle,
-                        message = grantDesc,
-                        icon = FluxIcons.FolderOpen,
-                        buttons = listOf(
-                            FluxDialogButton(cancel),
-                            FluxDialogButton(grantAction, FluxDialogButtonStyle.Primary) {
-                                context.startActivity(allFilesAccessIntent(context))
-                            },
-                        ),
-                    ),
-                )
-            }
-            else -> {
-                haptics.reject()
-                overlays.toast(notWritable.fill("dir" to dir), FluxToastKind.Error)
-            }
+    val pickDirectory = rememberLocalDirectoryPicker { dir ->
+        if (!ctx.readOnly && dir != current) {
+            haptics.tick()
+            ctx.editor.set("default_save_dir", dir)
         }
     }
-
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        val path = treeUriToPath(uri)
-        if (path == null) {
-            haptics.reject()
-            overlays.toast(unmappable, FluxToastKind.Warn)
-        } else {
-            apply(path)
-        }
-    }
-    val shown = current.ifEmpty { defaultDir }.trimEnd('/')
+    val shown = current.ifEmpty { defaultDir }.trimEnd('/').ifEmpty { "/" }
     val modified = shown != defaultDir.trimEnd('/')
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         FluxField(
-            value = shown,
+            value = remember(shown) { com.fluxdown.app.ui.friendlyLocalPath(context, shown) },
             onValueChange = {},
             readOnly = true,
-            mono = true,
+            mono = false,
             singleLine = false,
             enabled = !ctx.readOnly,
             trailing = {
                 Row {
                     if (modified) {
-                        FluxFieldAction(FluxIcons.RotateCcw, str(R.string.restoreDefaultPath), onClick = { apply(defaultDir) })
+                        FluxFieldAction(FluxIcons.RotateCcw, str(R.string.restoreDefaultPath), onClick = { pickDirectory(defaultDir) })
                     }
-                    FluxFieldAction(FluxIcons.FolderOpen, str(R.string.browse), onClick = { launcher.launch(null) })
+                    FluxFieldAction(FluxIcons.FolderOpen, str(R.string.browse), onClick = { pickDirectory(shown) })
                 }
             },
         )
@@ -502,7 +554,7 @@ private fun LocalSaveDirPicker(ctx: SettingsCtx) {
             FluxPill(
                 text = str(R.string.mobileUsePublicDownloadDir),
                 selected = false,
-                onClick = { apply(publicDir) },
+                onClick = { pickDirectory(publicDir) },
                 icon = FluxIcons.Download,
                 small = true,
                 toggleable = false,
@@ -511,7 +563,13 @@ private fun LocalSaveDirPicker(ctx: SettingsCtx) {
     }
 }
 
-private fun GlassSectionScope.behaviorRows(ctx: SettingsCtx, shown: Set<String>, queues: List<com.fluxdown.core.model.Queue>) {
+private fun GlassSectionScope.behaviorRows(
+    ctx: SettingsCtx,
+    shown: Set<String>,
+    queues: List<com.fluxdown.core.model.Queue>,
+    retentionForceCustom: Boolean,
+    setRetentionForceCustom: (Boolean) -> Unit,
+) {
     if ("download.silentDownload" in shown) {
         settingSwitch(
             ctx, "download.silent_download", R.string.silentDownload, R.string.silentDownloadDesc,
@@ -551,6 +609,9 @@ private fun GlassSectionScope.behaviorRows(ctx: SettingsCtx, shown: Set<String>,
             )
         }
     }
+    if ("download.completedRecordRetention" in shown) {
+        retentionRows(ctx, retentionForceCustom, setRetentionForceCustom)
+    }
     if ("download.idleFileScan" in shown) {
         settingSwitch(ctx, "idle_file_scan", R.string.idleFileScan, R.string.idleFileScanDesc, id = "download.idleFileScan")
     }
@@ -564,6 +625,66 @@ private fun GlassSectionScope.behaviorRows(ctx: SettingsCtx, shown: Set<String>,
     }
     if ("download.dedupSameUrl" in shown) {
         settingSwitch(ctx, "dedup_same_url", R.string.mobileDedupSameUrl, R.string.mobileDedupSameUrlDesc, id = "download.dedupSameUrl")
+    }
+}
+
+/** 已完成记录保留天数的预设（天；0 = 从不），与 PC / Web 一致；其余值落在「自定义」。 */
+private val RetentionPresets = listOf(0L, 1L, 7L, 30L)
+private const val RETENTION_CUSTOM = "custom"
+private const val RETENTION_CUSTOM_START = 14L
+private const val RETENTION_KEY = "completed_record_retention_days"
+
+/** 保留期：预设选择行 + 「自定义」时的天数输入行（镜像 GPUI `sections/retention.rs`）。 */
+private fun GlassSectionScope.retentionRows(
+    ctx: SettingsCtx,
+    forceCustom: Boolean,
+    setForceCustom: (Boolean) -> Unit,
+) {
+    val days = ctx.form.long(RETENTION_KEY, 0L)
+    val effective = if ((forceCustom && days > 0L) || days !in RetentionPresets) {
+        RETENTION_CUSTOM
+    } else {
+        days.toString()
+    }
+    row {
+        SettingRowBox(ctx, "download.completedRecordRetention", RETENTION_KEY) {
+            val title = str(R.string.completedRecordRetention)
+            val options = listOf(
+                SelectOption("0", str(R.string.retentionNever)),
+                SelectOption("1", str(R.string.retentionDay1)),
+                SelectOption("7", str(R.string.retentionDay7)),
+                SelectOption("30", str(R.string.retentionDay30)),
+                SelectOption(RETENTION_CUSTOM, str(R.string.retentionCustom)),
+            )
+            FluxListRow(
+                title = title,
+                subtitle = str(R.string.completedRecordRetentionDesc),
+                value = options.firstOrNull { it.value == effective }?.label,
+                chevron = true,
+                cloud = ctx.synced(RETENTION_KEY),
+                enabled = !ctx.readOnly,
+                onClick = {
+                    ctx.openPicker(
+                        PickerSpec(title, options, effective) { id ->
+                            if (id == RETENTION_CUSTOM) {
+                                setForceCustom(true)
+                                // 当前已是非预设天数则沿用，否则从起始值开始（刻意不等于任何预设）。
+                                if (effective != RETENTION_CUSTOM) ctx.editor.set(RETENTION_KEY, RETENTION_CUSTOM_START.toString())
+                            } else {
+                                setForceCustom(false)
+                                ctx.editor.set(RETENTION_KEY, id)
+                            }
+                        },
+                    )
+                },
+            )
+        }
+    }
+    if (effective == RETENTION_CUSTOM) {
+        settingNumber(
+            ctx, RETENTION_KEY, R.string.retentionCustom, null, 1L..3650L, RETENTION_CUSTOM_START,
+            unit = R.string.retentionDaysUnit, id = "download.completedRecordRetention.custom",
+        )
     }
 }
 

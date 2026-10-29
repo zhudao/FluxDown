@@ -1,7 +1,6 @@
 //! 引擎源端活动：同步事件只入有界队列；持久化成功后才发布活动通知。
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -88,7 +87,6 @@ pub struct JournalSink {
     downstream: Arc<dyn EventSink>,
     tx: mpsc::Sender<JournalCommand>,
     last_state: Mutex<HashMap<String, (i32, String)>>,
-    total_overflows: AtomicU64,
     overflows: Arc<Mutex<HashMap<String, ActivityLoss>>>,
 }
 
@@ -102,7 +100,6 @@ impl JournalSink {
             tx,
             last_state: Mutex::new(HashMap::new()),
             overflows: overflows.clone(),
-            total_overflows: AtomicU64::new(0),
         });
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -116,49 +113,41 @@ impl JournalSink {
                     }
                 };
                 let Some(cmd) = cmd else { break };
+                // 一次取出队列里已积压的连续 Add（上限 `ACTIVITY_BATCH_MAX`），整批一个事务；
+                // 遇到 Flush 先落完前面的批次再处理它，保持与入队一致的顺序。
+                let mut batch = Vec::new();
+                let mut flush = None;
                 match cmd {
                     JournalCommand::Add(entry) => {
-                        // 有限退避；永久损坏时快速排空待写队列成明确缺口，
-                        // tick 定期尝试持久化缺口，flush 始终可以返回错误。
-                        if unavailable {
-                            let mut pending = overflows.lock().unwrap_or_else(|e| e.into_inner());
-                            pending.entry(entry.task_id).or_default().storage_failures += 1;
-                            continue;
-                        }
-                        let mut saved = None;
-                        for attempt in 0..3 {
-                            match db.append_task_activity(&entry).await {
-                                Ok(value) => {
-                                    saved = Some(value);
+                        batch.push(entry);
+                        while batch.len() < ACTIVITY_BATCH_MAX {
+                            match rx.try_recv() {
+                                Ok(JournalCommand::Add(entry)) => batch.push(entry),
+                                Ok(JournalCommand::Flush(reply)) => {
+                                    flush = Some(reply);
                                     break;
                                 }
-                                Err(error) => {
-                                    tracing::error!(%error, task_id=%entry.task_id, attempt, "task activity persistence failed");
-                                    if attempt < 2 {
-                                        tokio::time::sleep(Duration::from_millis(
-                                            100 * (1 << attempt),
-                                        ))
-                                        .await;
-                                    }
-                                }
+                                Err(_) => break,
                             }
-                        }
-                        if let Some(saved) = saved {
-                            if let Some(saved) = saved {
-                                downstream.emit(EngineEvent::TaskActivityAdded(saved));
-                            }
-                        } else {
-                            unavailable = true;
-                            let mut pending = overflows.lock().unwrap_or_else(|e| e.into_inner());
-                            pending.entry(entry.task_id).or_default().storage_failures += 1;
                         }
                     }
-                    JournalCommand::Flush(reply) => {
-                        let result = persist_overflows(&db, downstream.as_ref(), &overflows).await;
-                        unavailable = result.is_err();
-                        if reply.send(result).is_err() {
-                            tracing::debug!("activity journal flush caller stopped waiting");
-                        }
+                    JournalCommand::Flush(reply) => flush = Some(reply),
+                }
+                if !batch.is_empty() {
+                    persist_batch(
+                        &db,
+                        downstream.as_ref(),
+                        &overflows,
+                        batch,
+                        &mut unavailable,
+                    )
+                    .await;
+                }
+                if let Some(reply) = flush {
+                    let result = persist_overflows(&db, downstream.as_ref(), &overflows).await;
+                    unavailable = result.is_err();
+                    if reply.send(result).is_err() {
+                        tracing::debug!("activity journal flush caller stopped waiting");
                     }
                 }
             }
@@ -183,9 +172,48 @@ impl JournalSink {
         .await
         .map_err(|_| "activity journal flush timed out".to_owned())?
     }
+}
 
-    pub fn overflow_count(&self) -> u64 {
-        self.total_overflows.load(Ordering::Relaxed)
+/// 单批落库的活动条数上限：积压时摊薄事务提交与容量裁剪，同时让单个事务保持短小。
+const ACTIVITY_BATCH_MAX: usize = 256;
+
+/// 一批活动落库并逐条按原顺序发布 `TaskActivityAdded`。
+/// 有限退避；永久损坏时快速排空待写队列成明确缺口，tick 定期尝试持久化缺口，
+/// flush 始终可以返回错误。
+async fn persist_batch(
+    db: &Db,
+    sink: &dyn EventSink,
+    overflows: &Mutex<HashMap<String, ActivityLoss>>,
+    batch: Vec<TaskActivity>,
+    unavailable: &mut bool,
+) {
+    let mut saved = None;
+    if !*unavailable {
+        for attempt in 0..3 {
+            match db.append_task_activities(&batch).await {
+                Ok(value) => {
+                    saved = Some(value);
+                    break;
+                }
+                Err(error) => {
+                    tracing::error!(%error, entries = batch.len(), attempt, "task activity persistence failed");
+                    if attempt < 2 {
+                        tokio::time::sleep(Duration::from_millis(100 * (1 << attempt))).await;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(saved) = saved {
+        for entry in saved.into_iter().flatten() {
+            sink.emit(EngineEvent::TaskActivityAdded(entry));
+        }
+    } else {
+        *unavailable = true;
+        let mut pending = overflows.lock().unwrap_or_else(|e| e.into_inner());
+        for entry in batch {
+            pending.entry(entry.task_id).or_default().storage_failures += 1;
+        }
     }
 }
 
@@ -216,43 +244,70 @@ async fn persist_overflows(
     first_error.map_or(Ok(()), Err)
 }
 
+impl JournalSink {
+    /// 任务状态/错误文案相对上次记录发生变化时记一条活动；相同状态不重复记录。
+    fn record_state(&self, task_id: &str, status: i32, error_message: &str) {
+        let changed = {
+            let mut previous = self.last_state.lock().unwrap_or_else(|e| e.into_inner());
+            if previous
+                .get(task_id)
+                .is_some_and(|(old_status, old_error)| {
+                    *old_status == status && old_error == error_message
+                })
+            {
+                false
+            } else {
+                previous.insert(task_id.to_owned(), (status, error_message.to_owned()));
+                true
+            }
+        };
+        if changed {
+            self.push_activity(
+                task_id,
+                if error_message.is_empty() {
+                    "status"
+                } else {
+                    "error"
+                },
+                error_message.to_owned(),
+                Some(status),
+            );
+        }
+    }
+
+    /// 同步入队；队列满时记入溢出缺口，不阻塞 `emit`。
+    fn push_activity(&self, task_id: &str, kind: &str, message: String, status: Option<i32>) {
+        let entry = TaskActivity {
+            id: 0,
+            task_id: task_id.to_owned(),
+            timestamp_ms: timestamp_ms(),
+            kind: kind.to_owned(),
+            message,
+            status,
+        };
+        if let Err(error) = self.tx.try_send(JournalCommand::Add(entry)) {
+            let mut pending = self.overflows.lock().unwrap_or_else(|e| e.into_inner());
+            pending.entry(task_id.to_owned()).or_default().overflow += 1;
+            tracing::error!(%task_id, %error, "task activity journal overflow (reported in persistent history)");
+        }
+    }
+}
+
 impl EventSink for JournalSink {
     fn emit(&self, event: EngineEvent) {
-        let activity = match &event {
+        match &event {
             EngineEvent::TaskProgress {
                 task_id,
                 status,
                 error_message,
                 ..
-            } => {
-                let changed = {
-                    let mut previous = self.last_state.lock().unwrap_or_else(|e| e.into_inner());
-                    if previous
-                        .get(task_id)
-                        .is_some_and(|(old_status, old_error)| {
-                            old_status == status && old_error == error_message
-                        })
-                    {
-                        false
-                    } else {
-                        previous.insert(task_id.clone(), (*status, error_message.clone()));
-                        true
-                    }
-                };
-                if changed {
-                    let message = error_message.clone();
-                    Some((
-                        task_id,
-                        if error_message.is_empty() {
-                            "status"
-                        } else {
-                            "error"
-                        },
-                        message,
-                        Some(*status),
-                    ))
-                } else {
-                    None
+            } => self.record_state(task_id, *status, error_message),
+            EngineEvent::TaskChanged(task) => {
+                self.record_state(&task.task_id, task.status, &task.error_message);
+            }
+            EngineEvent::TasksChanged(tasks) => {
+                for task in tasks {
+                    self.record_state(&task.task_id, task.status, &task.error_message);
                 }
             }
             EngineEvent::TasksSnapshot(tasks) => {
@@ -261,7 +316,6 @@ impl EventSink for JournalSink {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .retain(|task_id, _| retained.contains(task_id.as_str()));
-                None
             }
             EngineEvent::SegmentSplit {
                 task_id,
@@ -270,14 +324,14 @@ impl EventSink for JournalSink {
                 child_start,
                 child_end,
                 ..
-            } => Some((
+            } => self.push_activity(
                 task_id,
                 "split",
                 format!(
                     "segment {parent_index} split child={child_index} range={child_start}..={child_end}"
                 ),
                 None,
-            )),
+            ),
             EngineEvent::TaskCdnEvent {
                 task_id,
                 kind,
@@ -307,7 +361,7 @@ impl EventSink for JournalSink {
                 let message = format!(
                     "CDN {kind} host={host} ip={ip} reason={reason} candidates={candidates} alive={alive} cap={cap} auto_cap={auto_cap} nodes=[{nodes}]"
                 );
-                Some((
+                self.push_activity(
                     task_id,
                     match kind.as_str() {
                         "pool" => "cdn_pool",
@@ -321,25 +375,9 @@ impl EventSink for JournalSink {
                     },
                     message,
                     None,
-                ))
+                );
             }
-            _ => None,
-        };
-        if let Some((task_id, kind, message, status)) = activity {
-            let entry = TaskActivity {
-                id: 0,
-                task_id: task_id.clone(),
-                timestamp_ms: timestamp_ms(),
-                kind: kind.to_owned(),
-                message,
-                status,
-            };
-            if let Err(error) = self.tx.try_send(JournalCommand::Add(entry)) {
-                self.total_overflows.fetch_add(1, Ordering::Relaxed);
-                let mut pending = self.overflows.lock().unwrap_or_else(|e| e.into_inner());
-                pending.entry(task_id.clone()).or_default().overflow += 1;
-                tracing::error!(%task_id, %error, "task activity journal overflow (reported in persistent history)");
-            }
+            _ => {}
         }
         self.downstream.emit(event);
     }

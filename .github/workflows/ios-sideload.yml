@@ -1,0 +1,132 @@
+# 原生 iOS App（mobile/FluxDown）侧载版：full flavor（本机引擎含 BitTorrent / eD2K）**未签名** IPA，
+# 供 AltStore / SideStore / Sideloadly 等用户自签安装。商店构建（store flavor）见 ios-testflight.yml，两者互相独立。
+# 流程与本机一致，全部在 mobile/FluxDown/scripts/sideload.sh：
+#   build-core.sh --release --flavor full → xcodebuild archive（CODE_SIGNING_ALLOWED=NO、FLUX_FLAVOR_CONDITIONS=FULL_FLAVOR）
+#   → 打包 Payload/FluxDown.app 为 .ipa。不需要任何签名密钥。
+# 触发：
+#   - release.yml 的 build-ios 以 workflow_call 复用（统一 release 的 ios 组件）：产物 artifact `ios-ipa`，
+#     由 upload-ios 连同完成哨兵 SHA256SUMS-ios.txt 上传到 vX.Y.Z release 并同步 OSS；
+#     演练、产物晋升、补发（-f component=ios）与其他组件同一套规则。本文件不直接写 Release。
+#   - 手动出测试包（只留 artifact，不碰 Release）：gh workflow run ios-sideload.yml --ref main -f version=X.Y.Z
+# 资产名 FluxDown-<版本>-ios-sideload-unsigned.ipa：版本保留 -rc.N（与其他发布资产一致），官网 /api/release
+# 的 ios.assets.sideload_ipa 按这个后缀匹配，改名须同步 website-v2/src/lib/release-assets.ts。
+# CFBundleShortVersionString 只能是 X.Y.Z（去掉预发布后缀）；核心编译期版本 FLUXDOWN_APP_VERSION 保留完整版本
+# （协议握手 / 云端 / UA，与 Android、桌面一致）。构建号 = UTC 时间 YYYYMMDD.HHMMSS（CFBundleVersion）。
+# 缓存：tag 推送触发的调用不保存——GitHub 缓存按 ref 隔离，tag 作用域的缓存之后任何运行都恢复不了。
+# Secrets：FLUXCLOUD_BASE_URL（可选，编译期写入核心）。
+name: iOS Sideload (unsigned IPA)
+run-name: iOS Sideload ${{ inputs.version }}
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "构建的 git ref（release.yml 传 changes.outputs.source）"
+        required: true
+        type: string
+      version:
+        description: "发布版本（X.Y.Z 或 X.Y.Z-rc.N，不带 v）"
+        required: true
+        type: string
+    secrets:
+      FLUXCLOUD_BASE_URL:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本（X.Y.Z 或 X.Y.Z-rc.N，不带 v）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sideload:
+    name: Build unsigned sideload IPA
+    # 与商店构建同一镜像要求：工程是 Xcode 27 格式（objectVersion 110）且用了 iOS 27 SDK API。
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      CARGO_HTTP_MULTIPLEXING: "false"
+      CARGO_NET_RETRY: "10"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Resolve version and build number
+        id: meta
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::版本号须为 X.Y.Z 或 X.Y.Z-rc.N（得到 '$VERSION'）"
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "marketing=${VERSION%%-*}"
+            echo "build=$(date -u +%Y%m%d.%H%M%S)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Select newest non-beta Xcode
+        # 与 ios-testflight.yml 同名步骤逐字一致（判定规则见那里的注释）：侧载包与商店包用同一工具链。
+        run: |
+          candidates=""
+          for app in /Applications/Xcode*.app; do
+            real="$(cd "$app" && pwd -P)"
+            plist="$real/Contents/version.plist"
+            [ -f "$plist" ] || continue
+            version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+            build="$(/usr/libexec/PlistBuddy -c 'Print :ProductBuildVersion' "$plist")"
+            if [[ "$build" =~ ^[0-9]+[A-Z]5[0-9]{3}[a-z]$ ]] || [[ "$(basename "$real" | tr '[:upper:]' '[:lower:]')" == *beta* ]]; then
+              echo "skip beta: $real ($version $build)"
+              continue
+            fi
+            candidates+="$version $build $real"$'\n'
+          done
+          best="$(printf '%s' "$candidates" | sort -u -V | tail -n 1)"
+          if [ -z "$best" ]; then
+            echo "::error::镜像上没有非 beta 的 Xcode（App Store Connect 拒收 beta 构建）"
+            exit 1
+          fi
+          echo "selected: $best"
+          sudo xcode-select -s "${best#* * }/Contents/Developer"
+          xcodebuild -version
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-sideload
+          cache-on-failure: true
+          save-if: ${{ github.ref_type != 'tag' }}
+
+      - name: Build unsigned IPA
+        env:
+          FLUXCLOUD_BASE_URL_SECRET: ${{ secrets.FLUXCLOUD_BASE_URL }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          MARKETING: ${{ steps.meta.outputs.marketing }}
+          BUILD: ${{ steps.meta.outputs.build }}
+        run: |
+          if [ -n "$FLUXCLOUD_BASE_URL_SECRET" ]; then export FLUXCLOUD_BASE_URL="$FLUXCLOUD_BASE_URL_SECRET"; fi
+          FLUXDOWN_APP_VERSION="$VERSION" mobile/FluxDown/scripts/sideload.sh --version "$MARKETING" --build "$BUILD"
+          mkdir -p build/ios
+          cp "mobile/FluxDown/build/sideload/FluxDown-${MARKETING}-${BUILD}-unsigned.ipa" \
+            "build/ios/FluxDown-${VERSION}-ios-sideload-unsigned.ipa"
+          echo "### iOS sideload ${VERSION} (${BUILD}) — 未签名 IPA（full flavor）" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
+          retention-days: 14
+          name: ios-ipa
+          path: build/ios/FluxDown-*-ios-sideload-unsigned.ipa
+          if-no-files-found: error

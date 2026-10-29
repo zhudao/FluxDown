@@ -1,18 +1,23 @@
-//! 下载页挂到 shell 统一顶栏的插槽：「新建」主按钮（与内容区左缘对齐）、搜索框、「视图」选项菜单。
+//! 下载页的顶栏内容：页面插槽 [`DownloadTitleBar`]（「新建」图标主按钮，紧跟侧栏切换按钮），
+//! 以及作为 chrome 布局条目摆放的搜索框 [`DownloadSearchBox`] 与「视图」选项菜单
+//! [`DownloadViewMenu`]（可在顶栏内移动、可隐藏，见 [`DownloadPageWidget`]）。
 //!
-//! 插槽是独立实体（shell 在标题栏里渲染它，不在 [`DownloadView`] 的元素树内），
+//! 三者都是独立实体（shell 在标题栏里渲染它们，不在 [`DownloadView`] 的元素树内），
 //! 通过弱引用把操作转发给下载页；视图偏好的改写沿用 `mutate_prefs` 的重算与防抖持久化。
 
 use std::rc::Rc;
 
-use fluxdown_ui_components::{CheckState, ControlExt as _, FluxIcon, check_mark, segmented_tabs};
+use fluxdown_ui_components::{
+    CheckState, ControlExt as _, FluxIcon, check_mark, segmented_tabs, toolbar_action_button,
+    tooltip_view,
+};
 use fluxdown_ui_i18n::{Translator, keys};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, FocusHandle,
     Focusable as _, FontWeight, Hsla, InteractiveElement as _, IntoElement, MouseButton,
     ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    WeakEntity, Window, canvas, div, prelude::FluentBuilder as _, px,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     Icon, Sizable as _, Size,
@@ -74,14 +79,13 @@ impl ViewMenuPage {
     }
 }
 
-const GROUP_OPTIONS: [ViewGroupBy; 7] = [
+const GROUP_OPTIONS: [ViewGroupBy; 6] = [
     ViewGroupBy::None,
     ViewGroupBy::Status,
     ViewGroupBy::Date,
     ViewGroupBy::Type,
     ViewGroupBy::Queue,
     ViewGroupBy::Site,
-    ViewGroupBy::Group,
 ];
 
 const SORT_OPTIONS: [ViewSortKey; 7] = [
@@ -102,7 +106,6 @@ fn group_by_key(group_by: ViewGroupBy) -> &'static str {
         ViewGroupBy::Type => "viewGroupType",
         ViewGroupBy::Queue => "viewGroupQueue",
         ViewGroupBy::Site => "viewGroupSite",
-        ViewGroupBy::Group => "viewGroupGroup",
     }
 }
 
@@ -128,43 +131,114 @@ fn interactive(child: impl IntoElement) -> Div {
         .child(child)
 }
 
-/// 下载页的统一顶栏插槽。
-pub struct DownloadTitleBar {
-    view: WeakEntity<DownloadView>,
-    translator: Entity<Translator>,
-    search_input: Entity<InputState>,
-    /// 搜索框外壳的焦点句柄：输入框（后代）聚焦时外壳切换为聚焦外观。
-    search_focus: FocusHandle,
-    table_state: Entity<TableState<DownloadTableDelegate>>,
-    /// 「视图」弹层当前分页。
-    view_menu_page: ViewMenuPage,
-    /// 插槽自身左缘的窗口横坐标（上一帧 prepaint 测得），与下载页 `content_left` 相减得前导留白。
-    slot_left: Pixels,
+/// 下载页专属的 chrome 布局条目：只在下载页活跃时显示，只能放在顶栏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadPageWidget {
+    Search,
+    ViewMenu,
 }
 
-impl DownloadTitleBar {
-    pub(crate) fn new(
-        view: &Entity<DownloadView>,
-        translator: Entity<Translator>,
-        search_input: Entity<InputState>,
-        table_state: Entity<TableState<DownloadTableDelegate>>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        cx.observe(view, |_, _, cx| cx.notify()).detach();
-        Self {
-            view: view.downgrade(),
-            translator,
-            search_input,
-            search_focus: cx.focus_handle(),
-            table_state,
-            view_menu_page: ViewMenuPage::default(),
-            slot_left: px(0.),
+impl DownloadPageWidget {
+    /// 默认顺序（顶栏右侧自左向右）。
+    pub const ALL: [Self; 2] = [Self::Search, Self::ViewMenu];
+
+    /// chrome 布局中的稳定 id。
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::ViewMenu => "viewMenu",
         }
     }
 
-    /// 顶栏搜索框：chrome 上的浅色填充胶囊，无描边；聚焦时变为内容底色 + 强调色描边。
+    /// 编辑布局时的占位 / 拖拽预览文案键。
+    #[must_use]
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::Search => "chromeWidgetSearch",
+            Self::ViewMenu => "viewMenuLabel",
+        }
+    }
+}
+
+/// 下载页的顶栏插槽：「新建」图标主按钮。
+pub struct DownloadTitleBar {
+    view: WeakEntity<DownloadView>,
+    translator: Entity<Translator>,
+}
+
+impl DownloadTitleBar {
+    pub(crate) fn new(view: WeakEntity<DownloadView>, translator: Entity<Translator>) -> Self {
+        Self { view, translator }
+    }
+}
+
+impl Render for DownloadTitleBar {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let new_label =
+            SharedString::from(self.translator.read(cx).text(keys::NEW_DOWNLOAD).to_owned());
+        let view = self.view.clone();
+        // 图标按钮紧跟 shell 的侧栏切换按钮；无侧栏的页面里它自然贴到交通灯之后，不依赖内容区对齐。
+        h_flex()
+            .size_full()
+            .min_w_0()
+            .items_center()
+            .child(interactive(
+                div()
+                    .id("download-create-tooltip")
+                    .flex_none()
+                    .tooltip({
+                        let label = new_label.clone();
+                        move |window, cx| tooltip_view(label.clone(), window, cx)
+                    })
+                    .child(
+                        toolbar_action_button(
+                            "download-create",
+                            new_label,
+                            Icon::new(FluxIcon::Plus).size(active_theme(cx).extended().icon.md),
+                            false,
+                            false,
+                            cx,
+                        )
+                        .on_click(move |_, window, cx| {
+                            let Ok(()) =
+                                view.update(cx, |view, cx| view.open_new_download(window, cx))
+                            else {
+                                // 视图已释放，结束这次回调而不再更新状态。
+                                return;
+                            };
+                        }),
+                    ),
+            ))
+    }
+}
+
+/// 顶栏搜索框（chrome 布局条目 `search`）。
+pub struct DownloadSearchBox {
+    view: WeakEntity<DownloadView>,
+    search_input: Entity<InputState>,
+    /// 搜索框外壳的焦点句柄：输入框（后代）聚焦时外壳切换为聚焦外观。
+    search_focus: FocusHandle,
+}
+
+impl DownloadSearchBox {
+    pub(crate) fn new(
+        view: WeakEntity<DownloadView>,
+        search_input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self {
+            view,
+            search_input,
+            search_focus: cx.focus_handle(),
+        }
+    }
+}
+
+impl Render for DownloadSearchBox {
+    /// chrome 上的浅色填充胶囊，无描边；聚焦时变为内容底色 + 强调色描边。
     /// 未输入时右侧显示快捷键提示徽标。
-    fn render_search(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = active_theme(cx);
         let tokens = theme.tokens();
         let extended = theme.extended();
@@ -173,7 +247,7 @@ impl DownloadTitleBar {
         let caption = extended.caption;
         let input_focus = self.search_input.read(cx).focus_handle(cx);
         let empty = self.search_input.read(cx).value().is_empty();
-        h_flex()
+        let search = h_flex()
             .id("download-search-box")
             .track_focus(&self.search_focus)
             .w(theme.text_extent(SEARCH_WIDTH))
@@ -241,140 +315,96 @@ impl DownloadTitleBar {
                         .text_color(chrome.text_tertiary)
                         .child(SEARCH_SHORTCUT_HINT),
                 )
-            })
+            });
+        interactive(search)
+            .flex_shrink(1.)
+            .min_w(theme.text_extent(SEARCH_MIN_WIDTH))
+    }
+}
+
+/// 「视图」选项菜单（chrome 布局条目 `viewMenu`）。
+pub struct DownloadViewMenu {
+    view: WeakEntity<DownloadView>,
+    translator: Entity<Translator>,
+    table_state: Entity<TableState<DownloadTableDelegate>>,
+    /// 「视图」弹层当前分页。
+    view_menu_page: ViewMenuPage,
+    /// 弹层相对按钮的锚点：随所在顶栏区域变化（左侧区域向右展开，右侧区域向左展开）。
+    anchor: Anchor,
+}
+
+impl DownloadViewMenu {
+    pub(crate) fn new(
+        view: &Entity<DownloadView>,
+        translator: Entity<Translator>,
+        table_state: Entity<TableState<DownloadTableDelegate>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // 视图偏好变化（列 / 分组 / 排序 / 显示）后刷新已打开的弹层。
+        cx.observe(view, |_, _, cx| cx.notify()).detach();
+        Self {
+            view: view.downgrade(),
+            translator,
+            table_state,
+            view_menu_page: ViewMenuPage::default(),
+            anchor: Anchor::TopRight,
+        }
     }
 
-    fn render_view_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// 按摆放位置设置弹层锚点；未变化时不写，避免渲染期无条件改写实体。
+    pub fn set_anchor(&mut self, anchor: Anchor, cx: &mut Context<Self>) {
+        if self.anchor != anchor {
+            self.anchor = anchor;
+            cx.notify();
+        }
+    }
+}
+
+impl Render for DownloadViewMenu {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let translator = self.translator.read(cx);
         let trigger_label = SharedString::from(translator.text("viewMenuLabel").to_owned());
         let tooltip = SharedString::from(translator.text("viewOptionsTitle").to_owned());
         let view = self.view.clone();
         let translator = self.translator.clone();
         let table_state = self.table_state.clone();
-        let title_bar = cx.entity().downgrade();
+        let view_menu = cx.entity().downgrade();
 
-        Popover::new("download-view-popover")
-            .anchor(Anchor::TopRight)
-            .p_0()
-            .w(active_theme(cx).text_extent(VIEW_MENU_WIDTH))
-            .trigger(
-                Button::new("download-view")
-                    .ghost()
-                    .control(cx)
-                    .icon(FluxIcon::SlidersHorizontal)
-                    .label(trigger_label)
-                    .tooltip(tooltip),
-            )
-            .content(move |_, window, cx| {
-                let page = title_bar
-                    .upgrade()
-                    .map(|title_bar| title_bar.read(cx).view_menu_page)
-                    .unwrap_or_default();
-                let body_max_height = VIEW_MENU_MAX_BODY_HEIGHT
-                    .min(window.viewport_size().height - VIEW_MENU_WINDOW_RESERVE)
-                    .max(active_theme(cx).density().nav_row * 3.);
-                view_menu_content(
-                    ViewMenuContext {
-                        title_bar: &title_bar,
-                        view: &view,
-                        translator: &translator,
-                        table_state: &table_state,
-                        page,
-                        body_max_height,
-                    },
-                    cx,
+        interactive(
+            Popover::new("download-view-popover")
+                .anchor(self.anchor)
+                .p_0()
+                .w(active_theme(cx).text_extent(VIEW_MENU_WIDTH))
+                .trigger(
+                    Button::new("download-view")
+                        .ghost()
+                        .control(cx)
+                        .icon(FluxIcon::SlidersHorizontal)
+                        .label(trigger_label)
+                        .tooltip(tooltip),
                 )
-            })
+                .content(move |_, window, cx| {
+                    let page = view_menu
+                        .upgrade()
+                        .map(|view_menu| view_menu.read(cx).view_menu_page)
+                        .unwrap_or_default();
+                    let body_max_height = VIEW_MENU_MAX_BODY_HEIGHT
+                        .min(window.viewport_size().height - VIEW_MENU_WINDOW_RESERVE)
+                        .max(active_theme(cx).density().nav_row * 3.);
+                    view_menu_content(
+                        ViewMenuContext {
+                            view_menu: &view_menu,
+                            view: &view,
+                            translator: &translator,
+                            table_state: &table_state,
+                            page,
+                            body_max_height,
+                        },
+                        cx,
+                    )
+                }),
+        )
     }
-}
-
-impl Render for DownloadTitleBar {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let spacing = active_theme(cx).tokens().spacing;
-        let new_label =
-            SharedString::from(self.translator.read(cx).text(keys::NEW_DOWNLOAD).to_owned());
-        let view = self.view.clone();
-        // 主按钮左缘 = 内容区左缘 + 一档留白（由 flex gap 提供）；未测得前 /
-        // 顶栏前导区（交通灯、应用菜单）更宽时贴插槽左缘。
-        let content_left = self
-            .view
-            .upgrade()
-            .map_or(px(0.), |view| view.read(cx).content_left);
-        let leading = if content_left > px(0.) {
-            (content_left - self.slot_left).max(px(0.))
-        } else {
-            px(0.)
-        };
-        let title_bar = cx.entity().downgrade();
-        h_flex()
-            .relative()
-            .size_full()
-            .min_w_0()
-            .items_center()
-            .gap(spacing.sm)
-            // 前导留白远先于搜索框收缩（高收缩权重）；空白处保持窗口拖拽。
-            .child(div().flex_shrink(100.).min_w_0().w(leading))
-            .child(interactive(
-                Button::new("download-create")
-                    .primary()
-                    .control(cx)
-                    .icon(FluxIcon::Plus)
-                    .label(new_label)
-                    .on_click(move |_, window, cx| {
-                        let Ok(()) = view.update(cx, |view, cx| view.open_new_download(window, cx))
-                        else {
-                            // 视图已释放，结束这次回调而不再更新状态。
-                            return;
-                        };
-                    }),
-            ))
-            .child(div().flex_1().min_w_0())
-            .child(
-                interactive(self.render_search(window, cx))
-                    .flex_shrink(1.)
-                    .min_w(active_theme(cx).text_extent(SEARCH_MIN_WIDTH)),
-            )
-            .child(interactive(self.render_view_menu(cx)))
-            .child(left_edge_probe(
-                title_bar,
-                |title_bar| title_bar.slot_left,
-                |title_bar, left| title_bar.slot_left = left,
-            ))
-    }
-}
-
-/// 测量父元素左缘的窗口横坐标，变化时写回 `entity` 并重绘（下一帧生效）。
-///
-/// 父元素须 `relative()`；测量层显式 `inset_0()` 铺满父元素——只写 `size_full()` 的
-/// 绝对定位层会落在静态位置（`ElementExt::on_prepaint` 即如此），原点偏离父元素。
-pub(crate) fn left_edge_probe<T: 'static>(
-    entity: WeakEntity<T>,
-    get: fn(&T) -> Pixels,
-    set: fn(&mut T, Pixels),
-) -> impl IntoElement {
-    canvas(
-        move |bounds, window, cx| {
-            let left = bounds.origin.x;
-            let changed = entity
-                .upgrade()
-                .is_some_and(|entity| get(entity.read(cx)) != left);
-            if !changed {
-                return;
-            }
-            window.defer(cx, move |_, cx| {
-                let Ok(()) = entity.update(cx, |entity, cx| {
-                    set(entity, left);
-                    cx.notify();
-                }) else {
-                    // 视图已释放，结束这次回调而不再更新状态。
-                    return;
-                };
-            });
-        },
-        |_, (), _, _| {},
-    )
-    .absolute()
-    .inset_0()
 }
 
 /// 视图菜单共用的样式快照（颜色与尺寸均取自已缩放的 token）。
@@ -493,7 +523,7 @@ fn update_prefs(
 
 /// 视图菜单一次渲染所需的上下文。
 struct ViewMenuContext<'a> {
-    title_bar: &'a WeakEntity<DownloadTitleBar>,
+    view_menu: &'a WeakEntity<DownloadViewMenu>,
     view: &'a WeakEntity<DownloadView>,
     translator: &'a Entity<Translator>,
     table_state: &'a Entity<TableState<DownloadTableDelegate>>,
@@ -509,7 +539,7 @@ fn view_menu_content(menu: ViewMenuContext<'_>, cx: &App) -> impl IntoElement + 
     let spacing = active_theme(cx).tokens().spacing;
     let translator = menu.translator.read(cx);
     let tabs = {
-        let title_bar = menu.title_bar.clone();
+        let view_menu = menu.view_menu.clone();
         segmented_tabs(
             "download-view-menu-tabs",
             ViewMenuPage::ALL
@@ -520,8 +550,8 @@ fn view_menu_content(menu: ViewMenuContext<'_>, cx: &App) -> impl IntoElement + 
                     return;
                 };
 
-                let Ok(()) = title_bar.update(cx, |title_bar, cx| {
-                    title_bar.view_menu_page = page;
+                let Ok(()) = view_menu.update(cx, |view_menu, cx| {
+                    view_menu.view_menu_page = page;
                     cx.notify();
                 }) else {
                     // 视图已释放，结束这次回调而不再更新状态。

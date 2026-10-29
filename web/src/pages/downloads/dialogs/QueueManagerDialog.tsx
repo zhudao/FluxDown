@@ -4,7 +4,7 @@
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, Plus } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useT } from '../../../i18n'
-import { LATER_QUEUE_ID, MAIN_QUEUE_ID, TASK_STATUS, rpc, useAgent, useDaemon, useTasks } from '../../../lib/rpc'
+import { LATER_QUEUE_ID, MAIN_QUEUE_ID, TASK_STATUS, rpc, useAgent, useDaemon, useTasks, useTasksLoading } from '../../../lib/rpc'
 import type { QueueDto, TaskDto } from '../../../lib/rpc'
 import { Button, Checkbox, Dialog, DialogFooter, FieldError, FieldHint, Form, FormField, FormRow, Icon, Input, InputWithAction, OptionGroup, OptionRow, SectionHeader, Select, Switch, confirmDialog, useIsMobile } from '../../../ui'
 import { toastRpcError } from '../../../lib/rpcToast'
@@ -207,6 +207,7 @@ function QueueEditor({
   const queueId = queue?.queueId ?? null
   const builtin = isBuiltin(queueId)
   const running = queue?.isRunning ?? true
+  const isMain = queueId === MAIN_QUEUE_ID
   const title = queue === null ? t('createQueueAction') : queueLabel(t, queue)
 
   /** 成功返回 true；失败已弹 toast 并返回 false，调用方据此决定是否继续后续状态迁移。 */
@@ -241,7 +242,7 @@ function QueueEditor({
     try {
       if (queue) {
         await rpc.daemon.queue.update({ queueId: queue.queueId, ...fields })
-        await rpc.daemon.queue.schedule({ queueId: queue.queueId, ...schedule })
+        if (queue.queueId !== MAIN_QUEUE_ID) await rpc.daemon.queue.schedule({ queueId: queue.queueId, ...schedule })
         onSaved(null)
       } else {
         await rpc.daemon.queue.create(fields)
@@ -322,6 +323,9 @@ function QueueEditor({
           <Input id="queue-ua" value={userAgent} onChange={(event) => setUserAgent(event.target.value)} spellCheck={false} />
         </FormField>
 
+        {isMain ? (
+          <FieldHint>{t('mainQueueAlwaysRunningHint')}</FieldHint>
+        ) : (
         <OptionGroup>
           <OptionRow
             title={t('queueScheduleEnable')}
@@ -351,6 +355,7 @@ function QueueEditor({
             </div>
           ) : null}
         </OptionGroup>
+        )}
 
         {queue ? <PendingOrder queue={queue} /> : null}
 
@@ -367,7 +372,7 @@ function QueueEditor({
           <span />
         )}
         <div className="flex flex-wrap items-center gap-2">
-          {queue ? (
+          {queue && !(isMain && running) ? (
             <Button
               variant="outline"
               onClick={() => void run(() => (running ? rpc.daemon.queue.stop({ queueId: queue.queueId }) : rpc.daemon.queue.start({ queueId: queue.queueId })))}
@@ -436,6 +441,7 @@ function pendingIn(tasks: readonly TaskDto[], queueId: string): TaskDto[] {
 function PendingOrder({ queue }: { queue: QueueDto }) {
   const t = useT()
   const tasks = useTasks()
+  const loading = useTasksLoading()
   const pending = useMemo(() => pendingIn(tasks, queue.queueId), [tasks, queue.queueId])
   const move = async (index: number, delta: -1 | 1) => {
     const order = pending.map((task) => task.taskId)
@@ -452,7 +458,9 @@ function PendingOrder({ queue }: { queue: QueueDto }) {
     <div className="flex flex-col gap-1.5">
       <SectionHeader>{t('queueTabTasks')}</SectionHeader>
       <FieldHint>{t('queueTasksOrderHint')}</FieldHint>
-      {pending.length === 0 ? (
+      {loading ? (
+        <FieldHint>{t('tasksLoadingTitle')}</FieldHint>
+      ) : pending.length === 0 ? (
         <FieldHint>{t('queueNoPendingTasks')}</FieldHint>
       ) : (
         <ul className="rounded-md border border-hairline">

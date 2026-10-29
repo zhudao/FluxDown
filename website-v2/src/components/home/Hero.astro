@@ -14,6 +14,7 @@ import { common } from "../../i18n/messages/common";
 import { href } from "../../i18n/routing";
 import type { Lang } from "../../i18n/config";
 import { GITHUB_URL } from "../../lib/site-nav";
+import { withBase } from "../../lib/base";
 
 interface Props {
   lang: Lang;
@@ -112,6 +113,11 @@ const versions = [
         </span>
         <span class="opacity-40">/</span>
         <span>{t.license}</span>
+        <span class="opacity-40">/</span>
+        <a href={withBase(`/docs/${lang}/#compare`)} class="hero-compare">
+          {t.compare}
+          <ArrowRight size={12} strokeWidth={2} />
+        </a>
       </div>
     </div>
   </div>
@@ -269,6 +275,24 @@ const versions = [
     syntax: "<angle>";
     inherits: false;
     initial-value: 0deg;
+  }
+  .hero-compare {
+    position: relative;
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--accent-ink);
+    transition: color 160ms var(--ease-out);
+  }
+  .hero-compare:hover {
+    color: var(--fg);
+  }
+  .hero-compare :global(svg) {
+    transition: transform 160ms var(--ease-out);
+  }
+  .hero-compare:hover :global(svg) {
+    transform: translateX(2px);
   }
   .hero-badge {
     position: relative;

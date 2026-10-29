@@ -4,15 +4,16 @@
 
 use fluxdown_engine::downloader::CapturedRequestBody;
 use fluxdown_engine::model::{
-    BtFileEntry, CdnNodeInfo, GroupInfo, HlsQualityOption, QueueInfo, QueuePosition,
-    ResolveVariantOption, SegmentDetail, SourceBytes, TaskInfo,
+    BtFileEntry, CdnNodeInfo, GroupInfo, HlsQualityOption, QueueInfo, QueueOrderEntry,
+    QueuePosition, ResolveVariantOption, SegmentDetail, SourceBytes, TaskInfo,
 };
 use fluxdown_engine::rss::model::{RssItemInfo, RssSourceInfo};
+use fluxdown_engine::selection::PluginCandidate;
 use fluxdown_engine::webhook::{PresetInfo, TaskNotice, WebhookDelivery};
 use fluxdown_protocol::daemon::{
-    BtFileDto, CdnNodeDto, GroupDto, HlsQualityOptionDto, QueueDto, QueuePositionDto, RequestBody,
-    ResolveVariantOptionDto, RssItemDto, RssSourceDto, SegmentDetailDto, TaskDto,
-    WebhookDeliveryDto, WebhookPresetDto,
+    BtFileDto, CdnNodeDto, GroupDto, HlsQualityOptionDto, PluginCandidateDto, QueueDto,
+    QueueOrderEntryDto, QueuePositionDto, RequestBody, ResolveVariantOptionDto, RssItemDto,
+    RssSourceDto, SegmentDetailDto, TaskDto, WebhookDeliveryDto, WebhookPresetDto,
 };
 #[cfg(feature = "components")]
 use fluxdown_protocol::daemon::{ComponentFfmpegStatus, ComponentVersions, ComponentYtdlpStatus};
@@ -33,6 +34,28 @@ pub fn request_body_to_engine(body: RequestBody) -> CapturedRequestBody {
     }
 }
 
+/// 将分类目录路由转换为引擎路由（`base_dir` 由引擎建任务时填为解析出的保存目录）。
+#[must_use]
+pub fn category_route_to_engine(
+    route: fluxdown_protocol::CategoryRouteDto,
+) -> fluxdown_engine::category_route::CategoryRoute {
+    fluxdown_engine::category_route::CategoryRoute {
+        base_dir: String::new(),
+        rules: route
+            .rules
+            .into_iter()
+            .map(|rule| fluxdown_engine::category_route::CategoryRule {
+                match_mode: rule.match_mode,
+                extensions: rule.extensions,
+                regex_pattern: rule.regex_pattern,
+                url_pattern: rule.url_pattern,
+                save_dir: rule.save_dir,
+            })
+            .collect(),
+        other_dir: route.other_dir,
+    }
+}
+
 /// 将加速来源累计字节转换为 wire DTO。
 #[must_use]
 pub fn source_bytes_to_dto(bytes: SourceBytes) -> fluxdown_protocol::TaskSourceBytesDto {
@@ -40,6 +63,69 @@ pub fn source_bytes_to_dto(bytes: SourceBytes) -> fluxdown_protocol::TaskSourceB
         cdn_bytes: bytes.cdn,
         proxy_bytes: bytes.proxy,
         nic_bytes: bytes.nic,
+    }
+}
+
+/// 将宿主自身请求的出口方案转换为 wire DTO（改写地址在前，原地址由调用方兜底）。
+#[must_use]
+pub fn egress_plan_to_dto(
+    plan: fluxdown_engine::egress::EgressPlan,
+) -> fluxdown_protocol::EgressPlanDto {
+    let proxy = plan.proxy.map(|proxy| fluxdown_protocol::EgressProxyDto {
+        url: proxy.url,
+        no_proxy: proxy.no_proxy,
+    });
+    match plan.route.rewrite() {
+        Some(rewrite) => fluxdown_protocol::EgressPlanDto {
+            url: rewrite.url.clone(),
+            headers: rewrite.headers.iter().cloned().collect(),
+            plugin: Some(rewrite.plugin.clone()),
+            proxy,
+        },
+        None => fluxdown_protocol::EgressPlanDto {
+            url: plan.route.source_url().to_owned(),
+            headers: std::collections::BTreeMap::new(),
+            plugin: None,
+            proxy,
+        },
+    }
+}
+
+/// 将站点规则的校验结果与（可选的）路由解释转换为 wire DTO；`index` 从 0 起。
+#[must_use]
+pub fn proxy_route_to_dto(
+    issues: Vec<fluxdown_engine::proxy_rules::RuleIssue>,
+    explanation: Option<fluxdown_engine::proxy_rules::RouteExplanation>,
+) -> fluxdown_protocol::ProxyRouteResponse {
+    let to_index = |index: usize| u32::try_from(index).unwrap_or(u32::MAX);
+    let issues = issues
+        .into_iter()
+        .map(|issue| fluxdown_protocol::ProxyRuleIssueDto {
+            index: to_index(issue.index),
+            field: issue.field.to_owned(),
+            code: issue.code.to_owned(),
+            detail: issue.detail,
+        })
+        .collect();
+    match explanation {
+        Some(explanation) => fluxdown_protocol::ProxyRouteResponse {
+            issues,
+            matched: explanation
+                .matched
+                .map(|matched| fluxdown_protocol::ProxyRouteMatchDto {
+                    index: to_index(matched.index),
+                    id: matched.id,
+                    name: matched.name,
+                }),
+            reason: explanation.reason.as_str().to_owned(),
+            endpoint: explanation.endpoint,
+        },
+        None => fluxdown_protocol::ProxyRouteResponse {
+            issues,
+            matched: None,
+            reason: String::new(),
+            endpoint: String::new(),
+        },
     }
 }
 
@@ -83,6 +169,22 @@ pub fn task_activity_to_dto(
         kind: activity.kind,
         message: activity.message,
         status: activity.status,
+    }
+}
+
+/// 将任务速度历史转换成 wire DTO（未满桶的当前均值作为末点）。
+#[must_use]
+pub fn task_speed_history_to_dto(
+    task_id: String,
+    history: fluxdown_engine::speed_history::SpeedHistory,
+) -> fluxdown_protocol::TaskSpeedHistoryDto {
+    fluxdown_protocol::TaskSpeedHistoryDto {
+        task_id,
+        bucket_secs: history.bucket_secs,
+        samples: history.points(),
+        active_secs: history.active_secs,
+        transferred_bytes: history.transferred_bytes,
+        peak_bps: history.peak_bps,
     }
 }
 
@@ -286,6 +388,16 @@ pub fn queue_position_to_dto(position: QueuePosition) -> QueuePositionDto {
     QueuePositionDto {
         task_id: position.task_id,
         position: position.position,
+        order: position.order,
+    }
+}
+
+/// 将队列顺序增量的一项转换为 wire DTO。
+#[must_use]
+pub fn queue_order_entry_to_dto(entry: QueueOrderEntry) -> QueueOrderEntryDto {
+    QueueOrderEntryDto {
+        task_id: entry.task_id,
+        order: entry.order,
     }
 }
 
@@ -321,6 +433,17 @@ pub fn resolve_variant_option_to_dto(option: ResolveVariantOption) -> ResolveVar
         width: option.width,
         height: option.height,
         total_bytes: option.total_bytes,
+    }
+}
+
+/// 将多插件选择的候选插件转换为 wire DTO。
+#[must_use]
+pub fn plugin_candidate_to_dto(candidate: PluginCandidate) -> PluginCandidateDto {
+    PluginCandidateDto {
+        identity: candidate.identity,
+        name: candidate.name,
+        version: candidate.version,
+        description: candidate.description,
     }
 }
 
@@ -453,8 +576,70 @@ pub fn plugin_info_to_dto(
         permissions: plugin.permissions,
         auth_supported: plugin.auth_supported,
         subscription_provider_ids: plugin.subscription_provider_ids,
+        resolver_urls: plugin.resolver_urls,
         load_status: plugin.load_status,
         load_error: plugin.load_error,
+        contributions: plugin_contributions_to_dto(&plugin.contributions, plugin.view_icons),
+        risk: plugin.risk.as_str().to_owned(),
+        consent_pending: plugin.consent_pending,
+        consent_pending_hosts: plugin.consent_pending_hosts,
+        network_hosts: plugin.network_hosts,
+        package_dir: plugin.package_dir,
+        package_revision: plugin.package_revision,
+    }
+}
+
+#[cfg(feature = "plugins")]
+fn plugin_contributions_to_dto(
+    contributes: &fluxdown_engine::plugin::manifest::ContributesDecl,
+    mut view_icons: Vec<(String, String)>,
+) -> fluxdown_protocol::daemon::PluginContributionsDto {
+    use fluxdown_protocol::daemon::{
+        PluginCommandDeclDto, PluginContributionsDto, PluginDesktopEntryDto,
+        PluginPageScriptDeclDto, PluginViewDeclDto,
+    };
+    PluginContributionsDto {
+        views: contributes
+            .views
+            .iter()
+            .map(|view| PluginViewDeclDto {
+                id: view.id.clone(),
+                title: view.title.clone(),
+                location: view.location.as_str().to_owned(),
+                portable: view.is_portable(),
+                desktop: view.desktop.as_ref().map(|d| PluginDesktopEntryDto {
+                    entry: d.entry.clone(),
+                    width: d.width,
+                    height: d.height,
+                    network_hosts: d.network_hosts.clone(),
+                }),
+                icon_svg: view_icons
+                    .iter()
+                    .position(|(id, _)| *id == view.id)
+                    .map(|index| view_icons.swap_remove(index).1),
+            })
+            .collect(),
+        commands: contributes
+            .commands
+            .iter()
+            .map(|cmd| PluginCommandDeclDto {
+                id: cmd.id.clone(),
+                title: cmd.title.clone(),
+                palette: cmd.palette,
+                task_menu: cmd.task_menu,
+            })
+            .collect(),
+        sniff_rules: contributes.sniff_rules.is_some(),
+        page_scripts: contributes
+            .page_scripts
+            .iter()
+            .map(|s| PluginPageScriptDeclDto {
+                id: s.id.clone(),
+                title: s.title.clone(),
+                matches: s.matches.clone(),
+                world: s.world.as_str().to_owned(),
+            })
+            .collect(),
     }
 }
 
@@ -479,6 +664,7 @@ pub fn market_entry_to_dto(
         yanked: entry.yanked,
         tags: entry.tags,
         permissions: entry.permissions,
+        network_hosts: entry.network_hosts,
     }
 }
 
@@ -535,5 +721,53 @@ pub fn ytdlp_versions_to_dto(
     ComponentVersions {
         versions: versions.versions,
         latest_stable: versions.latest_stable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{queue_order_entry_to_dto, queue_position_to_dto};
+    use fluxdown_engine::queue_order::{QueueOrderDelta, QueueOrderPublisher};
+    use fluxdown_protocol::{QueuePositionDto, apply_queue_order};
+
+    /// 引擎发布的「全量 + 增量」经协议 reducer 应用后，必须与队列顺序逐项一致，
+    /// 且 `position` 为名次。
+    #[test]
+    fn engine_deltas_applied_by_the_protocol_reducer_match_the_queue() {
+        let mut publisher = QueueOrderPublisher::default();
+        let mut client: Vec<QueuePositionDto> = Vec::new();
+        let steps: [&[&str]; 7] = [
+            &["a", "b", "c", "d"],
+            &["b", "c", "d"],
+            &["b", "c", "d", "e", "f"],
+            &["x", "b", "c", "d", "e", "f"],
+            &["x", "b", "m", "c", "d", "e", "f"],
+            &["f", "x", "b", "m", "c", "d", "e"],
+            &[],
+        ];
+        for queue in steps {
+            match publisher.diff(queue.iter().copied()) {
+                QueueOrderDelta::Unchanged => {}
+                QueueOrderDelta::Full(positions) => {
+                    client = positions.into_iter().map(queue_position_to_dto).collect();
+                }
+                QueueOrderDelta::Incremental { removed, added } => {
+                    let added: Vec<_> = added.into_iter().map(queue_order_entry_to_dto).collect();
+                    apply_queue_order(&mut client, &removed, &added);
+                }
+            }
+            assert_eq!(
+                client
+                    .iter()
+                    .map(|p| p.task_id.as_str())
+                    .collect::<Vec<_>>(),
+                queue,
+                "queue {queue:?}"
+            );
+            for (index, entry) in client.iter().enumerate() {
+                assert_eq!(entry.position, i32::try_from(index + 1).unwrap_or(0));
+            }
+            assert!(client.windows(2).all(|w| w[0].order < w[1].order));
+        }
     }
 }

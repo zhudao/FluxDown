@@ -19,6 +19,8 @@ public enum TaskStatus: Int32, Sendable, Hashable, CaseIterable {
 
     /// 活跃 = 下载中或准备中（与 `event.rs` 的 `matches!(status, 1 | 5)` 一致）。
     public var isActive: Bool { self == .downloading || self == .preparing }
+    /// 运行时（分段图 / 传输读数）仍有可见用途：完成任务不保留（与 `event.rs` 的 `runtime_retained` 一致）。
+    public var retainsRuntime: Bool { self != .completed }
 }
 
 /// `TaskDto.seedingStatus`（0–8）。
@@ -149,6 +151,36 @@ public struct DownloadTask: Sendable, Hashable, Identifiable {
         guard totalBytes > 0 else { return nil }
         return min(max(Double(downloadedBytes) / Double(totalBytes), 0), 1)
     }
+
+    /// 本机 BT 任务正在做种（含排队等做种槽位）：已完成且 seedingStatus ∈ {1, 8}。可暂停（停止做种）。
+    public var isSeeding: Bool {
+        status == .completed && (seedingStatus == .seeding || seedingStatus == .queuedForSlot)
+    }
+
+    /// 已完成且做种已停止（2...7）、文件仍在 → 可恢复做种。其他已完成任务不可恢复（#935）。
+    public var canResumeSeeding: Bool {
+        guard status == .completed, !fileMissing else { return false }
+        switch seedingStatus {
+        case .ratioReached, .timeReached, .userStopped, .taskDeleted, .sessionReleased, .inactiveStop: return true
+        case .none, .seeding, .queuedForSlot, .unknown: return false
+        }
+    }
+
+    /// 「全部继续」可恢复的做种任务：用户手动停止（4）且文件仍在。
+    public var isUserStoppedSeed: Bool {
+        status == .completed && seedingStatus == .userStopped && !fileMissing
+    }
+}
+
+extension Sequence<DownloadTask> {
+    /// 存在可暂停的做种任务（「全部暂停」可用；纯做种主机不算「全部已暂停」）。
+    public var hasSeeding: Bool { contains { $0.isSeeding } }
+
+    /// 活动条「全部暂停 ↔ 全部恢复」切换：没有运行 / 排队 / 做种，且存在可恢复任务（暂停 / 失败 / 用户停止的做种）。
+    public func isAllPaused(active: Int, pending: Int) -> Bool {
+        guard active == 0, pending == 0, !hasSeeding else { return false }
+        return contains { $0.status == .paused || $0.status == .failed || $0.isUserStoppedSeed }
+    }
 }
 
 /// `TaskSegmentDto`：真实字节区间；`active == nil` 表示未知，不得推断为空闲。
@@ -212,6 +244,11 @@ public struct TaskQueue: Sendable, Hashable, Identifiable {
     public var scheduleStop: String
     /// bit0 = 周一 … bit6 = 周日；127 = 每天。
     public var scheduleDays: Int32
+
+    /// 主队列始终运行：运行中不能停止（停止态异常时仍可启动）。
+    public var canStop: Bool { QueueIds.canStop(queueId) }
+    /// 主队列不可定时。
+    public var canSchedule: Bool { QueueIds.canSchedule(queueId) }
 
     public init(
         queueId: String,
@@ -323,6 +360,22 @@ public enum SelectionKind: Sendable, Hashable {
     case bt([BtFile])
     case variant([VariantOption])
     case fileExists(FileConflict)
+    case plugin(site: String, url: String, candidates: [PluginCandidate])
+}
+
+/// 同站点多个插件命中时的候选插件（按 identity 升序）。
+public struct PluginCandidate: Sendable, Hashable {
+    public var identity: String
+    public var name: String
+    public var version: String
+    public var description: String
+
+    public init(identity: String, name: String, version: String, description: String) {
+        self.identity = identity
+        self.name = name
+        self.version = version
+        self.description = description
+    }
 }
 
 public struct HlsOption: Sendable, Hashable {
@@ -384,6 +437,7 @@ public enum SelectionOutcome: Sendable, Hashable {
     case bt(indices: [Int32])
     case variant(index: Int32)
     case fileExists(action: FileExistsAction)
+    case plugin(identity: String, remember: Bool)
     case cancelled
 }
 
@@ -514,10 +568,21 @@ public struct LinkDevice: Sendable, Hashable, Identifiable {
     public var defaultSaveDir: String?
     /// 设备自报的路径风格；nil = 未上报（按 `platform` 推断，见 ``effectivePathStyle``）。
     public var pathStyle: PathStyle?
+    /// 本机备注名（`name` 已是生效名）。
+    public var customName: String?
+    public var appVersion: String?
+    /// 对端已登录云账号时的云设备 id；与云名册同 id 时合并为一条。
+    public var cloudDeviceId: String?
+    /// 对端已解除配对：不可再下发，只能删除。
+    public var revoked: Bool
+    public var pairedAt: Int64
+    public var lastSeenAt: Int64
 
     public init(
         fingerprint: String, name: String, platform: String?, online: Bool,
-        defaultSaveDir: String? = nil, pathStyle: PathStyle? = nil
+        defaultSaveDir: String? = nil, pathStyle: PathStyle? = nil,
+        customName: String? = nil, appVersion: String? = nil, cloudDeviceId: String? = nil, revoked: Bool = false,
+        pairedAt: Int64 = 0, lastSeenAt: Int64 = 0
     ) {
         self.fingerprint = fingerprint
         self.name = name
@@ -525,6 +590,12 @@ public struct LinkDevice: Sendable, Hashable, Identifiable {
         self.online = online
         self.defaultSaveDir = defaultSaveDir
         self.pathStyle = pathStyle
+        self.customName = customName
+        self.appVersion = appVersion
+        self.cloudDeviceId = cloudDeviceId
+        self.revoked = revoked
+        self.pairedAt = pairedAt
+        self.lastSeenAt = lastSeenAt
     }
 
     public var id: String { fingerprint }

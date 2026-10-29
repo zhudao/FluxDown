@@ -85,8 +85,8 @@ pub enum ErrorReason {
     MailNotConfigured,
     /// FluxCloud：账号设备数已达套餐上限。
     DeviceLimit,
-    /// FluxCloud：参与配置同步的设备数已达套餐上限。
-    SyncDeviceLimit,
+    /// FluxCloud：账号同时在线设备数已达套餐上限（本设备保持登录，可在线列表中手动下线其他设备）。
+    OnlineDeviceLimit,
     /// FluxCloud：本设备不在账号的受信任设备中（已被移除 / 被替换）。
     DeviceUntrusted,
     /// FluxCloud：登录会话已失效（被撤销 / 刷新令牌过期）。
@@ -107,6 +107,8 @@ pub enum ErrorReason {
     PairingCodeInvalid,
     /// 局域网配对：配对会话不存在或已过期。
     PairingSessionExpired,
+    /// 局域网配对：对端用户在核验窗口内没有表态（等待超时）。
+    PairingTimeout,
     /// 局域网配对：无法连接对端地址。
     PairingPeerUnreachable,
     /// 局域网配对：对端地址不是 FluxDown 服务（如反代返回了非 FluxDown 响应、协议 / 端口不符）。
@@ -125,6 +127,12 @@ pub enum ErrorReason {
     PeerNotPaired,
     /// 局域网互联：已配对设备当前不可达。
     PeerOffline,
+    /// 局域网互联：对端 FluxDown 版本过旧，数据面链路协议不兼容（两端需升级）。
+    PeerOutdated,
+    /// 局域网互联：对端拒绝了本机请求，因为两台设备的系统时钟偏差超过容忍窗口。
+    PeerClockSkew,
+    /// 局域网互联：本机直连服务未启动（初始化失败或宿主不支持）。
+    LinkUnavailable,
     /// Doctor 修复：用户取消了系统管理员授权对话框（UAC / polkit / macOS 授权），未做任何更改。
     ElevationCancelled,
     /// Doctor 修复：无法请求管理员授权（缺 `pkexec` / polkit 认证代理、无桌面会话等）。
@@ -145,6 +153,77 @@ pub enum ErrorReason {
     NotifyDisabled,
     /// 云端推送：渠道配置无效（Device Key / 主题 / 机器人地址不合法，或该种类暂不可用）。
     NotifyTargetInvalid,
+    /// 提示音试听：文件缺失、格式不受支持或系统无可用播放器。
+    SoundUnplayable,
+    /// 套餐购买：云端未开放支付。
+    PaymentDisabled,
+    /// 套餐购买：支付网关建单失败（可稍后重试）。
+    PaymentGatewayFailed,
+    /// 套餐购买：目标套餐已下架或不可购买。
+    PlanNotPurchasable,
+    /// 套餐购买：已持有该套餐。
+    PlanAlreadyOwned,
+    /// 套餐购买：已付金额不低于目标套餐价格（买断制差价升级不成立）。
+    PlanNotUpgrade,
+    /// 套餐购买：已持有同档或更高档套餐（买断制只升不降）。
+    PlanTierNotHigher,
+    /// 套餐购买：已有另一张生效中的周期会员卡。
+    SubscriptionConflict,
+    /// 推介：邀请码无效（不存在 / 功能未开启）。
+    ReferralCodeInvalid,
+    /// 推介：不能使用自己的邀请码。
+    ReferralSelfUse,
+    /// 推介：本账号已使用过邀请码（每人终生一次）。
+    ReferralAlreadyUsed,
+    /// 推介：目标套餐不参与推介。
+    ReferralPlanExcluded,
+    /// 推介：自定义推荐码已被占用。
+    ReferralCodeTaken,
+    /// FluxMesh：本构建未编入FluxMesh、agent FluxMesh服务未运行，或云端关闭了FluxMesh。
+    ShareUnavailable,
+    /// FluxMesh：分享不存在（取件码 / 链接无对应分享，或不是本人的分享）。
+    ShareNotFound,
+    /// FluxMesh：分享已过期。
+    ShareExpired,
+    /// FluxMesh：分享已被分享方或后台停止。
+    ShareStopped,
+    /// FluxMesh：取件码 / 分享链接格式不正确。
+    ShareCodeInvalid,
+    /// FluxMesh：取件码尝试过于频繁，被云端限流。
+    ShareRateLimited,
+    /// FluxMesh：云端要求先完成人机验证（Turnstile）再重试 resolve。
+    ShareTurnstileRequired,
+    /// FluxMesh：分享方已修改或删除源文件（数据面 `changed`）。
+    ShareFileChanged,
+    /// FluxMesh：实时分享的分享方当前不在线。
+    ShareSenderOffline,
+    /// FluxMesh：任务不能分享（未完成、文件缺失或远程任务）。
+    ShareTaskNotShareable,
+    /// FluxMesh：没有可用的桥接（分享方不在线、没有在线网关，或云端不允许该身份走桥接）。
+    ShareBridgeUnavailable,
+    /// FluxMesh：分享数量、领取次数或流量超出套餐额度。
+    ShareQuotaExceeded,
+    /// FluxMesh：云端暂存副本尚未就绪（未转暂存、上传未完成或已被删除）。
+    ShareCloudNotReady,
+    /// FluxMesh：云端流量额度耗尽（桥接 / CDN 下载或上传）。
+    ShareTrafficExhausted,
+    /// FluxMesh：云端暂存不可用（存储未配置或服务暂不可用）。
+    ShareCloudUnavailable,
+    /// FluxMesh：取件码指向本机自己发起的分享（iroh 端点不能连接自身）。
+    ShareOwnShare,
+    /// FluxMesh：本机源文件已缺失或已被修改，分享无法继续 / 重新开始，只能删除。
+    ShareSourceMissing,
+    /// FluxMesh：管理员已关闭并锁定该分享的共享，不能再打开。
+    ShareSwarmLocked,
+    /// FluxMesh：本月共享加速额度已用完（任务仍可从分享方直连下完）。
+    ShareSwarmQuotaExhausted,
+    /// FluxMesh：共享加速需要登录（云端关闭了游客共享加速）。
+    ShareSwarmLoginRequired,
+    /// FluxMesh：所有者近期被下架次数达到上限，暂停发起 / 恢复分享。`RpcErrorData.field`
+    /// 携带解除时刻（RFC 3339），UI 据此填充文案里的时间。
+    ShareStrikeLimited,
+    /// FluxMesh：该分享已申诉过（每个下架分享只能申诉一次）。
+    ShareAppealExists,
     /// 对端发送了本端不认识的原因。
     #[serde(other)]
     Unknown,

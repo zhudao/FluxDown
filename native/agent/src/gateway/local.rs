@@ -3,24 +3,26 @@
 //! 全部复用 [`run_socket`](super::run_socket) 的同一套实现。
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use fluxdown_protocol::{
     ApplicationErrorCode, EventFrame, RequestId, RpcErrorData, RpcErrorObject, RpcRequest,
     RpcResponse, ServiceHello, ServiceRole, validate_first_request,
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use super::session_auth::SessionContext;
 use super::{GatewayService, RequestLanes, declares_selection_ui};
+use crate::event_pump::{EventPump, EventReader, MAX_PENDING_FRAMES, PumpEnd};
 
 type Waiters = Mutex<HashMap<RequestId, oneshot::Sender<RpcResponse>>>;
 
 /// 进程内事件流的终止原因。
 #[derive(Debug, thiserror::Error)]
 pub enum LocalEventError {
-    /// 消费速度落后于事件产生，已有 `skipped` 帧被丢弃：调用方必须用新的连接重新取快照。
+    /// 消费速度落后于事件产生（或合并后积压超限），事件流中断：调用方必须用新的连接重新取快照。
     #[error("local event stream lagged behind by {skipped} frames")]
     Lagged { skipped: u64 },
     /// agent 已关闭，不会再有事件。
@@ -38,9 +40,12 @@ pub struct LocalConnection {
     lanes: Option<RequestLanes>,
     waiters: Arc<Waiters>,
     next_id: AtomicI64,
-    events: tokio::sync::Mutex<broadcast::Receiver<EventFrame>>,
+    events: EventReader,
+    /// 持有广播接收任务；丢弃连接即中止。
+    _pump: EventPump,
     cancel: CancellationToken,
     ui_client: bool,
+    snapshot_ready: AtomicBool,
     /// `Drop` 可能发生在任意线程（如 FFI 对象被宿主语言的 GC 线程释放）：收尾任务投递到创建
     /// 连接的 runtime。
     runtime: tokio::runtime::Handle,
@@ -59,7 +64,9 @@ impl GatewayService {
         if ui_client {
             self.ui_connected().await;
         }
-        let (events, lanes, responses) = self.open_session(true);
+        let (receiver, lanes, responses) = self.open_session(&SessionContext::local(true));
+        let mut pump = EventPump::new();
+        pump.attach(receiver, MAX_PENDING_FRAMES);
         let waiters = Arc::new(Waiters::default());
         tokio::spawn(route_responses(responses, Arc::clone(&waiters)));
         Ok(LocalConnection {
@@ -68,9 +75,11 @@ impl GatewayService {
             lanes: Some(lanes),
             waiters,
             next_id: AtomicI64::new(1),
-            events: tokio::sync::Mutex::new(events),
+            events: pump.reader(),
+            _pump: pump,
             cancel,
             ui_client,
+            snapshot_ready: AtomicBool::new(false),
             runtime: tokio::runtime::Handle::current(),
         })
     }
@@ -86,6 +95,8 @@ impl LocalConnection {
     /// 与 WebSocket 相同的通道语义：同一通道内按到达顺序处理，慢通道不阻塞其它通道。
     /// 响应的 `id` 恒为调用方给出的 `id`（同一连接上并发的重复 `id` 也不会串线）。
     pub async fn call(&self, mut request: RpcRequest) -> RpcResponse {
+        let initial_snapshot =
+            self.ui_client && request.method == fluxdown_protocol::method::SYSTEM_SNAPSHOT;
         let wire_id = RequestId::Integer(self.next_id.fetch_add(1, Ordering::Relaxed));
         let caller_id = std::mem::replace(&mut request.id, wire_id.clone());
         let (waiter, response) = oneshot::channel();
@@ -99,20 +110,33 @@ impl LocalConnection {
             return with_id(rejected, caller_id);
         }
         match response.await {
-            Ok(response) => with_id(response, caller_id),
+            Ok(response) => {
+                if initial_snapshot
+                    && matches!(&response, RpcResponse::Success(_))
+                    && !self.snapshot_ready.swap(true, Ordering::AcqRel)
+                {
+                    // 事件订阅早于快照请求，重放晚于快照生成；与 WebSocket 路径相同。
+                    self.service.local.shell.ui_snapshot_ready();
+                }
+                with_id(response, caller_id)
+            }
             Err(_) => with_id(unavailable(wire_id), caller_id),
         }
     }
 
-    /// 下一帧事件（等价于 `service.event` 通知）。`Lagged` 后必须重新 `connect` 取快照。
+    /// 下一帧事件（等价于 `service.event` 通知）。宿主消费得慢时，积压的进度类事件按实体合并
+    /// （帧的 `previous` 声明覆盖区间，用 [`judge_frame`](fluxdown_protocol::judge_frame) 判定）；
+    /// 合并后仍积压超限或广播落后时返回 `Lagged`，必须重新 `connect` 取快照。
     pub async fn next_event(&self) -> Result<EventFrame, LocalEventError> {
-        let mut events = self.events.lock().await;
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => Err(LocalEventError::Closed),
-            frame = events.recv() => frame.map_err(|error| match error {
-                broadcast::error::RecvError::Lagged(skipped) => LocalEventError::Lagged { skipped },
-                broadcast::error::RecvError::Closed => LocalEventError::Closed,
+            frame = self.events.next() => frame.map_err(|end| match end {
+                PumpEnd::Lagged { skipped } => LocalEventError::Lagged { skipped },
+                PumpEnd::Overflow { pending } => LocalEventError::Lagged {
+                    skipped: u64::try_from(pending).unwrap_or(u64::MAX),
+                },
+                PumpEnd::Closed => LocalEventError::Closed,
             }),
         }
     }
@@ -123,7 +147,9 @@ impl LocalConnection {
         let ui_client = self.ui_client;
         self.ui_client = false;
         if ui_client {
-            self.service.ui_disconnected().await;
+            self.service
+                .ui_disconnected(self.snapshot_ready.load(Ordering::Acquire))
+                .await;
         }
         if let Some(lanes) = lanes {
             lanes.shutdown().await;
@@ -135,13 +161,14 @@ impl Drop for LocalConnection {
     fn drop(&mut self) {
         let lanes = self.lanes.take();
         let ui_client = self.ui_client;
+        let was_ready = self.snapshot_ready.load(Ordering::Acquire);
         if lanes.is_none() && !ui_client {
             return;
         }
         let service = Arc::clone(&self.service);
         self.runtime.spawn(async move {
             if ui_client {
-                service.ui_disconnected().await;
+                service.ui_disconnected(was_ready).await;
             }
             if let Some(lanes) = lanes {
                 lanes.shutdown().await;

@@ -1,4 +1,4 @@
-//! 下载：保存位置、行为、连接与性能、自动重试、高级。
+//! 下载：保存位置、自定义分类、行为、连接与性能、自动重试、高级。
 
 use fluxdown_protocol::{HIGH_SEGMENTS_WARN_ABOVE, SEVERE_SEGMENTS_WARN_ABOVE};
 use fluxdown_ui_components::{
@@ -9,7 +9,7 @@ use fluxdown_ui_theme::active_theme;
 use gpui::{App, ParentElement, SharedString, Styled, Window};
 use gpui_component::h_flex;
 
-use super::{SectionContext, rate_limit, user_agent};
+use super::{SectionContext, auto_quantity, categories, rate_limit, retention, user_agent};
 use crate::ui::{Control, Explain, SettingsPage, SettingsSection, body_text, meta_text};
 
 pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
@@ -35,6 +35,7 @@ pub(crate) fn page(ctx: &SectionContext, cx: &mut App) -> SettingsPage {
         connection_section(ctx, cx),
         retry_section(ctx),
         advanced_section(ctx),
+        categories::group(ctx, cx),
     ])
 }
 
@@ -51,6 +52,47 @@ fn save_location_section(ctx: &SectionContext) -> SettingsSection {
             Some("rememberLastSaveDirDesc"),
             ctx.pref_switch("download.remember_last_save_dir", false),
         ))
+        .row(ctx.item(
+            "saveDirHistory",
+            Some("saveDirHistoryDesc"),
+            ctx.pref_switch(SAVE_DIR_HISTORY_ENABLED_PREF, true),
+        ))
+        .row(ctx.item(
+            "clearSaveDirHistory",
+            Some("clearSaveDirHistoryDesc"),
+            clear_save_dir_history_control(ctx),
+        ))
+}
+
+/// 新建下载保存目录历史（设备本地偏好，与 `fluxdown_ui_downloads` 的
+/// `SAVE_DIR_HISTORY_PREF` / `SAVE_DIR_HISTORY_ENABLED_PREF` 同键）。
+const SAVE_DIR_HISTORY_PREF: &str = "download.save_dir_history";
+const SAVE_DIR_HISTORY_ENABLED_PREF: &str = "download.save_dir_history_enabled";
+
+/// 清空保存目录历史：写墓碑移除偏好；没有记录时按钮置灰。
+fn clear_save_dir_history_control(ctx: &SectionContext) -> Control {
+    let store = ctx.store();
+    let label = ctx.t("clearSaveDirHistoryAction");
+    Control::custom(move |disabled, _key, _window, cx: &mut App| {
+        let empty = store
+            .read(cx)
+            .pref(SAVE_DIR_HISTORY_PREF)
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty);
+        let clear_store = store.clone();
+        button(
+            "download-clear-save-dir-history",
+            label.clone(),
+            ButtonVariant::Secondary,
+            cx,
+        )
+        .on_click(move |_, _, cx| {
+            clear_store.update(cx, |store, cx| {
+                store.set_pref(SAVE_DIR_HISTORY_PREF, serde_json::Value::Null, cx);
+            });
+        })
+        .disabled(disabled || empty)
+    })
 }
 
 /// 目录选择：文本输入 + 系统目录选择器。
@@ -143,6 +185,11 @@ fn behavior_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
             ctx.daemon_enum_dropdown("file_missing_action", "fileMissing"),
         ))
         .row(ctx.item(
+            "completedRecordRetention",
+            Some("completedRecordRetentionDesc"),
+            retention::control(ctx),
+        ))
+        .row(ctx.item(
             "idleFileScan",
             Some("idleFileScanDesc"),
             ctx.daemon_switch("idle_file_scan"),
@@ -157,10 +204,12 @@ fn behavior_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
 fn default_queue_control(ctx: &SectionContext, cx: &mut App) -> Control {
     let mut options = vec![(SharedString::from(""), ctx.t("defaultQueue"))];
     options.extend(ctx.store.read(cx).queues().iter().map(|queue| {
-        (
-            SharedString::from(queue.queue_id.clone()),
-            SharedString::from(queue.name.clone()),
-        )
+        let label = match queue.queue_id.as_str() {
+            fluxdown_protocol::MAIN_QUEUE_ID => ctx.t("mainQueue"),
+            fluxdown_protocol::LATER_QUEUE_ID => ctx.t("laterQueue"),
+            _ => SharedString::from(queue.name.clone()),
+        };
+        (SharedString::from(queue.queue_id.clone()), label)
     }));
     ctx.daemon_dropdown("default_queue_id", options)
 }
@@ -214,7 +263,7 @@ fn connection_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
             ctx.item(
                 "defaultThreads",
                 Some("defaultThreadsDesc"),
-                ctx.daemon_number("default_segments"),
+                auto_quantity::control(ctx, "default_segments", "default_segments_custom", 16),
             )
             .footer(threads_risk_footer(ctx)),
         );
@@ -234,7 +283,7 @@ fn connection_section(ctx: &SectionContext, cx: &mut App) -> SettingsSection {
         section = section.row(ctx.item(
             "cdnMaxNodes",
             Some("cdnMaxNodesDesc"),
-            ctx.daemon_number("cdn_max_nodes"),
+            auto_quantity::control(ctx, "cdn_max_nodes", "cdn_max_nodes_custom", 2),
         ));
     }
     section = section.row(

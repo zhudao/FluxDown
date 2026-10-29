@@ -55,6 +55,8 @@ import com.fluxdown.app.actions.LocalTaskActions
 import com.fluxdown.app.actions.TaskActions
 import com.fluxdown.app.feature.devices.DevicesScreen
 import com.fluxdown.app.feature.devices.AddHostSheet
+import com.fluxdown.app.feature.devices.AddDeviceSheet
+import com.fluxdown.app.feature.devices.InboundPairingPrompt
 import com.fluxdown.app.feature.downloads.ActivitySheet
 import com.fluxdown.app.feature.downloads.DownloadsRailContext
 import com.fluxdown.app.feature.downloads.DownloadsRailFooter
@@ -64,6 +66,7 @@ import com.fluxdown.app.feature.downloads.HostSwitchSheet
 import com.fluxdown.app.feature.downloads.ProvideDownloadsView
 import com.fluxdown.app.feature.downloads.ViewOptionsSheet
 import com.fluxdown.app.feature.newtask.MoveToQueueSheet
+import com.fluxdown.app.feature.newtask.ImportEffects
 import com.fluxdown.app.feature.newtask.NewDownloadSheet
 import com.fluxdown.app.feature.rss.RssEditorSheet
 import com.fluxdown.app.feature.rss.RssEditorTarget
@@ -142,7 +145,9 @@ fun AppShell() {
     val scope = rememberCoroutineScope()
     val haptics = FluxTheme.haptics
     val actions = remember(overlays, haptics) {
-        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics)
+        TaskActions(context.applicationContext, scope, { container.session }, container.store, overlays, nav, haptics) {
+            container.host.value is com.fluxdown.core.model.HostRef.Local
+        }
     }
     val disconnectedText = stringResource(R.string.localServiceDisconnected)
     val invalidText = stringResource(R.string.localServiceInvalidArgument)
@@ -186,6 +191,7 @@ fun AppShell() {
         AppearanceSyncEffect()
         AccountEffects()
         UpdateEffects()
+        ImportEffects()
         ProvideDownloadsView {
             BackHandler(enabled = nav.searchOpen || nav.sheet != null || nav.selecting || nav.stack.isNotEmpty() || nav.tab != AppTab.Downloads) {
                 nav.back()
@@ -210,6 +216,7 @@ fun AppShell() {
                 Sheets()
                 FluxPortalHost(portal)
                 SelectionRequestSheet(request = selection)
+                InboundPairingPrompt()
                 FileConflictHost(requests = fileConflicts, blocked = selection != null)
                 CommandSearch(visible = nav.searchOpen, onDismiss = nav::closeSearch)
                 FluxOverlayHost(overlays)
@@ -400,7 +407,8 @@ private fun Sheets() {
     MoveToQueueSheet(route = sheet as? SheetRoute.MoveToQueue, onDismiss = nav::closeSheet)
     ViewOptionsSheet(visible = sheet == SheetRoute.ViewOptions, onDismiss = nav::closeSheet)
     HostSwitchSheet(visible = sheet == SheetRoute.HostSwitch, onDismiss = nav::closeSheet)
-    AddHostSheet(visible = sheet == SheetRoute.AddHost, onDismiss = nav::closeSheet)
+    AddHostSheet(route = sheet as? SheetRoute.AddHost, onDismiss = nav::closeSheet)
+    AddDeviceSheet(visible = sheet == SheetRoute.AddDevice, onDismiss = nav::closeSheet)
     ActivitySheet(visible = sheet == SheetRoute.Activity, onDismiss = nav::closeSheet)
     val rss = sheet as? SheetRoute.RssEditor
     RssEditorSheet(
@@ -470,12 +478,9 @@ private fun BoxScope.BottomChrome(failed: Boolean, orb: FluxOrbState) {
             items = dockItems(failed, tabs),
             selected = tabs.indexOf(nav.tab),
             onSelect = { nav.selectTab(tabs[it]) },
-            mini = nav.dockMini && !nav.selecting && nav.sheet == null,
-            onExpand = { nav.dockMini = false },
             hidden = hidden,
             selectionMode = nav.selecting,
             contentDescription = str(R.string.mobileMainNav),
-            expandDescription = str(R.string.mobileExpandNav),
         )
         DownloadsSelectionDock(Modifier.fillMaxWidth())
         if (!hidden) {
@@ -502,7 +507,6 @@ private fun BoxScope.BottomChrome(failed: Boolean, orb: FluxOrbState) {
                 },
                 modifier = Modifier.align(Alignment.CenterEnd),
                 selectionMode = nav.selecting,
-                mini = nav.dockMini && !nav.selecting,
                 contentDescription = str(if (rssTab) R.string.rssAddSource else R.string.newDownload),
                 exitDescription = str(R.string.mobileExitSelection),
             )

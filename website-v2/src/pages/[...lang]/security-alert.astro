@@ -5,13 +5,12 @@ import { BrandIcon } from "@/components/icons/brand";
 import { langStaticPaths, resolveLang, href } from "@/i18n/routing";
 import { guides } from "@/i18n/messages/guides";
 import { GITHUB_URL } from "@/lib/site-nav";
+import { OFFICIAL_SITES } from "@/lib/announcements";
 
 export const getStaticPaths = langStaticPaths;
 const lang = resolveLang(Astro.params.lang);
 const t = guides[lang].security;
 
-/** 官方域名白名单;首项为主域名。 */
-const OFFICIAL_SITES = ["https://www.fluxdown.com", "https://fluxdown.com", "https://fluxdown.zerx.dev"] as const;
 const n = (i: number) => String(i + 1).padStart(2, "0");
 ---
 
@@ -19,7 +18,7 @@ const n = (i: number) => String(i + 1).padStart(2, "0");
   <PageHeader eyebrow={t.eyebrow} title={t.title} lede={t.lede} />
 
   <section class="frame">
-    <div class="cells grid md:grid-cols-2">
+    <div class="cells grid grid-cols-1 md:grid-cols-2">
       <div class="cell domain domain-bad">
         <p class="domain-label mono">
           <span class="dot" aria-hidden="true"></span>
@@ -54,7 +53,7 @@ const n = (i: number) => String(i + 1).padStart(2, "0");
 
     <div class="rule"></div>
 
-    <div class="section-tight grid gap-12 lg:grid-cols-2 lg:gap-16">
+    <div class="section-tight grid grid-cols-1 gap-12 lg:grid-cols-2 lg:gap-16">
       <section aria-labelledby="advice-h">
         <h2 id="advice-h" class="h3">{t.adviceTitle}</h2>
         <ol class="list mt-6">

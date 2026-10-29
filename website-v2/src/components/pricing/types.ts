@@ -7,6 +7,7 @@ export interface CloudCampaign {
   stageSold: number[];
   currentStageIndex: number;
   effectivePriceMinor: number;
+  effectivePriceUsdtMicros?: number | null;
 }
 
 export interface CloudPlan {
@@ -21,11 +22,17 @@ export interface CloudPlan {
   icon: string;
   color: string;
   priceMinor: number;
+  priceUsdtMicros?: number | null;
   currency: string;
   highlights: string[];
   /** Missing = purchasable (older catalog responses). Delisted-but-shown plans are false. */
   purchasable?: boolean;
   campaign: CloudCampaign | null;
+  /** Missing = membership (older catalog responses). */
+  productKind?: "membership" | "pack";
+  pack?: { kind: "swarm" | "download" | "upload"; bytes: number; validDays: number } | null;
+  /** Membership card period in days; missing / null = permanent plan. */
+  billingPeriodDays?: number | null;
 }
 
 /** What the web purchase dialog needs from a plan card. */
@@ -35,4 +42,8 @@ export interface PlanBrief {
   /** Price currently shown on the card (campaign price, minor units); the order is authoritative. */
   priceMinor: number;
   currency: string;
+  /** Undiscounted list price (minor units); USDT is quoted proportionally to it. */
+  basePriceMinor: number;
+  /** USDT price at the list price (micros); null = USDT not offered. */
+  priceUsdtMicros: number | null;
 }

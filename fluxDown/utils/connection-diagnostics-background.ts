@@ -1,5 +1,11 @@
 import { browser } from "wxt/browser";
-import { ConnectionDiagnosticsStore, DIAGNOSTIC_MAX_AGE_MS, MAX_DIAGNOSTIC_ENTRIES } from "./connection-diagnostics-store";
+import {
+  ConnectionDiagnosticsStore,
+  DIAGNOSTIC_MAX_AGE_MS,
+  MAX_DIAGNOSTIC_ENTRIES,
+  redactConnectionError,
+} from "./connection-diagnostics-store";
+import { errorLogSnapshot } from "./error-log-background";
 import { recordConnectionDiagnostic, setDiagnosticRecorder } from "./connection-diagnostics";
 import { nmhCheckFluxDownAvailableWithRetry } from "./native-messaging";
 import { loadSettings } from "./settings";
@@ -11,8 +17,12 @@ export function installConnectionDiagnostics() {
 
   return async (message: { type: string; event?: unknown }, sender: { id?: string; url?: string }) => {
     const page = sender.url?.split(/[?#]/, 1)[0];
-    const source = page === browser.runtime.getURL("/popup.html") ? "popup"
-      : page === browser.runtime.getURL("/options.html") ? "options" : null;
+    const pages: Record<string, "popup" | "options" | "sidepanel"> = {
+      [browser.runtime.getURL("/popup.html")]: "popup",
+      [browser.runtime.getURL("/options.html")]: "options",
+      [browser.runtime.getURL("/sidepanel.html")]: "sidepanel",
+    };
+    const source = page ? pages[page] ?? null : null;
     // Content scripts and web pages cannot read the journal or inject entries.
     if (sender.id !== browser.runtime.id || !source) {
       throw new Error("Diagnostics are only available to extension pages");
@@ -24,8 +34,8 @@ export function installConnectionDiagnostics() {
 
     // Pure liveness check: never warm up/start the desktop app or submit a task.
     const localReachable = await nmhCheckFluxDownAvailableWithRetry();
-    const [settings, platform, events] = await Promise.all([
-      loadSettings(), browser.runtime.getPlatformInfo(), store.snapshot(),
+    const [settings, platform, events, errors] = await Promise.all([
+      loadSettings(), browser.runtime.getPlatformInfo(), store.snapshot(), errorLogSnapshot(),
     ]);
     const manifest = browser.runtime.getManifest();
     const report = {
@@ -52,6 +62,8 @@ export function installConnectionDiagnostics() {
       },
       retention: { maxEntries: MAX_DIAGNOSTIC_ENTRIES, maxAgeDays: DIAGNOSTIC_MAX_AGE_MS / 86_400_000 },
       events,
+      // 扩展错误日志（侧边栏「诊断」页同源），导出前与连接事件同样脱敏。
+      extensionErrors: errors.map((entry) => ({ ...entry, message: redactConnectionError(entry.message) })),
     };
     // Background owns the data URL and download. Closing popup/Save As cannot
     // revoke a page-owned blob midway through saving. Existing interceptors

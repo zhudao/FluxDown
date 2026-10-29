@@ -142,6 +142,44 @@ pub(crate) fn tone_pill(text: impl Into<SharedString>, color: Hsla, frame: Frame
         .text_color(color)
 }
 
+/// 风险等级的色调：`elevated` = warning，`full` = destructive，`standard` 无强调。
+pub(crate) fn risk_color(risk: &str, frame: Frame<'_>) -> Option<Hsla> {
+    match risk {
+        "elevated" => Some(frame.extended.colors.warning),
+        "full" => Some(frame.tokens.colors.destructive),
+        _ => None,
+    }
+}
+
+/// 风险等级的（名称，说明）文案键；未知等级按 standard。
+pub(crate) fn risk_keys(risk: &str) -> (&'static str, &'static str) {
+    match risk {
+        "elevated" => ("pluginRiskElevated", "pluginRiskTooltipElevated"),
+        "full" => ("pluginRiskFull", "pluginRiskTooltipFull"),
+        _ => ("pluginRiskStandard", "pluginRiskTooltipStandard"),
+    }
+}
+
+/// 风险徽标：只对 `elevated` / `full` 显示（standard 不打扰），悬停给出说明。
+pub(crate) fn risk_pill(
+    id: impl Into<gpui::ElementId>,
+    risk: &str,
+    frame: Frame<'_>,
+) -> Option<gpui::Stateful<Div>> {
+    use gpui::InteractiveElement as _;
+    use gpui::StatefulInteractiveElement as _;
+    let color = risk_color(risk, frame)?;
+    let (name_key, tip_key) = risk_keys(risk);
+    let tip = SharedString::from(frame.translator.text(tip_key).to_owned());
+    Some(
+        tone_pill(frame.translator.text(name_key).to_owned(), color, frame)
+            .id(id)
+            .tooltip(move |window, cx| {
+                fluxdown_ui_components::tooltip_view(tip.clone(), window, cx)
+            }),
+    )
+}
+
 /// 空状态：32px 图标（text_tertiary）+ sm MEDIUM 标题 + 可选 xs 说明，居中。
 pub(crate) fn empty_state(
     icon: impl IconNamed,
@@ -175,9 +213,30 @@ pub(crate) fn is_web_url(url: &str) -> bool {
         && !rest.is_empty()
 }
 
+/// 主页地址的展示文本：去掉协议、`www.` 与末尾斜杠（`https://github.com/a/b/` → `github.com/a/b`）；
+/// 链接目标仍用原地址。
+pub(crate) fn display_url(url: &str) -> &str {
+    let url = url.trim();
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let trimmed = rest.trim_end_matches('/');
+    if trimmed.is_empty() { url } else { trimmed }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_web_url;
+    use super::{display_url, is_web_url};
+
+    #[test]
+    fn display_url_drops_scheme_www_and_trailing_slash() {
+        assert_eq!(
+            display_url("https://github.com/zerx-lab/x/"),
+            "github.com/zerx-lab/x"
+        );
+        assert_eq!(display_url("HTTP://www.example.com"), "example.com");
+        assert_eq!(display_url("example.com/a"), "example.com/a");
+        assert_eq!(display_url("https://"), "https://");
+    }
 
     #[test]
     fn only_http_and_https_are_clickable() {

@@ -127,9 +127,15 @@ impl FetchOutcome {
 /// Fetch every subscription URL (newline-separated list, `#` comments
 /// allowed) and return the merged + deduped tracker list.
 ///
+/// Requests go through the host egress ([`crate::egress::RoutedClients`]) so the
+/// global proxy and site rules apply exactly as for download tasks.
+///
 /// Individual source failures are tolerated: the outcome is a success as
 /// long as at least one source responds.  All network errors are logged.
-pub async fn fetch_subscriptions(urls: &str) -> FetchOutcome {
+pub async fn fetch_subscriptions(
+    urls: &str,
+    proxy: &crate::proxy_config::ProxyConfig,
+) -> FetchOutcome {
     let sources: Vec<&str> = urls
         .lines()
         .map(str::trim)
@@ -146,7 +152,7 @@ pub async fn fetch_subscriptions(urls: &str) -> FetchOutcome {
         };
     }
 
-    let client = match reqwest::Client::builder().timeout(FETCH_TIMEOUT).build() {
+    let client = match crate::egress::RoutedClients::new(proxy, "", |b| b.timeout(FETCH_TIMEOUT)) {
         Ok(c) => c,
         Err(e) => {
             return FetchOutcome {
@@ -197,7 +203,11 @@ pub async fn fetch_subscriptions(urls: &str) -> FetchOutcome {
 }
 
 /// Fetch a single subscription source and return its non-empty lines.
-async fn fetch_one(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
+async fn fetch_one(
+    clients: &crate::egress::RoutedClients,
+    url: &str,
+) -> Result<Vec<String>, String> {
+    let client = clients.client(url).await.map_err(|e| e.to_string())?;
     let resp = client.get(url).send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
     if !status.is_success() {

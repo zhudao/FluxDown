@@ -41,6 +41,10 @@ pub enum PluginEntryKind {
     Auth,
     /// 订阅 provider 入口：`globalThis.subscribe`。
     Subscription,
+    /// 常驻宿主入口：manifest `main.entry`，顶层脚本注册视图/命令/RPC。
+    Main,
+    /// 拦截入口：`globalThis.intercept`。
+    Intercept,
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +150,9 @@ pub struct ResolveResult {
     /// fail-closed 强制）。仅初段解析（[`ResolveRequest::resolver_item`] 为空）
     /// 可返回；二段返回会被拒绝（防递归裂变）。`None` = 单直链旧语义。
     pub manifest: Option<ResolveManifest>,
+    /// 请求改写补丁（与拦截器 `prepare` 返回值同形），每次运行都重新应用，
+    /// 失败即任务失败。`extraHeaders` 作为整表替换并入同一补丁。
+    pub request: Option<crate::intercept::RequestPatch>,
 }
 
 /// [`ResolveResult::manifest`] —— 插件返回的多文件清单（网盘文件夹/多规格
@@ -261,26 +268,25 @@ pub enum PluginEvent {
         file_name: String,
         total_bytes: i64,
     },
-    /// 任务被取消（用户手动取消 / variants 选择被取消 / 宿主取消）终态通知
-    /// （593#1）。与 onDone/onError 互斥：cancel_task 只在 generation 未被
-    /// on_task_done 接管的路径上发出，同一任务不会重复触发终态钩子。仅用于
-    /// 通知插件释放已转存的临时远程资源，不影响任务状态机、不支持重试。
+    /// 用户关闭「选择插件」/ 变体选择对话框而取消（任务被暂停）终态通知
+    /// （593#1）。与 onDone/onError 互斥：只在 generation 未被 on_task_done
+    /// 接管的路径上发出，同一任务不会重复触发终态钩子。仅用于通知插件释放已转存
+    /// 的临时远程资源，不影响任务状态机、不支持重试。
     Cancel {
         task_id: String,
         url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<CancelReason>,
+        reason: CancelReason,
     },
 }
 
-/// `onCancel` 载荷的可选取消原因。
+/// `onCancel` 载荷的取消原因；每个变体都对应一条真实的引擎发射路径。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CancelReason {
+    /// 用户关闭了「选择插件」对话框（任务被暂停）。
     UserCancelled,
+    /// 用户关闭了 resolver 多变体选择框。
     VariantSelectionCancelled,
-    HostCancelled,
-    Unknown,
 }
 
 impl PluginEvent {
@@ -370,6 +376,14 @@ pub struct BridgeHttpRequest {
     /// 由运行时注入，插件脚本不能自行打开认证能力。
     #[serde(skip)]
     pub auth_allowed: bool,
+    /// 由运行时注入（仅开发模式插件为 true），插件脚本不能自行打开：
+    /// 允许访问环回 / 私网等非公网地址，便于连接本机服务联调。
+    #[serde(skip)]
+    pub private_network_allowed: bool,
+    /// 由运行时注入：本次插件调用的出口（见 [`super::call_egress`]）。`None` = 无调用级
+    /// 出口（常驻宿主、通知钩子等），bridge 按全局规则 + 全局模式选出口。
+    #[serde(skip)]
+    pub egress: Option<Arc<super::call_egress::CallEgress>>,
 }
 
 impl Default for BridgeHttpRequest {
@@ -381,6 +395,8 @@ impl Default for BridgeHttpRequest {
             body: None,
             auth_ref: None,
             auth_allowed: false,
+            private_network_allowed: false,
+            egress: None,
         }
     }
 }
@@ -463,6 +479,9 @@ pub struct YtdlpSpec {
     /// 从脚本墙钟里扣除，避免排队被误判为插件自身超时。
     #[serde(skip)]
     pub wall_pause: Option<Arc<WallPause>>,
+    /// 宿主在 JS 边界注入：本次插件调用的出口（见 [`BridgeHttpRequest::egress`]）。
+    #[serde(skip)]
+    pub egress: Option<Arc<super::call_egress::CallEgress>>,
 }
 
 /// 累计「不应计入脚本墙钟」的排队等待时长（含进行中的等待）。
@@ -551,6 +570,133 @@ pub struct HostContext {
     /// manifest `permissions` 是否含 `"auth"`——决定是否允许插件读取/保存
     /// 通用认证凭据以及让 `flux.fetch` 自动注入凭据。
     pub auth_permitted: bool,
+    /// 插件是否为开发模式（「从目录安装」）。仅此类插件的 `flux.fetch` 可访问
+    /// 非公网地址（环回 / 私网）；正式安装的插件恒为 false。
+    pub private_network_allowed: bool,
+    /// 本次调用的出口（见 [`super::call_egress`]）；`None` = 全局出口。
+    pub egress: Option<Arc<super::call_egress::CallEgress>>,
+}
+
+// ---------------------------------------------------------------------------
+// 常驻宿主（`main`）：可移植视图 / 命令 / RPC / 事件 / 定时器。
+// ---------------------------------------------------------------------------
+
+/// `flux.tasks.*` 的出口：把任务操作转给 daemon 服务（方法白名单由实现方负责）。
+/// `params` / 返回值均为 daemon wire 形状。
+#[async_trait::async_trait]
+pub trait PluginTaskPort: Send + Sync {
+    async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError>;
+}
+
+/// 一次页面脚本调用（[`HostCall::Invoke`] 且 `page_url` 为 `Some`）执行期间，插件经
+/// `flux.tasks.create` / `flux.tasks.resume` 成功开始的任务。宿主据此把用户在浏览器里的
+/// 操作登记为「用户开始」（进度 / 完成窗口）；其余调用来源（视图、命令、事件、定时器）恒为空。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StartedTasks {
+    /// `create` 返回的新任务 ID，按调用顺序。
+    pub created: Vec<String>,
+    /// `resume` 成功的已有任务 ID，按调用顺序。
+    pub resumed: Vec<String>,
+}
+
+/// 投递给常驻宿主的一次调用。
+#[derive(Debug, Clone)]
+pub enum HostCall {
+    ViewOpen {
+        session: String,
+        view: String,
+        props: serde_json::Value,
+        task_id: Option<String>,
+        locale: String,
+    },
+    /// `event`：`{node, type, value?, key?, action?}`。
+    ViewEvent {
+        session: String,
+        event: serde_json::Value,
+    },
+    ViewRefresh {
+        session: String,
+    },
+    ViewClose {
+        session: String,
+    },
+    Command {
+        id: String,
+        task_ids: Vec<String>,
+    },
+    /// `page_url` 为 `Some` 表示来自浏览器页面脚本（只命中 `{ page: true }` 处理器，
+    /// ctx 为 `{ caller: "page", pageUrl }`）；`None` 表示桌面视图（ctx 为 `{ caller: "desktop" }`）。
+    Invoke {
+        name: String,
+        args: serde_json::Value,
+        page_url: Option<String>,
+    },
+    Event(PluginEvent),
+    Timer {
+        id: u32,
+    },
+    /// 设置值变化：`json` 为类型化设置对象，宿主就地更新 `flux.settings`。
+    Settings {
+        json: String,
+    },
+}
+
+/// 宿主调用的返回值。
+#[derive(Debug, Clone)]
+pub enum HostReply {
+    /// 视图树（未规范化的原始 JSON）。
+    Tree(serde_json::Value),
+    /// 命令 / RPC 的返回值；`started` 只有页面脚本调用可能非空。
+    Value {
+        value: serde_json::Value,
+        started: StartedTasks,
+    },
+    None,
+}
+
+/// 宿主调用的 future。入队在 [`PluginHost::call`] 返回之前同步完成，因此调用方
+/// 先后调用 `call` 的顺序就是宿主的处理顺序。
+pub type HostFuture =
+    std::pin::Pin<Box<dyn Future<Output = Result<HostReply, PluginError>> + Send>>;
+
+/// 已启动的常驻宿主（一个插件一个，独占一份 JS 运行时与上下文，调用串行执行）。
+pub trait PluginHost: Send + Sync {
+    /// 入队一次调用；返回的 future 在处理完成时就绪。
+    fn call(&self, call: HostCall) -> HostFuture;
+    /// 停止宿主并释放 JS 运行时；排队中与进行中的调用以 `Runtime` 错误结束。
+    fn dispose(&self);
+}
+
+/// 宿主回调（JS → Rust 的异步旁路）。
+#[async_trait::async_trait]
+pub trait HostEvents: Send + Sync {
+    /// `ctx.refresh()`：请求重新渲染某个会话。
+    fn request_render(&self, session: &str);
+    /// `flux.ui.toast`。
+    fn toast(&self, identity: &str, level: &str, text: &str);
+    /// `ctx.close()`：以 `requested` 原因结束调用方自己的会话。
+    fn close_view(&self, identity: &str, session: &str) -> Result<(), PluginError>;
+    /// `ctx.navigate(target)`：校验目标后向客户端发出跳转请求。
+    async fn navigate(
+        &self,
+        identity: &str,
+        session: &str,
+        target: serde_json::Value,
+    ) -> Result<(), PluginError>;
+    /// 安排一个一次性定时器：`delay` 后向宿主投递 [`HostCall::Timer`]。
+    fn timer(&self, identity: &str, id: u32, delay: Duration);
+    /// 取消尚未触发的定时器。
+    fn timer_clear(&self, identity: &str, id: u32);
+    /// `flux.settings.update`。
+    async fn settings_update(
+        &self,
+        identity: &str,
+        entries: Vec<(String, String)>,
+    ) -> Result<(), PluginError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -588,6 +734,22 @@ pub trait ScriptRuntime: Send + Sync {
         host: HostContext,
     ) -> Result<Option<ResolveResult>, PluginError>;
 
+    /// 调用 `globalThis.intercept(ctx)`（下载拦截平面）。`Ok(None)` = 不改动；
+    /// `Ok(Some(raw))` 为插件返回值的 JSON 文本。`long_running` 走外部工具信号量
+    /// （finalize 阶段可能运行 ffmpeg / yt-dlp 数十分钟）。
+    #[allow(clippy::too_many_arguments)]
+    async fn invoke_intercept(
+        &self,
+        plugin: &PluginScript,
+        arg_json: String,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        budget: ExecutionBudget,
+        host: HostContext,
+        long_running: bool,
+        artifact_task_id: Option<String>,
+    ) -> Result<Option<String>, PluginError>;
+
     /// 调用 `globalThis.authenticate(ctx)`，返回一次登录交互状态。
     async fn invoke_auth(
         &self,
@@ -622,6 +784,21 @@ pub trait ScriptRuntime: Send + Sync {
         budget: ExecutionBudget,
         host: HostContext,
     );
+
+    /// 启动一个常驻宿主：在插件 runtime 上 spawn 一个 actor，独占一份 JS 运行时，
+    /// 依次执行 flux 门面、宿主门面与 `main` 源码，之后经返回的句柄串行接收调用。
+    /// `task_port` 仅在 manifest 授予 `tasks` 权限时为 `Some`（决定是否注入
+    /// `flux.tasks`）。
+    #[allow(clippy::too_many_arguments)]
+    async fn start_host(
+        &self,
+        plugin: PluginScript,
+        settings_json: String,
+        bridge: Arc<dyn PluginBridge>,
+        host: HostContext,
+        task_port: Option<Arc<dyn PluginTaskPort>>,
+        events: Arc<dyn HostEvents>,
+    ) -> Result<Arc<dyn PluginHost>, PluginError>;
 
     /// 供 off-actor worker `spawn` 用的 tokio `Handle`（专用 multi_thread runtime）。
     /// **禁止裸 `tokio::spawn`**——那可能把 resolve future 落到宿主的
@@ -679,8 +856,8 @@ pub trait PluginBridge: Send + Sync {
 
     /// 命令式重试请求（onError 钩子专用，复刻 gopeed `ctx.task.continue()`）：
     /// 内部经 `plugin_retry_tx` 通道发起延迟 resume；限流在 actor 侧
-    /// （`max_auto_retries`）；不阻塞、不返回决策。
-    fn request_retry(&self, task_id: &str, delay_ms: u64);
+    /// （`max_auto_retries`）；不阻塞、不返回决策。`plugin_id` 供审计归属。
+    fn request_retry(&self, plugin_id: &str, task_id: &str, delay_ms: u64);
 
     /// `flux.task.recordArtifact(name)`：登记任务的衍生产物文件名（同
     /// `save_dir` 下的相对文件名，如转码产物 `<stem>.mp4`）。onDone 钩子专用；

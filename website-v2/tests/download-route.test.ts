@@ -1,25 +1,43 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { bustApiCaches } from "../src/lib/api-cache";
+import { markReleaseViewer, recordUpdateAssets, resetReleaseViewers } from "../src/lib/download-gate";
+import { resetDownloadBans } from "../src/lib/download-ban";
 
 let configured = true;
-let cdnConfigured = false;
+let cdnConfigured = true;
+const MAINLAND_IP = "114.114.114.114";
+const MAINLAND_IPV6 = "2408:8207:78ae:7a51:f55e:4f2f:261d:ccc9";
+/** 反代按 Cloudflare 的 CF-IPCountry 写入的 X-Client-Country。 */
+const COUNTRY: Record<string, string> = {
+  [MAINLAND_IP]: "CN", [MAINLAND_IPV6]: "CN", "8.8.8.8": "US", "1.1.1.1": "HK",
+};
 const signatures: string[] = [];
-mock.module("astro:env/server", () => ({ GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo" }));
+// 与 share-proxy.test.ts 共用同一进程的模块表：bun 的 mock.module 首次注册后导出名集合即固定，此处必须含全部 astro:env/server 导出。
+mock.module("astro:env/server", () => ({ GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo", FLUXCLOUD_API_BASE: "" }));
 const ossMock = () => ({
   ossConfigured: configured,
-  cdnDownloadUrl: (key: string, tag: string) => cdnConfigured
-    ? `https://cdn.example/${key}?fallback=github&tag=${encodeURIComponent(tag)}` : null,
-  releaseObjectKey: (tag: string, name: string) => `${tag}/${name}`,
-  presignOssUrl: (method: string, key: string) => {
-    signatures.push(method);
-    return `https://oss.example/${key}`;
+  cdnConfigured,
+  cdnDownloadUrl: (key: string) => {
+    signatures.push("CDN");
+    return `https://cdn.example/${key}?auth_key=signed`;
   },
-  ossDownloadUrl: (key: string) => {
-    signatures.push("GET");
+  releaseObjectKey: (tag: string, name: string) => `${tag}/${name}`,
+  presignOssHeadUrl: (key: string) => {
+    signatures.push("HEAD");
     return `https://oss.example/${key}`;
   },
 });
 mock.module("../src/lib/oss", ossMock);
+let pan123Configured = false;
+let pan123Link: string | null = "https://pan.example/app.zip";
+const pan123Mock = () => ({
+  pan123Configured,
+  pan123DownloadUrl: async (key: string, size: number) => {
+    signatures.push(`PAN123 ${key} ${size}`);
+    return pan123Link;
+  },
+});
+mock.module("../src/lib/pan123", pan123Mock);
 const { GET } = await import("../src/pages/api/download/[filename]");
 const originalFetch = globalThis.fetch;
 let draft = false;
@@ -31,10 +49,15 @@ let sequence = 0;
 
 beforeEach(() => {
   bustApiCaches();
+  resetReleaseViewers();
+  resetDownloadBans();
+  markReleaseViewer(MAINLAND_IP);
   configured = true;
-  cdnConfigured = false;
+  cdnConfigured = true;
   mock.module("../src/lib/oss", ossMock);
-  draft = false;
+  pan123Configured = false;
+  pan123Link = "https://pan.example/app.zip";
+  mock.module("../src/lib/pan123", pan123Mock);
   prerelease = false;
   status = 200;
   headSize = "12";
@@ -55,70 +78,233 @@ beforeEach(() => {
 });
 afterAll(() => { globalThis.fetch = originalFetch; mock.restore(); });
 
-async function get(source = "", tag = `v${sequence}`, filename = "app.zip") {
+/** 缺省模拟读过发布清单的大陆访客；clientIp 传空串时不带 X-Client-IP（按 TCP 对端 10.0.0.1）。 */
+async function get(source = "", tag = `v${sequence}`, filename = "app.zip", clientIp = MAINLAND_IP, userAgent = "") {
   const url = new URL(`https://site.example/api/download/${filename}`);
   if (source) url.searchParams.set("source", source);
   if (tag) url.searchParams.set("tag", tag);
-  return GET({ params: { filename }, url } as Parameters<typeof GET>[0]);
+  const headers: Record<string, string> = {};
+  if (clientIp) headers["x-client-ip"] = clientIp;
+  if (COUNTRY[clientIp]) headers["x-client-country"] = COUNTRY[clientIp];
+  if (userAgent) headers["user-agent"] = userAgent;
+  const request = new Request(url, { headers });
+  return GET({ params: { filename }, url, request, clientAddress: "10.0.0.1" } as Parameters<typeof GET>[0]);
 }
 
-test("github never signs or probes OSS", async () => {
-  const response = await get("github");
+test("mainland is Cloudflare's country code, so IPv6 visitors count and HK / unknown do not", async () => {
+  for (const [ip, expected] of [[MAINLAND_IPV6, "cdn"], ["1.1.1.1", "github"], ["10.9.9.9", "github"]]) {
+    markReleaseViewer(ip);
+    const response = await get("auto", `v${sequence}`, "app.zip", ip, "Mozilla/5.0");
+    expect(response.headers.get("X-Download-Source")).toBe(expected);
+  }
+});
+
+test("github never signs or probes OSS, even for mainland visitors", async () => {
+  const response = await get("github", `v${sequence}`, "app.zip", MAINLAND_IP);
   expect(response.status).toBe(302);
   expect(response.headers.get("X-Download-Source")).toBe("github");
   expect(signatures).toEqual([]);
   expect(requests.length).toBe(1);
 });
 
-test("auto uses CDN without HEAD or signing even when website OSS credentials are absent", async () => {
-  cdnConfigured = true;
-  configured = false;
-  mock.module("../src/lib/oss", ossMock);
-  headSize = "0";
-  const response = await get("auto");
-  expect(response.status).toBe(302);
-  expect(response.headers.get("X-Download-Source")).toBe("cdn");
-  expect(response.headers.get("Location")).toBe(
-    `https://cdn.example/v${sequence}/app.zip?fallback=github&tag=v${sequence}`,
-  );
+test("visitors outside mainland China go straight to GitHub without probing", async () => {
+  for (const source of ["auto", "", "unknown"]) {
+    const response = await get(source, `v${sequence}`, "app.zip", "8.8.8.8");
+    expect(response.headers.get("X-Download-Source")).toBe("github");
+  }
+  // 无 X-Client-IP 时按 TCP 对端判定，同样不是大陆。
+  expect((await get("auto", `v${sequence}`, "app.zip", "")).headers.get("X-Download-Source")).toBe("github");
   expect(signatures).toEqual([]);
-  expect(requests.length).toBe(1);
 });
 
-test("auto without CDN retains verified OSS then GitHub fallback", async () => {
-  expect((await get("auto")).headers.get("X-Download-Source")).toBe("oss");
-  expect(signatures).toEqual(["HEAD", "GET"]);
+test("mainland visitors get a verified OSS asset through the signed CDN, else GitHub", async () => {
+  for (const source of ["auto", ""]) {
+    const response = await get(source, `v${sequence}`, "app.zip", MAINLAND_IP);
+    expect(response.headers.get("X-Download-Source")).toBe("cdn");
+    expect(response.headers.get("Location")).toBe(`https://cdn.example/v${sequence}/app.zip?auth_key=signed`);
+  }
+  // HEAD 结果缓存：同一资产只探测一次。
+  expect(signatures).toEqual(["HEAD", "CDN", "CDN"]);
   sequence++;
   headSize = "11";
-  expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
+  signatures.length = 0;
+  const missing = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP);
+  expect(missing.headers.get("X-Download-Source")).toBe("github");
+  expect(signatures).toEqual(["HEAD"]);
 });
 
-test("auto CDN still requires published exact GitHub metadata", async () => {
-  cdnConfigured = true;
-  draft = true;
-  expect((await get("auto")).status).toBe(403);
-  bustApiCaches();
-  draft = false;
-  expect((await get("auto", `v${sequence}`, "unknown.zip")).status).toBe(404);
-  bustApiCaches();
-  status = 503;
-  expect((await get("auto")).status).toBe(503);
+test("CDN routing is off until both the CDN key and OSS credentials are configured", async () => {
+  for (const [cdn, oss] of [[false, true], [true, false]]) {
+    cdnConfigured = cdn;
+    configured = oss;
+    mock.module("../src/lib/oss", ossMock);
+    bustApiCaches();
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP)).headers.get("X-Download-Source")).toBe("github");
+    expect((await get("oss")).status).toBe(503);
+  }
   expect(signatures).toEqual([]);
 });
 
-test("legacy prefers verified OSS and forced OSS also works", async () => {
-  expect((await get()).headers.get("X-Download-Source")).toBe("oss");
-  expect((await get("oss")).headers.get("X-Download-Source")).toBe("oss");
-  expect(signatures).toEqual(["HEAD", "GET", "GET"]);
+test("forced OSS outside mainland China goes to GitHub instead of the paid CDN", async () => {
+  const response = await get("oss", `v${sequence}`, "app.zip", "8.8.8.8");
+  expect(response.headers.get("X-Download-Source")).toBe("github");
+  expect(signatures).toEqual([]);
 });
 
-test("size mismatch: legacy falls back, forced OSS returns 503 without Location", async () => {
+test("an IP over the download limit gets 429 without touching GitHub or OSS", async () => {
+  for (let i = 0; i < 20; i++) {
+    expect((await get("github", `v${sequence}`, `file-${i}.zip`)).status).not.toBe(429);
+  }
+  requests = [];
+  const banned = await get("auto");
+  expect(banned.status).toBe(429);
+  expect(Number(banned.headers.get("Retry-After"))).toBe(12 * 3600);
+  expect(requests).toEqual([]);
+  expect(signatures).toEqual([]);
+  // 其他 IP 不受影响。
+  expect((await get("auto", `v${sequence}`, "app.zip", "8.8.8.8")).status).toBe(302);
+});
+
+test("mainland requests that never read the release manifest or come from scripts go to GitHub", async () => {
+  resetReleaseViewers();
+  for (const source of ["auto", "", "oss"]) {
+    expect((await get(source)).headers.get("X-Download-Source")).toBe("github");
+  }
+  markReleaseViewer(MAINLAND_IP);
+  for (const ua of ["curl/8.7.1", "python-requests/2.32", "Go-http-client/2.0", "Wget/1.21"]) {
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("github");
+  }
+  expect(signatures).toEqual([]);
+  // 应用内更新（含不带 User-Agent 的旧客户端）与浏览器照常走 CDN。
+  for (const ua of ["fluxdown-agent/0.5.9", "fluxdown-android/0.5.9", "", "Mozilla/5.0 (Windows NT 10.0)"]) {
+    expect((await get("", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("cdn");
+  }
+});
+
+test("reading the manifest admits the visitor for 24 hours", async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  try {
+    resetReleaseViewers();
+    markReleaseViewer(MAINLAND_IP, now);
+    now += 24 * 3600 * 1000 - 1;
+    expect((await get("auto")).headers.get("X-Download-Source")).toBe("cdn");
+    now += 2;
+    bustApiCaches();
+    expect((await get("auto")).headers.get("X-Download-Source")).toBe("github");
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("size mismatch: mainland falls back to GitHub, forced OSS returns 503 without Location", async () => {
   headSize = "11";
-  expect((await get()).headers.get("X-Download-Source")).toBe("github");
+  expect((await get("")).headers.get("X-Download-Source")).toBe("github");
   const response = await get("oss");
   expect(response.status).toBe(503);
   expect(response.headers.has("Location")).toBe(false);
   expect(signatures).toEqual(["HEAD"]);
+});
+
+/** 开启 123，并把当前 `v${sequence}/app.zip` 登记为更新清单资产（/api/release 生成清单时登记）。 */
+function enablePan123(link: string | null = "https://pan.example/app.zip") {
+  pan123Configured = true;
+  pan123Link = link;
+  mock.module("../src/lib/pan123", pan123Mock);
+  recordUpdateAssets("stable", [{ tag: `v${sequence}`, name: "app.zip" }]);
+}
+
+test("mainland: only >=0.6.0 updaters get 123pan; browsers and UA-less old updaters keep dl-cn", async () => {
+  enablePan123();
+  for (const ua of ["Mozilla/5.0 (Windows NT 10.0)", ""]) {
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("cdn");
+  }
+  expect(signatures).toEqual(["HEAD", "CDN", "CDN"]);
+  signatures.length = 0;
+  const response = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0");
+  expect(response.headers.get("X-Download-Source")).toBe("pan123");
+  expect(response.headers.get("Location")).toBe("https://pan.example/app.zip");
+  // 123 不可用（缺资产 / 大小不符 / 超时）时大陆更新器回落 dl-cn 镜像，镜像也不行才是 GitHub。
+  enablePan123(null);
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("cdn");
+  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`, `PAN123 v${sequence}/app.zip 12`, "CDN"]);
+  headSize = "11";
+  sequence++;
+  enablePan123(null);
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  expect((await get("oss", `v${sequence}`, "app.zip", MAINLAND_IP, "fluxdown-agent/0.6.0")).status).toBe(503);
+});
+
+test("outside mainland: 123pan needs a strict >=0.6.0 updater User-Agent", async () => {
+  enablePan123();
+  markReleaseViewer("8.8.8.8");
+  for (const ua of ["fluxdown-agent/0.6.0", "fluxdown-android/0.6.0", "fluxdown-agent/0.6.0-rc.1", "fluxdown-android/1.0.0"]) {
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", ua)).headers.get("X-Download-Source")).toBe("pan123");
+  }
+  signatures.length = 0;
+  for (const ua of [
+    "", "Mozilla/5.0", "fluxdown-agent/0.5.9", "fluxdown-cli/0.6.0", "fluxdown-test/0.6.0",
+    "fluxdown-agent/0.6", "fluxdown-agent/0.6.0 Mozilla/5.0", "Mozilla/5.0 fluxdown-agent/0.6.0",
+  ]) {
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", ua)).headers.get("X-Download-Source")).toBe("github");
+  }
+  expect(signatures).toEqual([]);
+  // 123 不可用时非大陆更新器直接 GitHub，不消耗付费镜像；source=oss 也不返回 503。
+  enablePan123(null);
+  expect((await get("oss", `v${sequence}`, "app.zip", "8.8.8.8", "fluxdown-agent/0.6.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  expect(signatures).toEqual([`PAN123 v${sequence}/app.zip 12`]);
+});
+
+test("123pan only signs assets in the current update manifest, within the per-IP quota", async () => {
+  enablePan123();
+  markReleaseViewer("8.8.8.8");
+  const updater = "fluxdown-agent/0.6.0";
+  // 历史版本 / 非更新组件不在清单：不签 123。
+  expect((await get("", `v${sequence}`, "other.zip", "8.8.8.8", updater)).status).toBe(404);
+  recordUpdateAssets("stable", [{ tag: `v${sequence + 100}`, name: "app.zip" }]);
+  expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("github");
+  expect(signatures).toEqual([]);
+  // 另一渠道的清单同样有效。
+  recordUpdateAssets("frontier", [{ tag: `v${sequence}`, name: "app.zip" }]);
+  for (let i = 0; i < 10; i++) {
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("pan123");
+  }
+  // 同一 IP 24 小时内签满 10 条后回落：非大陆 GitHub，大陆 dl-cn。
+  expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("github");
+  expect((await get("", `v${sequence}`, "app.zip", MAINLAND_IP, updater)).headers.get("X-Download-Source")).toBe("pan123");
+  expect(signatures.filter((s) => s.startsWith("PAN123")).length).toBe(11);
+});
+
+test("123pan obeys the download gate, source=github and stale metadata", async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  // 下载元数据缓存在首个请求时创建并捕获 Date.now：必须先替换。
+  Date.now = () => now;
+  try {
+    resetReleaseViewers();
+    enablePan123();
+    const updater = "fluxdown-agent/0.6.0";
+    expect((await get("", `v${sequence}`, "app.zip", "8.8.8.8", updater)).headers.get("X-Download-Source")).toBe("github");
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, updater)).headers.get("X-Download-Source")).toBe("github");
+    markReleaseViewer(MAINLAND_IP, now);
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "curl/8.7.1")).headers.get("X-Download-Source"))
+      .toBe("github");
+    expect((await get("github", `v${sequence}`, "app.zip", MAINLAND_IP, updater)).headers.get("X-Download-Source"))
+      .toBe("github");
+    expect(signatures).toEqual([]);
+    now += 120_001;
+    status = 503;
+    const fallback = await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, updater);
+    expect(fallback.headers.get("X-Download-Source")).toBe("github");
+    expect(fallback.headers.get("X-Download-Metadata")).toBe("stale");
+    expect(signatures).toEqual([]);
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("unconfigured OSS is explicit 503", async () => {

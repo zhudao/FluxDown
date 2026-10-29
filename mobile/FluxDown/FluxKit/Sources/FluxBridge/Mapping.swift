@@ -95,6 +95,10 @@ extension TaskRuntimeDto {
     }
 }
 
+extension QueueOrderDto {
+    var domain: QueueOrderEntry { QueueOrderEntry(taskId: taskId, order: order) }
+}
+
 extension QueueDto {
     var domain: TaskQueue {
         TaskQueue(
@@ -183,6 +187,10 @@ extension SelectionKindDto {
                 renamePreview: renamePreview,
                 actions: actions.map(\.domain)
             ))
+        case let .plugin(site, url, candidates):
+            .plugin(site: site, url: url, candidates: candidates.map {
+                PluginCandidate(identity: $0.identity, name: $0.name, version: $0.version, description: $0.description)
+            })
         }
     }
 }
@@ -194,6 +202,7 @@ extension SelectionOutcomeDto {
         case let .bt(indices): .bt(indices: indices)
         case let .variant(index): .variant(index: index)
         case let .fileExists(action): .fileExists(action: action.domain)
+        case let .plugin(identity, remember): .plugin(identity: identity, remember: remember)
         case .cancelled: .cancelled
         }
     }
@@ -206,6 +215,7 @@ extension SelectionOutcome {
         case let .bt(indices): .bt(indices: indices)
         case let .variant(index): .variant(index: index)
         case let .fileExists(action): .fileExists(action: action.dto)
+        case let .plugin(identity, remember): .plugin(identity: identity, remember: remember)
         case .cancelled: .cancelled
         }
     }
@@ -274,7 +284,13 @@ extension LinkDeviceDto {
             platform: platform,
             online: online,
             defaultSaveDir: defaultSaveDir,
-            pathStyle: pathStyle.map(PathStyle.init(wire:))
+            pathStyle: pathStyle.map(PathStyle.init(wire:)),
+            customName: customName,
+            appVersion: appVersion,
+            cloudDeviceId: cloudDeviceId,
+            revoked: revoked,
+            pairedAt: pairedAt,
+            lastSeenAt: lastSeenAt
         )
     }
 }
@@ -287,6 +303,7 @@ extension CategoryDto {
             icon: icon,
             extensions: extensions,
             regexPattern: regexPattern,
+            urlPattern: urlPattern,
             position: position,
             visible: visible,
             builtinType: builtinType
@@ -300,9 +317,11 @@ extension HostSnapshotDto {
             info: info.domain,
             daemonConnected: daemonConnected,
             tasks: tasks.map(\.domain),
+            tasksLoading: tasksLoading,
+            taskTotal: taskTotal,
             runtime: Dictionary(runtime.map { ($0.taskId, $0.domain) }, uniquingKeysWith: { _, last in last }),
             queues: queues.map(\.domain),
-            queuePositions: queuePositions,
+            queueOrder: queueOrder.map(\.domain),
             groups: groups.map(\.domain),
             stats: stats.domain,
             priorityTaskId: priorityTaskId,
@@ -338,7 +357,8 @@ extension HostEventDto {
             ))
         case let .taskRuntimeChanged(runtime): .taskRuntimeChanged(runtime.domain)
         case let .queuesChanged(queues): .queuesChanged(queues.map(\.domain))
-        case let .queuePositionsChanged(positions): .queuePositionsChanged(positions)
+        case let .queuePositionsChanged(order): .queuePositionsChanged(order.map(\.domain))
+        case let .queueOrderChanged(removed, added): .queueOrderChanged(removed: removed, added: added.map(\.domain))
         case let .groupsChanged(groups): .groupsChanged(groups.map(\.domain))
         case let .fileMissingChanged(updates): .fileMissingChanged(updates)
         case let .priorityTaskChanged(taskId): .priorityTaskChanged(taskId: taskId)
@@ -386,7 +406,9 @@ extension CreateTaskRequest {
             headers: headers,
             httpUser: httpUser,
             httpPassword: httpPassword,
-            saveSiteAuth: saveSiteAuth
+            saveSiteAuth: saveSiteAuth,
+            unattended: false,
+            offeredSaveDir: offeredSaveDir
         )
     }
 }

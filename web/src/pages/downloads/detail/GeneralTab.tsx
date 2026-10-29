@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from 'react'
-import { Check, Copy, Download } from 'lucide-react'
+import { Check, Copy, Download, Layers, Link2 } from 'lucide-react'
 import { useT } from '../../../i18n'
 import { Button, Icon, Tooltip } from '../../../ui'
 import { copyText } from '../../../lib/copy'
-import { useDownloads, stateLabel } from '../state'
+import { useDownloads } from '../state'
+import { taskStateLabel } from '../table/text'
 import { copyUrls, downloadViewsFiles, isDownloadable } from '../model/actions'
 import { MAX_ETA_SECS, PROTOCOL_LABEL, formatBytes, formatDateTime, sourceSite } from '../model/task'
+import { localizeTaskError } from '../model/taskError'
 import type { DownloadTaskView, TaskState } from '../model/task'
-import { openGroupDetail } from '../dialogs'
+import { canChangeSegments, canChangeUrl } from '../model/taskEdit'
+import { openChangeSegments, openChangeUrl, openGroupDetail } from '../dialogs'
+import { routeLabel } from '../../../lib/taskRoute'
 import { DetailRow } from './DetailRow'
 import { SourcesSection } from './SourcesSection'
 
@@ -75,7 +79,7 @@ export function GeneralTab({ view }: { view: DownloadTaskView }) {
           {view.boosted ? <div className="text-xs text-warning">{t('detailBoostActive')}</div> : null}
         </div>
         <DetailRow label={t('infoStatus')}>
-          <span className={STATE_TEXT[view.state]}>{stateLabel(t, view.state)}</span>
+          <span className={STATE_TEXT[view.state]}>{taskStateLabel(t, view)}</span>
         </DetailRow>
         {view.sizeBytes > 0 ? <DetailRow label={t('infoSize')}>{formatBytes(view.sizeBytes)}</DetailRow> : null}
         {!completed ? <DetailRow label={t('infoDownloaded')}>{formatBytes(view.downloadedBytes)}</DetailRow> : null}
@@ -103,12 +107,13 @@ export function GeneralTab({ view }: { view: DownloadTaskView }) {
         <DetailRow label={t('taskQueueLabel')}>{queueLabel}</DetailRow>
         <DetailRow label={t('taskChecksum')}>{checksum}</DetailRow>
         <DetailRow label={t('taskProxy')}>{proxy}</DetailRow>
+        {dto && dto.autoRoute !== '' ? <DetailRow label={t('taskRoute')}>{routeLabel(t, dto.autoRoute)}</DetailRow> : null}
         {dto?.ignoreTlsErrors ? <DetailRow label={t('taskIgnoreTlsErrors')}>✓</DetailRow> : null}
         {view.errorMessage !== '' ? (
           <DetailRow label={t('infoError')}>
             <div className="flex items-center gap-1">
-              <span className="min-w-0 flex-1 break-all text-destructive">{view.errorMessage}</span>
-              <CopyErrorButton message={view.errorMessage} />
+              <span className="min-w-0 flex-1 break-all text-destructive">{localizeTaskError(t, view.errorMessage)}</span>
+              <CopyErrorButton message={localizeTaskError(t, view.errorMessage)} />
             </div>
           </DetailRow>
         ) : null}
@@ -128,6 +133,16 @@ export function GeneralTab({ view }: { view: DownloadTaskView }) {
           <Button icon={Copy} onClick={() => copyUrls([view])}>
             {t('copyUrl')}
           </Button>
+          {canChangeUrl(view) ? (
+            <Button icon={Link2} onClick={() => openChangeUrl(view.taskId)}>
+              {t('webChangeUrl')}
+            </Button>
+          ) : null}
+          {canChangeSegments(view) ? (
+            <Button icon={Layers} onClick={() => openChangeSegments(view.taskId)}>
+              {t('editThreads')}
+            </Button>
+          ) : null}
         </div>
       </div>
       <SourcesSection view={view} />

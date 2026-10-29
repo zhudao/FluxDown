@@ -52,6 +52,7 @@ private struct DevicesContent: View {
     @State private var renaming: CloudDeviceRecord?
     @State private var deleting: CloudDeviceRecord?
     @State private var pendingUnpair: LinkDevice?
+    @State private var renamingLink: LinkRenameTarget?
 
     /// 已信任设备分组最多直接显示的行数，其余进入「管理全部」。
     private static let cloudPreviewLimit = 5
@@ -147,6 +148,7 @@ private struct DevicesContent: View {
             .sensoryFeedback(.selection, trigger: current.id)
         }
         .cloudDeviceRenameAlert(renaming: $renaming)
+        .linkDeviceRenameAlert(renaming: $renamingLink)
         .environment(model)
         .sheet(item: $sheet, onDismiss: sheetDismissed) { item in
             switch item {
@@ -188,7 +190,8 @@ private struct DevicesContent: View {
     }
 
     private func presentAddDevice() {
-        pairing = PairingModel(container: container)
+        // 当前是本机主机时发现走 NWBrowser（iOS 上 Rust mDNS 不可用）；远端主机照旧用它的 agent 发现。
+        pairing = PairingModel(container: container, options: .init(agentDiscovery: !container.isLocalHost))
         sheet = .addDevice
     }
 
@@ -409,6 +412,7 @@ private struct DevicesContent: View {
     @ViewBuilder
     private func linkSection(state: HostState, readOnly: Bool) -> some View {
         let devices = DevicePresentation.sorted(link: state.linkDevices)
+        let attached = DeviceRules.attachedLinkFingerprints(cloud: state.cloudDevices, link: state.linkDevices)
         Section {
             if devices.isEmpty {
                 Text(L("linkedDevicesEmpty"))
@@ -417,7 +421,14 @@ private struct DevicesContent: View {
             }
             ForEach(devices) { device in
                 NavigationLink(value: DevicesRoute.linkDevice(fingerprint: device.fingerprint)) {
-                    LinkDeviceRow(name: device.name, platform: device.platform, online: device.online)
+                    LinkDeviceRow(
+                        name: device.name,
+                        platform: device.platform,
+                        online: device.online,
+                        revoked: device.revoked,
+                        sameAccount: attached.contains(device.fingerprint),
+                        grantsControl: model.linkInfos.first { $0.fingerprint == device.fingerprint }?.grantsControl ?? false
+                    )
                 }
                 // 解除只弹确认框：不用 `role: .destructive`（会让 List 先行移除该行而数据未变，导致行数不一致崩溃）。
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -426,10 +437,21 @@ private struct DevicesContent: View {
                             pendingUnpair = device
                         }
                         .tint(Color.fdStatusFailed)
+                        if !device.revoked {
+                            Button(L("linkedDeviceRename"), systemImage: FluxSymbol.edit) {
+                                renamingLink = LinkRenameTarget(fingerprint: device.fingerprint, customName: device.customName ?? "")
+                            }
+                            .tint(.accentColor)
+                        }
                     }
                 }
                 .contextMenu {
                     if !readOnly {
+                        if !device.revoked {
+                            Button(L("linkedDeviceRename"), systemImage: FluxSymbol.edit) {
+                                renamingLink = LinkRenameTarget(fingerprint: device.fingerprint, customName: device.customName ?? "")
+                            }
+                        }
                         Button(L("linkedDeviceRemove"), systemImage: "minus.circle", role: .destructive) {
                             pendingUnpair = device
                         }
@@ -458,7 +480,7 @@ private struct DevicesContent: View {
                 Text(L("linkedDevicesTitle"))
                 Spacer(minLength: 8)
                 if model.linkPhase == .loading {
-                    ProgressView().accessibilityLabel(L("localPairingRetryScan"))
+                    ProgressView().accessibilityLabel(L("linkedDeviceRefresh"))
                 } else {
                     Button {
                         Task {
@@ -473,7 +495,7 @@ private struct DevicesContent: View {
                     }
                     .buttonStyle(.borderless)
                     .disabled(readOnly)
-                    .accessibilityLabel(L("localPairingRetryScan"))
+                    .accessibilityLabel(L("linkedDeviceRefresh"))
                 }
                 Button {
                     presentAddDevice()
@@ -612,6 +634,7 @@ private struct ConnectionStyle {
 // MARK: - 当前主机卡
 
 private struct HostCard: View {
+    @Environment(AppContainer.self) private var container
     let host: HostRef
     let connection: Connection
     let facts: HostFacts
@@ -637,9 +660,21 @@ private struct HostCard: View {
                             .foregroundStyle(style.text)
                     }
                     if case let .failed(error) = connection {
-                        Text(ErrorText.describe(error))
-                            .font(.footnote)
-                            .foregroundStyle(Color.fdStatusFailedText)
+                        if error.code == .unauthorized, case let .remote(_, _, endpoint) = host,
+                           container.linkFingerprint(ofHost: host.id) != nil
+                        {
+                            // 经局域网配对添加的主机被拒：授权已被主机侧撤销，引导重新配对（不是「更换访问密钥」）。
+                            Text(L("mobileHostRepairNeeded"))
+                                .font(.footnote)
+                                .foregroundStyle(Color.fdStatusFailedText)
+                            Button(L("mobileHostRepair")) { container.router.presentRepair(address: endpoint) }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                        } else {
+                            Text(ErrorText.describe(error))
+                                .font(.footnote)
+                                .foregroundStyle(Color.fdStatusFailedText)
+                        }
                     }
                 }
             }

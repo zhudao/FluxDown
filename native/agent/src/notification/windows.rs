@@ -1,6 +1,6 @@
 //! Windows completion toasts use a dedicated protocol and expiring opaque local tokens.
 //! No callbacks, polling, runtime, COM activator, or file paths in activation URIs.
-//! Requires windows 0.61.3: Data_Xml_Dom, Foundation, UI_Notifications, Win32_System_WinRT.
+//! Requires windows 0.61.3: Data_Xml_Dom, Foundation, UI_Notifications.
 
 #[path = "windows_activation.rs"]
 mod activation;
@@ -16,8 +16,14 @@ pub(super) fn show(
     title: &str,
     body: &str,
     actions: Option<&super::CompletionActions>,
+    silent: bool,
 ) -> Result<(), String> {
-    // Use a short-lived dedicated thread to avoid changing the caller's COM apartment.
+    // Use a short-lived dedicated thread that has never initialized COM: windows-core then
+    // joins the process MTA through `CoIncrementMTAUsage`, which it never releases. That keeps
+    // its process-wide cached activation factories valid for every later toast. Never pair
+    // RoInitialize/RoUninitialize per toast: tearing down the last apartment in the process
+    // (headless `--server` has no other) unloads the WinRT servers behind those cached
+    // factories, and the next toast dereferences a dangling factory (0xC0000005).
     // It is joined before returning: no per-toast resident thread or callback lifetime.
     let data_dir = data_dir.to_owned();
     let title = title.to_owned();
@@ -25,13 +31,13 @@ pub(super) fn show(
     let actions = actions.cloned();
     std::thread::Builder::new()
         .name("fluxdown-toast".into())
-        .spawn(move || runtime::show(&data_dir, &title, &body, actions.as_ref()))
+        .spawn(move || runtime::show(&data_dir, &title, &body, actions.as_ref(), silent))
         .map_err(|error| format!("could not start toast sender: {error}"))?
         .join()
         .map_err(|_| "toast sender panicked".to_owned())?
 }
 
-fn toast_xml(title: &str, body: &str, actions: Option<(&str, &str, &str)>) -> String {
+fn toast_xml(title: &str, body: &str, actions: Option<(&str, &str, &str)>, silent: bool) -> String {
     let launch = actions.map_or_else(String::new, |(token, _, _)| {
         format!(
             " activationType=\"protocol\" launch=\"{}\"",
@@ -49,6 +55,10 @@ fn toast_xml(title: &str, body: &str, actions: Option<(&str, &str, &str)>) -> St
             escape_xml(file), activation::uri(token, "open-file"),
             escape_xml(folder), activation::uri(token, "open-folder"),
         ));
+    }
+    if silent {
+        // 提示音由 agent 自己播放（`desktop.sound.task_completed`），避免系统通知音叠加。
+        xml.push_str("<audio silent=\"true\"/>");
     }
     xml.push_str("</toast>");
     xml
@@ -77,44 +87,24 @@ fn escape_xml(value: &str) -> String {
 
 #[cfg(windows)]
 mod runtime {
-    use std::marker::PhantomData;
     use std::path::Path;
-    use std::rc::Rc;
     use windows::Data::Xml::Dom::XmlDocument;
     use windows::Foundation::{DateTime, IReference, PropertyValue};
     use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
-    use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize, RoUninitialize};
     use windows::core::{HSTRING, Interface};
 
     use super::super::{CompletionActions, WINDOWS_AUMID};
     use super::{activation, toast_xml};
 
     const GROUP: &str = "completion";
-    // Apartment teardown must stay on the thread that initialized WinRT.
-    struct Apartment(PhantomData<Rc<()>>);
-    impl Apartment {
-        fn new() -> Result<Self, String> {
-            // SAFETY: this fresh dedicated thread has no COM apartment; Drop balances each
-            // successful initialization on the same thread after all WinRT objects are dropped.
-            unsafe { RoInitialize(RO_INIT_MULTITHREADED) }
-                .map_err(|error| format!("could not initialize notification WinRT: {error}"))?;
-            Ok(Self(PhantomData))
-        }
-    }
-    impl Drop for Apartment {
-        fn drop(&mut self) {
-            // SAFETY: only constructed after successful initialization on this thread.
-            unsafe { RoUninitialize() };
-        }
-    }
 
     pub(super) fn show(
         data_dir: &Path,
         title: &str,
         body: &str,
         actions: Option<&CompletionActions>,
+        silent: bool,
     ) -> Result<(), String> {
-        let _apartment = Apartment::new()?;
         // Hold the emission lease through Show: concurrent emitters cannot reuse a slot
         // between token creation and delivery. File close releases the cross-process lock.
         let stored = actions
@@ -133,6 +123,7 @@ mod runtime {
                     actions.open_folder_label.as_str(),
                 )
             }),
+            silent,
         );
         let result = deliver(&xml, stored.as_ref());
         if let Err(delivery_error) = &result
@@ -194,7 +185,7 @@ mod tests {
             "&lt;&amp;&gt;&quot;&apos;&#9;&#10;&#13;���中📁"
         );
         let hostile = "\"/><action arguments=\"file:///C:/evil\"/><text>";
-        let xml = toast_xml(hostile, hostile, Some((TOKEN, hostile, hostile)));
+        let xml = toast_xml(hostile, hostile, Some((TOKEN, hostile, hostile)), false);
         assert_eq!(xml.matches("<action ").count(), 2);
         assert_eq!(xml.matches("<text>").count(), 2);
         assert!(!xml.contains("arguments=\"file:"));
@@ -206,6 +197,7 @@ mod tests {
             "Done",
             "name.zip",
             Some((TOKEN, "Open File", "Open Folder")),
+            false,
         );
         assert!(xml.contains(&format!(
             "launch=\"fluxdown-notification://{TOKEN}/open-folder\""
@@ -219,9 +211,16 @@ mod tests {
 
     #[test]
     fn informational_toast_has_no_protocol_activation() {
-        let xml = toast_xml("Test", "Hello", None);
+        let xml = toast_xml("Test", "Hello", None, false);
+        assert!(!xml.contains("<audio"));
         assert!(!xml.contains("protocol"));
         assert!(!xml.contains("<actions>"));
         assert!(!xml.contains("launch="));
+    }
+
+    #[test]
+    fn silent_toast_suppresses_the_system_sound() {
+        let xml = toast_xml("Done", "name.zip", None, true);
+        assert!(xml.ends_with("<audio silent=\"true\"/></toast>"));
     }
 }

@@ -1,18 +1,19 @@
 use std::collections::BTreeMap;
 
-use fluxdown_ui_components::FluxIcon;
+use fluxdown_ui_components::{FluxIcon, tooltip_view};
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    Anchor, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, div,
+    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement as _, Styled, WeakEntity, div,
 };
 use gpui_component::{
     Disableable as _, Icon, h_flex,
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
-    tooltip::Tooltip,
 };
 
-use super::status_bar::{status_button, status_button_content};
+use fluxdown_protocol::proxy_rules::enabled_proxy_rule_count;
+
+use super::status_bar::{WidgetPlacement, compact_tooltip, status_button, status_button_content};
 use crate::{controller::DownloadsCommand, pages::downloads::DownloadView};
 
 const PROXY_MODES: [(&str, &str); 4] = [
@@ -66,6 +67,7 @@ fn proxy_menu(menu: PopupMenu, entity: &Entity<DownloadView>, cx: &App) -> Popup
         this.controller.config_str("proxy_host"),
         this.controller.config_str("proxy_port"),
     );
+    let rule_count = enabled_proxy_rule_count(this.controller.config_str("proxy_rules"));
     let translator = this.translator.read(cx);
     let manual_configured = endpoint.is_some();
     let manual_hint = endpoint.unwrap_or_else(|| {
@@ -96,7 +98,7 @@ fn proxy_menu(menu: PopupMenu, entity: &Entity<DownloadView>, cx: &App) -> Popup
                             .line_height(caption.line_height)
                             .text_color(theme.tokens().colors.muted_foreground)
                             .tooltip(move |window, cx| {
-                                Tooltip::new(tooltip_endpoint.clone()).build(window, cx)
+                                tooltip_view(tooltip_endpoint.clone(), window, cx)
                             })
                             .child(endpoint.clone()),
                     )
@@ -116,6 +118,40 @@ fn proxy_menu(menu: PopupMenu, entity: &Entity<DownloadView>, cx: &App) -> Popup
                         return;
                     };
                 }),
+        );
+    }
+    let rules_hint = (rule_count > 0).then(|| {
+        SharedString::from(translator.text_with(
+            "proxyRulesActiveHint",
+            &[("count", &rule_count.to_string())],
+        ))
+    });
+    if let Some(hint) = rules_hint {
+        menu = menu.separator().item(
+            PopupMenuItem::element(move |_, cx| {
+                let theme = active_theme(cx);
+                let caption = &theme.extended().caption;
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap(theme.tokens().spacing.sm)
+                    .items_center()
+                    .child(
+                        Icon::new(FluxIcon::Info)
+                            .size(theme.extended().icon.sm)
+                            .flex_none(),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .text_size(caption.size)
+                            .line_height(caption.line_height)
+                            .text_color(theme.tokens().colors.muted_foreground)
+                            .child(hint.clone()),
+                    )
+            })
+            .disabled(true),
         );
     }
     menu
@@ -155,7 +191,13 @@ impl DownloadView {
         );
     }
 
-    pub(super) fn render_proxy_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// 代理模式控件：地球图标 + 当前模式 + 下拉箭头；紧凑摆放只留图标，模式并入悬浮提示。
+    pub(super) fn render_proxy_control(
+        &self,
+        placement: WidgetPlacement,
+        view: WeakEntity<Self>,
+        cx: &App,
+    ) -> AnyElement {
         let mode = current_proxy_mode(self.controller.config_str("proxy_mode"));
         let label_key = PROXY_MODES
             .iter()
@@ -164,22 +206,54 @@ impl DownloadView {
         let translator = self.translator.read(cx);
         let label = SharedString::from(translator.text(label_key).to_owned());
         let title = SharedString::from(translator.text("settingsCatProxy").to_owned());
+        let rule_count = enabled_proxy_rule_count(self.controller.config_str("proxy_rules"));
+        let rules_hint = (rule_count > 0).then(|| {
+            SharedString::from(translator.text_with(
+                "proxyRulesActiveHint",
+                &[("count", &rule_count.to_string())],
+            ))
+        });
         let theme = active_theme(cx);
         let icon_size = theme.extended().icon.sm;
         let control_height = theme.density().status_control;
-        let view = cx.weak_entity();
+        let content = status_button_content(Some(FluxIcon::Globe), None, None, cx);
+        let (content, tooltip) = if placement.compact {
+            (content, compact_tooltip(&title, &label))
+        } else {
+            let mut content = content
+                .min_w_0()
+                .child(div().min_w_0().truncate().child(label));
+            if rule_count > 0 {
+                let caption = &theme.extended().caption;
+                let tokens = theme.tokens();
+                content = content.child(
+                    div()
+                        .flex_none()
+                        .px(tokens.spacing.xs)
+                        .rounded(tokens.radius.sm)
+                        .bg(tokens.colors.muted)
+                        .text_color(tokens.colors.muted_foreground)
+                        .text_size(caption.size)
+                        .line_height(caption.line_height)
+                        .child(SharedString::from(rule_count.to_string())),
+                );
+            }
+            (
+                content.child(Icon::new(FluxIcon::ChevronDown).size(icon_size).flex_none()),
+                title,
+            )
+        };
+        let tooltip = match rules_hint {
+            Some(hint) => SharedString::from(format!("{tooltip} · {hint}")),
+            None => tooltip,
+        };
 
         status_button("status-proxy-mode", cx)
             .max_w(control_height * 7.)
             .disabled(self.controller.is_stale())
-            .child(
-                status_button_content(Some(FluxIcon::Globe), None, None, cx)
-                    .min_w_0()
-                    .child(div().min_w_0().truncate().child(label))
-                    .child(Icon::new(FluxIcon::ChevronDown).size(icon_size).flex_none()),
-            )
-            .tooltip(title)
-            .dropdown_menu_with_anchor(Anchor::BottomRight, move |menu, window, cx| {
+            .child(content)
+            .tooltip(tooltip)
+            .dropdown_menu_with_anchor(placement.menu_anchor, move |menu, window, cx| {
                 let Some(entity) = view.upgrade() else {
                     return menu;
                 };
@@ -203,6 +277,7 @@ impl DownloadView {
                 .detach();
                 proxy_menu(menu, &entity, cx)
             })
+            .into_any_element()
     }
 }
 

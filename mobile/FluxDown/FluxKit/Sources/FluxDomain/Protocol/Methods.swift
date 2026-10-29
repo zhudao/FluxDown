@@ -9,6 +9,9 @@ public enum HostMethod {
     public static let systemHello = "system.hello"
     public static let systemPing = "system.ping"
     public static let systemSnapshot = "system.snapshot"
+    /// 任务表 / 队列位置表分页（载入 `taskTotal` / `queueTotal` 加载态的快照头）：由 Rust 驱动（FluxBridge 之下）
+    /// 消费，Swift 侧不直接调用；列出仅为与 Rust 常量表一一对应。
+    public static let systemTaskPage = "system.taskPage"
     /// 让服务优雅退出：daemon 关停引擎后退出；agent 先关停 daemon 再退出（完全退出）。
     ///
     /// 允许作为连接首帧（握手前）调用：协议版本不兼容的新旧进程替换只能靠它完成。
@@ -16,22 +19,29 @@ public enum HostMethod {
     public static let daemonTaskList = "daemon.task.list"
     public static let daemonTaskGet = "daemon.task.get"
     public static let daemonTaskActivity = "daemon.task.activity"
+    /// 任务整个生命周期的持久化速度曲线与统计（`{taskId}` → `TaskSpeedHistory?`，`null` = 无记录）。
+    public static let daemonTaskSpeedHistory = "daemon.task.speedHistory"
     public static let daemonTaskCreate = "daemon.task.create"
     public static let daemonTaskPause = "daemon.task.pause"
     public static let daemonTaskResume = "daemon.task.resume"
     public static let daemonTaskRename = "daemon.task.rename"
     /// 更换任务下载源地址（`{taskId, url}`，语义同旧 `PUT /api/v1/tasks/{id}/url`）。
     public static let daemonTaskChangeUrl = "daemon.task.changeUrl"
+    /// 修改任务线程数（`SetTaskSegmentsParams`），已下进度保留；完成或不存在的任务返回 `not-found`。
+    public static let daemonTaskSetSegments = "daemon.task.setSegments"
     public static let daemonTaskDelete = "daemon.task.delete"
     public static let daemonTaskPauseAll = "daemon.task.pauseAll"
     public static let daemonTaskResumeAll = "daemon.task.resumeAll"
     public static let daemonTaskRescan = "daemon.task.rescan"
     public static let daemonTaskSetSeedLimits = "daemon.task.setSeedLimits"
+    public static let daemonTaskVerify = "daemon.task.verify"
     /// 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。
     public static let daemonTaskPauseMany = "daemon.task.pauseMany"
     public static let daemonTaskResumeMany = "daemon.task.resumeMany"
     /// 批量删除（`{taskIds, deleteFiles}`）：语义同批量暂停。
     public static let daemonTaskDeleteMany = "daemon.task.deleteMany"
+    /// 批量建任务（`DaemonCreateTasksParams`）：整块一个事务、一次 `tasksChanged` 事件，按 `batchId` 幂等。
+    public static let daemonTaskCreateMany = "daemon.task.createMany"
     public static let daemonQueueList = "daemon.queue.list"
     public static let daemonQueueCreate = "daemon.queue.create"
     public static let daemonQueueUpdate = "daemon.queue.update"
@@ -51,6 +61,7 @@ public enum HostMethod {
     public static let daemonConfigGet = "daemon.config.get"
     public static let daemonConfigPatch = "daemon.config.patch"
     public static let daemonConfigProxyTest = "daemon.config.proxyTest"
+    public static let daemonConfigProxyRoute = "daemon.config.proxyRoute"
     public static let daemonConfigConnPolicy = "daemon.config.connPolicy"
     public static let daemonConfigClearConnPolicy = "daemon.config.clearConnPolicy"
     public static let daemonConfigSystemProxy = "daemon.config.systemProxy"
@@ -75,6 +86,9 @@ public enum HostMethod {
     public static let daemonRssValidate = "daemon.rss.validate"
     public static let daemonLinkProbe = "daemon.link.probe"
     public static let daemonPluginList = "daemon.plugin.list"
+    public static let daemonPluginSniffRules = "daemon.plugin.sniffRules"
+    public static let daemonPluginPageScripts = "daemon.plugin.pageScripts"
+    public static let daemonPluginPageScriptSource = "daemon.plugin.pageScriptSource"
     public static let daemonPluginAuth = "daemon.plugin.auth"
     public static let daemonPluginSetEnabled = "daemon.plugin.setEnabled"
     public static let daemonPluginUpdateSettings = "daemon.plugin.updateSettings"
@@ -86,6 +100,22 @@ public enum HostMethod {
     public static let daemonPluginMarketList = "daemon.plugin.marketList"
     public static let daemonPluginMarketInstall = "daemon.plugin.marketInstall"
     public static let daemonPluginIgnoreRetry = "daemon.plugin.ignoreRetry"
+    /// 站点默认插件列表（无参）→ `[PluginSiteDefault]`。
+    public static let daemonPluginSiteDefaults = "daemon.plugin.siteDefaults"
+    /// `PluginSetSiteDefaultParams`：确认 / 修改 / 移除（identity 为 null）站点默认插件。
+    public static let daemonPluginSetSiteDefault = "daemon.plugin.setSiteDefault"
+    public static let daemonPluginConsent = "daemon.plugin.consent"
+    public static let daemonPluginAuditList = "daemon.plugin.audit.list"
+    public static let daemonPluginAuditClear = "daemon.plugin.audit.clear"
+    public static let daemonPluginAuditRecord = "daemon.plugin.audit.record"
+    public static let daemonPluginViewOpen = "daemon.plugin.view.open"
+    public static let daemonPluginViewEvent = "daemon.plugin.view.event"
+    public static let daemonPluginViewClose = "daemon.plugin.view.close"
+    public static let daemonPluginViewSnapshot = "daemon.plugin.view.snapshot"
+    public static let daemonPluginViewKeepalive = "daemon.plugin.view.keepalive"
+    public static let daemonPluginCommand = "daemon.plugin.command"
+    public static let daemonPluginInvoke = "daemon.plugin.invoke"
+    public static let daemonPluginPageInvoke = "daemon.plugin.pageInvoke"
     public static let daemonComponentGet = "daemon.component.get"
     public static let daemonComponentListVersions = "daemon.component.listVersions"
     public static let daemonComponentInstall = "daemon.component.install"
@@ -100,6 +130,7 @@ public enum HostMethod {
     public static let daemonCdnReportsPeek = "daemon.cdnReports.peek"
     public static let daemonCdnReportsAck = "daemon.cdnReports.ack"
     public static let daemonCdnConfigApply = "daemon.cdnConfig.apply"
+    public static let daemonEgressPlan = "daemon.egress.plan"
     public static let daemonBtTrackerSubscriptionRefresh = "daemon.bt.trackerSubscription.refresh"
     public static let daemonEd2kServerSubscriptionRefresh = "daemon.ed2k.serverSubscription.refresh"
     public static let daemonDiagnosticsDescribe = "daemon.diagnostics.describe"
@@ -133,6 +164,8 @@ public enum HostMethod {
     public static let agentProfileChangeNickname = "agent.profile.changeNickname"
     public static let agentProfileSendPasswordCode = "agent.profile.sendPasswordCode"
     public static let agentProfileChangePassword = "agent.profile.changePassword"
+    public static let agentProfileSendDeleteCode = "agent.profile.sendDeleteCode"
+    public static let agentProfileDeleteAccount = "agent.profile.deleteAccount"
     public static let agentGatewayGet = "agent.gateway.get"
     public static let agentGatewayPatch = "agent.gateway.patch"
     /// 仅供本机官方 UI 展示/复制用户 token；结果 `{ "userToken": "..." }`（未配置为空串）。
@@ -142,6 +175,7 @@ public enum HostMethod {
     public static let agentRemoteReconnect = "agent.remote.reconnect"
     public static let agentDeviceRename = "agent.device.rename"
     public static let agentDeviceDelete = "agent.device.delete"
+    public static let agentDeviceDisconnect = "agent.device.disconnect"
     public static let agentPreferencesPatch = "agent.preferences.patch"
     public static let agentSyncGet = "agent.sync.get"
     public static let agentSyncEnable = "agent.sync.enable"
@@ -172,10 +206,34 @@ public enum HostMethod {
     public static let agentLinkApprove = "agent.link.approve"
     /// `LinkDeviceParams`：解除配对。
     public static let agentLinkRemove = "agent.link.remove"
+    /// `LinkRenameParams` → `LinkDeviceInfo`：设置 / 清除本机备注名。
+    public static let agentLinkRename = "agent.link.rename"
     /// 探测全部已配对设备在线状态 → `Vec<LinkDeviceInfo>`（同时推送 `LinkedDevicesChanged`）。
     public static let agentLinkRefresh = "agent.link.refresh"
     /// `LinkDispatchParams` → `LinkDispatchResult`：下发下载到已配对设备。
     public static let agentLinkDispatch = "agent.link.dispatch"
+    /// `LinkDeviceParams` → `LinkControlCredentialDto`：向本机 agent 申请对某已配对主机的设备控制凭据（仅 `controllable && !revoked`）。
+    public static let agentLinkControlCredential = "agent.link.controlCredential"
+    /// FluxMesh（`agent.share.*`）：仅当主机 hello 带 `agent.share` 能力时可用；移动端暂不使用，常量只为与 `method.rs` 一一对应。
+    public static let agentShareConfig = "agent.share.config"
+    public static let agentShareSetLocalConfig = "agent.share.setLocalConfig"
+    public static let agentShareCreate = "agent.share.create"
+    public static let agentShareList = "agent.share.list"
+    public static let agentShareUpdate = "agent.share.update"
+    public static let agentShareStop = "agent.share.stop"
+    public static let agentShareResume = "agent.share.resume"
+    public static let agentShareDelete = "agent.share.delete"
+    public static let agentShareResolve = "agent.share.resolve"
+    public static let agentShareReceive = "agent.share.receive"
+    public static let agentShareReceiveRecords = "agent.share.receiveRecords"
+    public static let agentShareDismissPending = "agent.share.dismissPending"
+    public static let agentShareSwitchToBridge = "agent.share.switchToBridge"
+    public static let agentShareDiagnostics = "agent.share.diagnostics"
+    public static let agentShareLogs = "agent.share.logs"
+    public static let agentShareSessionKill = "agent.share.sessionKill"
+    public static let agentShareConvertToCloud = "agent.share.convertToCloud"
+    public static let agentShareDeleteCloudCopy = "agent.share.deleteCloudCopy"
+    public static let agentShareStopProviding = "agent.share.stopProviding"
     public static let agentPlanList = "agent.plan.list"
     public static let agentOrderCreate = "agent.order.create"
     public static let agentOrderGet = "agent.order.get"
@@ -188,6 +246,8 @@ public enum HostMethod {
     public static let agentReferralValidate = "agent.referral.validate"
     public static let agentPlatformOpenTask = "agent.platform.openTask"
     public static let agentPlatformRevealTask = "agent.platform.revealTask"
+    /// 把任务产物以文件写入主机系统剪贴板；仅桌面主机本机来源，移动端不使用。
+    public static let agentPlatformCopyTaskFiles = "agent.platform.copyTaskFiles"
     public static let agentPlatformOpenPath = "agent.platform.openPath"
     public static let agentPlatformIntegrationGet = "agent.platform.integrationGet"
     public static let agentPlatformSetAutostart = "agent.platform.setAutostart"
@@ -195,6 +255,8 @@ public enum HostMethod {
     public static let agentPlatformSetUrlProtocol = "agent.platform.setUrlProtocol"
     /// 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。
     public static let agentPlatformFileIcon = "agent.platform.fileIcon"
+    /// 由 agent 在本机播放一次提示音偏好值；仅桌面，移动端不使用。
+    public static let agentSoundPreview = "agent.sound.preview"
     public static let agentCaptureSubmit = "agent.capture.submit"
     /// 从本机 `.torrent` 文件建任务：agent 读文件、上传 daemon blob 后调用 `daemon.task.create`。
     public static let agentCaptureSubmitTorrentFile = "agent.capture.submitTorrentFile"
@@ -255,5 +317,9 @@ public enum HostCapability {
     public static let agentExternalCapture = "agent.externalCapture"
     /// 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。
     public static let agentOpenTaskFiles = "agent.openTaskFiles"
+    /// 按连接下发：本连接可把任务产物写入 agent 所在主机的系统剪贴板（`agent.platform.copyTaskFiles`）。
+    public static let agentCopyTaskFiles = "agent.copyTaskFiles"
+    /// 本主机编入了FluxMesh服务（`agent.share.*`）；移动端暂不使用。
+    public static let agentShare = "agent.share"
     public static let clientSelections = "client.selections"
 }

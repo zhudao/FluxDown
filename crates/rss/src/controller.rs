@@ -2,8 +2,8 @@
 
 use crate::{PortFuture, RssPort};
 use fluxdown_protocol::{
-    AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, QueueDto, RssItemDto, RssSourceDto,
-    ServiceEvent, WsServerMsg, method,
+    AgentEvent, AgentSnapshot, DaemonEvent, DaemonSnapshot, PluginDto, QueueDto, RssItemDto,
+    RssSourceDto, ServiceEvent, WsServerMsg, method,
 };
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -22,7 +22,11 @@ pub struct RssController {
     pub(crate) port: Arc<dyn RssPort>,
     pub(crate) sources: Vec<RssSourceDto>,
     pub(crate) queues: Vec<QueueDto>,
+    /// 已安装插件快照：新建/编辑订阅时据此生成来源（provider）选项。
+    pub(crate) plugins: Vec<PluginDto>,
     pub(crate) tasks: HashMap<String, (i32, bool)>,
+    /// 任务表仍在分页载入：`tasks` 只是占位，条目关联任务「不在表里」不代表已被删除。
+    pub(crate) tasks_loading: bool,
     pub(crate) selected_source: Option<String>,
     pub(crate) items: Vec<RssItemDto>,
     pub(crate) selected: BTreeSet<String>,
@@ -42,7 +46,9 @@ impl RssController {
             port,
             sources: Vec::new(),
             queues: Vec::new(),
+            plugins: Vec::new(),
             tasks: HashMap::new(),
+            tasks_loading: false,
             selected_source: None,
             items: Vec::new(),
             selected: BTreeSet::new(),
@@ -63,12 +69,14 @@ impl RssController {
     }
 
     fn absorb_snapshot(&mut self, snapshot: &DaemonSnapshot) {
+        self.tasks_loading = snapshot.task_total.is_some();
         self.tasks = snapshot
             .tasks
             .iter()
             .map(|task| (task.task_id.clone(), (task.status, task.file_missing)))
             .collect();
         self.queues.clone_from(&snapshot.queues);
+        self.plugins.clone_from(&snapshot.plugins);
         self.absorb_sources(&snapshot.rss_sources);
         self.invalidate_items();
     }
@@ -140,6 +148,25 @@ impl RssController {
                 }
                 selected
             }
+            // 插件列表只在打开编辑器时读取，变化本身不影响 RSS 页可见内容。
+            AgentEvent::Daemon(DaemonEvent::PluginsChanged(plugins)) => {
+                self.plugins.clone_from(plugins);
+                false
+            }
+            AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::PluginAutoDisabled {
+                identity,
+                reason,
+            })) => {
+                if let Some(plugin) = self
+                    .plugins
+                    .iter_mut()
+                    .find(|plugin| plugin.identity == *identity)
+                {
+                    plugin.enabled = false;
+                    plugin.disabled_reason.clone_from(reason);
+                }
+                false
+            }
             AgentEvent::Daemon(DaemonEvent::RssChanged { source_id, .. }) => {
                 let selected = self.selected_source.as_deref() == Some(source_id);
                 if selected {
@@ -151,8 +178,29 @@ impl RssController {
                 let value = (task.status, task.file_missing);
                 self.tasks.insert(task.task_id.clone(), value) != Some(value)
             }
+            AgentEvent::Daemon(DaemonEvent::TasksChanged(tasks)) => {
+                let mut changed = false;
+                for task in tasks {
+                    let value = (task.status, task.file_missing);
+                    changed |= self.tasks.insert(task.task_id.clone(), value) != Some(value);
+                }
+                changed
+            }
             AgentEvent::Daemon(DaemonEvent::TaskDeleted { task_id }) => {
                 self.tasks.remove(task_id).is_some()
+            }
+            AgentEvent::Daemon(DaemonEvent::TasksDeleted { task_ids }) => {
+                let mut changed = false;
+                for task_id in task_ids {
+                    changed |= self.tasks.remove(task_id).is_some();
+                }
+                changed
+            }
+            // 任务表整表重载宣告：清空并进入加载态，完整表由会话分页载入后以快照信号送达。
+            AgentEvent::Daemon(DaemonEvent::TablesReloading { tasks: Some(_), .. }) => {
+                self.tasks.clear();
+                self.tasks_loading = true;
+                true
             }
             AgentEvent::Daemon(DaemonEvent::Engine(WsServerMsg::TasksSnapshot { tasks })) => {
                 self.tasks = tasks
@@ -384,6 +432,7 @@ impl RssController {
                 Some((4, _)) => "statusError",
                 Some((5, _)) => "statusPreparing",
                 Some(_) => "rssTaskCreated",
+                None if self.tasks_loading => "rssTaskLoading",
                 None => "rssTaskMissing",
             },
             2 => "rssStatusIgnored",
@@ -631,6 +680,61 @@ mod tests {
                 task_id: "task".into(),
             },
         )));
+        assert_eq!(controller.status_key(&linked), "rssTaskMissing");
+        Ok(())
+    }
+
+    #[test]
+    fn batched_task_facts_update_linked_item_status_like_single_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut snapshot = snapshot()?;
+        snapshot.daemon.tasks.push(task(1)?);
+        let mut controller = RssController::new(Arc::new(Port));
+        controller.replace_snapshot(&snapshot);
+        let linked = item("a", "guid", "Linked", 1, 1, "task");
+        assert_eq!(controller.status_key(&linked), "statusDownloading");
+        let batch = ServiceEvent::Agent(AgentEvent::Daemon(DaemonEvent::TasksChanged(vec![task(
+            2,
+        )?])));
+        assert!(controller.apply_event(&batch));
+        assert_eq!(controller.status_key(&linked), "statusPaused");
+        // 内容未变的批次不重绘。
+        assert!(!controller.apply_event(&batch));
+        Ok(())
+    }
+
+    /// 任务表分页载入期间，关联任务「不在表里」不是已删除：显示载入中而不是「任务已删除」；
+    /// 完整快照到达后恢复按表判定。
+    #[test]
+    fn missing_linked_task_is_loading_not_deleted_while_the_task_table_pages_in()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut snapshot = snapshot()?;
+        snapshot.daemon.tasks.push(task(1)?);
+        let mut controller = RssController::new(Arc::new(Port));
+        controller.replace_snapshot(&snapshot);
+        let linked = item("a", "guid", "Linked", 1, 1, "task");
+        assert_eq!(controller.status_key(&linked), "statusDownloading");
+
+        assert!(
+            controller.apply_event(&ServiceEvent::Agent(AgentEvent::Daemon(
+                DaemonEvent::TablesReloading {
+                    tasks: Some(5_000),
+                    queue: None,
+                }
+            )))
+        );
+        assert_eq!(controller.status_key(&linked), "rssTaskLoading");
+
+        controller.replace_snapshot(&snapshot);
+        assert_eq!(controller.status_key(&linked), "statusDownloading");
+
+        let mut header = snapshot.clone();
+        header.daemon.tasks.clear();
+        header.daemon.task_total = Some(5_000);
+        controller.replace_snapshot(&header);
+        assert_eq!(controller.status_key(&linked), "rssTaskLoading");
+        header.daemon.task_total = None;
+        controller.replace_snapshot(&header);
         assert_eq!(controller.status_key(&linked), "rssTaskMissing");
         Ok(())
     }

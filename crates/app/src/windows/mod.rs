@@ -27,11 +27,15 @@ pub mod file_conflict;
 pub mod group_detail;
 pub mod main;
 pub mod new_download;
+pub mod plugin;
 pub mod progress;
 pub mod queue_manager;
 pub mod selection;
 pub mod settings;
+pub mod share;
+pub mod share_receive;
 pub mod task_detail;
+pub mod update_prompt;
 
 #[cfg(test)]
 mod tests;
@@ -46,10 +50,20 @@ pub enum WindowKey {
     Selection(String),
     /// 所有待确认的「文件已存在」请求聚合在这一个窗口里。
     FileConflicts,
+    /// 自动完成提醒复用进度窗口，一个窗口内导航有界完成集合。
+    Completion,
     TaskDetail(String),
     GroupDetail(String),
     /// 独立下载进度 / 完成窗口（每任务一个）。
     Progress(String),
+    /// 「发现新版本」提醒（不依赖主窗口，托盘驻留时由 agent 拉起界面后单独弹出）。
+    UpdatePrompt,
+    /// 插件桌面界面（contributes.views 的 desktop 入口，gpui-shell 运行），key 为 `<identity>/<viewId>`。
+    Plugin(String),
+    /// FluxMesh分享面板：key 是任务集（`tasks:<排序后的 id>`）或 `share:<分享 id>`，同一组任务只开一个。
+    Share(String),
+    /// FluxMesh接收确认窗口（单例：取件码 / 链接 / 深链 / 剪贴板打开的分享都进这一个）。
+    ShareReceive,
 }
 
 pub struct WindowRegistry {
@@ -97,14 +111,20 @@ impl WindowRegistry {
     }
 
     fn on_window_closed(cx: &mut App, window_id: WindowId) {
-        let last_closed = {
+        let (last_closed, closed_key) = {
             let registry = cx.global_mut::<Self>();
-            if let Some(key) = registry.ids.remove(&window_id) {
-                registry.open.remove(&key);
+            let key = registry.ids.remove(&window_id);
+            if let Some(key) = key.as_ref() {
+                registry.open.remove(key);
             }
             registry.confirming.remove(&window_id);
-            registry.open.is_empty()
+            (registry.open.is_empty(), key)
         };
+        match closed_key {
+            Some(WindowKey::Completion) => crate::completion_windows::window_closed(cx),
+            Some(WindowKey::UpdatePrompt) => crate::update_notices::prompt_closed(cx),
+            _ => {}
+        }
         if last_closed {
             crate::lifecycle::quit_ui(cx);
         }

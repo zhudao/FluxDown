@@ -4,6 +4,7 @@
 //! 顶部居中的卡片列——未登录 hero / 已登录 profile、账号与安全、设备、云功能。
 
 mod assets;
+mod billing;
 mod controller;
 mod device_list;
 mod dialogs;
@@ -13,6 +14,8 @@ mod link;
 mod pages;
 mod profile_edit;
 mod rail;
+mod referral;
+mod rpc;
 mod sync_scope;
 mod ui;
 mod verification;
@@ -27,9 +30,11 @@ use gpui::SharedString;
 pub use assets::{AccountAssets, CLOUD_ICON_PATH, CROWN_ICON_PATH};
 pub use controller::AccountController;
 pub use dialogs::add_device::open as open_add_device;
+pub use dialogs::device::{confirm_unpair_by_fingerprint, open_link_rename_by_fingerprint};
 pub use dialogs::pairing_prompt::open as open_pairing_prompt;
 pub use host::{AccountHost, AccountHostEvent};
 pub use rail::AccountRailButton;
+pub use referral::ReferralView;
 pub use view::AccountView;
 
 pub type PortFuture<T> =

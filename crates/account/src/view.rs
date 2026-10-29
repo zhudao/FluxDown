@@ -8,14 +8,15 @@ use fluxdown_protocol::{CloudEndpointDto, method};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
-    App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, px,
+    AnyView, App, AppContext as _, ClipboardItem, Context, Entity, IntoElement, ParentElement,
+    Render, SharedString, Styled, Subscription, Window, div, px,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
 
 use crate::controller::AccountController;
+use crate::dialogs::plan_purchase::PurchaseTab;
 use crate::errors::{ErrorContext, error_text};
 use crate::host::{AccountHost, AccountHostEvent};
 use crate::link::now_unix_ms;
@@ -54,6 +55,8 @@ pub struct AccountView {
     signing_out: bool,
     /// 上次观察到的登录态，用于在切换时清掉旧错误。
     had_session: bool,
+    /// app 注入的额度视图（共享加速额度 / 贡献）；登录态下显示在资料卡之后。
+    share_usage: Option<AnyView>,
     _endpoint_subscription: Subscription,
     _host_subscription: Subscription,
 }
@@ -105,12 +108,19 @@ impl AccountView {
             linked_refreshing: false,
             signing_out: false,
             had_session,
+            share_usage: None,
             _endpoint_subscription,
             _host_subscription,
         };
         this.load_endpoint(cx);
         Self::spawn_sync_time_ticker(cx);
         this
+    }
+
+    /// 注入「共享加速额度」视图（由 app 创建）；登录态下以 `shareTabUsage` 为标题渲染。
+    pub fn set_share_usage(&mut self, view: AnyView, cx: &mut Context<Self>) {
+        self.share_usage = Some(view);
+        cx.notify();
     }
 
     /// 「上次同步 N 分钟前」由时钟推进，不在任何被追踪的状态里：retained 渲染只在依赖变化时
@@ -170,6 +180,24 @@ impl AccountView {
         if !self.signing_out {
             crate::dialogs::password::open(&self.host, window, cx);
         }
+    }
+
+    /// 套餐购买对话框（`tab` 决定初始页签）；断线 / 退出中不打开。
+    pub(crate) fn open_plan_purchase(
+        &mut self,
+        tab: PurchaseTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.signing_out && !self.controller(cx).is_stale() {
+            crate::dialogs::plan_purchase::open(&self.host, tab, window, cx);
+        }
+    }
+
+    /// 「推介有奖」入口开关：交给 app 写设备本地偏好。
+    pub(crate) fn request_show_referral(&mut self, value: bool, cx: &mut Context<Self>) {
+        self.host
+            .update(cx, |host, cx| host.request_show_referral(value, cx));
     }
 
     /// 通用「发起命令 → 失败提示」；成功结果由快照/事件驱动的重渲染呈现。
@@ -568,12 +596,27 @@ impl Render for AccountView {
                     disabled: disabled || self.signing_out,
                     refreshing: self.cloud_refreshing,
                     last_error,
+                    show_referral: self.host.read(cx).show_referral(),
                 },
                 cx,
             )),
         };
 
         let logged_in = session.is_some();
+        if logged_in && let Some(usage) = self.share_usage.clone() {
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(tokens.spacing.sm)
+                    .child(crate::ui::group_heading(
+                        crate::t(&translator, "shareTabUsage"),
+                        None,
+                        cx,
+                    ))
+                    .child(usage),
+            );
+        }
         if let Some(session) = &session {
             column = column.child(pages::security::render(
                 &translator,
@@ -601,12 +644,15 @@ impl Render for AccountView {
         column = column.child(pages::cloud_features::render(
             &translator,
             &tokens,
-            logged_in,
+            pages::cloud_features::CloudFeaturesState {
+                logged_in,
+                disabled,
+            },
             &sync,
             (!self.host.read(cx).controller.is_stale()
                 && self.host.read(cx).controller.cloud_connected())
             .then_some(devices.as_slice()),
-            disabled,
+            self.host.read(cx).controller.max_online_devices(),
             cx,
         ));
         if let Some(endpoint) = server_address {

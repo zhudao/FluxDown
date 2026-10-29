@@ -51,7 +51,7 @@ export type ErrorReason =
   | 'registrationIncomplete'
   | 'mailNotConfigured'
   | 'deviceLimit'
-  | 'syncDeviceLimit'
+  | 'onlineDeviceLimit'
   | 'deviceUntrusted'
   | 'sessionExpired'
   | 'passwordChanged'
@@ -62,6 +62,8 @@ export type ErrorReason =
   | 'saveDirUnavailable'
   | 'pairingCodeInvalid'
   | 'pairingSessionExpired'
+  | 'pairingTimeout'
+  | 'peerClockSkew'
   | 'pairingPeerUnreachable'
   | 'pairingNotFluxDown'
   | 'pairingThrottled'
@@ -71,6 +73,8 @@ export type ErrorReason =
   | 'pairingVersionMismatch'
   | 'peerNotPaired'
   | 'peerOffline'
+  | 'peerOutdated'
+  | 'linkUnavailable'
   | 'elevationCancelled'
   | 'elevationUnavailable'
   | 'runningElevated'
@@ -81,13 +85,48 @@ export type ErrorReason =
   | 'notifyChannelLimit'
   | 'notifyDisabled'
   | 'notifyTargetInvalid'
+  | 'soundUnplayable'
+  | 'paymentDisabled'
+  | 'paymentGatewayFailed'
+  | 'planNotPurchasable'
+  | 'planAlreadyOwned'
+  | 'planNotUpgrade'
+  | 'planTierNotHigher'
+  | 'referralCodeInvalid'
+  | 'referralSelfUse'
+  | 'referralAlreadyUsed'
+  | 'referralPlanExcluded'
+  | 'referralCodeTaken'
+  | 'shareUnavailable'
+  | 'shareNotFound'
+  | 'shareExpired'
+  | 'shareStopped'
+  | 'shareCodeInvalid'
+  | 'shareRateLimited'
+  | 'shareTurnstileRequired'
+  | 'shareFileChanged'
+  | 'shareSenderOffline'
+  | 'shareTaskNotShareable'
+  | 'shareBridgeUnavailable'
+  | 'shareQuotaExceeded'
+  | 'shareCloudNotReady'
+  | 'shareTrafficExhausted'
+  | 'shareCloudUnavailable'
+  | 'shareOwnShare'
+  | 'shareSourceMissing'
+  | 'shareSwarmLocked'
+  | 'shareSwarmQuotaExhausted'
+  | 'shareSwarmLoginRequired'
+  | 'shareStrikeLimited'
+  | 'shareAppealExists'
+  | 'subscriptionConflict'
   | 'unknown';
 
 /** `error.data`：应用错误的机器可读详情。 */
 export interface RpcErrorData {
   code: ApplicationErrorCode;
   retryable: boolean;
-  /** 出错的参数字段名。 */
+  /** 出错的参数字段名；`shareStrikeLimited` 时携带解除时刻（RFC 3339）。 */
   field?: string;
   /** 乐观并发冲突时服务端当前版本（如 daemon.config.patch）。 */
   revision?: number;

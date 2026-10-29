@@ -347,6 +347,7 @@ impl ApiHost for MockHost {
                 name: String::new(),
                 source_url: String::new(),
                 error: String::new(),
+                plugin_id: String::new(),
                 items: Vec::new(),
             }))
     }
@@ -1833,6 +1834,7 @@ async fn resolve_preview_forwards_request_and_returns_host_response() {
         name: "预览清单".to_string(),
         source_url: "https://example.com/share".to_string(),
         error: String::new(),
+        plugin_id: "pan@example".to_string(),
         items: vec![],
     });
     let server = TestServer::start(host, |c| {

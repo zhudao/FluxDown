@@ -5,22 +5,30 @@ export const METHOD = {
   SYSTEM_HELLO: 'system.hello',
   SYSTEM_PING: 'system.ping',
   SYSTEM_SNAPSHOT: 'system.snapshot',
+  /** 任务表 / 队列位置表分页（快照头带 `taskTotal` / `queueTotal` 时用它载入）。 */
+  SYSTEM_TASK_PAGE: 'system.taskPage',
   /** 允许作为连接首帧（握手前）调用。 */
   SYSTEM_SHUTDOWN: 'system.shutdown',
 
   DAEMON_TASK_LIST: 'daemon.task.list',
   DAEMON_TASK_GET: 'daemon.task.get',
   DAEMON_TASK_ACTIVITY: 'daemon.task.activity',
+  DAEMON_TASK_SPEED_HISTORY: 'daemon.task.speedHistory',
   DAEMON_TASK_CREATE: 'daemon.task.create',
+  /** 批量建任务（`DaemonCreateTasksParams`）：整块一个事务、一次 `tasksChanged` 事件，按 `batchId` 幂等。 */
+  DAEMON_TASK_CREATE_MANY: 'daemon.task.createMany',
   DAEMON_TASK_PAUSE: 'daemon.task.pause',
   DAEMON_TASK_RESUME: 'daemon.task.resume',
   DAEMON_TASK_RENAME: 'daemon.task.rename',
   DAEMON_TASK_CHANGE_URL: 'daemon.task.changeUrl',
+  /** 修改任务线程数（`{taskId, segments}`，≤0 = 自动），已下进度保留；完成或不存在的任务返回 not-found。 */
+  DAEMON_TASK_SET_SEGMENTS: 'daemon.task.setSegments',
   DAEMON_TASK_DELETE: 'daemon.task.delete',
   DAEMON_TASK_PAUSE_ALL: 'daemon.task.pauseAll',
   DAEMON_TASK_RESUME_ALL: 'daemon.task.resumeAll',
   DAEMON_TASK_RESCAN: 'daemon.task.rescan',
   DAEMON_TASK_SET_SEED_LIMITS: 'daemon.task.setSeedLimits',
+  DAEMON_TASK_VERIFY: 'daemon.task.verify',
   DAEMON_TASK_PAUSE_MANY: 'daemon.task.pauseMany',
   DAEMON_TASK_RESUME_MANY: 'daemon.task.resumeMany',
   DAEMON_TASK_DELETE_MANY: 'daemon.task.deleteMany',
@@ -46,6 +54,7 @@ export const METHOD = {
   DAEMON_CONFIG_GET: 'daemon.config.get',
   DAEMON_CONFIG_PATCH: 'daemon.config.patch',
   DAEMON_CONFIG_PROXY_TEST: 'daemon.config.proxyTest',
+  DAEMON_CONFIG_PROXY_ROUTE: 'daemon.config.proxyRoute',
   DAEMON_CONFIG_CONN_POLICY: 'daemon.config.connPolicy',
   DAEMON_CONFIG_CLEAR_CONN_POLICY: 'daemon.config.clearConnPolicy',
   DAEMON_CONFIG_SYSTEM_PROXY: 'daemon.config.systemProxy',
@@ -71,6 +80,9 @@ export const METHOD = {
   DAEMON_LINK_PROBE: 'daemon.link.probe',
 
   DAEMON_PLUGIN_LIST: 'daemon.plugin.list',
+  DAEMON_PLUGIN_SNIFF_RULES: 'daemon.plugin.sniffRules',
+  DAEMON_PLUGIN_PAGE_SCRIPTS: 'daemon.plugin.pageScripts',
+  DAEMON_PLUGIN_PAGE_SCRIPT_SOURCE: 'daemon.plugin.pageScriptSource',
   DAEMON_PLUGIN_AUTH: 'daemon.plugin.auth',
   DAEMON_PLUGIN_SET_ENABLED: 'daemon.plugin.setEnabled',
   DAEMON_PLUGIN_UPDATE_SETTINGS: 'daemon.plugin.updateSettings',
@@ -81,6 +93,20 @@ export const METHOD = {
   DAEMON_PLUGIN_MARKET_LIST: 'daemon.plugin.marketList',
   DAEMON_PLUGIN_MARKET_INSTALL: 'daemon.plugin.marketInstall',
   DAEMON_PLUGIN_IGNORE_RETRY: 'daemon.plugin.ignoreRetry',
+  DAEMON_PLUGIN_SITE_DEFAULTS: 'daemon.plugin.siteDefaults',
+  DAEMON_PLUGIN_SET_SITE_DEFAULT: 'daemon.plugin.setSiteDefault',
+  DAEMON_PLUGIN_CONSENT: 'daemon.plugin.consent',
+  DAEMON_PLUGIN_AUDIT_LIST: 'daemon.plugin.audit.list',
+  DAEMON_PLUGIN_AUDIT_CLEAR: 'daemon.plugin.audit.clear',
+  DAEMON_PLUGIN_AUDIT_RECORD: 'daemon.plugin.audit.record',
+  DAEMON_PLUGIN_VIEW_OPEN: 'daemon.plugin.view.open',
+  DAEMON_PLUGIN_VIEW_EVENT: 'daemon.plugin.view.event',
+  DAEMON_PLUGIN_VIEW_CLOSE: 'daemon.plugin.view.close',
+  DAEMON_PLUGIN_VIEW_SNAPSHOT: 'daemon.plugin.view.snapshot',
+  DAEMON_PLUGIN_VIEW_KEEPALIVE: 'daemon.plugin.view.keepalive',
+  DAEMON_PLUGIN_COMMAND: 'daemon.plugin.command',
+  DAEMON_PLUGIN_INVOKE: 'daemon.plugin.invoke',
+  DAEMON_PLUGIN_PAGE_INVOKE: 'daemon.plugin.pageInvoke',
   DAEMON_COMPONENT_GET: 'daemon.component.get',
   DAEMON_COMPONENT_LIST_VERSIONS: 'daemon.component.listVersions',
   DAEMON_COMPONENT_INSTALL: 'daemon.component.install',
@@ -98,6 +124,7 @@ export const METHOD = {
   DAEMON_CDN_REPORTS_PEEK: 'daemon.cdnReports.peek',
   DAEMON_CDN_REPORTS_ACK: 'daemon.cdnReports.ack',
   DAEMON_CDN_CONFIG_APPLY: 'daemon.cdnConfig.apply',
+  DAEMON_EGRESS_PLAN: 'daemon.egress.plan',
 
   DAEMON_BT_TRACKER_SUBSCRIPTION_REFRESH: 'daemon.bt.trackerSubscription.refresh',
   DAEMON_ED2K_SERVER_SUBSCRIPTION_REFRESH: 'daemon.ed2k.serverSubscription.refresh',
@@ -132,6 +159,8 @@ export const METHOD = {
   AGENT_PROFILE_CHANGE_NICKNAME: 'agent.profile.changeNickname',
   AGENT_PROFILE_SEND_PASSWORD_CODE: 'agent.profile.sendPasswordCode',
   AGENT_PROFILE_CHANGE_PASSWORD: 'agent.profile.changePassword',
+  AGENT_PROFILE_SEND_DELETE_CODE: 'agent.profile.sendDeleteCode',
+  AGENT_PROFILE_DELETE_ACCOUNT: 'agent.profile.deleteAccount',
 
   AGENT_GATEWAY_GET: 'agent.gateway.get',
   AGENT_GATEWAY_PATCH: 'agent.gateway.patch',
@@ -140,6 +169,7 @@ export const METHOD = {
   AGENT_REMOTE_RECONNECT: 'agent.remote.reconnect',
   AGENT_DEVICE_RENAME: 'agent.device.rename',
   AGENT_DEVICE_DELETE: 'agent.device.delete',
+  AGENT_DEVICE_DISCONNECT: 'agent.device.disconnect',
   AGENT_PREFERENCES_PATCH: 'agent.preferences.patch',
   AGENT_SYNC_GET: 'agent.sync.get',
   AGENT_SYNC_ENABLE: 'agent.sync.enable',
@@ -154,7 +184,9 @@ export const METHOD = {
   AGENT_LINK_PAIR_FINISH: 'agent.link.pairFinish',
   AGENT_LINK_APPROVE: 'agent.link.approve',
   AGENT_LINK_REMOVE: 'agent.link.remove',
+  AGENT_LINK_RENAME: 'agent.link.rename',
   AGENT_LINK_REFRESH: 'agent.link.refresh',
+  AGENT_LINK_CONTROL_CREDENTIAL: 'agent.link.controlCredential',
   AGENT_LINK_DISPATCH: 'agent.link.dispatch',
   AGENT_CLOUD_ENDPOINT_GET: 'agent.cloud.endpointGet',
   AGENT_CLOUD_ENDPOINT_SET: 'agent.cloud.endpointSet',
@@ -172,16 +204,21 @@ export const METHOD = {
   AGENT_REFERRAL_DELETE_CODE: 'agent.referral.deleteCode',
   AGENT_REFERRAL_LIST_RECORDS: 'agent.referral.listRecords',
   AGENT_REFERRAL_VALIDATE: 'agent.referral.validate',
+  AGENT_PLUGIN_FAVORITE_LIST: 'agent.pluginFavorite.list',
+  AGENT_PLUGIN_FAVORITE_SET: 'agent.pluginFavorite.set',
 
-  // 以下方法读写宿主机路径 / 桌面集成，Web 不使用。
+  // 以下方法读写宿主机路径 / 桌面集成，按连接能力门控（多数 Web 不使用）。
   AGENT_PLATFORM_OPEN_TASK: 'agent.platform.openTask',
   AGENT_PLATFORM_REVEAL_TASK: 'agent.platform.revealTask',
+  /** 把任务产物以文件写入 agent 所在主机的系统剪贴板；仅当 hello 带 `agent.copyTaskFiles` 能力时可用。 */
+  AGENT_PLATFORM_COPY_TASK_FILES: 'agent.platform.copyTaskFiles',
   AGENT_PLATFORM_OPEN_PATH: 'agent.platform.openPath',
   AGENT_PLATFORM_INTEGRATION_GET: 'agent.platform.integrationGet',
   AGENT_PLATFORM_SET_AUTOSTART: 'agent.platform.setAutostart',
   AGENT_PLATFORM_SET_FILE_ASSOCIATION: 'agent.platform.setFileAssociation',
   AGENT_PLATFORM_SET_URL_PROTOCOL: 'agent.platform.setUrlProtocol',
   AGENT_PLATFORM_FILE_ICON: 'agent.platform.fileIcon',
+  AGENT_SOUND_PREVIEW: 'agent.sound.preview',
   AGENT_CAPTURE_SUBMIT: 'agent.capture.submit',
   AGENT_CAPTURE_SUBMIT_TORRENT_FILE: 'agent.capture.submitTorrentFile',
   AGENT_CAPTURE_LIST: 'agent.capture.list',
@@ -213,6 +250,36 @@ export const METHOD = {
   AGENT_CLOUD_NOTIFY_DELIVERIES: 'agent.cloudNotify.deliveries',
   AGENT_CLOUD_NOTIFY_SEND_EMAIL_CODE: 'agent.cloudNotify.sendEmailCode',
   AGENT_CLOUD_NOTIFY_VERIFY_EMAIL: 'agent.cloudNotify.verifyEmail',
+  /** FluxMesh（临时文件分享）：仅当 hello 带 `agent.share` 能力时可用。 */
+  AGENT_SHARE_CONFIG: 'agent.share.config',
+  AGENT_SHARE_SET_LOCAL_CONFIG: 'agent.share.setLocalConfig',
+  AGENT_SHARE_CREATE: 'agent.share.create',
+  AGENT_SHARE_LIST: 'agent.share.list',
+  AGENT_SHARE_UPDATE: 'agent.share.update',
+  AGENT_SHARE_STOP: 'agent.share.stop',
+  /** 重新开始已停止 / 已过期的分享（同 id、同链接，重新分配取件码）。 */
+  AGENT_SHARE_RESUME: 'agent.share.resume',
+  /** 删除分享记录（分享中的先停止）。 */
+  AGENT_SHARE_DELETE: 'agent.share.delete',
+  AGENT_SHARE_RESOLVE: 'agent.share.resolve',
+  AGENT_SHARE_RECEIVE: 'agent.share.receive',
+  AGENT_SHARE_DISMISS_PENDING: 'agent.share.dismissPending',
+  AGENT_SHARE_RECEIVE_RECORDS: 'agent.share.receiveRecords',
+  /** 把接收任务切到实时桥接；任务继续运行，其 `pathKind` 在分块经桥接 / CDN 流动后变为 `bridge` / `cdn`。 */
+  AGENT_SHARE_SWITCH_TO_BRIDGE: 'agent.share.switchToBridge',
+  AGENT_SHARE_DIAGNOSTICS: 'agent.share.diagnostics',
+  AGENT_SHARE_USAGE_REFRESH: 'agent.share.usageRefresh',
+  AGENT_SHARE_LOGS: 'agent.share.logs',
+  AGENT_SHARE_SESSION_KILL: 'agent.share.sessionKill',
+  /** 把实时分享转为云端暂存（需登录）；预检通过后立即返回 `cloudState = uploading`，上传在 agent 后台进行。 */
+  AGENT_SHARE_CONVERT_TO_CLOUD: 'agent.share.convertToCloud',
+  /** 删除云端副本（上传中则先取消）；分享回到实时模式。 */
+  AGENT_SHARE_DELETE_CLOUD_COPY: 'agent.share.deleteCloudCopy',
+  AGENT_SHARE_STOP_PROVIDING: 'agent.share.stopProviding',
+  /** 举报分享（按原因枚举，agent 用本机 endpoint 私钥签名）。 */
+  AGENT_SHARE_REPORT: 'agent.share.report',
+  /** 申诉已下架的分享，返回更新后的分享。 */
+  AGENT_SHARE_APPEAL: 'agent.share.appeal',
 
   /** 服务端推送通知，params 为 EventFrame。 */
   SERVICE_EVENT: 'service.event',
@@ -240,5 +307,12 @@ export const CAPABILITY_AGENT_DEVICE_LINK = 'agent.deviceLink';
 export const CAPABILITY_AGENT_EXTERNAL_CAPTURE = 'agent.externalCapture';
 /** 按连接下发：本连接可在 agent 所在主机上打开 / 定位任务产物（`agent.platform.openTask` / `revealTask`）。 */
 export const CAPABILITY_AGENT_OPEN_TASK_FILES = 'agent.openTaskFiles';
+/**
+ * 按连接下发：本连接可把任务产物写入 agent 所在主机的系统剪贴板（`agent.platform.copyTaskFiles`）。
+ * 只在本机来源 + 桌面构建 + 有图形会话时下发；远程 / NAS 连接没有（浏览器无法把文件写进系统剪贴板）。
+ */
+export const CAPABILITY_AGENT_COPY_TASK_FILES = 'agent.copyTaskFiles';
+/** 本 agent 编入了FluxMesh服务（`agent.share.*`）；条件能力，未编入FluxMesh的构建不下发。 */
+export const CAPABILITY_AGENT_SHARE = 'agent.share';
 /** 客户端能力：可处理交互选择（HLS/BT/变体），放入握手 capabilities。 */
 export const CAPABILITY_CLIENT_SELECTIONS = 'client.selections';

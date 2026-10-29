@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use fluxdown_api::service::LiveSpeed;
-use fluxdown_protocol::{DownloadRequest, TaskDto};
+use fluxdown_protocol::{ApplicationErrorCode, DownloadRequest, PluginDto, TaskDto};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -11,11 +11,32 @@ use tokio_util::sync::CancellationToken;
 
 use crate::capture::CaptureService;
 use crate::daemon_client::DaemonClient;
+use crate::sniff_rules::{Have, SniffRuleStore};
+
+pub mod comspec;
 
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 const MAX_BATCH_ITEMS: usize = 1000;
 const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 const MAX_COMPLETED_TASKS: usize = 10;
+/// 扩展 ↔ agent 的 NMH 协议版本；v2 增加应答 `data`、`capabilities`、`capture_status`、`sniff_rules`。
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 2;
+const SUPPORTED_ACTIONS: &[&str] = &[
+    "ping",
+    "download",
+    "batch_download",
+    "tasks",
+    "task_op",
+    "open_file",
+    "reveal_file",
+    "capabilities",
+    "capture_status",
+    "sniff_rules",
+    "page_scripts",
+    "page_script_source",
+    "plugin_invoke",
+];
+const MAX_CAPTURE_STATUS_IDS: usize = 256;
 
 #[derive(Deserialize)]
 struct PipeMessage {
@@ -44,6 +65,25 @@ struct TaskIdPayload {
     task_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureStatusPayload {
+    transaction_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SniffRulesPayload {
+    #[serde(default)]
+    have: Have,
+    /// 用户手动同步：忽略退避并等刷新完成再应答（至多 15 s）。
+    #[serde(default)]
+    force: bool,
+    /// 只取 plugin 层：本机聚合，不触发任何网络刷新（扩展关闭远程规则同步时使用）。
+    #[serde(default)]
+    plugin_only: bool,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskBrief {
@@ -65,6 +105,8 @@ struct PipeResponse {
     msg_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tasks: Option<Vec<TaskBrief>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 impl PipeResponse {
@@ -74,6 +116,7 @@ impl PipeResponse {
             message: Some(message.into()),
             msg_id,
             tasks: None,
+            data: None,
         }
     }
 
@@ -83,6 +126,7 @@ impl PipeResponse {
             message: Some(message.into()),
             msg_id,
             tasks: None,
+            data: None,
         }
     }
 
@@ -92,6 +136,17 @@ impl PipeResponse {
             message: None,
             msg_id,
             tasks: Some(tasks),
+            data: None,
+        }
+    }
+
+    fn ok_data(msg_id: u64, message: impl Into<String>, data: Value) -> Self {
+        Self {
+            success: true,
+            message: Some(message.into()),
+            msg_id,
+            tasks: None,
+            data: Some(data),
         }
     }
 }
@@ -101,6 +156,7 @@ pub struct NmhService {
     daemon: Arc<DaemonClient>,
     capture: Arc<CaptureService>,
     task_events: Option<crate::task_events::TaskEventHub>,
+    sniff_rules: Option<Arc<SniffRuleStore>>,
 }
 
 impl NmhService {
@@ -110,6 +166,7 @@ impl NmhService {
             daemon,
             capture,
             task_events: None,
+            sniff_rules: None,
         }
     }
 
@@ -117,6 +174,13 @@ impl NmhService {
     #[must_use]
     pub fn with_task_events(mut self, task_events: crate::task_events::TaskEventHub) -> Self {
         self.task_events = Some(task_events);
+        self
+    }
+
+    /// 注入嗅探规则包存储；未注入时 `sniff_rules` 动作按未知动作处理。
+    #[must_use]
+    pub fn with_sniff_rules(mut self, store: Arc<SniffRuleStore>) -> Self {
+        self.sniff_rules = Some(store);
         self
     }
 
@@ -138,7 +202,7 @@ impl NmhService {
                     .submit(request, crate::capture::CaptureOrigin::External)
                     .await
                 {
-                    Ok(_) => PipeResponse::ok(message.msg_id, "download accepted"),
+                    Ok(value) => PipeResponse::ok_data(message.msg_id, "download accepted", value),
                     Err(error) => PipeResponse::error(message.msg_id, error.to_string()),
                 },
                 Err(error) => PipeResponse::error(message.msg_id, error.to_string()),
@@ -154,6 +218,15 @@ impl NmhService {
                 self.platform_action(message.msg_id, message.payload, true)
                     .await
             }
+            "capabilities" => self.capabilities(message.msg_id).await,
+            "capture_status" => self.capture_status(message.msg_id, message.payload).await,
+            "page_scripts" => self.page_scripts(message.msg_id).await,
+            "page_script_source" => {
+                self.page_script_source(message.msg_id, message.payload)
+                    .await
+            }
+            "plugin_invoke" => self.plugin_invoke(message.msg_id, message.payload).await,
+            "sniff_rules" => self.sniff_rules(message.msg_id, message.payload).await,
             other => PipeResponse::error(message.msg_id, format!("unknown action: {other}")),
         }
     }
@@ -175,20 +248,251 @@ impl NmhService {
             .submit_many(batch.items, crate::capture::CaptureOrigin::External)
             .await
         {
-            Ok(_) => PipeResponse::ok(msg_id, format!("batch accepted ({count} items)")),
+            Ok(value) => {
+                PipeResponse::ok_data(msg_id, format!("batch accepted ({count} items)"), value)
+            }
             Err(error) => PipeResponse::error(msg_id, error.to_string()),
         }
     }
 
-    async fn task_list(&self, msg_id: u64) -> PipeResponse {
-        let tasks = match self
+    /// plugin 层嗅探规则包；daemon 不支持（未编入插件）或查询失败时按「无插件规则」降级。
+    async fn plugin_sniff_rules(&self) -> Option<fluxdown_protocol::PluginSniffRulesDto> {
+        match self
             .daemon
-            .call::<Value, Vec<TaskDto>>(fluxdown_protocol::method::DAEMON_TASK_LIST, None)
+            .call::<Value, fluxdown_protocol::PluginSniffRulesDto>(
+                fluxdown_protocol::method::DAEMON_PLUGIN_SNIFF_RULES,
+                None,
+            )
             .await
         {
-            Ok(tasks) => tasks,
+            Ok(dto) => Some(dto),
+            Err(error) => {
+                // Unsupported 是常态（无插件特性）；其余错误不应拖垮 capabilities / 官方规则同步。
+                if !matches!(error.code, ApplicationErrorCode::Unsupported) {
+                    tracing::warn!(code = ?error.code, "plugin sniff rules unavailable");
+                }
+                None
+            }
+        }
+    }
+
+    /// 页面脚本索引；daemon 不支持 / 查询失败 / epoch 为空时视为不可用（`capabilities` 两字段均为 null）。
+    async fn page_scripts_index(&self) -> Option<fluxdown_protocol::PluginPageScriptsDto> {
+        match self
+            .daemon
+            .call::<Value, fluxdown_protocol::PluginPageScriptsDto>(
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPTS,
+                None,
+            )
+            .await
+        {
+            Ok(dto) if !dto.epoch.is_empty() => Some(dto),
+            Ok(_) => None,
+            Err(error) => {
+                if !matches!(error.code, ApplicationErrorCode::Unsupported) {
+                    tracing::warn!(code = ?error.code, "plugin page scripts unavailable");
+                }
+                None
+            }
+        }
+    }
+
+    /// 转发 daemon 的页面脚本相关方法；失败带上 daemon 返回的消息。
+    async fn forward_page_call<P: serde::Serialize>(
+        &self,
+        method: &str,
+        params: Option<P>,
+    ) -> Result<Value, String> {
+        self.daemon
+            .call_detailed::<P, Value>(method, params)
+            .await
+            .map_err(|error| error.message)
+    }
+
+    async fn page_scripts(&self, msg_id: u64) -> PipeResponse {
+        match self
+            .forward_page_call::<Value>(fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPTS, None)
+            .await
+        {
+            Ok(data) => PipeResponse::ok_data(msg_id, "ok", data),
+            Err(message) => PipeResponse::error(msg_id, message),
+        }
+    }
+
+    async fn page_script_source(&self, msg_id: u64, payload: Value) -> PipeResponse {
+        let params = match serde_json::from_value::<fluxdown_protocol::PluginPageScriptSourceParams>(
+            payload,
+        ) {
+            Ok(params) => params,
+            Err(error) => return PipeResponse::error(msg_id, error.to_string()),
+        };
+        let data = match self
+            .forward_page_call(
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPT_SOURCE,
+                Some(params),
+            )
+            .await
+        {
+            Ok(data) => data,
+            Err(message) => return PipeResponse::error(msg_id, message),
+        };
+        match serde_json::to_vec(&data) {
+            Ok(bytes) if bytes.len() > SNIFF_REPLY_BUDGET => {
+                PipeResponse::error(msg_id, "page script too large")
+            }
+            Ok(_) => PipeResponse::ok_data(msg_id, "ok", data),
+            Err(error) => PipeResponse::error(msg_id, error.to_string()),
+        }
+    }
+
+    /// 页面脚本调用插件处理器（daemon 侧为慢方法，按请求并发处理，不影响其它 NMH 连接）。
+    /// 扩展只收到处理器返回值；插件在这次调用里开始的任务按静默捕获规则登记提示窗口。
+    async fn plugin_invoke(&self, msg_id: u64, payload: Value) -> PipeResponse {
+        let params =
+            match serde_json::from_value::<fluxdown_protocol::PluginPageInvokeParams>(payload) {
+                Ok(params) => params,
+                Err(error) => return PipeResponse::error(msg_id, error.to_string()),
+            };
+        match self
+            .daemon
+            .call_detailed::<_, fluxdown_protocol::PluginPageInvokeResultDto>(
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_INVOKE,
+                Some(params),
+            )
+            .await
+        {
+            Ok(result) => {
+                self.capture
+                    .announce_page_started(&result.created_task_ids, &result.resumed_task_ids);
+                PipeResponse::ok_data(msg_id, "ok", serde_json::json!({ "value": result.value }))
+            }
+            Err(error) => PipeResponse::error(msg_id, error.message),
+        }
+    }
+
+    async fn capabilities(&self, msg_id: u64) -> PipeResponse {
+        let (plugins_supported, resolvers) = match self
+            .daemon
+            .call::<Value, Vec<PluginDto>>(fluxdown_protocol::method::DAEMON_PLUGIN_LIST, None)
+            .await
+        {
+            Ok(plugins) => (true, resolver_infos(plugins)),
+            Err(error) if matches!(error.code, ApplicationErrorCode::Unsupported) => {
+                (false, Vec::new())
+            }
             Err(error) => return PipeResponse::error(msg_id, format!("{:?}", error.code)),
         };
+        let (plugin_dto, page_scripts) = if plugins_supported {
+            (
+                self.plugin_sniff_rules().await,
+                self.page_scripts_index().await,
+            )
+        } else {
+            (None, None)
+        };
+        let plugin_rules_sequence = plugin_dto.as_ref().map_or(0, |dto| dto.sequence);
+        let plugin_rules_epoch = plugin_dto.as_ref().and_then(plugin_epoch_value);
+        PipeResponse::ok_data(
+            msg_id,
+            "ok",
+            serde_json::json!({
+                "protocol": EXTENSION_PROTOCOL_VERSION,
+                "actions": SUPPORTED_ACTIONS,
+                "pluginsSupported": plugins_supported,
+                "resolvers": resolvers,
+                "pluginRulesSequence": plugin_rules_sequence,
+                "pluginRulesEpoch": plugin_rules_epoch,
+                "pageScriptsSequence": page_scripts.as_ref().map(|dto| dto.sequence),
+                "pageScriptsEpoch": page_scripts.map(|dto| dto.epoch),
+            }),
+        )
+    }
+
+    async fn capture_status(&self, msg_id: u64, payload: Value) -> PipeResponse {
+        let request = match serde_json::from_value::<CaptureStatusPayload>(payload) {
+            Ok(request) => request,
+            Err(error) => return PipeResponse::error(msg_id, error.to_string()),
+        };
+        let count = request.transaction_ids.len();
+        if count == 0 || count > MAX_CAPTURE_STATUS_IDS {
+            return PipeResponse::error(msg_id, format!("invalid transaction count: {count}"));
+        }
+        let statuses = self.capture.statuses(&request.transaction_ids).await;
+        PipeResponse::ok_data(msg_id, "ok", serde_json::json!({ "statuses": statuses }))
+    }
+
+    async fn sniff_rules(&self, msg_id: u64, payload: Value) -> PipeResponse {
+        let Some(store) = &self.sniff_rules else {
+            return PipeResponse::error(msg_id, "unknown action: sniff_rules");
+        };
+        let request = match serde_json::from_value::<SniffRulesPayload>(payload) {
+            Ok(request) => request,
+            Err(error) => return PipeResponse::error(msg_id, error.to_string()),
+        };
+        let mut data = if request.plugin_only {
+            serde_json::json!({
+                "official": null,
+                "community": null,
+                "revocations": null,
+                "status": null,
+            })
+        } else {
+            store.query(&request.have, request.force).await
+        };
+        let plugin_dto = self.plugin_sniff_rules().await;
+        // daemon 未答复时序号与 epoch 都为 null：扩展据此不改动 plugin 层，不把「查不到」当作「已清空」。
+        let plugin_sequence = plugin_dto
+            .as_ref()
+            .map_or(Value::Null, |dto| Value::from(dto.sequence));
+        let plugin_epoch = plugin_dto
+            .as_ref()
+            .and_then(plugin_epoch_value)
+            .map_or(Value::Null, Value::String);
+        let plugin_pack = select_plugin_pack(
+            plugin_dto,
+            request.have.plugin(),
+            request.have.plugin_epoch(),
+        );
+        if let Some(object) = data.as_object_mut() {
+            object.insert("plugin".to_string(), plugin_pack);
+            object.insert("pluginSequence".to_string(), plugin_sequence);
+            object.insert("pluginEpoch".to_string(), plugin_epoch);
+        }
+        let deferred = defer_oversized_docs(&mut data);
+        if let Some(object) = data.as_object_mut() {
+            object.insert("deferred".to_string(), serde_json::json!(deferred));
+        }
+        PipeResponse::ok_data(msg_id, "ok", data)
+    }
+
+    async fn task_list(&self, msg_id: u64) -> PipeResponse {
+        // 大任务表不能一次取回：分页拉取，每页只留简报需要的行（未完成的全部 + 最近完成的
+        // 若干），内存与任务总数无关。
+        let limit = fluxdown_protocol::TASK_PAGE_MAX_LIMIT;
+        let mut kept: Vec<TaskDto> = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let params = serde_json::json!({ "cursor": cursor, "limit": limit });
+            let page = match self
+                .daemon
+                .call::<Value, Vec<TaskDto>>(
+                    fluxdown_protocol::method::DAEMON_TASK_LIST,
+                    Some(params),
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => return PipeResponse::error(msg_id, format!("{:?}", error.code)),
+            };
+            let last = page.len() < limit;
+            cursor = page.last().map(|task| task.task_id.clone());
+            kept.extend(page);
+            kept = trim_completed(kept);
+            if last || cursor.is_none() {
+                break;
+            }
+        }
+        let tasks = kept;
         let speeds = self
             .task_events
             .as_ref()
@@ -250,18 +554,88 @@ impl NmhService {
     }
 }
 
-fn select_task_briefs(
-    tasks: Vec<TaskDto>,
-    speeds: &std::collections::HashMap<String, LiveSpeed>,
-) -> Vec<TaskBrief> {
+/// daemon 的 plugin 层 epoch；空串（旧 daemon 无 epoch）视为缺失。
+fn plugin_epoch_value(dto: &fluxdown_protocol::PluginSniffRulesDto) -> Option<String> {
+    (!dto.epoch.is_empty()).then(|| dto.epoch.clone())
+}
+
+/// plugin 层嗅探规则包的应答值：缺省 `have`、daemon 序号更新或 epoch 与扩展持有的不同
+/// （数据库重置后序号重新计数，旧序号作废）时给 pack，否则 `null`。
+fn select_plugin_pack(
+    dto: Option<fluxdown_protocol::PluginSniffRulesDto>,
+    have: Option<u64>,
+    have_epoch: Option<&str>,
+) -> Value {
+    dto.filter(|dto| {
+        let epoch_changed = !dto.epoch.is_empty() && have_epoch != Some(dto.epoch.as_str());
+        epoch_changed || have.is_none_or(|known| dto.sequence > known)
+    })
+    .and_then(|dto| dto.pack)
+    .unwrap_or(Value::Null)
+}
+
+/// 应答 data 的序列化体积预算：NMH 单帧上限 1 MiB（浏览器 → 扩展方向同口径），留出信封余量。
+const SNIFF_REPLY_BUDGET: usize = 900 * 1024;
+
+/// 文档合计超过 [`SNIFF_REPLY_BUDGET`] 时把后面的文档置 `null` 并返回其名（`deferred`），
+/// 扩展处理完已收到的文档后再次查询取走剩余部分。第一份文档无论多大都保留，保证每轮有进展。
+/// 顺序：吊销列表（体积小、安全相关）→ official → community → plugin。
+fn defer_oversized_docs(data: &mut Value) -> Vec<&'static str> {
+    let mut deferred = Vec::new();
+    let Some(object) = data.as_object_mut() else {
+        return deferred;
+    };
+    let mut used = 0_usize;
+    let mut kept_any = false;
+    for key in ["revocations", "official", "community", "plugin"] {
+        let size = match object.get(key) {
+            Some(value) if !value.is_null() => value.to_string().len(),
+            _ => continue,
+        };
+        if kept_any && used.saturating_add(size) > SNIFF_REPLY_BUDGET {
+            object.insert(key.to_string(), Value::Null);
+            deferred.push(key);
+        } else {
+            used = used.saturating_add(size);
+            kept_any = true;
+        }
+    }
+    deferred
+}
+
+/// 只保留声明了 resolver URL 的插件；供扩展判断页面能否交给桌面端解析。
+fn resolver_infos(plugins: Vec<PluginDto>) -> Vec<Value> {
+    plugins
+        .into_iter()
+        .filter(|plugin| !plugin.resolver_urls.is_empty())
+        .map(|plugin| {
+            serde_json::json!({
+                "identity": plugin.identity,
+                "name": plugin.name,
+                "enabled": plugin.enabled,
+                "loaded": plugin.load_status == "Loaded",
+                "urls": plugin.resolver_urls,
+            })
+        })
+        .collect()
+}
+
+/// 只留简报需要的行：未完成的全部，加上最近完成的 `MAX_COMPLETED_TASKS` 个（未完成在前）。
+fn trim_completed(tasks: Vec<TaskDto>) -> Vec<TaskDto> {
     let (mut completed, active): (Vec<_>, Vec<_>) =
         tasks.into_iter().partition(|task| task.status == 3);
     completed
         .sort_by_key(|task| std::cmp::Reverse(task.created_at.parse::<i64>().unwrap_or_default()));
     completed.truncate(MAX_COMPLETED_TASKS);
-    active
+    active.into_iter().chain(completed).collect()
+}
+
+fn select_task_briefs(
+    tasks: Vec<TaskDto>,
+    speeds: &std::collections::HashMap<String, LiveSpeed>,
+) -> Vec<TaskBrief> {
+    trim_completed(tasks)
         .into_iter()
-        .chain(completed)
         .map(|task| TaskBrief {
             speed: speeds
                 .get(&task.task_id)
@@ -648,6 +1022,29 @@ pub mod registry {
         /// Windows：Chrome 与 Edge 都开启了 `NativeHostsExecutablesLaunchDirectly`，浏览器直接
         /// 启动中继、不经 `cmd.exe`。
         pub direct_launch: bool,
+        /// Windows 且仍有浏览器经 `%ComSpec% /d /c` 启动主机时：`ComSpec` 的配置值与本进程值。
+        pub comspec: Option<super::comspec::ComSpecState>,
+    }
+
+    impl NmhDiagnosis {
+        /// 浏览器启动原生消息主机所执行的入口（诊断详情用）：类 Unix 为启动脚本；Windows 为
+        /// `<ComSpec> /d /c <中继>`，直接启动或 `ComSpec` 不可用时为中继本身。
+        #[must_use]
+        pub fn launch_entry(&self) -> String {
+            if !cfg!(windows) {
+                return self.relay_location.clone();
+            }
+            match self
+                .comspec
+                .as_ref()
+                .and_then(super::comspec::ComSpecState::launcher)
+            {
+                Some(launcher) if !self.direct_launch => {
+                    format!("{launcher} /d /c {}", self.registered_relay)
+                }
+                _ => self.registered_relay.clone(),
+            }
+        }
     }
 
     /// 让浏览器拉不起 FluxDown 原生消息主机的组织策略（Windows 组策略 / 注册表）。
@@ -940,9 +1337,11 @@ pub mod registry {
     }
 
     /// 像浏览器那样拉起当前生效的注册并经它 `ping`：类 Unix 执行清单指向的启动脚本，Windows
-    /// 与 Chrome / Edge 一样经 `cmd.exe /d /c` 启动中继（浏览器都开了
-    /// `NativeHostsExecutablesLaunchDirectly` 时直接启动）。注册缺失 / 失效，或本进程 IPC 端点
-    /// 不在线（由监听检查报告，重新注册修不好）时返回 `None`。
+    /// 与 Chrome / Edge 一样经 `%ComSpec% /d /c` 启动中继（浏览器都开了
+    /// `NativeHostsExecutablesLaunchDirectly` 时直接启动）。`ComSpec` 取注册表配置值——即重启后
+    /// 的浏览器会拿到的值；本进程环境可能还是修改前继承的旧值。注册缺失 / 失效、`ComSpec` 不可用
+    /// （由 `nmh_comspec` 检查报告），或本进程 IPC 端点不在线（由监听检查报告，重新注册修不好）
+    /// 时返回 `None`。
     pub async fn probe_browser_launch(
         diagnosis: &NmhDiagnosis,
     ) -> Option<Result<(), RelayLaunchError>> {
@@ -965,13 +1364,11 @@ pub mod registry {
             command.arg(CHROME_EXTENSION_ID);
             command
         } else {
-            let cmd = std::env::var_os("ComSpec")
-                .filter(|value| !value.is_empty())
-                .map_or_else(
-                    || PathBuf::from(r"C:\Windows\System32\cmd.exe"),
-                    PathBuf::from,
-                );
-            let mut command = tokio::process::Command::new(cmd);
+            let launcher = diagnosis
+                .comspec
+                .as_ref()
+                .and_then(super::comspec::ComSpecState::launcher)?;
+            let mut command = tokio::process::Command::new(launcher);
             command.raw_arg(cmd_launch_line(
                 &diagnosis.registered_relay,
                 CHROME_EXTENSION_ID,
@@ -2295,6 +2692,10 @@ pub mod registry {
                 });
             }
             (diagnosis.policy_blocks, diagnosis.direct_launch) = read_policies();
+            // 只要还有浏览器经 cmd.exe 启动主机，ComSpec 就决定扩展能否连上。
+            if !diagnosis.direct_launch {
+                diagnosis.comspec = Some(crate::nmh::comspec::inspect());
+            }
             diagnosis
         }
 
@@ -2343,8 +2744,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        MAX_BATCH_ITEMS, NmhService, PipeMessage, handle_stream, ping_stream, pipe_name_for,
-        select_task_briefs, socket_path_under,
+        MAX_BATCH_ITEMS, NmhService, PipeMessage, SNIFF_REPLY_BUDGET, handle_stream, ping_stream,
+        pipe_name_for, select_task_briefs, socket_path_under,
     };
 
     /// 与 `native/nmh/src/main.rs` 的 `unix_socket_lives_in_a_private_per_user_ipc_dir`
@@ -2482,5 +2883,425 @@ mod tests {
         assert_eq!(message.msg_id, 7);
         assert_eq!(message.payload["url"], "https://example.com/a");
         assert_eq!(MAX_BATCH_ITEMS, 1000);
+    }
+
+    fn service_with(
+        daemon: Arc<crate::daemon_client::DaemonClient>,
+    ) -> (NmhService, Arc<crate::capture::CaptureService>) {
+        let events =
+            crate::event_hub::AgentEventHub::new(fluxdown_protocol::AgentSnapshot::default());
+        let shell = crate::shell::ShellState::new(
+            crate::shell::TrayAvailability::Unavailable(
+                fluxdown_protocol::TrayUnavailableReason::NotBuilt,
+            ),
+            daemon.clone(),
+            events.clone(),
+        );
+        let capture = Arc::new(crate::capture::CaptureService::new(
+            daemon.clone(),
+            events,
+            shell,
+        ));
+        (NmhService::new(daemon, capture.clone()), capture)
+    }
+
+    /// 经长度帧协议发一问一答。
+    async fn exchange(
+        stream: &mut tokio::io::DuplexStream,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let bytes = serde_json::to_vec(&request).expect("request json");
+        let length = u32::try_from(bytes.len()).expect("frame length");
+        stream
+            .write_all(&length.to_le_bytes())
+            .await
+            .expect("write length");
+        stream.write_all(&bytes).await.expect("write body");
+        let mut length = [0_u8; 4];
+        stream.read_exact(&mut length).await.expect("read length");
+        let mut body = vec![0_u8; u32::from_le_bytes(length) as usize];
+        stream.read_exact(&mut body).await.expect("read body");
+        serde_json::from_slice(&body).expect("response json")
+    }
+
+    #[tokio::test]
+    async fn download_reply_carries_transaction_ids_and_capture_status_follows_resolution() {
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::disconnected());
+        let (service, capture) = service_with(daemon);
+        let (mut client, server) = tokio::io::duplex(65536);
+        let server_task = tokio::spawn(handle_stream(server, service));
+
+        let reply = exchange(
+            &mut client,
+            json!({"action": "download", "msg_id": 2, "url": "https://example.com/a.zip"}),
+        )
+        .await;
+        assert_eq!(reply["success"], true);
+        assert_eq!(reply["message"], "download accepted");
+        let ids = reply["data"]["transactionIds"].as_array().expect("ids");
+        assert_eq!(ids.len(), 1);
+        let id = ids[0].as_str().expect("id").to_owned();
+
+        let status = exchange(
+            &mut client,
+            json!({"action": "capture_status", "msg_id": 3, "transactionIds": [id, "missing"]}),
+        )
+        .await;
+        assert_eq!(status["data"]["statuses"][&id], "pending");
+        assert_eq!(status["data"]["statuses"]["missing"], "unknown");
+
+        capture.resolve(&id, false, None).await.expect("reject");
+        let status = exchange(
+            &mut client,
+            json!({"action": "capture_status", "msg_id": 4, "transactionIds": [id]}),
+        )
+        .await;
+        assert_eq!(status["data"]["statuses"][&id], "rejected");
+
+        let invalid = exchange(
+            &mut client,
+            json!({"action": "capture_status", "msg_id": 5, "transactionIds": []}),
+        )
+        .await;
+        assert_eq!(invalid["success"], false);
+        assert_eq!(invalid["message"], "invalid transaction count: 0");
+
+        drop(client);
+        server_task
+            .await
+            .expect("join")
+            .expect("clean client EOF closes NMH stream");
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_protocol_and_plugin_support() {
+        use fluxdown_protocol::{ApplicationErrorCode, RpcErrorData, RpcErrorObject};
+
+        let supported = Arc::new(crate::daemon_client::DaemonClient::answering(|_| {
+            Ok(json!([]))
+        }));
+        let (service, _) = service_with(supported);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert_eq!(reply["data"]["protocol"], 2);
+        assert_eq!(reply["data"]["pluginsSupported"], true);
+        assert_eq!(reply["data"]["resolvers"], json!([]));
+        assert!(
+            reply["data"]["actions"]
+                .as_array()
+                .expect("actions")
+                .contains(&json!("sniff_rules"))
+        );
+
+        let unsupported = Arc::new(crate::daemon_client::DaemonClient::answering(|_| {
+            Err(RpcErrorObject::application(
+                "daemon was built without plugin support",
+                RpcErrorData::new(ApplicationErrorCode::Unsupported, false),
+            ))
+        }));
+        let (service, _) = service_with(unsupported);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert_eq!(reply["success"], true);
+        assert_eq!(reply["data"]["pluginsSupported"], false);
+        assert_eq!(reply["data"]["resolvers"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_plugin_rules_sequence_and_epoch() {
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::answering(|method| {
+            if method == fluxdown_protocol::method::DAEMON_PLUGIN_SNIFF_RULES {
+                Ok(json!({"sequence": 7, "epoch": "e1", "pack": {"rules": []}}))
+            } else {
+                Ok(json!([]))
+            }
+        }));
+        let (service, _) = service_with(daemon);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert_eq!(reply["data"]["pluginRulesSequence"], 7);
+        assert_eq!(reply["data"]["pluginRulesEpoch"], "e1");
+    }
+
+    #[tokio::test]
+    async fn capabilities_reports_page_scripts_sequence_and_epoch() {
+        use fluxdown_protocol::{ApplicationErrorCode, RpcErrorData, RpcErrorObject};
+
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::answering(|method| {
+            if method == fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPTS {
+                Ok(json!({"sequence": 5, "epoch": "p1", "scripts": []}))
+            } else {
+                Ok(json!([]))
+            }
+        }));
+        let (service, _) = service_with(daemon);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert_eq!(reply["data"]["pageScriptsSequence"], 5);
+        assert_eq!(reply["data"]["pageScriptsEpoch"], "p1");
+        let actions = reply["data"]["actions"].as_array().expect("actions");
+        for action in ["page_scripts", "page_script_source", "plugin_invoke"] {
+            assert!(actions.contains(&json!(action)), "{action}");
+        }
+
+        // daemon 不支持该方法：两字段均为 null，capabilities 仍成功。
+        let unsupported = Arc::new(crate::daemon_client::DaemonClient::answering(|method| {
+            if method == fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPTS {
+                Err(RpcErrorObject::application(
+                    "unsupported",
+                    RpcErrorData::new(ApplicationErrorCode::Unsupported, false),
+                ))
+            } else {
+                Ok(json!([]))
+            }
+        }));
+        let (service, _) = service_with(unsupported);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert_eq!(reply["success"], true);
+        assert!(reply["data"]["pageScriptsSequence"].is_null());
+        assert!(reply["data"]["pageScriptsEpoch"].is_null());
+
+        // epoch 为空：视为不可用。
+        let empty = Arc::new(crate::daemon_client::DaemonClient::answering(|method| {
+            if method == fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPTS {
+                Ok(json!({"sequence": 0, "epoch": "", "scripts": []}))
+            } else {
+                Ok(json!([]))
+            }
+        }));
+        let (service, _) = service_with(empty);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+        let reply = exchange(&mut client, json!({"action": "capabilities", "msg_id": 1})).await;
+        assert!(reply["data"]["pageScriptsSequence"].is_null());
+        assert!(reply["data"]["pageScriptsEpoch"].is_null());
+    }
+
+    #[tokio::test]
+    async fn page_script_actions_forward_daemon_data() {
+        let index = json!({"sequence": 3, "epoch": "e", "scripts": [{"id": "a"}]});
+        let expected = index.clone();
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::answering(
+            move |method| match method {
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPTS => Ok(expected.clone()),
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPT_SOURCE => {
+                    Ok(json!({"identity": "a@b", "id": "a", "sha256": "h", "code": "x"}))
+                }
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_INVOKE => Ok(json!({
+                    "value": {"n": 1}, "createdTaskIds": [], "resumedTaskIds": [],
+                })),
+                _ => Ok(json!([])),
+            },
+        ));
+        let (service, _) = service_with(daemon);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+
+        let reply = exchange(&mut client, json!({"action": "page_scripts", "msg_id": 1})).await;
+        assert_eq!(reply["success"], true);
+        assert_eq!(reply["data"], index);
+
+        let reply = exchange(
+            &mut client,
+            json!({"action": "page_script_source", "msg_id": 2, "identity": "a@b", "id": "a"}),
+        )
+        .await;
+        assert_eq!(reply["success"], true);
+        assert_eq!(reply["data"]["code"], "x");
+
+        let reply = exchange(
+            &mut client,
+            json!({"action": "page_script_source", "msg_id": 3, "identity": "a@b"}),
+        )
+        .await;
+        assert_eq!(reply["success"], false);
+
+        let reply = exchange(
+            &mut client,
+            json!({
+                "action": "plugin_invoke", "msg_id": 4, "identity": "a@b",
+                "name": "run", "args": {"q": 1}, "pageUrl": "https://example.com/",
+            }),
+        )
+        .await;
+        assert_eq!(reply["success"], true);
+        assert_eq!(reply["data"], json!({"value": {"n": 1}}));
+
+        let reply = exchange(
+            &mut client,
+            json!({"action": "plugin_invoke", "msg_id": 5, "identity": "a@b", "name": "run"}),
+        )
+        .await;
+        assert_eq!(reply["success"], false);
+    }
+
+    #[tokio::test]
+    async fn page_script_source_over_budget_and_daemon_errors_fail() {
+        use fluxdown_protocol::{ApplicationErrorCode, RpcErrorData, RpcErrorObject};
+
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::answering(
+            |method| match method {
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_SCRIPT_SOURCE => Ok(json!({
+                    "identity": "a@b", "id": "a", "sha256": "h",
+                    "code": "x".repeat(SNIFF_REPLY_BUDGET + 1),
+                })),
+                fluxdown_protocol::method::DAEMON_PLUGIN_PAGE_INVOKE => {
+                    Err(RpcErrorObject::application(
+                        "rpc not exposed to page: run",
+                        RpcErrorData::new(ApplicationErrorCode::Unsupported, false),
+                    ))
+                }
+                _ => Ok(json!([])),
+            },
+        ));
+        let (service, _) = service_with(daemon);
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+
+        let reply = exchange(
+            &mut client,
+            json!({"action": "page_script_source", "msg_id": 1, "identity": "a@b", "id": "a"}),
+        )
+        .await;
+        assert_eq!(reply["success"], false);
+        assert_eq!(reply["message"], "page script too large");
+
+        let reply = exchange(
+            &mut client,
+            json!({
+                "action": "plugin_invoke", "msg_id": 2, "identity": "a@b",
+                "name": "run", "pageUrl": "https://example.com/",
+            }),
+        )
+        .await;
+        assert_eq!(reply["success"], false);
+        assert_eq!(reply["message"], "rpc not exposed to page: run");
+    }
+
+    #[tokio::test]
+    async fn plugin_only_sniff_rules_skips_remote_docs_and_resets_on_epoch_change() {
+        let daemon = Arc::new(crate::daemon_client::DaemonClient::answering(|method| {
+            if method == fluxdown_protocol::method::DAEMON_PLUGIN_SNIFF_RULES {
+                Ok(json!({"sequence": 2, "epoch": "e2", "pack": {"packId": "plugin"}}))
+            } else {
+                Ok(json!([]))
+            }
+        }));
+        // 指向永远连不上的数据目录：plugin_only 若触碰远程文档存储会留下可观察的错误。
+        let dir = std::env::temp_dir().join(format!("fluxdown-nmh-sniff-{}", uuid::Uuid::new_v4()));
+        let (service, _) = service_with(daemon);
+        let service = service.with_sniff_rules(Arc::new(crate::sniff_rules::SniffRuleStore::new(
+            dir.clone(),
+            crate::egress::Egress::system_default(),
+        )));
+        let (mut client, server) = tokio::io::duplex(65536);
+        tokio::spawn(handle_stream(server, service));
+
+        let same_epoch = exchange(
+            &mut client,
+            json!({
+                "action": "sniff_rules", "msg_id": 1, "pluginOnly": true,
+                "have": {"plugin": 2, "pluginEpoch": "e2"},
+            }),
+        )
+        .await;
+        assert_eq!(same_epoch["success"], true);
+        assert!(same_epoch["data"]["plugin"].is_null());
+        assert_eq!(same_epoch["data"]["pluginSequence"], 2);
+        assert_eq!(same_epoch["data"]["pluginEpoch"], "e2");
+        assert!(same_epoch["data"]["status"].is_null());
+        assert_eq!(same_epoch["data"]["deferred"], json!([]));
+
+        // 序号没有更新，但 epoch 变了（数据库重置）：必须重发 plugin 包。
+        let reset = exchange(
+            &mut client,
+            json!({
+                "action": "sniff_rules", "msg_id": 2, "pluginOnly": true,
+                "have": {"plugin": 9, "pluginEpoch": "old"},
+            }),
+        )
+        .await;
+        assert_eq!(reset["data"]["plugin"], json!({"packId": "plugin"}));
+        assert_eq!(reset["data"]["pluginEpoch"], "e2");
+        assert!(
+            !dir.exists(),
+            "plugin-only must not touch the remote doc store"
+        );
+    }
+
+    #[test]
+    fn plugin_pack_is_returned_only_when_newer_than_have_or_epoch_changed() {
+        use super::select_plugin_pack;
+        use serde_json::Value;
+
+        let dto = |sequence, pack| fluxdown_protocol::PluginSniffRulesDto {
+            sequence,
+            epoch: "e1".to_owned(),
+            pack,
+        };
+        let pack = json!({"packId": "plugin"});
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), None, Some("e1")),
+            pack
+        );
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), Some(2), Some("e1")),
+            pack
+        );
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), Some(3), Some("e1")),
+            Value::Null
+        );
+        // epoch 不同：即使序号更小 / 相等也重发。
+        assert_eq!(
+            select_plugin_pack(Some(dto(1, Some(pack.clone()))), Some(9), Some("old")),
+            pack
+        );
+        assert_eq!(
+            select_plugin_pack(Some(dto(3, Some(pack.clone()))), Some(3), None),
+            pack
+        );
+        assert_eq!(
+            select_plugin_pack(Some(dto(0, None)), None, Some("e1")),
+            Value::Null
+        );
+        assert_eq!(select_plugin_pack(None, Some(1), Some("e1")), Value::Null);
+    }
+
+    #[test]
+    fn oversized_reply_defers_later_documents_but_always_keeps_the_first() {
+        use super::{SNIFF_REPLY_BUDGET, defer_oversized_docs};
+        use serde_json::Value;
+
+        let big = |fill: usize| Value::String("x".repeat(fill));
+        let mut data = json!({
+            "revocations": {"sequence": 1},
+            "official": big(SNIFF_REPLY_BUDGET / 2),
+            "community": big(SNIFF_REPLY_BUDGET / 2),
+            "plugin": {"packId": "plugin"},
+        });
+        let deferred = defer_oversized_docs(&mut data);
+        assert_eq!(deferred, ["community"]);
+        assert!(data["community"].is_null());
+        assert!(!data["official"].is_null());
+        assert!(!data["revocations"].is_null());
+        // 后面体积小、仍装得下的文档照常发送，不被前面的超限连坐。
+        assert!(!data["plugin"].is_null());
+
+        // 第一份文档本身超预算也要保留，否则永远没有进展。
+        let mut oversized = json!({"revocations": null, "official": big(SNIFF_REPLY_BUDGET + 1)});
+        assert!(defer_oversized_docs(&mut oversized).is_empty());
+        assert!(!oversized["official"].is_null());
+
+        let mut small = json!({"official": {"sequence": 1}, "community": null});
+        assert!(defer_oversized_docs(&mut small).is_empty());
     }
 }

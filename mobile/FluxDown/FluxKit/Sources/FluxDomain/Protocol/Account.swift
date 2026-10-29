@@ -374,6 +374,17 @@ public struct ChangeNicknameParams: Sendable, Hashable, Codable {
     public init(nickname: String) { self.nickname = nickname }
 }
 
+/// 删除账号：`currentPassword` 与 `code`（`sendDeleteCode` 发到绑定邮箱）二选一，nil 字段不编码。
+public struct DeleteAccountParams: Sendable, Hashable, Codable {
+    public var currentPassword: String?
+    public var code: String?
+
+    public init(currentPassword: String? = nil, code: String? = nil) {
+        self.currentPassword = currentPassword
+        self.code = code
+    }
+}
+
 /// 已登录修改 / 设置密码：`currentPassword` 与 `code`（`sendPasswordCode` 发到绑定邮箱）二选一。
 public struct ChangePasswordParams: Sendable, Hashable, Codable {
     public var newPassword: String
@@ -580,7 +591,7 @@ public enum AccountRules {
         case "registrationIncomplete": "accountErrorRegistrationIncomplete"
         case "mailNotConfigured": "errReasonMailNotConfigured"
         case "deviceLimit": "accountErrorDeviceLimit"
-        case "syncDeviceLimit": "cloudSyncErrorDeviceLimit"
+        case "onlineDeviceLimit": "cloudSyncErrorOnlineLimit"
         case "deviceUntrusted": context == .sync ? "cloudSyncErrorDeviceUntrusted" : "accountErrorDeviceUntrusted"
         case "sessionExpired": "errReasonSessionExpired"
         case "cloudUnreachable": context == .sync ? "cloudSyncErrorNetwork" : "accountErrorNetwork"
@@ -593,12 +604,33 @@ public enum AccountRules {
         case "pairingSignatureInvalid": "errReasonPairingSignatureInvalid"
         case "pairingSelf": "errReasonPairingSelf"
         case "pairingVersionMismatch": "errReasonPairingVersionMismatch"
+        case "pairingTimeout": "errReasonPairingTimeout"
+        case "peerClockSkew": "errReasonPeerClockSkew"
         case "peerNotPaired": "errReasonPeerNotPaired"
         case "peerOffline": "errReasonPeerOffline"
+        case "peerOutdated": "errReasonPeerOutdated"
+        case "linkUnavailable": "errReasonLinkUnavailable"
         case "targetDeviceOffline": "errReasonTargetDeviceOffline"
         case "taskStateConflict": "errReasonTaskStateConflict"
         case "taskDeviceMismatch": "errReasonTaskDeviceMismatch"
         case "saveDirUnavailable": "errReasonSaveDirUnavailable"
+        case "shareUnavailable": "errReasonShareUnavailable"
+        case "shareNotFound": "errReasonShareNotFound"
+        case "shareExpired": "errReasonShareExpired"
+        case "shareStopped": "errReasonShareStopped"
+        case "shareCodeInvalid": "errReasonShareCodeInvalid"
+        case "shareRateLimited": "errReasonShareRateLimited"
+        case "shareTurnstileRequired": "errReasonShareTurnstileRequired"
+        case "shareFileChanged": "errReasonShareFileChanged"
+        case "shareSenderOffline": "errReasonShareSenderOffline"
+        case "shareTaskNotShareable": "errReasonShareTaskNotShareable"
+        case "shareBridgeUnavailable": "errReasonShareBridgeUnavailable"
+        case "shareQuotaExceeded": "errReasonShareQuotaExceeded"
+        case "shareCloudNotReady": "errReasonShareCloudNotReady"
+        case "shareTrafficExhausted": "errReasonShareTrafficExhausted"
+        case "shareCloudUnavailable": "errReasonShareCloudUnavailable"
+        case "shareOwnShare": "errReasonShareOwnShare"
+        case "shareSourceMissing": "errReasonShareSourceMissing"
         default: nil
         }
     }
@@ -630,7 +662,8 @@ public enum AccountRules {
         case .pairing:
             switch error.code {
             case .invalidArgument: return "localPairingAddressInvalid"
-            default: if network { return "errReasonPairingPeerUnreachable" }
+            // 不带 reason 的 `unavailable` 是本机服务 / 会话问题，不是「对端地址不可达」（那种情形 agent 会带 `pairingPeerUnreachable`）。
+            default: break
             }
         case .general:
             break

@@ -14,10 +14,9 @@ use fluxdown_protocol::{
 use fluxdown_ui_account::AccountHost;
 use fluxdown_ui_downloads::DownloadView;
 use fluxdown_ui_i18n::{I18nCatalog, I18nError, Translator, system_locale};
-use fluxdown_ui_settings::{SettingsStore, SettingsView, component_locale};
+use fluxdown_ui_settings::{SettingsStore, SettingsView, SlotVisibility, component_locale};
 use fluxdown_ui_shell::ShellView;
 use gpui::{App, AppContext as _, Entity, Global, WeakEntity};
-use gpui_component::menu::AppMenuBar;
 use tokio::sync::mpsc;
 
 use crate::agent_client::{AgentClient, AgentClientConfig, AgentClientError};
@@ -34,7 +33,8 @@ const EVENT_BATCH: usize = 256;
 /// 次实例等待刚启动主实例的 IPC 端点就绪、或等待旧主实例释放锁的最长时间。
 const ACTIVATION_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 const ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-/// `--after-update`：旧桌面进程随 agent 整体退出而退出，等它释放单实例锁的最长时间与轮询间隔。
+/// `--after-update` / `--relaunch`：旧桌面进程随 agent 整体退出而退出，等它释放单实例锁的最长
+/// 时间与轮询间隔。
 const AFTER_UPDATE_LOCK_WAIT: Duration = Duration::from_secs(30);
 const AFTER_UPDATE_LOCK_INTERVAL: Duration = Duration::from_millis(100);
 /// agent 拉起的确认 / 进度界面（`--capture` / `--progress-task`）等旧主实例释放单实例锁的最长
@@ -78,7 +78,12 @@ pub(crate) struct Desktop {
     pub settings_store: Entity<SettingsStore>,
     /// 账户 / 设备 / 局域网配对状态：设置页与「添加设备」对话框共享。
     pub account_host: Entity<AccountHost>,
-    pub menu_bar: Entity<AppMenuBar>,
+    /// 设置侧栏「推介有奖」页的可见性（已登录 + 设备本地偏好），设置窗口与命令面板共用。
+    pub referral_visibility: Entity<SlotVisibility>,
+    /// FluxMesh状态中枢：管理页、分享面板、接收窗口、设置页与任务来源徽标共用的唯一一份FluxMesh投影。
+    pub share_hub: Entity<fluxdown_ui_share::ShareHub>,
+    /// 接收确认窗口内的视图（窗口关闭后失效）：新的来源交给它而不是再开一个窗口。
+    pub share_receive: Option<WeakEntity<fluxdown_ui_share::ShareReceiveView>>,
     /// 主窗口内的下载页（主窗口关闭后失效）。
     pub main_downloads: Option<WeakEntity<DownloadView>>,
     pub main_shell: Option<WeakEntity<ShellView>>,
@@ -134,9 +139,10 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         files: launch.torrent_files.clone(),
         activate: launch.activate_existing || !launch.capture_only,
         settings: launch.settings,
+        new_download: launch.new_download,
         progress_task: launch.progress_task.clone(),
     };
-    let lock_wait = if launch.after_update {
+    let lock_wait = if launch.after_update || launch.relaunch {
         Some(AFTER_UPDATE_LOCK_WAIT)
     } else if launch.agent_initiated() {
         Some(AGENT_LAUNCH_LOCK_WAIT)
@@ -218,12 +224,23 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         }
     });
     application.run(move |cx| {
-        gpui_component::init(cx);
+        // gpui-shell 组件目录的初始化内含 `gpui_component::init`，故整体替代它并先于主题初始化；
+        // 失败只让插件界面不可用（组件仍已初始化）。
+        if let Err(error) = fluxdown_ui_plugin_ui::init(
+            cx,
+            Arc::new(crate::capability_ports::AgentPluginUiPort::new(
+                agent_client.clone(),
+            )),
+            DesktopPaths::from_env().data_root.join("plugin-ui"),
+        ) {
+            log::error!("plugin desktop interfaces unavailable: {error}");
+        }
         crate::logging::install_ui_watchdog(cx);
         crate::app_icon::install();
         fluxdown_ui_theme::init(cx);
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
+        fluxdown_ui_plugin_ui::set_translator(cx, translator.clone());
         let session = cx.new(|cx| AgentSession::new(agent_client.clone(), cx));
         WindowRegistry::init(cx, agent_client.clone());
 
@@ -232,6 +249,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             cx.new(|_| SettingsStore::new(Arc::new(AgentSettingsPort::new(agent_client.clone()))));
         attach(&session, &settings_store, cx);
         let account_host = crate::account_host::install(&translator, &session, &agent_client, cx);
+        let share_hub = crate::share_host::install(&translator, &session, &agent_client, cx);
         let quit_store = settings_store.clone();
         cx.on_app_quit(move |cx| {
             let calls = quit_store.update(cx, |store, _| store.drain_pending_calls());
@@ -252,16 +270,19 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         })
         .detach();
 
-        crate::menus::bind_keys(cx);
-        let menu_bar = crate::menus::install(cx, &translator);
+        crate::shortcuts::install(cx, &settings_store, &translator);
+        crate::menus::install(cx, &translator);
         crate::menus::install_global_actions(cx);
+        let referral_visibility = cx.new(|_| SlotVisibility::default());
         cx.set_global(Desktop {
             translator: translator.clone(),
             session: session.clone(),
             client: agent_client.clone(),
             settings_store,
             account_host,
-            menu_bar,
+            referral_visibility,
+            share_hub,
+            share_receive: None,
             main_downloads: None,
             main_shell: None,
             settings_view: None,
@@ -273,6 +294,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 会话 → 运行时统计 / 外壳状态折叠进 Desktop。偏好不在此处理：`SettingsStore` 已订阅同一
         // 会话并叠加本地未回执编辑，外观与语言只从它投影（见 `observe_preferences`）。
         observe_preferences(cx);
+        crate::account_host::bind_referral_visibility(cx);
         after_first_snapshot(cx, crate::legacy_themes::migrate);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
@@ -306,7 +328,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                 log::error!("fatal FluxDown agent error: {:?}", error.code);
             }
             SessionSignal::ServiceStopped => crate::lifecycle::service_stopped(cx),
-            SessionSignal::Stale => {}
+            SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {}
         })
         .detach();
 
@@ -347,13 +369,16 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                         });
                         crate::lifecycle::keep_alive(cx, task).detach();
                     }
-                    if let Some(task_id) = message.progress_task {
-                        crate::progress_windows::user_started_on_launch(task_id, cx);
-                    }
                     if message.settings {
                         crate::windows::settings::open(cx);
+                    } else if message.new_download {
+                        crate::windows::new_download::open_default(cx);
                     } else if message.activate {
                         crate::windows::main::reveal(cx);
+                    }
+                    // 窗口动作之后再判定：唤起时刚打开的主窗口应先就位，进度窗口按它是否在场决定。
+                    if let Some(task_id) = message.progress_task {
+                        crate::progress_windows::user_started_on_launch(task_id, cx);
                     }
                 });
                 if acknowledgement.send(()).is_err() {
@@ -370,24 +395,31 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::windows::selection::install(cx);
         crate::windows::file_conflict::install(cx);
         crate::plugin_notices::install(cx);
+        crate::plugin_contributions::install(cx);
         crate::update_notices::install(cx);
+        crate::service_notices::install(cx);
         if launch.after_update {
             after_session_settled(cx, crate::update_notices::show_installed);
         }
         crate::progress_windows::install(cx);
-        if let Some(task_id) = launch.progress_task.clone() {
+        if launch.capture_only
+            && let Some(task_id) = launch.progress_task.clone()
+        {
             // 须先于下方「无待确认即退出」登记：意图的界面保活会推迟那次退出。
             crate::progress_windows::user_started_on_launch(task_id, cx);
         }
 
         if launch.settings {
             after_session_settled(cx, crate::windows::settings::open);
+        } else if launch.new_download {
+            after_session_settled(cx, crate::windows::new_download::open_default);
         } else if launch.capture_only {
             // 由 agent 为待确认交互拉起：不开主窗口；确认窗口随快照 / 事件打开，全部关闭后由
             // 窗口注册表退出。启动链接提交完成后若首个快照里已无待确认项，直接退出。
             quit_when_nothing_to_confirm(launch_submissions, cx);
         } else if launch.minimized {
-            // 开机自启（agent 判定需要界面时才拉起）：会话就绪后开最小化主窗口。
+            // 开机自启且托盘不可见（agent 判定没有其它入口时才拉起）：会话就绪后开最小化主窗口，
+            // 新窗口不抢焦点。
             after_session_settled(cx, open_main_minimized);
         } else if launch.is_plain() {
             // 普通启动：本进程冷启动了服务时按「启动时最小化到托盘」决定；agent 早已驻留时
@@ -396,6 +428,15 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         } else {
             // 等快照就绪后开主窗口，避免首帧闪连接态。
             after_session_settled(cx, crate::windows::main::reveal);
+        }
+        if !launch.capture_only
+            && let Some(task_id) = launch.progress_task.clone()
+        {
+            // 非驻留拉起会同时打开主窗口：排在上面的开窗决定之后登记（同一快照信号里后执行），
+            // 进度窗口才不会先弹出又被随后打开的主窗口盖住。
+            after_session_settled(cx, move |cx| {
+                crate::progress_windows::user_started_on_launch(task_id, cx);
+            });
         }
         // 主窗口的首帧 / 快照订阅先注册，捕获确认后开，避免主窗口覆盖待确认窗口。
         // --capture 仍不创建主窗口；其空窗退出检查在异步回调里执行。
@@ -497,7 +538,7 @@ fn desktop_application() -> gpui::Application {
 }
 
 fn open_main_minimized(cx: &mut App) {
-    if let Some(handle) = crate::windows::main::open(cx)
+    if let Some(handle) = crate::windows::main::open_unfocused(cx)
         && let Err(error) = handle.update(cx, |_, window, _| window.minimize_window())
     {
         log::debug!("view or window released before lifecycle update: {error:#}");
@@ -539,7 +580,10 @@ fn after_session_settled(cx: &mut App, run: impl FnOnce(&mut App) + 'static) {
     *subscription.borrow_mut() = Some(cx.subscribe(&session, move |_, signal, cx| {
         if matches!(
             signal,
-            SessionSignal::Snapshot(_) | SessionSignal::Stale | SessionSignal::Fatal(_)
+            SessionSignal::Snapshot(_)
+                | SessionSignal::Stale
+                | SessionSignal::Fatal(_)
+                | SessionSignal::ServiceFailed(_)
         ) && holder.borrow_mut().take().is_some()
             && let Some(run) = run.take()
         {
@@ -637,13 +681,16 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
     }
 }
 
-/// 偏好快照/事件 → 活动栏可选入口可见性（条目与偏好键见 `activity` 注册表）。
+/// 偏好快照/事件 → 活动栏可选入口可见性与 chrome 布局（条目与偏好键见 `activity` /
+/// `chrome_layout`）。
 fn apply_activity_bar_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App) {
     let Some(shell) = Desktop::global(cx).main_shell.clone() else {
         return;
     };
     if let Err(error) = shell.update(cx, |shell, cx| {
         crate::activity::apply_visibility(shell, values, cx);
+        crate::chrome_layout::apply(shell, values, cx);
+        crate::menus::apply_menu_bar_visibility(shell, values, cx);
     }) {
         log::debug!("view or window released before lifecycle update: {error:#}");
     }
@@ -709,10 +756,15 @@ pub(crate) fn submit_captures_detached(
         return finished;
     }
     let calls = capture_calls(client, urls, files);
+    let failures = client.clone();
     client.spawn_background(async move {
         for (kind, future) in calls {
             if let Err(error) = future.await {
                 log::warn!("failed to submit captured {kind}: {:?}", error.code);
+                failures
+                    .submissions
+                    .capture_failure
+                    .send_replace(Some(error));
             }
         }
         if done.send(()).is_err() {

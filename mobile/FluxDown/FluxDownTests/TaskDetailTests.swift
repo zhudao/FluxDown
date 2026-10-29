@@ -38,7 +38,12 @@ struct TaskDetailTests {
         var done = task(status: .completed)
         #expect(TaskDetailVisual(task: done, queuePosition: 0) == .completed)
         done.seedingStatus = .seeding
+        // store 不含做种：做种任务按已完成呈现。
+        #if FULL_FLAVOR
         #expect(TaskDetailVisual(task: done, queuePosition: 0) == .seeding)
+        #else
+        #expect(TaskDetailVisual(task: done, queuePosition: 0) == .completed)
+        #endif
         done.fileMissing = true
         #expect(TaskDetailVisual(task: done, queuePosition: 0) == .missing)
         #expect(TaskDetailVisual.missing.isFinished)
@@ -90,18 +95,19 @@ struct TaskDetailTests {
         #expect(TaskSourceComposition.percentText(1) == "100.0%")
     }
 
-    // MARK: 速度统计
+    // MARK: 速度曲线
 
-    @Test func speedStats() {
-        #expect(TaskSpeedStats(history: nil) == TaskSpeedStats(history: .empty))
-        var history = SpeedHistory.empty
-        for (i, bps) in [100, 300, 200].enumerated() {
-            history = history.recording(nowMs: Int64(1_000 + i * 1000), down: Int64(bps), up: 0)
-        }
-        let stats = TaskSpeedStats(history: history)
-        #expect(stats.samples == 3)
-        #expect(stats.average == 200)
-        #expect(stats.peak == 300)
+    @Test func speedHistoryModelAppliesNullAndRejectsOtherTasks() {
+        let model = TaskSpeedHistoryModel()
+        let mine = TaskSpeedHistory(taskId: "a", samples: [1, 2], activeSecs: 2, transferredBytes: 3, peakBps: 2)
+        model.apply(mine, for: "a")
+        #expect(model.history == mine)
+        // 回包属于别的任务：丢弃，保留上一份。
+        model.apply(TaskSpeedHistory(taskId: "b", samples: [9, 9]), for: "a")
+        #expect(model.history == mine)
+        // null = 无记录（如重新下载后）：清空。
+        model.apply(nil, for: "a")
+        #expect(model.history == nil)
     }
 
     // MARK: 做种与格式化
@@ -122,8 +128,13 @@ struct TaskDetailTests {
 
     @Test func siteLabel() {
         #expect(TaskDetailFormat.siteLabel(task(url: "https://www.example.com/x")) == "example.com")
+        #if FULL_FLAVOR
         #expect(TaskDetailFormat.siteLabel(task(url: "torrent-file://local")) == "BitTorrent")
         #expect(TaskDetailFormat.siteLabel(task(url: "magnet:?xt=urn:btih:abc")) == "BitTorrent")
+        #else
+        #expect(TaskDetailFormat.siteLabel(task(url: "torrent-file://local")) == "BT")
+        #expect(TaskDetailFormat.siteLabel(task(url: "magnet:?xt=urn:btih:abc")) == "BT")
+        #endif
         #expect(TaskDetailFormat.siteLabel(task(url: "torrent-file://local", origin: "https://t.example.org/a.torrent")) == "t.example.org")
         #expect(TaskDetailFormat.siteLabel(task(url: "ed2k://|file|x|1|h|/")) == "ED2K")
     }

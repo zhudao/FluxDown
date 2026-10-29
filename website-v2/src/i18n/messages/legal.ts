@@ -18,13 +18,13 @@ export const legal = defineMessages({
       meta: {
         title: "Privacy Policy - FluxDown",
         description:
-          "FluxDown privacy policy. No telemetry, no tracking, no accounts required. All download data stays 100% local on your device.",
+          "FluxDown privacy policy. No ads, no tracking, account optional. Download data stays on your device; this page lists exactly what the apps and the optional FluxDown account send.",
       },
       eyebrow: "Legal · Privacy",
       title: "Privacy <em>Policy</em>",
-      updated: "September 2026",
+      updated: "October 2026",
       intro:
-        'FluxDown ("we", "our", or "the software") is committed to protecting your privacy. This Privacy Policy explains what information we collect, what we do not collect, and how your data is handled when you use FluxDown desktop application, browser extension, and this website.',
+        'FluxDown ("we", "our", or "the software") is committed to protecting your privacy. This Privacy Policy explains what information we collect, what we do not collect, and how your data is handled when you use the FluxDown desktop application, the FluxDown mobile apps for iOS and Android, the browser extension, the optional FluxDown account, and this website.',
       sections: [
         {
           id: "collect",
@@ -34,18 +34,55 @@ export const legal = defineMessages({
             "<strong>Website analytics:</strong> We use Vercel Web Analytics, a privacy-friendly analytics service that collects anonymous, aggregated page view data. No cookies are used, no personal data is collected, and no individual users are tracked.",
             "<strong>Feedback submissions:</strong> When you voluntarily submit feedback through our website, we collect the feedback type, title, description, and optionally your contact information. This data is stored as GitHub Issues in our repository.",
             "<strong>Email subscriptions:</strong> If you subscribe to platform availability notifications, we store your email address in a GitHub Issue. This is used solely to notify you when the requested platform becomes available.",
-            "<strong>Mirror speed statistics (optional):</strong> To power the Community Speed Network, FluxDown may report anonymous, aggregated mirror speed metrics (region-level mirror + measured throughput). These contain no URLs, file names, IP addresses, or identifiers of any kind, and can be disabled in settings at any time.",
+            "<strong>Anonymous usage counters (desktop and server):</strong> The desktop application and the headless server send two anonymous events: <code>app_installed</code> once and <code>app_active</code> at most once a day. They contain a random installation ID, the operating system, CPU architecture and app version — never URLs, file names or account data. You can turn them off with the Anonymous Usage Statistics switch in settings. The mobile apps do not send these events.",
+          ],
+        },
+        {
+          id: "account",
+          title: "Optional FluxDown Account",
+          body: "Every download feature works without an account. If you choose to create or sign in to a FluxDown account, we store the following on our servers to provide account features:",
+          items: [
+            "<strong>Account details:</strong> your email address, your password (stored only as a salted hash), and the nickname you choose.",
+            "<strong>Signed-in devices:</strong> for each device you sign in on, a randomly generated device ID, the device name, platform, app version, and the IP address and time it was last seen, so you can see and manage your devices and keep your account secure.",
+            "<strong>Settings sync (optional):</strong> if you turn on sync, the settings groups you select are stored so they can be applied on your other devices. Download tasks and history are never synced.",
+            "<strong>Links you send to your devices:</strong> when you choose to send a download to another of your devices, the link and its options are stored so that device can receive and run it.",
+            "<strong>Cloud notifications (opt-in, desktop and server):</strong> if you enable them, task events (file name, size, status, error and queue name) are sent so we can deliver email or Telegram notifications. Download URLs and save folders are only included if you turn on those options separately. Events are kept for 7 days.",
+            "<strong>Download route quality:</strong> while signed in, the app reports connection measurements for download servers (server host name, IP address, connection time, throughput and success) so FluxDown can choose faster routes. These measurements never include URL paths, query strings, file names or tokens.",
+            "<strong>Plans:</strong> if you buy an optional plan on the desktop app or the website, we keep the order record (plan, amount and status) with your account. The mobile apps do not offer purchases.",
+          ],
+        },
+        {
+          id: "share",
+          title: "File Sharing (FluxMesh)",
+          body: "FluxMesh is used only when you share a completed download or receive a shared file. Files are transferred directly between devices over an encrypted peer-to-peer connection whenever possible, otherwise through FluxDown relay servers that cannot read the content. When you use it, we process:",
+          items: [
+            "<strong>Share records:</strong> for each share, the file names, sizes, content hashes (BLAKE3), the link, pickup code, expiry and claim count, plus the sharing device and account. Receivers can receive without an account; their device's random network ID, device name, IP address and its approximate location (country, region, city and ISP looked up on our servers) are recorded as access history for the share owner and for abuse handling.",
+            "<strong>Network address records:</strong> the random network ID of each device taking part in sharing and the network addresses it publishes (relay server and direct IP addresses) are stored on FluxDown's own address servers so peers can find each other. We do not use third-party discovery services.",
+            "<strong>Network and transfer diagnostics:</strong> the same diagnostics the app shows you on the Network Diagnostics and Transfer Diagnostics pages are also sent to FluxDown while sharing or receiving: NAT type, IPv4/IPv6 availability, public IP addresses and their approximate location, relay latencies, peer-to-peer connection counters, and per-transfer connection paths, round-trip times, throughput, packet loss and errors. When your device provides content to other devices through Swarm sharing, each such connection is a transfer too: in addition to the above, it includes the random network ID of the receiving device, the share concerned, and which contents you provided to it (file hashes, without file names or paths) with how many bytes and chunks of each were sent. Network snapshots are sent only when they change during sharing activity; transfer details are sent every few seconds while a transfer runs and once when it ends. Nothing is sent when you are not sharing or receiving, and no other download tasks, URLs or folders are included.",
+            "<strong>Swarm metering:</strong> for Swarm transfers, both the providing and the receiving device report per-peer byte counts (the random network ID of the other device and the number of bytes, without file names or paths). This data is used to cross-check and calculate Swarm boost usage and contribution, and is kept for the same period as the transfer session.",
+            "<strong>Retention:</strong> access history, network diagnostics and transfer details are deleted after a period set on our servers (30 days by default); the history of published network addresses after 90 days by default. When a share ends its pickup code is released immediately; the share record stays in the owner's share history.",
           ],
         },
         {
           id: "not-collect",
           title: "Information We Do NOT Collect",
-          body: "FluxDown is designed with a local-first architecture. The desktop application:",
+          body: "FluxDown is designed with a local-first architecture. The FluxDown apps:",
           items: [
-            "Does NOT collect, transmit, or store any of your download URLs, file names, or download history on any remote server. All download data is stored locally in a SQLite database on your device.",
-            "Does NOT include any crash reporting or usage analytics. The only optional network report is the anonymous mirror speed metric described above — and it can be turned off.",
-            "Does NOT require an account, login, or registration of any kind.",
-            "Does NOT phone home for anything else. Aside from downloads you initiate and the optional speed metrics, the application operates entirely offline.",
+            "Do NOT collect or store your download history on any remote server. Download tasks, file paths and progress are stored locally in a SQLite database on your device. Download links only leave your device when you explicitly send them to another of your devices or enable the notification options described above.",
+            "Do NOT include advertising, third-party trackers, or crash reporting.",
+            "Do NOT require an account, login, or registration to download files.",
+            "Do NOT sell or share your personal data with third parties for advertising or tracking.",
+          ],
+        },
+        {
+          id: "mobile",
+          title: "Mobile Apps",
+          body: "The FluxDown apps for iOS and Android run the same download engine locally on your device:",
+          items: [
+            "Downloaded files and task records stay in the app's storage on your device until you delete them.",
+            "Local network access is used only to discover and connect to FluxDown hosts (your computer, NAS or server) that you add or pair with. Connections to your own hosts go directly to them, not through our servers.",
+            "Face ID / Touch ID is used only on the device to protect access keys; biometric data never leaves your device and is never available to us.",
+            "Notifications about finished or failed downloads are generated locally on your device.",
           ],
         },
         {
@@ -67,8 +104,18 @@ export const legal = defineMessages({
         {
           id: "storage",
           title: "Data Storage & Security",
-          body: "All download data (task records, file paths, progress) is stored locally on your device in a SQLite database managed by the FluxDown application. We have no access to this data. Website feedback and subscription data is stored in GitHub Issues within our repository, subject to GitHub's privacy policy.",
+          body: "All download data (task records, file paths, progress) is stored locally on your device in a SQLite database managed by the FluxDown application. We have no access to this data. Account data is stored on our own servers and transmitted over HTTPS. Website feedback and subscription data is stored in GitHub Issues within our repository, subject to GitHub's privacy policy.",
           items: [],
+        },
+        {
+          id: "deletion",
+          title: "Your Choices & Account Deletion",
+          body: "You stay in control of the data described above:",
+          items: [
+            "Sign out at any time, or remove individual devices from your account, in the app's account settings.",
+            "Turn settings sync, cloud notifications and the anonymous usage counters on or off in settings.",
+            'Delete your FluxDown account at any time in the app: Settings → Account → Delete Account (confirmed with your password or an email code). This permanently removes your account, signed-in devices, synced settings, sent links and notification settings. Order records are kept only where we are legally required to. Files you downloaded stay on your device. If you cannot access the app, contact us through the <a href="{feedback}">Feedback page</a> from your account email.',
+          ],
         },
         {
           id: "third-party",
@@ -82,7 +129,7 @@ export const legal = defineMessages({
         {
           id: "children",
           title: "Children's Privacy",
-          body: "FluxDown does not knowingly collect any personal information from children under the age of 13. Since the desktop application collects no personal data at all, and website data collection is limited to voluntary feedback submissions, we believe our service is inherently safe for users of all ages.",
+          body: "FluxDown does not knowingly collect any personal information from children under the age of 13. Downloading files does not require an account, and the optional account only stores the data described above. If you believe a child under 13 has created an account, contact us and we will delete it.",
           items: [],
         },
         {
@@ -107,7 +154,7 @@ export const legal = defineMessages({
       },
       eyebrow: "Legal · Terms",
       title: "Terms of <em>Service</em>",
-      updated: "February 2026",
+      updated: "October 2026",
       intro:
         'Please read these Terms of Service ("Terms") carefully before using FluxDown software, browser extension, and website (collectively, the "Service"). By using the Service, you agree to be bound by these Terms.',
       sections: [
@@ -167,6 +214,18 @@ export const legal = defineMessages({
           title: "Termination",
           body: "You may stop using FluxDown at any time by uninstalling the software and removing the browser extension. We reserve the right to modify or discontinue the Service at any time without prior notice. Upon termination, all provisions of these Terms that by their nature should survive will remain in effect.",
           items: [],
+        },
+        {
+          id: "fluxmesh-traffic",
+          title: "FluxMesh Traffic & Plans",
+          body: "These rules apply to the monthly allowances, traffic packs and plans that come with FluxCloud.",
+          items: [
+            "Monthly allowances are granted per calendar month in Beijing time (UTC+8); whether unused allowance carries over is stated on each plan.",
+            "Traffic packs can be used until they expire. Expired packs are void, and packs already delivered are non-refundable.",
+            "Membership cards are bought for a period and renewed manually; they never auto-renew and are never charged automatically. Renewing the same card extends it from its current end date. When a card expires you automatically return to your permanent plan's entitlements. Time that has already taken effect is non-refundable.",
+            "For plans marked as entitlement-locked, published entitlements can only be increased, never reduced; the plan page states whether a plan is locked.",
+            "Plans are for your own use. Reselling, sharing accounts or abuse (including bulk automated downloading) may result in restricted or revoked entitlements.",
+          ],
         },
         {
           id: "changes",
@@ -237,7 +296,7 @@ export const legal = defineMessages({
           title: "Other platforms",
           body: "",
           items: [
-            'macOS: artifacts are currently unsigned; users should obtain artifacts only from the official GitHub Releases page. See <a href="{gatekeeper}">macOS Gatekeeper instructions</a>.',
+            "macOS: the app and DMG are signed with an Apple Developer ID (Hardened Runtime) and notarized by Apple; the notarization ticket is stapled, so Gatekeeper verifies them even offline.",
             "Linux: artifacts (AppImage / deb / Arch / portable) are currently not cryptographically signed; obtain them only from the official GitHub Releases page.",
           ],
         },
@@ -256,13 +315,13 @@ export const legal = defineMessages({
     privacy: {
       meta: {
         title: "隐私政策 - FluxDown",
-        description: "FluxDown 隐私政策。无遥测、无追踪、无需账户，所有下载数据 100% 保存在你的设备本地。",
+        description: "FluxDown 隐私政策。无广告、无追踪，账户可选。下载数据保存在你的设备本地；本页逐项列出各应用与可选的 FluxDown 账户会发送哪些数据。",
       },
       eyebrow: "法律 · 隐私",
       title: "隐私<em>政策</em>",
-      updated: "2026 年 9 月",
+      updated: "2026 年 10 月",
       intro:
-        "FluxDown（以下简称「我们」或「本软件」）致力于保护您的隐私。本隐私政策说明了当您使用 FluxDown 桌面应用、浏览器扩展和本网站时，我们收集哪些信息、不收集哪些信息以及如何处理您的数据。",
+        "FluxDown（以下简称「我们」或「本软件」）致力于保护您的隐私。本隐私政策说明了当您使用 FluxDown 桌面应用、iOS 与 Android 移动应用、浏览器扩展、可选的 FluxDown 账户和本网站时，我们收集哪些信息、不收集哪些信息以及如何处理您的数据。",
       sections: [
         {
           id: "collect",
@@ -272,18 +331,55 @@ export const legal = defineMessages({
             "<strong>网站分析：</strong>我们使用 Vercel Web Analytics，这是一项注重隐私的分析服务，仅收集匿名的、聚合的页面浏览数据。不使用 Cookie，不收集个人数据，不追踪个人用户。",
             "<strong>反馈提交：</strong>当您通过网站自愿提交反馈时，我们收集反馈类型、标题、描述以及可选的联系方式。这些数据以 GitHub Issue 的形式存储在我们的代码仓库中。",
             "<strong>邮件订阅：</strong>如果您订阅了平台可用性通知，我们会将您的邮箱地址存储在 GitHub Issue 中，仅用于在所请求的平台可用时通知您。",
-            "<strong>镜像测速统计（可选）：</strong>为支持社区加速网络，FluxDown 可能上报匿名的聚合镜像测速指标（地区级镜像 + 实测速度）。其中不包含任何链接、文件名、IP 地址或任何形式的身份标识，且可随时在设置中关闭。",
+            "<strong>匿名使用计数（桌面端与服务器端）：</strong>桌面应用与无界面服务器会发送两个匿名事件：安装时一次 <code>app_installed</code>，每天至多一次 <code>app_active</code>。其中只包含随机安装 ID、操作系统、CPU 架构和应用版本，绝不包含链接、文件名或账户信息，可在设置中通过「匿名使用统计」开关关闭。移动应用不发送这些事件。",
+          ],
+        },
+        {
+          id: "account",
+          title: "可选的 FluxDown 账户",
+          body: "不登录账户也能使用全部下载功能。如果您选择注册或登录 FluxDown 账户，我们会在服务器上保存以下数据以提供账户功能：",
+          items: [
+            "<strong>账户资料：</strong>您的邮箱地址、密码（仅以加盐哈希形式保存）以及您设置的昵称。",
+            "<strong>已登录设备：</strong>每台登录设备的随机设备 ID、设备名称、平台、应用版本，以及最近一次在线的 IP 地址与时间，用于让您查看和管理设备并保障账户安全。",
+            "<strong>设置同步（可选）：</strong>开启同步后，保存您所选的设置分组，以便应用到您的其他设备。下载任务与历史永不同步。",
+            "<strong>发送到您设备的链接：</strong>当您选择把下载发送到自己的另一台设备时，会保存该链接及其选项，以便那台设备接收并执行。",
+            "<strong>云端推送（需主动开启，桌面端与服务器端）：</strong>开启后会发送任务事件（文件名、大小、状态、错误与队列名），用于投递邮件或 Telegram 通知。下载地址与保存目录只有在您分别开启对应选项时才会包含。事件保留 7 天。",
+            "<strong>下载线路质量：</strong>登录期间，应用会上报下载服务器的连接测量数据（服务器主机名、IP 地址、连接耗时、吞吐量与是否成功），用于为 FluxDown 选择更快的线路。其中绝不包含链接路径、查询参数、文件名或令牌。",
+            "<strong>套餐：</strong>如果您在桌面应用或网站上购买可选套餐，我们会在账户中保存订单记录（套餐、金额与状态）。移动应用不提供任何购买。",
+          ],
+        },
+        {
+          id: "share",
+          title: "文件分享（FluxMesh）",
+          body: "只有当您分享已完成的下载或接收他人分享的文件时才会使用 FluxMesh。文件尽量在设备之间通过加密的点对点连接直接传输，无法直连时经由 FluxDown 自建中继服务器转发，中继无法读取内容。使用 FluxMesh 时，我们会处理：",
+          items: [
+            "<strong>分享记录：</strong>每个分享的文件名、大小、内容哈希（BLAKE3）、链接、取件码、有效期与领取次数，以及分享所用的设备和账户。未登录也可以接收；接收方设备的随机网络 ID、设备名、IP 地址及其大致归属（由我们服务器查询的国家、省份、城市与运营商）会作为访问记录保存，供分享者查看和处理滥用。",
+            "<strong>网络地址记录：</strong>参与分享的设备的随机网络 ID 及其公布的网络地址（中继服务器与直连 IP 地址）保存在 FluxDown 自建的地址服务器上，用于让双方互相找到。我们不使用第三方发现服务。",
+            "<strong>网络与传输诊断：</strong>应用在「网络诊断」「传输诊断」页面向您展示的同一份诊断数据，在分享或接收期间也会发送给 FluxDown：NAT 类型、IPv4 / IPv6 可用性、公网 IP 及其大致归属、各中继延迟、点对点连接计数，以及每次传输的连接路径、往返时延、速率、丢包与错误。当您的设备通过「共享」向其他设备提供内容时，每条连接同样是一次传输：除上述数据外，还包括对端设备的随机网络 ID、所属分享，以及您向该设备提供了哪些内容（文件哈希，不含文件名与路径）、各发送了多少字节与数据块。网络快照只在分享活动期间发生变化时发送；传输详情在传输进行中每隔几秒发送一次、结束时发送一次。不分享也不接收时不发送任何内容，也不包含其他下载任务、链接或目录。",
+            "<strong>共享计量：</strong>通过「共享」传输时，收发双方各自上报逐对端的字节数（对端设备的随机网络 ID 与字节数，不含文件名与路径）。这些数据用于核对并计算共享加速额度的消耗与贡献，保存期限与传输会话一致。",
+            "<strong>保存期限：</strong>访问记录、网络诊断与传输详情按服务器设定的期限（默认 30 天）后删除；公布网络地址的历史默认保留 90 天。分享结束后取件码立即释放，分享记录保留在分享者的分享历史中。",
           ],
         },
         {
           id: "not-collect",
           title: "我们不收集的信息",
-          body: "FluxDown 采用本地优先架构设计。桌面应用程序：",
+          body: "FluxDown 采用本地优先架构设计。FluxDown 各应用：",
           items: [
-            "不会收集、传输或在任何远程服务器上存储您的下载链接、文件名或下载历史。所有下载数据均存储在您设备上的本地 SQLite 数据库中。",
-            "不包含任何崩溃报告或使用行为分析。唯一可选的网络上报是上文所述的匿名镜像测速指标，且可以随时关闭。",
-            "不需要任何形式的账户、登录或注册。",
-            "不进行其他任何「回连」。除您主动发起的下载和可选的测速指标外，应用完全离线运行。",
+            "不会在任何远程服务器上收集或保存您的下载历史。下载任务、文件路径与进度均存储在您设备上的本地 SQLite 数据库中。只有当您主动把链接发送到自己的其他设备，或开启上文所述的推送选项时，下载链接才会离开您的设备。",
+            "不包含广告、第三方追踪器或崩溃报告。",
+            "下载文件不需要任何形式的账户、登录或注册。",
+            "不会出于广告或追踪目的向第三方出售或共享您的个人数据。",
+          ],
+        },
+        {
+          id: "mobile",
+          title: "移动应用",
+          body: "FluxDown 的 iOS 与 Android 应用在您的设备本地运行同一套下载引擎：",
+          items: [
+            "下载的文件与任务记录保存在您设备上的应用存储中，直到您将其删除。",
+            "本地网络权限仅用于发现并连接您添加或配对的 FluxDown 主机（您的电脑、NAS 或服务器）。与您自己主机的连接直接建立，不经过我们的服务器。",
+            "面容 ID / 触控 ID 仅在设备本地用于保护访问密钥；生物识别数据不会离开您的设备，我们也无法获取。",
+            "下载完成或失败的通知均由您的设备在本地生成。",
           ],
         },
         {
@@ -305,8 +401,18 @@ export const legal = defineMessages({
         {
           id: "storage",
           title: "数据存储与安全",
-          body: "所有下载数据（任务记录、文件路径、进度）均存储在您设备上由 FluxDown 应用管理的本地 SQLite 数据库中。我们无法访问这些数据。网站反馈和订阅数据存储在我们 GitHub 仓库的 Issue 中，受 GitHub 隐私政策约束。",
+          body: "所有下载数据（任务记录、文件路径、进度）均存储在您设备上由 FluxDown 应用管理的本地 SQLite 数据库中。我们无法访问这些数据。账户数据保存在我们自己的服务器上，并通过 HTTPS 传输。网站反馈和订阅数据存储在我们 GitHub 仓库的 Issue 中，受 GitHub 隐私政策约束。",
           items: [],
+        },
+        {
+          id: "deletion",
+          title: "您的选择与账户删除",
+          body: "您可以随时掌控上述数据：",
+          items: [
+            "随时在应用的账户设置中退出登录，或从账户中移除单台设备。",
+            "在设置中开启或关闭设置同步、云端推送与匿名使用计数。",
+            '您可以随时在应用中删除 FluxDown 账户：设置 → 账户 → 删除账户（需验证密码或邮箱验证码）。删除后，账户、已登录设备、同步的设置、发送的链接与推送设置将被永久移除；仅在法律要求时保留订单记录。已下载的文件仍保留在您的设备上。如果无法使用应用，请用账户邮箱通过<a href="{feedback}">反馈页面</a>联系我们。',
+          ],
         },
         {
           id: "third-party",
@@ -320,7 +426,7 @@ export const legal = defineMessages({
         {
           id: "children",
           title: "儿童隐私",
-          body: "FluxDown 不会故意收集 13 岁以下儿童的任何个人信息。由于桌面应用完全不收集个人数据，且网站数据收集仅限于自愿提交的反馈，我们认为本服务对所有年龄段的用户都是安全的。",
+          body: "FluxDown 不会故意收集 13 岁以下儿童的任何个人信息。下载文件无需账户，可选账户只保存上文所述的数据。如果您认为有 13 岁以下儿童注册了账户，请联系我们，我们会将其删除。",
           items: [],
         },
         {
@@ -344,7 +450,7 @@ export const legal = defineMessages({
       },
       eyebrow: "法律 · 条款",
       title: "服务<em>条款</em>",
-      updated: "2026 年 2 月",
+      updated: "2026 年 10 月",
       intro:
         "请在使用 FluxDown 软件、浏览器扩展和网站（统称「服务」）前仔细阅读本服务条款（以下简称「条款」）。使用本服务即表示您同意受本条款约束。",
       sections: [
@@ -404,6 +510,18 @@ export const legal = defineMessages({
           title: "终止",
           body: "您可以随时通过卸载软件和移除浏览器扩展来停止使用 FluxDown。我们保留随时修改或终止服务的权利，恕不另行通知。终止后，本条款中因其性质应当继续有效的所有条款将继续有效。",
           items: [],
+        },
+        {
+          id: "fluxmesh-traffic",
+          title: "FluxMesh 流量与套餐",
+          body: "以下规则适用于 FluxCloud 的每月赠送额度、流量包与套餐。",
+          items: [
+            "每月赠送额度按北京时间自然月发放，可结转的以套餐说明为准。",
+            "流量包在有效期内可用，过期作废，已发放的不退款。",
+            "会员卡按周期购买、手动续费，不会自动续费或自动扣款；续费同一张卡时从当前到期时间顺延。到期后自动回到永久套餐的权益。已生效的时长不退款。",
+            "开启「权益锁定」的套餐，已公示权益只增不减；是否锁定以套餐页标注为准。",
+            "套餐限本人使用，转售、共享账号或滥用（含批量自动化下载）可限制或回收权益。",
+          ],
         },
         {
           id: "changes",
@@ -473,7 +591,7 @@ export const legal = defineMessages({
           title: "其他平台",
           body: "",
           items: [
-            'macOS：产物目前未签名，请仅从官方 GitHub Releases 页面获取。参见 <a href="{gatekeeper}">macOS Gatekeeper 说明</a>。',
+            "macOS：应用与 DMG 使用 Apple Developer ID 签名（Hardened Runtime）并经 Apple 公证，公证票据已装订（staple），离线时 Gatekeeper 也能校验。",
             "Linux：产物（AppImage / deb / Arch / 便携版）目前未做加密签名，请仅从官方 GitHub Releases 页面获取。",
           ],
         },

@@ -4,16 +4,22 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 局域网配对的 mDNS 发现：Wi-Fi 省电模式默认丢弃组播包，发现期间持有 MulticastLock -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- 打开已下载的 .apk：系统安装器要求调用方声明此权限，否则静默关闭（无任何提示） -->
+    <!-- 打开已下载的 .apk / 应用自更新交给安装程序：系统安装器要求调用方声明此权限，否则静默关闭（无任何提示） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-    <!-- 用户把保存目录指向 Download/ 以外的共享存储时，按需引导系统“所有文件访问”授权（可选） -->
+    <!-- 用户把保存目录指向应用专属目录以外的共享存储时按需授权：Android 11+ 引导系统“所有文件访问”，
+         Android 10 及以下申请存储运行时权限（Android 10 另需 application 的 requestLegacyExternalStorage） -->
     <uses-permission
         android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- 诊断页检查 magnet / ed2k / .torrent 的默认处理者：Android 11+ 默认看不到其它应用，需声明要探测的 Intent -->
     <queries>
@@ -29,6 +35,11 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:mimeType="application/x-bittorrent" />
         </intent>
+        <!-- 完成通知「打开」：判断精确 MIME 是否有应用可处理，否则退回 */* -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="content" android:mimeType="*/*" />
+        </intent>
     </queries>
 
     <!-- usesCleartextTraffic：局域网 server 模式主机多为 http://。RPC 本身由 Rust 原生 socket 连接（不受此限）；
@@ -38,6 +49,7 @@
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:enableOnBackInvokedCallback="true"
+        android:requestLegacyExternalStorage="true"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -184,10 +196,7 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 应用更新：安装会话结果（系统回调，不对外导出）+ 周期后台检查任务 -->
-        <receiver
-            android:name=".update.InstallResultReceiver"
-            android:exported="false" />
+        <!-- 应用更新：周期后台检查任务 -->
         <service
             android:name=".update.UpdateCheckJobService"
             android:exported="false"

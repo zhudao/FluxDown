@@ -1,18 +1,27 @@
 package com.fluxdown.bridge
 
+import com.fluxdown.core.host.CreateTaskRequest
 import com.fluxdown.core.host.HostErrorCode
 import com.fluxdown.core.host.HostEvent
 import com.fluxdown.core.host.HostException
 import com.fluxdown.core.host.HostSignal
 import com.fluxdown.core.host.HostSnapshot
+import com.fluxdown.core.host.ImportBatch
+import com.fluxdown.core.host.ImportItem
+import com.fluxdown.core.host.ImportProgress
+import com.fluxdown.core.host.ImportRetry
+import com.fluxdown.core.host.ImportSummary
+import com.fluxdown.core.host.ImportUpdate
 import com.fluxdown.core.model.BtFile
 import com.fluxdown.core.model.Category
 import com.fluxdown.core.model.CloudDevice
 import com.fluxdown.core.model.FileExistsAction
 import com.fluxdown.core.model.HlsOption
+import com.fluxdown.core.model.PluginCandidate
 import com.fluxdown.core.model.HostInfo
 import com.fluxdown.core.model.LinkDevice
 import com.fluxdown.core.model.Queue
+import com.fluxdown.core.model.QueueOrderEntry
 import com.fluxdown.core.model.RssSource
 import com.fluxdown.core.model.RuntimeStats
 import com.fluxdown.core.model.SeedingStatus
@@ -85,7 +94,7 @@ internal fun HostSnapshotDto.toCore() = HostSnapshot(
     tasks = tasks.map { it.toCore() },
     runtime = runtime.associate { it.taskId to it.toCore() },
     queues = queues.map { it.toCore() },
-    queuePositions = queuePositions,
+    queueOrder = queueOrder.map { it.toCore() },
     groups = groups.map { it.toCore() },
     stats = stats.toCore(),
     priorityTaskId = priorityTaskId,
@@ -97,6 +106,8 @@ internal fun HostSnapshotDto.toCore() = HostSnapshot(
     linkDevices = linkDevices.map { it.toCore() },
     categories = categories.map { it.toCore() },
     sections = sections,
+    tasksLoading = tasksLoading,
+    taskTotal = taskTotal.toLong(),
 )
 
 internal fun HostEventDto.toCore(): HostEvent = when (this) {
@@ -116,7 +127,8 @@ internal fun HostEventDto.toCore(): HostEvent = when (this) {
     )
     is HostEventDto.TaskRuntimeChanged -> HostEvent.TaskRuntimeChanged(runtime.toCore())
     is HostEventDto.QueuesChanged -> HostEvent.QueuesChanged(queues.map { it.toCore() })
-    is HostEventDto.QueuePositionsChanged -> HostEvent.QueuePositionsChanged(positions)
+    is HostEventDto.QueuePositionsChanged -> HostEvent.QueuePositionsChanged(order.map { it.toCore() })
+    is HostEventDto.QueueOrderChanged -> HostEvent.QueueOrderChanged(removed, added.map { it.toCore() })
     is HostEventDto.GroupsChanged -> HostEvent.GroupsChanged(groups.map { it.toCore() })
     is HostEventDto.FileMissingChanged -> HostEvent.FileMissingChanged(updates)
     is HostEventDto.PriorityTaskChanged -> HostEvent.PriorityTaskChanged(taskId)
@@ -196,6 +208,8 @@ internal fun QueueDto.toCore() = Queue(
     scheduleDays = scheduleDays,
 )
 
+internal fun QueueOrderDto.toCore() = QueueOrderEntry(taskId = taskId, order = order)
+
 internal fun GroupDto.toCore() = TaskGroup(
     groupId = groupId,
     name = name,
@@ -239,6 +253,11 @@ internal fun SelectionKindDto.toCore(): SelectionKind = when (this) {
         renamePreview = renamePreview,
         actions = actions.map { it.toCore() },
     )
+    is SelectionKindDto.Plugin -> SelectionKind.Plugin(
+        site = site,
+        url = url,
+        candidates = candidates.map { PluginCandidate(it.identity, it.name, it.version, it.description) },
+    )
 }
 
 internal fun FileExistsActionDto.toCore(): FileExistsAction = when (this) {
@@ -259,6 +278,7 @@ internal fun SelectionOutcomeDto.toCore(): SelectionOutcome = when (this) {
     is SelectionOutcomeDto.Variant -> SelectionOutcome.Variant(index)
     is SelectionOutcomeDto.FileExists -> SelectionOutcome.FileExists(action.toCore())
     is SelectionOutcomeDto.Cancelled -> SelectionOutcome.Cancelled
+    is SelectionOutcomeDto.Plugin -> SelectionOutcome.Plugin(identity, remember)
 }
 
 internal fun SelectionOutcome.toDto(): SelectionOutcomeDto = when (this) {
@@ -266,6 +286,7 @@ internal fun SelectionOutcome.toDto(): SelectionOutcomeDto = when (this) {
     is SelectionOutcome.Bt -> SelectionOutcomeDto.Bt(indices)
     is SelectionOutcome.Variant -> SelectionOutcomeDto.Variant(index)
     is SelectionOutcome.FileExists -> SelectionOutcomeDto.FileExists(action.toDto())
+    is SelectionOutcome.Plugin -> SelectionOutcomeDto.Plugin(identity, remember)
     SelectionOutcome.Cancelled -> SelectionOutcomeDto.Cancelled
 }
 
@@ -300,6 +321,14 @@ internal fun LinkDeviceDto.toCore() = LinkDevice(
     online = online,
     defaultSaveDir = defaultSaveDir,
     pathStyle = pathStyle,
+    customName = customName,
+    appVersion = appVersion,
+    cloudDeviceId = cloudDeviceId,
+    revoked = revoked,
+    pairedAt = pairedAt,
+    lastSeenAt = lastSeenAt,
+    grantsControl = grantsControl,
+    controllable = controllable,
 )
 
 internal fun CategoryDto.toCore() = Category(
@@ -308,6 +337,7 @@ internal fun CategoryDto.toCore() = Category(
     icon = icon,
     extensions = extensions,
     regexPattern = regexPattern,
+    urlPattern = urlPattern,
     position = position,
     visible = visible,
     builtinType = builtinType,
@@ -397,4 +427,59 @@ internal fun AppUpdateStatusDto.toCore() = AppUpdateStatus(
 internal fun AppUpdateSignalDto.toCore(): AppUpdateSignal = when (this) {
     is AppUpdateSignalDto.Status -> AppUpdateSignal.Status(status.toCore())
     is AppUpdateSignalDto.InstallRequested -> AppUpdateSignal.InstallRequested(packagePath, version)
+}
+
+// ── 批量导入 ──────────────────────────────────────────────────────────────
+
+internal fun CreateTaskRequest.toDto() = CreateTaskRequestDto(
+    url = url,
+    fileName = fileName,
+    saveDir = saveDir,
+    segments = segments,
+    queueId = queueId,
+    startPaused = startPaused,
+    cookies = cookies,
+    referrer = referrer,
+    userAgent = userAgent,
+    proxyUrl = proxyUrl,
+    checksum = checksum,
+    ignoreTlsErrors = ignoreTlsErrors,
+    headers = headers,
+    httpUser = httpUser,
+    httpPassword = httpPassword,
+    saveSiteAuth = saveSiteAuth,
+    offeredSaveDir = offeredSaveDir,
+    unattended = unattended,
+)
+
+internal fun ImportBatch.toDto() = ImportBatchDto(
+    common = common.toDto(),
+    items = items.map { ImportItemDto(url = it.url, fileName = it.fileName, checksum = it.checksum) },
+)
+
+/** 单条拒绝没有文案（`message` 只带违规字段名）：空串按「无说明」处理，由 reason / code 兜底。 */
+internal fun HostErrorDto.toImportError(): HostException =
+    HostException(code.toCore(), reason, retryable, message.ifEmpty { null })
+
+internal fun ImportProgressDto.toCore() = ImportProgress(
+    total = total.toInt(),
+    done = done.toInt(),
+    failed = failed.toInt(),
+    retry = retry?.let { ImportRetry(attempt = it.attempt.toInt(), max = it.max.toInt(), delaySecs = it.delaySecs.toInt()) },
+)
+
+/** [items] = 提交时各组条目按顺序拼接的列表：Rust 汇总里的 `unfinished` 是其中的序号。 */
+internal fun ImportSummaryDto.toCore(items: List<ImportItem>) = ImportSummary(
+    total = total.toInt(),
+    succeeded = succeeded.toInt(),
+    failed = failed.toInt(),
+    notSubmitted = notSubmitted.toInt(),
+    cancelled = cancelled,
+    firstError = firstError?.toImportError(),
+    unfinished = unfinished.mapNotNull { items.getOrNull(it.toInt()) },
+)
+
+internal fun ImportUpdateDto.toCore(items: List<ImportItem>): ImportUpdate = when (this) {
+    is ImportUpdateDto.Progress -> ImportUpdate.Progress(progress.toCore())
+    is ImportUpdateDto.Finished -> ImportUpdate.Finished(summary.toCore(items))
 }

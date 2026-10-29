@@ -20,6 +20,30 @@ struct TasksProtocolTests {
         #expect(old.seedRatioLimitMilli == SeedLimit.inherit && old.seedUploadLimitBps == 0)
     }
 
+    /// 协议 17 起 `TaskDto` 默认值字段不再上线：只剩恒在字段的任务对象必须解码成「全部跟随全局」，
+    /// 且单个字段缺省不影响其余字段（四个 `seed*Limit*` 缺省 = -2；上传限速缺省 = 0）。
+    @Test func seedLimitsDecodeFromPagedTaskDtoWithDefaultFieldsOmitted() throws {
+        let bare = Data(#"""
+        {"taskId":"t","url":"https://e.com/f","fileName":"f","saveDir":"/d","status":1,
+         "downloadedBytes":10,"totalBytes":100,"createdAt":1760000000}
+        """#.utf8)
+        let limits = try ProtocolJSON.decode(TaskSeedLimits.self, from: bare, what: "task")
+        #expect(limits == TaskSeedLimits())
+        #expect(limits.seedRatioLimitMilli == -2)
+        #expect(limits.seedPostRatioLimitMilli == -2)
+        #expect(limits.seedTimeLimitMinutes == -2)
+        #expect(limits.seedInactiveTimeLimitMinutes == -2)
+        #expect(limits.seedUploadLimitBps == 0)
+
+        // 只有非默认值的字段会上线：其余仍按缺省回落。
+        let partial = Data(#"""
+        {"taskId":"t","url":"magnet:?xt=urn:btih:x","fileName":"f","saveDir":"/d","status":3,
+         "downloadedBytes":0,"totalBytes":0,"createdAt":1,"seedTimeLimitMinutes":-1,"seedUploadLimitBps":2048}
+        """#.utf8)
+        let some = try ProtocolJSON.decode(TaskSeedLimits.self, from: partial, what: "task")
+        #expect(some == TaskSeedLimits(seedTimeLimitMinutes: SeedLimit.unlimited, seedUploadLimitBps: 2048))
+    }
+
     @Test func seedLimitField_modeMappingFromWire() {
         #expect(SeedLimitField(wire: -2, unit: .ratio).mode == .inherit)
         #expect(SeedLimitField(wire: -1, unit: .ratio).mode == .unlimited)
@@ -143,6 +167,36 @@ struct TasksProtocolTests {
     @Test func activityQueryOmitsNilCursors() throws {
         let data = try ProtocolJSON.encode(TaskActivityQuery(taskId: "t", beforeId: 5), what: "q")
         #expect(String(decoding: data, as: UTF8.self) == #"{"beforeId":5,"limit":0,"taskId":"t"}"#)
+    }
+
+    @Test func speedHistoryDecodesWireShape_nullMeansNoRecord_andDerivesAverage() throws {
+        let json = #"{"taskId":"t","bucketSecs":2,"samples":[0,100,300],"activeSecs":6,"transferredBytes":1200,"peakBps":400}"#
+        let history = try ProtocolJSON.decode(TaskSpeedHistory.self, from: Data(json.utf8), what: "h")
+        #expect(history.bucketSecs == 2 && history.samples == [0, 100, 300])
+        #expect(history.averageBps == 200 && history.hasCurve)
+        let none = try ProtocolJSON.decode(TaskSpeedHistory?.self, from: Data("null".utf8), what: "h")
+        #expect(none == nil)
+        #expect(TaskSpeedHistory(taskId: "t").averageBps == 0)
+        #expect(!TaskSpeedHistory(taskId: "t", samples: [0, 0], peakBps: 0).hasCurve)
+        #expect(!TaskSpeedHistory(taskId: "t", samples: [5], peakBps: 5).hasCurve)
+    }
+
+    @Test func speedHistoryElapsedSeconds_bucketedClampedAndStrictlyIncreasing() {
+        let full = TaskSpeedHistory(taskId: "t", bucketSecs: 2, samples: [1, 2, 3], activeSecs: 6)
+        #expect(full.elapsedSeconds == [2, 4, 6])
+        // 末尾不完整桶被 activeSecs 截断。
+        let partial = TaskSpeedHistory(taskId: "t", bucketSecs: 5, samples: [1, 2, 3], activeSecs: 11)
+        #expect(partial.elapsedSeconds == [5, 10, 11])
+        // 截断后重复的点强制严格递增。
+        let tiny = TaskSpeedHistory(taskId: "t", bucketSecs: 5, samples: [1, 2, 3], activeSecs: 3)
+        #expect(tiny.elapsedSeconds == [3, 4, 5])
+        #expect(TaskSpeedHistory(taskId: "t", bucketSecs: 0, samples: [1, 2], activeSecs: 9).elapsedSeconds == [1, 2])
+    }
+
+    @Test func clockDurationText_minutesAndHours() {
+        #expect(clockDurationText(0) == "0:00" && clockDurationText(65) == "1:05")
+        #expect(clockDurationText(3599) == "59:59" && clockDurationText(3661) == "1:01:01")
+        #expect(clockDurationText(-4) == "0:00")
     }
 
     @Test func feed_latestThenLoadOlderThenLiveEvents() throws {
@@ -275,8 +329,17 @@ struct TasksProtocolTests {
     // MARK: 插件失败
 
     @Test func pluginFailureDetection() {
-        #expect(PluginFailure.isIgnorable(status: .failed, errorMessage: "[插件] yt: boom"))
-        #expect(!PluginFailure.isIgnorable(status: .failed, errorMessage: "connection reset"))
-        #expect(!PluginFailure.isIgnorable(status: .paused, errorMessage: "[插件] yt: boom"))
+        #expect(PluginFailure.isIgnorable(status: .failed, errorMessage: "[插件] yt: boom", groupId: ""))
+        #expect(!PluginFailure.isIgnorable(status: .failed, errorMessage: "connection reset", groupId: ""))
+        #expect(!PluginFailure.isIgnorable(status: .paused, errorMessage: "[插件] yt: boom", groupId: ""))
+        #expect(!PluginFailure.isIgnorable(status: .failed, errorMessage: "[插件] yt: boom", groupId: "g1"))
+    }
+
+    @Test func taskErrorMessageLocalization() {
+        #expect(TaskErrorMessage.localizationKey(for: TaskErrorMessage.postOnlyEndpoint) == "taskErrorPostOnlyEndpoint")
+        #expect(TaskErrorMessage.localizationKey(for: " " + TaskErrorMessage.postOnlyResume + "\n") == "taskErrorPostOnlyResume")
+        #expect(TaskErrorMessage.localizationKey(for: "connection reset") == nil)
+        #expect(TaskErrorMessage.displayText("connection reset", localize: { _ in "x" }) == "connection reset")
+        #expect(TaskErrorMessage.displayText(TaskErrorMessage.postOnlyResume, localize: { "L:" + $0 }) == "L:taskErrorPostOnlyResume")
     }
 }

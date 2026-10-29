@@ -1,18 +1,24 @@
-//! 插件详情对话框：已安装插件与市场条目共用（manifest 级信息 + 权限 + 使用须知）。
+//! 插件详情对话框：已安装插件与市场条目共用（manifest 级信息 + 权限 + 页面脚本 + 使用须知）。
 
 use std::rc::Rc;
 
-use fluxdown_protocol::{MarketEntryDto, PluginDto};
-use fluxdown_ui_components::{dialog_scroll_body, tabular_numbers};
+use fluxdown_protocol::{MarketEntryDto, PluginDto, PluginPageScriptDeclDto};
+use fluxdown_ui_components::{ControlExt as _, dialog_scroll_body, tabular_numbers};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
-use gpui::{App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div};
-use gpui_component::{WindowExt as _, h_flex, link::Link, v_flex};
+use gpui::{
+    App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Window, div, prelude::FluentBuilder as _,
+};
+use gpui_component::{
+    WindowExt as _, button::Button, dialog::DialogFooter, h_flex, link::Link, v_flex,
+};
 
+use super::plugin_live::LivePlugins;
 use crate::{pages::Frame, ui};
 
 /// 详情对话框的数据；调用侧从各自 DTO 拆字段。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PluginDetail {
     pub name: String,
     pub version: String,
@@ -26,6 +32,11 @@ pub struct PluginDetail {
     pub settings_count: usize,
     pub permissions: Vec<String>,
     pub yanked_label: Option<String>,
+    /// `standard|elevated|full`；空串按 standard。
+    pub risk: String,
+    pub network_hosts: Vec<String>,
+    /// 插件声明的页面脚本（标题 + 匹配站点）；市场条目不携带。
+    pub page_scripts: Vec<PluginPageScriptDeclDto>,
 }
 
 impl PluginDetail {
@@ -38,6 +49,9 @@ impl PluginDetail {
             homepage: plugin.homepage.clone(),
             settings_count: plugin.settings.len(),
             permissions: plugin.permissions.clone(),
+            risk: plugin.risk.clone(),
+            network_hosts: plugin.network_hosts.clone(),
+            page_scripts: plugin.contributions.page_scripts.clone(),
             ..Self::default()
         }
     }
@@ -60,6 +74,9 @@ impl PluginDetail {
             settings_count: 0,
             permissions: entry.permissions.clone(),
             yanked_label: yanked_label(translator, &entry.yanked),
+            risk: crate::market::risk_of(&entry.permissions).to_owned(),
+            network_hosts: entry.network_hosts.clone(),
+            page_scripts: Vec::new(),
         }
     }
 }
@@ -90,6 +107,30 @@ pub fn permission_label(translator: &Translator, permission: &str) -> (String, S
             translator.text("pluginPermAuthName").to_owned(),
             translator.text("pluginPermAuthDesc").to_owned(),
         ),
+        "tasks" => (
+            translator.text("pluginPermTasksName").to_owned(),
+            translator.text("pluginPermTasksDesc").to_owned(),
+        ),
+        "browserRules" => (
+            translator.text("pluginPermBrowserRulesName").to_owned(),
+            translator.text("pluginPermBrowserRulesDesc").to_owned(),
+        ),
+        "desktop" => (
+            translator.text("pluginPermDesktopName").to_owned(),
+            translator.text("pluginPermDesktopDesc").to_owned(),
+        ),
+        "background" => (
+            translator.text("pluginPermBackgroundName").to_owned(),
+            translator.text("pluginPermBackgroundDesc").to_owned(),
+        ),
+        "intercept" => (
+            translator.text("pluginPermInterceptName").to_owned(),
+            translator.text("pluginPermInterceptDesc").to_owned(),
+        ),
+        "pageScripts" => (
+            translator.text("pluginPermPageScriptsName").to_owned(),
+            translator.text("pluginPermPageScriptsDesc").to_owned(),
+        ),
         other => (
             other.to_owned(),
             translator.text("pluginPermUnknownDesc").to_owned(),
@@ -97,31 +138,88 @@ pub fn permission_label(translator: &Translator, permission: &str) -> (String, S
     }
 }
 
-/// 打开详情对话框；对话框构造器每帧重建，内容从共享的只读快照按需渲染。
+/// 详情对话框「审计记录」入口回调；仅已安装插件提供。
+pub type OpenAudit = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// 详情对话框内容：内容放在实体里，已安装插件可按 identity 跟随实时列表刷新。
+struct DetailBody {
+    detail: PluginDetail,
+    translator: Translator,
+    /// 插件被卸载后已关过一次对话框：之后的列表更新不得再关掉别的对话框。
+    closed: bool,
+    _live: Option<Subscription>,
+}
+
+impl Render for DetailBody {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        render_detail(&self.detail, &self.translator, cx)
+    }
+}
+
+/// 打开详情对话框。`live` 仅已安装插件提供：详情随最新列表刷新，插件被卸载时关闭对话框。
 pub fn open_plugin_detail(
     detail: PluginDetail,
     translator: Translator,
+    open_audit: Option<OpenAudit>,
+    live: Option<Entity<LivePlugins>>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let detail = Rc::new(detail);
-    let translator = Rc::new(translator);
+    let audit_label = SharedString::from(translator.text("pluginAuditOpenForPlugin").to_owned());
+    let body = cx.new(|_| DetailBody {
+        detail,
+        translator,
+        closed: false,
+        _live: None,
+    });
+    if let Some(live) = live {
+        body.update(cx, |this, cx| {
+            this._live = Some(cx.observe_in(&live, window, |this, live, window, cx| {
+                let Some(plugin) = live.read(cx).plugin(&this.detail.identity) else {
+                    if !this.closed {
+                        this.closed = true;
+                        window.close_dialog(cx);
+                    }
+                    return;
+                };
+                let next = PluginDetail::from_plugin(plugin);
+                if next == this.detail {
+                    return;
+                }
+                // 标题在对话框构造器里每帧重建：改名时整窗重绘才能带上新标题。
+                if next.name != this.detail.name {
+                    window.refresh();
+                }
+                this.detail = next;
+                cx.notify();
+            }));
+        });
+    }
     window.open_dialog(cx, move |dialog, _, cx| {
-        let detail = detail.clone();
-        let translator = translator.clone();
+        let name = body.read(cx).detail.name.clone();
+        let content = body.clone();
+        let open_audit = open_audit.clone();
         dialog
-            .title(fluxdown_ui_components::dialog_title(
-                detail.name.clone(),
-                cx,
-            ))
+            .title(fluxdown_ui_components::dialog_title(name, cx))
             .w(active_theme(cx).text_extent(480.))
             .content(move |root, _, cx| {
                 root.min_h_0().child(dialog_scroll_body(
                     "plugin-detail-body",
                     None,
-                    render_detail(&detail, &translator, cx),
+                    content.clone(),
                     cx,
                 ))
+            })
+            .when_some(open_audit, |dialog, open_audit| {
+                dialog.footer(
+                    DialogFooter::new().child(
+                        Button::new("plugin-detail-audit")
+                            .outline()
+                            .control(cx)
+                            .label(audit_label.clone())
+                            .on_click(move |_, window, cx| open_audit(window, cx)),
+                    ),
+                )
             })
     });
 }
@@ -190,6 +288,7 @@ fn render_detail(detail: &PluginDetail, translator: &Translator, cx: &App) -> im
                     .clone()
                     .map(|label| ui::tone_pill(label, tokens.colors.destructive, frame)),
             )
+            .children(ui::risk_pill("plugin-detail-risk", &detail.risk, frame))
             .children(
                 detail
                     .tags
@@ -256,7 +355,36 @@ fn render_detail(detail: &PluginDetail, translator: &Translator, cx: &App) -> im
             .child(section_title(text("pluginDetailPermissions")))
             .children(permissions);
     }
+    if !detail.page_scripts.is_empty() {
+        content = content
+            .child(section_title(text("pluginConsentPageScripts")))
+            .children(page_script_rows(&detail.page_scripts, frame));
+    }
+    if !detail.network_hosts.is_empty() {
+        content = content
+            .child(section_title(text("pluginConsentNetworkHosts")))
+            .children(
+                detail
+                    .network_hosts
+                    .iter()
+                    .map(|host| ui::body_text(host.clone(), frame)),
+            );
+    }
     content
         .child(section_title(text("pluginDetailUsage")))
         .child(ui::meta_text(text("pluginDetailUsageBody"), frame))
+}
+
+/// 页面脚本行：标题 + 匹配站点（逗号分隔）；详情与授权对话框共用。
+pub fn page_script_rows(scripts: &[PluginPageScriptDeclDto], frame: Frame<'_>) -> Vec<gpui::Div> {
+    scripts
+        .iter()
+        .map(|script| {
+            v_flex()
+                .w_full()
+                .gap(frame.tokens.spacing.xxs)
+                .child(ui::title_text(script.title.clone(), frame))
+                .child(ui::meta_text(script.matches.join(", "), frame))
+        })
+        .collect()
 }
