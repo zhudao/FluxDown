@@ -424,13 +424,14 @@ private fun LinkedDeviceRow(
         version = device.appVersion,
         current = false,
         subtitleOverride = if (device.revoked) str(R.string.linkedDeviceRevokedDesc) else null,
-        note = if (device.grantsControl && !device.revoked) str(R.string.linkControlGrantedTag) else null,
+        // 「同一账号」并入状态行：trailing 已有三个操作按钮，再挂标签会把标题列挤成竖排
+        note = listOfNotNull(
+            str(R.string.linkedDeviceSameAccountTag).takeIf { sameAccount && !device.revoked },
+            str(R.string.linkControlGrantedTag).takeIf { device.grantsControl && !device.revoked },
+        ).joinToString(" · ").ifEmpty { null },
         trailing = {
             Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                when {
-                    device.revoked -> FluxTag(str(R.string.linkedDeviceRevokedTag), tone = Tone.Coral)
-                    sameAccount -> FluxTag(str(R.string.linkedDeviceSameAccountTag), tone = Tone.Accent)
-                }
+                if (device.revoked) FluxTag(str(R.string.linkedDeviceRevokedTag), tone = Tone.Coral)
                 if (!device.revoked) {
                     if (onDispatch != null) {
                         FluxIconButton(

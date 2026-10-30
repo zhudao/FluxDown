@@ -5,6 +5,7 @@
 
 pub(crate) mod about;
 pub(crate) mod api;
+mod app_icon;
 pub(crate) mod appearance;
 mod auto_quantity;
 pub(crate) mod bt;
@@ -258,6 +259,7 @@ pub(crate) fn share_page(
     ctx: &SectionContext,
     general: Option<AnyView>,
     network: Option<AnyView>,
+    network_visible: bool,
 ) -> SettingsPage {
     let page = SettingsPage::new(
         "share",
@@ -277,6 +279,10 @@ pub(crate) fn share_page(
             }
         }
     };
-    page.tab(slot_tab("", "settingsTabGeneral", general))
-        .tab(slot_tab("network", "shareTabNetwork", network).fill_height())
+    let page = page.tab(slot_tab("", "settingsTabGeneral", general));
+    if network_visible {
+        page.tab(slot_tab("network", "shareTabNetwork", network).fill_height())
+    } else {
+        page
+    }
 }

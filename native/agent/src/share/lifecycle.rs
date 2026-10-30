@@ -25,8 +25,14 @@ const SHARE_SYNC_COALESCE: Duration = Duration::from_secs(1);
 const SYNC_ATTEMPTS: usize = 3;
 
 impl Inner {
-    /// 由内存状态拼出完整的 UI 状态（纯函数，不访问网络）。
+    /// 由内存状态拼出完整的 UI 状态（纯函数，不访问网络）。本机开关关闭时只带本机设置，其余为空。
     pub(super) fn state_dto(&self, has_account: bool) -> ShareStateDto {
+        if !self.local.enabled {
+            return ShareStateDto {
+                local_config: self.local.clone(),
+                ..ShareStateDto::default()
+            };
+        }
         let (enabled, can_send, policy_summary) = match &self.config {
             Some(cached) => (
                 cached.cfg.enabled,
@@ -198,10 +204,14 @@ impl ShareService {
     // ───────────── 云端策略 / 公钥 ─────────────
 
     /// 取云端策略（5 分钟内用缓存，之后 ETag 条件请求；`force` 跳过新鲜期）。离线时沿用旧缓存。
+    /// 本机开关关闭时不发请求，直接 `ShareUnavailable`（端点构建、分享、接收都经这里，等于总闸）。
     pub(super) async fn config(
         &self,
         force: bool,
     ) -> Result<super::cloud::CloudConfig, RpcErrorData> {
+        if !self.is_enabled() {
+            return Err(unavailable());
+        }
         let (cached, etag) = self.with(|i| {
             (
                 i.config
@@ -440,17 +450,19 @@ impl ShareService {
         Ok(())
     }
 
-    /// 空闲静默：有有效分享或进行中的接收任务才绑定端点，否则关闭。
+    /// 空闲静默：有有效分享或进行中的接收任务才绑定端点，否则关闭；本机开关关闭时恒不绑定。
     pub(super) async fn refresh_endpoint(&self) {
         let _guard = self.lifecycle.lock().await;
         self.sync_content();
+        let enabled = self.is_enabled();
         let (needed, dirty_endpoint, receiving) = self.with(|i| {
             let receiving = i
                 .receive_tasks
                 .values()
                 .any(super::service::ReceiveTask::is_active);
             (
-                self.registry.active_count() > 0 || receiving || !self.content.is_empty(),
+                enabled
+                    && (self.registry.active_count() > 0 || receiving || !self.content.is_empty()),
                 i.endpoint_dirty.then(|| i.endpoint.clone()).flatten(),
                 receiving,
             )
@@ -705,6 +717,9 @@ impl ShareService {
     /// 账号分享与游客分享分属不同归属方，各自用对应身份列出、只对账自己那一类。
     /// 请求期间本机改过分享表（`share_epoch` 变了）就作废这次列表重新请求，最多 [`SYNC_ATTEMPTS`] 次。
     pub(super) async fn sync_shares(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         self.reconcile_shares().await;
         self.retry_source_loss_stops().await;
     }

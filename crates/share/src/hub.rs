@@ -3,6 +3,8 @@
 //! 分享页、分享面板、接收窗口、设置页与诊断视图都观察同一个 `ShareHub`（跨窗口共享实体），
 //! 由 app 把 agent 会话的快照 / 事件喂进来；视图只读状态、经 [`ShareApi`] 发命令。
 
+use std::collections::HashMap;
+
 use fluxdown_protocol::{
     AgentEvent, AgentSnapshot, ServiceEvent, ShareDto, ShareHashingDto, ShareResolveDto,
     ShareStateDto, ShareTaskFactsDto,
@@ -20,6 +22,15 @@ pub enum ShareHubEvent {
     PendingReceive { resolve_id: String },
 }
 
+/// 一份分享上正在进行的云端副本操作：面板 / 列表里被点的按钮据此转圈。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloudOp {
+    /// 转为云端暂存（含上传失败后的重试）。
+    Convert,
+    /// 删除云端副本（含取消上传）。
+    Delete,
+}
+
 pub struct ShareHub {
     api: ShareApi,
     translator: Entity<Translator>,
@@ -33,6 +44,8 @@ pub struct ShareHub {
     diagnostics_request: Option<Option<String>>,
     /// 已宣告过的待确认接收，避免同一个预览反复弹窗。
     announced_pending: Option<String>,
+    /// 进行中的云端副本操作（分享 ID → 操作）：RPC 发出时登记，成败后撤销。
+    cloud_ops: HashMap<String, CloudOp>,
 }
 
 impl EventEmitter<ShareHubEvent> for ShareHub {}
@@ -48,7 +61,32 @@ impl ShareHub {
             host: ShareHost::default(),
             diagnostics_request: None,
             announced_pending: None,
+            cloud_ops: HashMap::new(),
         }
+    }
+
+    /// 该分享上进行中的云端副本操作。
+    #[must_use]
+    pub(crate) fn cloud_op(&self, share_id: &str) -> Option<CloudOp> {
+        self.cloud_ops.get(share_id).copied()
+    }
+
+    /// 登记 / 撤销（`None`）某分享上进行中的云端副本操作，并通知观察者重绘。
+    pub(crate) fn set_cloud_op(
+        &mut self,
+        share_id: &str,
+        op: Option<CloudOp>,
+        cx: &mut Context<Self>,
+    ) {
+        match op {
+            Some(op) => {
+                self.cloud_ops.insert(share_id.to_owned(), op);
+            }
+            None => {
+                self.cloud_ops.remove(share_id);
+            }
+        }
+        cx.notify();
     }
 
     /// 注入窗口入口（app 在创建窗口能力时调用）。

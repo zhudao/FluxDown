@@ -4,10 +4,12 @@
 import { useEffect, useState } from 'react'
 import { rpc } from '../../lib/rpc'
 import { accountErrorKey } from '../settings/sections/account/errorText'
-import { useShareSignedIn } from './state'
+import { useShareAvailable, useShareSignedIn } from './state'
 
 export function useUsageRefresh(): { refreshing: boolean; refresh: () => void } {
-  const signedIn = useShareSignedIn()
+  const signedInUser = useShareSignedIn()
+  const available = useShareAvailable()
+  const signedIn = signedInUser && available
   const [refreshing, setRefreshing] = useState(false)
   const [nonce, setNonce] = useState(0)
 

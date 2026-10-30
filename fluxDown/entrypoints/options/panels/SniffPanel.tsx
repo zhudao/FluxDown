@@ -1,11 +1,13 @@
 import type { JSX } from "preact";
 import { Select } from "@/ui/components/Select";
+import { usePlatform } from "@/ui/hooks/usePlatform";
 import { useT } from "@/ui/i18n";
 import { settings, updateSettings } from "../lib/store";
 import { PanelShell, SettingRow, ToggleRow } from "../parts";
 
 export function SniffPanel(): JSX.Element | null {
   const t = useT();
+  const platform = usePlatform();
   const s = settings.value;
   if (!s) return null;
 
@@ -29,17 +31,19 @@ export function SniffPanel(): JSX.Element | null {
         checked={s.showFloatingButton}
         onChange={(v) => void updateSettings({ showFloatingButton: v })}
       />
-      <SettingRow title={t("options.sniff.floatTrigger")} desc={t("options.sniff.floatTriggerDesc")}>
-        <Select<"hover" | "always">
-          value={s.floatButtonTrigger}
-          disabled={!s.showFloatingButton}
-          onChange={(v) => void updateSettings({ floatButtonTrigger: v })}
-          options={[
-            { value: "hover", label: t("options.sniff.triggerHover") },
-            { value: "always", label: t("options.sniff.triggerAlways") },
-          ]}
-        />
-      </SettingRow>
+      {platform.android ? null : (
+        <SettingRow title={t("options.sniff.floatTrigger")} desc={t("options.sniff.floatTriggerDesc")}>
+          <Select<"hover" | "always">
+            value={s.floatButtonTrigger}
+            disabled={!s.showFloatingButton}
+            onChange={(v) => void updateSettings({ floatButtonTrigger: v })}
+            options={[
+              { value: "hover", label: t("options.sniff.triggerHover") },
+              { value: "always", label: t("options.sniff.triggerAlways") },
+            ]}
+          />
+        </SettingRow>
+      )}
       <SettingRow title={t("options.sniff.floatPosition")} desc={t("options.sniff.floatPositionDesc")}>
         <Select<"top-right" | "top-left" | "bottom-right" | "bottom-left">
           value={s.floatButtonPosition}

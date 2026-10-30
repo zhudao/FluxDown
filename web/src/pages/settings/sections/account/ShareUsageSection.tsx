@@ -10,7 +10,7 @@ import type { ShareEarnDto, ShareUsageDto } from '../../../../lib/rpc'
 import { Badge, Button, Icon, ProgressBar } from '../../../../ui'
 import { boostLabel, formatQuotaBytes, grantSourceKey, levelLabel, trafficKindKey, usageMeters } from '../../../share/model'
 import type { MeterView } from '../../../share/model'
-import { useShareSignedIn, useShareState } from '../../../share/state'
+import { useShareAvailable, useShareSignedIn, useShareState } from '../../../share/state'
 import { useUsageRefresh } from '../../../share/useUsageRefresh'
 import { formatShortTime } from '../../../webhooks/cloudLogic'
 import { SettingsSection } from '../../kit'
@@ -128,9 +128,10 @@ function Body({ usage, failed, onRefresh, refreshing }: { usage: ShareUsageDto; 
 
 export function ShareUsageSection() {
   const signedIn = useShareSignedIn()
+  const available = useShareAvailable()
   const { usage, usageError } = useShareState()
   const { refreshing, refresh } = useUsageRefresh()
 
-  if (!signedIn || !usage) return null
+  if (!available || !signedIn || !usage) return null
   return <Body usage={usage} failed={usageError != null} refreshing={refreshing} onRefresh={refresh} />
 }

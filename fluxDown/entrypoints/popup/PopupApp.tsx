@@ -20,7 +20,9 @@ import { ToastHost, showToast } from "@/ui/components/Toast";
 import { Toggle } from "@/ui/components/Toggle";
 import { ResourceList } from "@/ui/features/ResourceList";
 import { SiteCard } from "@/ui/features/SiteCard";
+import { QuickDownload } from "@/ui/features/QuickDownload";
 import { TaskList } from "@/ui/features/TaskList";
+import { usePlatform } from "@/ui/hooks/usePlatform";
 import { useSidePanelOpener } from "@/ui/hooks/useSidePanelOpener";
 import { useTabView } from "@/ui/hooks/useTabView";
 import { useT } from "@/ui/i18n";
@@ -165,6 +167,7 @@ export function PopupApp(): JSX.Element {
   const stats = useStats();
   const sidePanel = useSidePanelOpener(true);
   const [exporting, setExporting] = useState(false);
+  const platform = usePlatform();
 
   const manifest = browser.runtime.getManifest();
   const version = manifest.version_name ?? `v${manifest.version}`;
@@ -176,12 +179,12 @@ export function PopupApp(): JSX.Element {
   const [pane, setPane] = useState<PaneKey | null>(null);
   const viewLoaded = view !== null;
   useEffect(() => {
-    if (pane === null && viewLoaded) setPane(resourceTotal > 0 ? "resources" : "tasks");
-  }, [pane, viewLoaded, resourceTotal]);
-  const current: PaneKey = pane ?? "resources";
+    if (pane === null && viewLoaded) setPane(resourceTotal > 0 || platform.android ? "resources" : "tasks");
+  }, [pane, viewLoaded, resourceTotal, platform.android]);
+  const current: PaneKey = platform.android ? "resources" : (pane ?? "resources");
   const tabs: TabItem<PaneKey>[] = [
     { key: "resources", label: t("popup.tabs.resources"), count: resourceTotal },
-    { key: "tasks", label: t("popup.tabs.tasks"), count: activeTasks },
+    ...(platform.android ? [] : [{ key: "tasks" as const, label: t("popup.tabs.tasks"), count: activeTasks }]),
   ];
 
   const exportDiagnostics = async () => {
@@ -197,6 +200,9 @@ export function PopupApp(): JSX.Element {
   };
 
   const switchLabel = `${t("switch.label")} · ${enabled ? t("switch.enabled") : t("switch.disabled")}`;
+  // Android 的「已连接」只代表下载会交给 FluxDown Android App（Intent），不是桌面连接
+  const statusLabel =
+    platform.android && connection.state === "connected" ? t("header.androidHandoff") : t(`header.${connection.state}`);
 
   return (
     <div class="pp-root">
@@ -209,18 +215,18 @@ export function PopupApp(): JSX.Element {
           <button
             type="button"
             class={`pp-status pp-${connection.state}`}
-            title={t(`header.${connection.state}`)}
+            title={statusLabel}
             onClick={connection.refresh}
           >
             <span class="pp-status-dot" />
-            <span>{t(`header.${connection.state}`)}</span>
+            <span>{statusLabel}</span>
           </button>
           <Toggle checked={enabled} onChange={setEnabled} label={switchLabel} />
         </div>
       </header>
 
       <HostAccessNotice />
-      <PageScriptsHint />
+      {platform.desktopApp ? <PageScriptsHint /> : null}
 
       {siteHost ? (
         <div class="pp-site">
@@ -228,9 +234,15 @@ export function PopupApp(): JSX.Element {
         </div>
       ) : null}
 
-      <Tabs class="pp-tabs" items={tabs} active={current} onChange={setPane} />
+      {tabs.length > 1 ? <Tabs class="pp-tabs" items={tabs} active={current} onChange={setPane} /> : null}
 
       <main class="pp-content">
+        {/* Android：任务列表不可用，快速下载直接置顶 */}
+        {platform.android ? (
+          <div class="pp-quick">
+            <QuickDownload />
+          </div>
+        ) : null}
         <section class={`pp-pane${current === "resources" ? "" : " fd-hidden"}`}>
           {summary && summary.total > 0 ? (
             <>
@@ -246,10 +258,12 @@ export function PopupApp(): JSX.Element {
           )}
         </section>
 
-        {/* 任务页签隐藏时仍挂载：持续轮询以维持页签计数 */}
-        <section class={`pp-pane${current === "tasks" ? "" : " fd-hidden"}`}>
-          <TaskList density="compact" quickDownload onActiveCountChange={setActiveTasks} />
-        </section>
+        {/* 任务页签隐藏时仍挂载：持续轮询以维持页签计数；Android 无 NMH 任务列表（快速下载见上方） */}
+        {platform.android ? null : (
+          <section class={`pp-pane${current === "tasks" ? "" : " fd-hidden"}`}>
+            <TaskList density="compact" quickDownload onActiveCountChange={setActiveTasks} />
+          </section>
+        )}
       </main>
 
       <footer class="pp-footer">
@@ -265,18 +279,22 @@ export function PopupApp(): JSX.Element {
           {sidePanel.available ? (
             <IconButton icon="sidebar" label={t("popup.sidePanel")} onClick={sidePanel.open} />
           ) : null}
-          <button
-            type="button"
-            class="pp-link"
-            disabled={exporting}
-            title={t("diagnostics.description")}
-            onClick={exportDiagnostics}
-          >
-            {exporting ? t("diagnostics.exporting") : t("diagnostics.export")}
-          </button>
+          {/* 导出诊断依赖 downloads API 与 NMH 侧数据，Android 不可用 */}
+          {platform.desktopApp ? (
+            <button
+              type="button"
+              class="pp-link"
+              disabled={exporting}
+              title={t("diagnostics.description")}
+              onClick={exportDiagnostics}
+            >
+              {exporting ? t("diagnostics.exporting") : t("diagnostics.export")}
+            </button>
+          ) : null}
         </div>
         <div class="pp-footer-right">
-          {enabled && bypassKey !== "off" ? (
+          {/* 跳过接管修饰键是键盘操作，触屏无意义 */}
+          {platform.desktopApp && enabled && bypassKey !== "off" ? (
             <span class="pp-bypass-hint" title={t("popup.bypassHintTip", { key: bypassKeyLabel(bypassKey) })}>
               {t("popup.bypassHint", { key: bypassKeyLabel(bypassKey) })}
             </span>

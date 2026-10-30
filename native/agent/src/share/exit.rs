@@ -53,7 +53,8 @@ pub(super) fn exit_candidates(
 impl ShareService {
     /// 完全退出前的收尾；只在设置为「自动转为云端暂存」时动作，任何一步失败都不阻止退出。
     pub(super) async fn convert_before_quit(&self) {
-        if self.with(|i| i.local.exit_behavior) != ShareExitBehavior::ConvertToCloud
+        if !self.is_enabled()
+            || self.with(|i| i.local.exit_behavior) != ShareExitBehavior::ConvertToCloud
             || !self.cloud.has_account().await
         {
             return;

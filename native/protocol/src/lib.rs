@@ -3,6 +3,7 @@
 //! 本 crate 只定义 wire 契约；不得依赖下载引擎、网络运行时、数据库或 UI。
 
 pub mod agent;
+pub mod app_icon;
 pub mod capture_link;
 pub mod cloud_notify;
 pub mod coalesce;

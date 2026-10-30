@@ -251,6 +251,12 @@ object HostMethod {
     const val agentPlatformSetUrlProtocol = "agent.platform.setUrlProtocol"
     /** 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。 */
     const val agentPlatformFileIcon = "agent.platform.fileIcon"
+    /** 切换 / 导入桌面应用图标；仅桌面，移动端不使用。 */
+    const val agentPlatformSetAppIcon = "agent.platform.setAppIcon"
+    /** 当前自定义桌面应用图标的 PNG；仅桌面，移动端不使用。 */
+    const val agentPlatformAppIconImage = "agent.platform.appIconImage"
+    /** 为桌面界面进程现有窗口补设应用图标；仅桌面，移动端不使用。 */
+    const val agentPlatformSyncWindowIcons = "agent.platform.syncWindowIcons"
     /** 由 agent 在本机播放一次提示音偏好值；仅桌面，移动端不使用。 */
     const val agentSoundPreview = "agent.sound.preview"
     const val agentCaptureSubmit = "agent.capture.submit"

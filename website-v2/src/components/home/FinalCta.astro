@@ -50,12 +50,17 @@ const title = t.title.replace(/<em>(.*?)<\/em>/g, '<span class="serif accent-gra
 </section>
 
 <script>
-  import { mountStage } from "../../scripts/particle-stage";
-  import { NeuralSphere } from "./neural-sphere";
+  import { whenIdle } from "../../scripts/idle";
 
+  // 点云球属装饰:首屏绘制后的空闲时段再加载并挂载
   const host = document.querySelector<HTMLElement>(".cta");
   const canvas = host?.querySelector<HTMLCanvasElement>("[data-sphere]");
-  if (host && canvas) mountStage(canvas, host, new NeuralSphere());
+  if (host && canvas) {
+    whenIdle(async () => {
+      const [{ mountStage }, { NeuralSphere }] = await Promise.all([import("../../scripts/particle-stage"), import("./neural-sphere")]);
+      mountStage(canvas, host, new NeuralSphere());
+    });
+  }
 </script>
 
 <style>

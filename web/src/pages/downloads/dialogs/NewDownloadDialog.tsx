@@ -763,7 +763,7 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
               }}
               className="font-mono text-xs"
             />
-            {text.trim() !== '' && count === 0 && !hasShareInput ? <FieldError>{t('newDownloadNoValidUrl')}</FieldError> : null}
+            {text.trim() !== '' && count === 0 && !(shareActive && hasShareInput) ? <FieldError>{t('newDownloadNoValidUrl')}</FieldError> : null}
             {shareNotice ? (
               <div className="flex items-start gap-2 rounded-md border border-hairline bg-chrome px-2.5 py-2 text-xs text-muted-foreground">
                 <Icon icon={Share2} className="mt-0.5 shrink-0 text-text-tertiary" />

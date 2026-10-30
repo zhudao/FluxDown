@@ -48,6 +48,8 @@ pub(crate) struct ManifestView {
     search: Entity<InputState>,
     picking: bool,
     submitting: bool,
+    /// 当前（或最近一次）提交走「稍后下载」：在途时只让被点击的那一侧按钮转圈。
+    submitting_paused: bool,
     on_submit: ManifestSubmit,
     on_back: ManifestBack,
 }
@@ -118,6 +120,7 @@ impl ManifestView {
             search,
             picking: false,
             submitting: false,
+            submitting_paused: false,
             on_submit,
             on_back,
         }
@@ -185,6 +188,7 @@ impl ManifestView {
         ) else {
             return;
         };
+        self.submitting_paused = paused;
         self.set_submitting(true, cx);
         (self.on_submit)(request, window, cx);
     }

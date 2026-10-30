@@ -39,6 +39,7 @@ import { fallbackAfterSendFailure, sendToFluxDown } from "./sender";
 import { getCachedProfiles, getCachedSettings, peekCachedProfiles, peekCachedSettings } from "./settings-cache";
 import { loadServiceWorkerScopes, peekServiceWorkerScopes } from "./sw-scopes";
 import { logError, logWarn } from "@/utils/error-log";
+import { hasDownloadsApi } from "@/utils/platform";
 
 // 响应头缓存 —— 当 HTTP 响应指示"这是一个下载"时，缓存其元数据
 // 这是第三层兜底拦截的关键数据来源
@@ -167,8 +168,10 @@ function isBrowserOnly(urls: readonly (string | undefined)[], scopes: ServiceWor
 }
 
 // Firefox 不支持 onDeterminingFilename，兜底层是唯一拦截路径，
-// 需要更长等待让浏览器填充 downloadItem 元数据
-const hasDeterminingFilename = !!browser.downloads.onDeterminingFilename;
+// 需要更长等待让浏览器填充 downloadItem 元数据。
+// Firefox for Android 连 downloads 命名空间都没有：只剩 webRequest blocking 一条拦截路径。
+const downloadsApi = hasDownloadsApi() ? browser.downloads : undefined;
+const hasDeterminingFilename = !!downloadsApi?.onDeterminingFilename;
 
 // ──────────────────────────────────────────────────────────────
 // 弱网可靠性：统一等待元数据就绪
@@ -1145,12 +1148,12 @@ const blockingHeadersEvent = browser.webRequest.onHeadersReceived as unknown as 
 export function setInterceptListenersActive(active: boolean): void {
   if (active === interceptListenersActive) return;
   interceptListenersActive = active;
-  if (browser.downloads.onDeterminingFilename) {
-    if (active) browser.downloads.onDeterminingFilename.addListener(handleDeterminingFilename);
-    else browser.downloads.onDeterminingFilename.removeListener(handleDeterminingFilename);
+  if (downloadsApi?.onDeterminingFilename) {
+    if (active) downloadsApi.onDeterminingFilename.addListener(handleDeterminingFilename);
+    else downloadsApi.onDeterminingFilename.removeListener(handleDeterminingFilename);
   }
-  if (active) browser.downloads.onCreated.addListener(handleDownloadCreated);
-  else browser.downloads.onCreated.removeListener(handleDownloadCreated);
+  if (active) downloadsApi?.onCreated.addListener(handleDownloadCreated);
+  else downloadsApi?.onCreated.removeListener(handleDownloadCreated);
   if (!hasDeterminingFilename) {
     try {
       if (active) {

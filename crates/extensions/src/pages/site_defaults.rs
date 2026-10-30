@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use fluxdown_protocol::{ApplicationErrorCode, PluginDto, PluginSiteDefaultDto, RpcErrorData};
-use fluxdown_ui_components::ControlExt as _;
+use fluxdown_ui_components::{BusyExt as _, ControlExt as _};
 use gpui::{
     Anchor, Context, IntoElement, ParentElement, SharedString, Styled, Window,
     prelude::FluentBuilder as _, px,
@@ -33,6 +33,8 @@ pub(crate) struct SiteDefaultsUi {
     pub entries: Vec<PluginSiteDefaultDto>,
     /// 有写操作在途的站点（禁用该行控件）。
     pub busy: HashSet<String>,
+    /// `busy` 中由「移除」发起的站点（仅「移除」按钮转圈，其余写操作转「确认」）。
+    pub removing: HashSet<String>,
     /// 上次读取因断连失败；重连后重新读取一次。
     pub retry_on_reconnect: bool,
 }
@@ -122,6 +124,9 @@ impl ExtensionsView {
         if !self.plugins.site_defaults.busy.insert(site.clone()) {
             return;
         }
+        if identity.is_none() {
+            self.plugins.site_defaults.removing.insert(site.clone());
+        }
         cx.notify();
         let future = self.controller.set_site_default(site.clone(), identity);
         cx.spawn_in(window, async move |this, cx| {
@@ -129,6 +134,7 @@ impl ExtensionsView {
 
             let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.plugins.site_defaults.busy.remove(&site);
+                this.plugins.site_defaults.removing.remove(&site);
                 if let Err(error) = result {
                     let translator = this.translator.read(cx);
                     let detail = error_text(translator, &error);
@@ -170,7 +176,9 @@ impl ExtensionsView {
             .iter()
             .enumerate()
             .map(|(index, entry)| {
-                let busy = stale || self.plugins.site_defaults.busy.contains(&entry.site);
+                let site_busy = self.plugins.site_defaults.busy.contains(&entry.site);
+                let removing = self.plugins.site_defaults.removing.contains(&entry.site);
+                let busy = stale || site_busy;
                 let current_name =
                     SharedString::from(plugin_display_name(plugins, &entry.identity).to_owned());
                 let options = entry
@@ -266,6 +274,7 @@ impl ExtensionsView {
                                 .primary()
                                 .control(cx)
                                 .label(translator.text("pluginSiteDefaultConfirm").to_owned())
+                                .busy(site_busy && !removing)
                                 .disabled(busy)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.set_site_default(
@@ -283,6 +292,7 @@ impl ExtensionsView {
                             .ghost()
                             .control(cx)
                             .label(translator.text("pluginSiteDefaultRemove").to_owned())
+                            .busy(removing)
                             .disabled(busy)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.set_site_default(site.clone(), None, window, cx);

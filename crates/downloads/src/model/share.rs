@@ -48,7 +48,11 @@ impl ShareFacts {
         self.pickup_code_length
     }
 
+    /// 任务的FluxMesh事实；FluxMesh 不可用（未启用 / 云端未开放）时一律没有，徽标 / 停止共享 / 传输诊断随之隐藏。
     pub(crate) fn task(&self, task_id: &str) -> Option<&ShareTaskFactsDto> {
+        if !self.available {
+            return None;
+        }
         self.tasks.get(task_id)
     }
 

@@ -46,6 +46,7 @@ pub fn search_index(
     store: &Entity<SettingsStore>,
     activity_bar: &[ActivityBarToggle],
     referral_visible: bool,
+    share_network_visible: bool,
     cx: &mut App,
 ) -> Vec<SettingsSearchEntry> {
     let current = translator.read(cx).clone();
@@ -54,6 +55,7 @@ pub fn search_index(
         store,
         activity_bar,
         referral_visible,
+        share_network_visible,
         cx,
     ));
     if current.locale() == "en" {
@@ -66,6 +68,7 @@ pub fn search_index(
         store,
         activity_bar,
         referral_visible,
+        share_network_visible,
         cx,
     ));
     // 两次构建读同一份设置状态，结构应逐项一致；不一致（构建期间状态变化）时放弃别名。
@@ -89,6 +92,7 @@ fn pages_for(
     store: &Entity<SettingsStore>,
     activity_bar: &[ActivityBarToggle],
     referral_visible: bool,
+    share_network_visible: bool,
     cx: &mut App,
 ) -> Vec<SettingsPage> {
     let ctx = SectionContext { store, translator };
@@ -101,7 +105,10 @@ fn pages_for(
         &ctx,
         activity_bar,
         None,
-        ShareSlots::default(),
+        ShareSlots {
+            network_visible: share_network_visible,
+            ..ShareSlots::default()
+        },
         None,
         referral,
         cx,

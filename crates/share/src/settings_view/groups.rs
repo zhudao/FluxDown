@@ -16,7 +16,7 @@ use gpui_component::{
 use super::{
     NUMBER_WIDTH, OPTION_MAX_CHARS, ShareSettingsView, UNIT_DROPDOWN_WIDTH,
     controls::{exit_value, log_level_value, mode_value, option, portmapper_value},
-    rows::{RowSpec, setting_group, setting_row, text},
+    rows::{RowSpec, setting_card, setting_group, setting_row, text},
 };
 use crate::model::{
     claims_label,
@@ -33,6 +33,35 @@ pub(super) struct GroupCtx<'a> {
 }
 
 impl ShareSettingsView {
+    /// 「启用 FluxMesh（实验性）」总开关：功能关闭时页面里唯一的内容。
+    pub(super) fn enable_card(
+        &self,
+        g: &GroupCtx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let translator = g.translator;
+        let enabled = self.switch_with(
+            "share-set-enabled",
+            self.shown.enabled,
+            !self.connected(cx),
+            Self::set_enabled,
+            cx,
+        );
+        let rows = vec![setting_row(
+            RowSpec::new(
+                translator,
+                "enabled",
+                "shareSetEnabled",
+                "shareSetEnabledDesc",
+                enabled,
+            ),
+            window,
+            cx,
+        )];
+        setting_card(rows, cx)
+    }
+
     pub(super) fn defaults_group(
         &self,
         g: &GroupCtx,

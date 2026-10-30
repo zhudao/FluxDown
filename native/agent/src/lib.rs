@@ -5,6 +5,8 @@
 
 pub mod analytics;
 pub mod api_host;
+#[cfg(feature = "desktop")]
+mod app_icon;
 pub mod background_effects;
 mod bundle_watch;
 pub mod capture;

@@ -825,6 +825,11 @@ impl NewDownloadView {
         cx.notify();
     }
 
+    /// 宿主当前是否提供接收入口。
+    pub fn has_share_receive(&self) -> bool {
+        self.open_share_receive.is_some()
+    }
+
     /// 尚未交给接收流程的分享链接（输入顺序）。
     fn pending_share_links(&self) -> impl Iterator<Item = &String> {
         self.share_links

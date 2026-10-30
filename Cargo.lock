@@ -3962,6 +3962,7 @@ dependencies = [
 name = "fluxdown_ui_settings"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "fluxdown_protocol",
  "fluxdown_ui_components",

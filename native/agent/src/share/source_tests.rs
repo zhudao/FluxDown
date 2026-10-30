@@ -324,6 +324,7 @@ async fn guest_node(base: &str, label: &str) -> Node {
     })
     .await
     .unwrap();
+    service.with(|i| i.local.enabled = true);
     let cancel = CancellationToken::new();
     tokio::spawn(service.clone().run(cancel.clone()));
     Node {

@@ -51,6 +51,9 @@ impl UsageSync {
         access: SyncAccess<V>,
         cx: &mut Context<V>,
     ) {
+        if !hub.read(cx).available() {
+            return;
+        }
         let now = self.now_ms();
         match self.refresh.on_render(now) {
             Some(GateAction::Fetch) => self.start_fetch(hub, access, cx),
@@ -77,6 +80,9 @@ impl UsageSync {
         access: SyncAccess<V>,
         cx: &mut Context<V>,
     ) {
+        if !hub.read(cx).available() {
+            return;
+        }
         self.refresh.manual_started(self.now_ms());
         self.start_fetch(hub, access, cx);
         cx.notify();

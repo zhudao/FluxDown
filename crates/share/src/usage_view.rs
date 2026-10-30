@@ -5,7 +5,7 @@
 //! 不自管滚动；未登录 / 暂无数据时渲染空元素（购买 / 升级 / 登录入口由账户页自己提供）。
 
 use fluxdown_protocol::{ShareTrafficKind, ShareUsageDto};
-use fluxdown_ui_components::{ButtonVariant, FluxIcon, card, loading_icon_button};
+use fluxdown_ui_components::{BusyHold, ButtonVariant, FluxIcon, card, loading_icon_button};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
 use gpui::{
@@ -36,6 +36,8 @@ pub struct ShareUsageView {
     hub: Entity<ShareHub>,
     translator: Entity<Translator>,
     sync: UsageSync,
+    /// 用户点「刷新」后的最短转圈保持。
+    refresh_hold: BusyHold,
 }
 
 impl ShareUsageView {
@@ -49,7 +51,13 @@ impl ShareUsageView {
             hub,
             translator,
             sync: UsageSync::new(),
+            refresh_hold: BusyHold::default(),
         }
+    }
+
+    fn refresh_clicked(&mut self, cx: &mut Context<Self>) {
+        self.refresh_hold.start(cx);
+        self.refresh_now(cx);
     }
 
     fn refresh_now(&mut self, cx: &mut Context<Self>) {
@@ -110,17 +118,18 @@ impl ShareUsageView {
             &[("month", &usage.month), ("time", &reset)],
         );
         let label = text(translator, "shareNetRefresh");
+        let loading = self.sync.loading || self.refresh_hold.is_held();
         let refresh: AnyElement = loading_icon_button(
             "share-usage-refresh",
             label.clone(),
             Icon::new(FluxIcon::RotateCw).size(active_theme(cx).extended().icon.md),
             ButtonVariant::Ghost,
-            self.sync.loading,
+            loading,
             cx,
         )
         .tooltip(tooltip_builder(label))
-        .disabled(self.sync.loading)
-        .on_click(cx.listener(|this, _, _, cx| this.refresh_now(cx)))
+        .disabled(loading)
+        .on_click(cx.listener(|this, _, _, cx| this.refresh_clicked(cx)))
         .into_any_element();
         v_flex()
             .w_full()

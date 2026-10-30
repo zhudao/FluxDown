@@ -28,6 +28,7 @@ pub fn open(cx: &mut App) {
     let settings_store = desktop.settings_store.clone();
     let account_host = desktop.account_host.clone();
     let referral_visibility = desktop.referral_visibility.clone();
+    let share_network_visibility = desktop.share_network_visibility.clone();
     let share_hub = desktop.share_hub.clone();
     let title = translator.read(cx).text(keys::SETTINGS).to_owned();
     let mut options = auxiliary_window_options(title);
@@ -47,9 +48,14 @@ pub fn open(cx: &mut App) {
         let referral = cx.new(|cx| ReferralView::new(account_host.clone(), window, cx));
         let share = cx.new(|cx| ShareSettingsView::new(share_hub.clone(), window, cx));
         let share_network = cx.new(|cx| ShareNetworkView::new(share_hub.clone(), window, cx));
-        let share_usage = cx.new(|cx| ShareUsageView::new(share_hub, window, cx));
+        let share_usage = cx.new(|cx| ShareUsageView::new(share_hub.clone(), window, cx));
         account.update(cx, |account, cx| {
             account.set_share_usage(share_usage.into(), cx);
+            account.set_share_usage_visible(share_hub.read(cx).available(), cx);
+            cx.observe(&share_hub, |account, hub, cx| {
+                account.set_share_usage_visible(hub.read(cx).available(), cx);
+            })
+            .detach();
         });
         let settings = cx.new(|cx| {
             SettingsView::new(
@@ -59,7 +65,10 @@ pub fn open(cx: &mut App) {
                     account: Some(account.clone().into()),
                     extensions: Some(extensions.clone().into()),
                     share: Some(share.clone().into()),
-                    share_network: Some(share_network.clone().into()),
+                    share_network: Some(VisibleSlot {
+                        view: share_network.clone().into(),
+                        visible: share_network_visibility,
+                    }),
                     referral: Some(VisibleSlot {
                         view: referral.clone().into(),
                         visible: referral_visibility,

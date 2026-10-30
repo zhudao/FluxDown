@@ -3,7 +3,7 @@
 
 use std::{rc::Rc, sync::Arc};
 
-use fluxdown_ui_downloads::{DownloadHostActions, IdOpener};
+use fluxdown_ui_downloads::{DownloadHostActions, IdOpener, NewDownloadView};
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_settings::SettingsTarget;
 use fluxdown_ui_share::{
@@ -32,9 +32,12 @@ pub(crate) fn install(
     hub.update(cx, |hub, _| hub.set_host(host()));
     attach(session, &hub, cx);
 
-    cx.subscribe(&hub, |_, event: &ShareHubEvent, cx| match event {
+    cx.subscribe(&hub, |hub, event: &ShareHubEvent, cx| match event {
         ShareHubEvent::PendingReceive { resolve_id } => {
-            crate::windows::share_receive::open(cx, ReceiveSource::Pending(resolve_id.clone()));
+            // FluxMesh 未启用 / 不可用时不自动弹接收窗口。
+            if hub.read(cx).available() {
+                crate::windows::share_receive::open(cx, ReceiveSource::Pending(resolve_id.clone()));
+            }
         }
     })
     .detach();
@@ -98,6 +101,41 @@ pub(crate) fn open_share_receive_opener() -> IdOpener {
     Rc::new(|link, _, cx| {
         crate::windows::share_receive::open(cx, ReceiveSource::Input(link));
     })
+}
+
+/// FluxMesh 可用性 → 设置页「网络诊断」Tab 的可见性。要求 `Desktop` 全局已就绪。
+pub(crate) fn bind_network_visibility(cx: &mut App) {
+    let desktop = Desktop::global(cx);
+    let hub = desktop.share_hub.clone();
+    let visibility = desktop.share_network_visibility.clone();
+    let project = move |hub: &Entity<ShareHub>, cx: &mut App| {
+        let available = hub.read(cx).available();
+        visibility.update(cx, |visibility, cx| visibility.set(available, cx));
+    };
+    project(&hub, cx);
+    cx.observe(&hub, move |hub, cx| project(&hub, cx)).detach();
+}
+
+/// 新建下载框的接收入口跟随FluxMesh可用性：可用才注入，不可用时分享链接 / 取件码走既有的「不可用」提示。
+pub(crate) fn bind_share_receive(
+    form: &Entity<NewDownloadView>,
+    hub: &Entity<ShareHub>,
+    cx: &mut App,
+) {
+    let hub = hub.clone();
+    form.update(cx, |form, cx| {
+        let opener = |hub: &Entity<ShareHub>, cx: &App| {
+            hub.read(cx).available().then(open_share_receive_opener)
+        };
+        form.set_open_share_receive(opener(&hub, cx), cx);
+        cx.observe(&hub, move |form, hub, cx| {
+            let next = opener(&hub, cx);
+            if next.is_some() != form.has_share_receive() {
+                form.set_open_share_receive(next, cx);
+            }
+        })
+        .detach();
+    });
 }
 
 /// 把FluxMesh入口注入下载页的宿主动作（主窗口与独立任务窗口共用）：分享面板、任务行「切换桥接」、

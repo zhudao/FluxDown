@@ -9,7 +9,7 @@ use std::{
 
 use fluxdown_protocol::{InstalledPlugin, MarketEntryDto, PluginDto};
 use fluxdown_ui_components::{
-    BusyExt as _, ControlExt as _, FluxIcon, IconControlExt as _, card, form, form_field,
+    BusyExt as _, BusyHold, ControlExt as _, FluxIcon, IconControlExt as _, card, form, form_field,
     input_with_action, tabular_numbers, tooltip_view,
 };
 use fluxdown_ui_theme::active_theme;
@@ -78,6 +78,12 @@ pub(crate) struct PluginsUi {
     pub busy: HashSet<String>,
     /// 「重新加载」在途的 dev 插件（按钮显示转圈）；是 `busy` 的子集。
     pub reloading: HashSet<String>,
+    /// 「卸载」在途的插件（仅该按钮转圈）；是 `busy` 的子集。
+    pub uninstalling: HashSet<String>,
+    /// 点击「重新加载」后的最短转圈保持，按插件标识。
+    pub reload_holds: HashMap<String, BusyHold>,
+    /// 点击「刷新市场」后的最短转圈保持（自动加载不启动）。
+    pub market_hold: BusyHold,
     pub market: MarketUi,
     pub site_defaults: super::site_defaults::SiteDefaultsUi,
     /// 安装 / 更新 / 重载成功、等待插件列表追上后再判定授权流程的插件；
@@ -96,6 +102,9 @@ impl Default for PluginsUi {
             installing_dir: false,
             busy: HashSet::new(),
             reloading: HashSet::new(),
+            uninstalling: HashSet::new(),
+            reload_holds: HashMap::new(),
+            market_hold: BusyHold::default(),
             market: MarketUi::default(),
             site_defaults: super::site_defaults::SiteDefaultsUi::default(),
             awaiting_consent: HashMap::new(),
@@ -196,6 +205,7 @@ impl ExtensionsView {
             .iter()
             .map(|plugin| (plugin.identity.as_str(), plugin))
             .collect::<HashMap<_, _>>();
+        let market_refreshing = market.loading || self.plugins.market_hold.is_held();
 
         v_flex()
             .w_full()
@@ -268,9 +278,10 @@ impl ExtensionsView {
                                     .ghost()
                                     .control(cx)
                                     .label(translator.text("marketRefreshTooltip").to_owned())
-                                    .busy(self.plugins.market.loading)
-                                    .disabled(self.plugins.market.loading || stale)
+                                    .busy(market_refreshing)
+                                    .disabled(market_refreshing || stale)
                                     .on_click(cx.listener(|this, _, window, cx| {
+                                        this.plugins.market_hold.start(cx);
                                         this.load_market(window, cx);
                                     })),
                             ),
@@ -561,7 +572,12 @@ impl ExtensionsView {
             })
             .when(plugin.dev_mode, |this| {
                 let identity = identity.clone();
-                let reloading = self.plugins.reloading.contains(&plugin.identity);
+                let reloading = self.plugins.reloading.contains(&plugin.identity)
+                    || self
+                        .plugins
+                        .reload_holds
+                        .get(&plugin.identity)
+                        .is_some_and(BusyHold::is_held);
                 this.child(
                     Button::new(("plugin-reload", index))
                         .ghost()
@@ -569,7 +585,7 @@ impl ExtensionsView {
                         .icon(FluxIcon::RotateCw)
                         .tooltip(translator.text("pluginReloadTooltip").to_owned())
                         .busy(reloading)
-                        .disabled(busy)
+                        .disabled(busy || reloading)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.reload_plugin(identity.clone(), window, cx);
                         })),
@@ -641,6 +657,7 @@ impl ExtensionsView {
                     .control_icon(cx)
                     .icon(FluxIcon::Trash2)
                     .tooltip(translator.text("pluginUninstallTooltip").to_owned())
+                    .busy(self.plugins.uninstalling.contains(&plugin.identity))
                     .disabled(busy)
                     .on_click({
                         let name = plugin.name.clone();
@@ -1239,6 +1256,9 @@ impl ExtensionsView {
         if !self.plugins.busy.insert(identity.clone()) {
             return;
         }
+        if op == PluginOp::Uninstall {
+            self.plugins.uninstalling.insert(identity.clone());
+        }
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = future.await;
@@ -1246,6 +1266,7 @@ impl ExtensionsView {
             let Ok(()) = this.update_in(cx, |this, window, cx| {
                 this.plugins.busy.remove(&identity);
                 this.plugins.reloading.remove(&identity);
+                this.plugins.uninstalling.remove(&identity);
                 this.finish_plugin_op(op, result, window, cx);
                 cx.notify();
             }) else {
@@ -1261,6 +1282,11 @@ impl ExtensionsView {
             return;
         }
         self.plugins.reloading.insert(identity.clone());
+        self.plugins
+            .reload_holds
+            .entry(identity.clone())
+            .or_default()
+            .start(cx);
         let future = self.controller.reload_plugin_dev(identity.clone());
         self.run_plugin_op(identity, PluginOp::Reload, future, window, cx);
     }

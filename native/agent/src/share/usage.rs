@@ -13,8 +13,11 @@ const USAGE_TTL: Duration = Duration::from_secs(30);
 const USAGE_DEBOUNCE: Duration = Duration::from_secs(5);
 
 impl ShareService {
-    /// 拉取并发布额度。未登录清空；失败只写 `usage_error`、保留旧值。
+    /// 拉取并发布额度。未登录清空；失败只写 `usage_error`、保留旧值。本机开关关闭时不请求。
     pub(super) async fn refresh_usage(&self) {
+        if !self.is_enabled() {
+            return;
+        }
         if !self.cloud.has_account().await {
             self.with(|i| {
                 i.usage = None;

@@ -1,19 +1,23 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 import { bustApiCaches } from "../src/lib/api-cache";
 import { markReleaseViewer, recordUpdateAssets, resetReleaseViewers } from "../src/lib/download-gate";
+import { DOWNLOAD_PASS_COOKIE, issueDownloadPass } from "../src/lib/download-pass";
 import { resetDownloadBans } from "../src/lib/download-ban";
 
 let configured = true;
 let cdnConfigured = true;
 const MAINLAND_IP = "114.114.114.114";
 const MAINLAND_IPV6 = "2408:8207:78ae:7a51:f55e:4f2f:261d:ccc9";
-/** 反代按 Cloudflare 的 CF-IPCountry 写入的 X-Client-Country。 */
+/** 反代按边缘国家码（ESA Ali-Ip-Country / CF-IPCountry）写入的 X-Client-Country。 */
 const COUNTRY: Record<string, string> = {
   [MAINLAND_IP]: "CN", [MAINLAND_IPV6]: "CN", "8.8.8.8": "US", "1.1.1.1": "HK",
 };
 const signatures: string[] = [];
-// 与 share-proxy.test.ts 共用同一进程的模块表：bun 的 mock.module 首次注册后导出名集合即固定，此处必须含全部 astro:env/server 导出。
-mock.module("astro:env/server", () => ({ GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo", FLUXCLOUD_API_BASE: "" }));
+const PASS_SECRET = "pass-secret";
+// 与 share-proxy.test.ts / download-pass.test.ts 共用同一进程的模块表：bun 的 mock.module 首次注册后导出名集合即固定，此处必须含全部 astro:env/server 导出。
+mock.module("astro:env/server", () => ({
+  GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo", FLUXCLOUD_API_BASE: "", DOWNLOAD_PASS_SECRET: PASS_SECRET,
+}));
 const ossMock = () => ({
   ossConfigured: configured,
   cdnConfigured,
@@ -78,8 +82,15 @@ beforeEach(() => {
 });
 afterAll(() => { globalThis.fetch = originalFetch; mock.restore(); });
 
+/** 签发给 `ip` 的验证码通行证 Cookie（浏览器经 POST /api/download/pass 换取）。 */
+function pass(ip = MAINLAND_IP, now = Date.now()): string {
+  return `${DOWNLOAD_PASS_COOKIE}=${issueDownloadPass(PASS_SECRET, ip, now)}`;
+}
+
 /** 缺省模拟读过发布清单的大陆访客；clientIp 传空串时不带 X-Client-IP（按 TCP 对端 10.0.0.1）。 */
-async function get(source = "", tag = `v${sequence}`, filename = "app.zip", clientIp = MAINLAND_IP, userAgent = "") {
+async function get(
+  source = "", tag = `v${sequence}`, filename = "app.zip", clientIp = MAINLAND_IP, userAgent = "", cookie = "",
+) {
   const url = new URL(`https://site.example/api/download/${filename}`);
   if (source) url.searchParams.set("source", source);
   if (tag) url.searchParams.set("tag", tag);
@@ -87,14 +98,15 @@ async function get(source = "", tag = `v${sequence}`, filename = "app.zip", clie
   if (clientIp) headers["x-client-ip"] = clientIp;
   if (COUNTRY[clientIp]) headers["x-client-country"] = COUNTRY[clientIp];
   if (userAgent) headers["user-agent"] = userAgent;
+  if (cookie) headers.cookie = cookie;
   const request = new Request(url, { headers });
   return GET({ params: { filename }, url, request, clientAddress: "10.0.0.1" } as Parameters<typeof GET>[0]);
 }
 
-test("mainland is Cloudflare's country code, so IPv6 visitors count and HK / unknown do not", async () => {
+test("mainland is the edge's country code, so IPv6 visitors count and HK / unknown do not", async () => {
   for (const [ip, expected] of [[MAINLAND_IPV6, "cdn"], ["1.1.1.1", "github"], ["10.9.9.9", "github"]]) {
     markReleaseViewer(ip);
-    const response = await get("auto", `v${sequence}`, "app.zip", ip, "Mozilla/5.0");
+    const response = await get("auto", `v${sequence}`, "app.zip", ip, "Mozilla/5.0", pass(ip));
     expect(response.headers.get("X-Download-Source")).toBe(expected);
   }
 });
@@ -175,9 +187,34 @@ test("mainland requests that never read the release manifest or come from script
     expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("github");
   }
   expect(signatures).toEqual([]);
-  // 应用内更新（含不带 User-Agent 的旧客户端）与浏览器照常走 CDN。
-  for (const ua of ["fluxdown-agent/0.5.9", "fluxdown-android/0.5.9", "", "Mozilla/5.0 (Windows NT 10.0)"]) {
+  // 应用内更新（含不带 User-Agent 的旧客户端）与带验证码通行证的浏览器照常走 CDN。
+  for (const ua of ["fluxdown-agent/0.5.9", "fluxdown-android/0.5.9", ""]) {
     expect((await get("", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("cdn");
+  }
+  expect((await get("", `v${sequence}`, "app.zip", MAINLAND_IP, "Mozilla/5.0 (Windows NT 10.0)", pass()))
+    .headers.get("X-Download-Source")).toBe("cdn");
+});
+
+test("browsers need a captcha pass bound to their IP for the mirror; updaters never do", async () => {
+  const browser = "Mozilla/5.0 (Windows NT 10.0)";
+  const tampered = pass().replace(/.$/, (c) => (c === "A" ? "B" : "A"));
+  for (const cookie of ["", pass("8.8.8.8"), tampered, `${DOWNLOAD_PASS_COOKIE}=`, `other=${pass().split("=")[1]}`]) {
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, browser, cookie)).headers.get("X-Download-Source"))
+      .toBe("github");
+  }
+  // 不认识的非更新器 User-Agent 同样要通行证。
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, "SomeDownloader/1.0")).headers.get("X-Download-Source"))
+    .toBe("github");
+  expect(signatures).toEqual([]);
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, browser, `a=1; ${pass()}`))
+    .headers.get("X-Download-Source")).toBe("cdn");
+  // 通行证过期后回落 GitHub。
+  const expired = pass(MAINLAND_IP, Date.now() - 30 * 60 * 1000);
+  expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, browser, expired)).headers.get("X-Download-Source"))
+    .toBe("github");
+  // 自升级不带 Cookie 也照常拿镜像。
+  for (const ua of ["fluxdown-agent/0.6.0", "fluxdown-android/1.2.3", ""]) {
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("cdn");
   }
 });
 
@@ -217,8 +254,9 @@ function enablePan123(link: string | null = "https://pan.example/app.zip") {
 
 test("mainland: only >=0.6.0 updaters get 123pan; browsers and UA-less old updaters keep dl-cn", async () => {
   enablePan123();
-  for (const ua of ["Mozilla/5.0 (Windows NT 10.0)", ""]) {
-    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua)).headers.get("X-Download-Source")).toBe("cdn");
+  for (const [ua, cookie] of [["Mozilla/5.0 (Windows NT 10.0)", pass()], ["", ""]]) {
+    expect((await get("auto", `v${sequence}`, "app.zip", MAINLAND_IP, ua, cookie)).headers.get("X-Download-Source"))
+      .toBe("cdn");
   }
   expect(signatures).toEqual(["HEAD", "CDN", "CDN"]);
   signatures.length = 0;

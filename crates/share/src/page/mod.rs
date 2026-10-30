@@ -10,7 +10,7 @@ mod mine;
 mod summary;
 mod table;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use fluxdown_ui_components::FluxIcon;
 use fluxdown_ui_i18n::Translator;
@@ -34,8 +34,8 @@ pub struct ShareView {
     provide_override: Option<bool>,
     /// 开关的 `setLocalConfig` 请求在途：期间开关不可再点。
     provide_inflight: bool,
-    /// 正在提交操作（停止 / 开始 / 删除）的分享 ID，防重入。
-    busy: HashSet<String>,
+    /// 正在提交操作的分享 ID 及其操作（停止 / 开始 / 删除），防重入，并让点击的按钮转圈。
+    busy: HashMap<String, crate::model::ShareAction>,
     /// 「我的分享」多选集合（分享 ID）；分享从列表消失时在 `absorb_hub` 里剔除。
     selected: HashSet<String>,
 }
@@ -52,7 +52,7 @@ impl ShareView {
             usage_sync: UsageSync::new(),
             provide_override: None,
             provide_inflight: false,
-            busy: HashSet::new(),
+            busy: HashMap::new(),
             selected: HashSet::new(),
         }
     }

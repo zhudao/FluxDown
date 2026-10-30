@@ -64,21 +64,32 @@ fn not_shareable() -> RpcErrorData {
 }
 
 impl ShareService {
-    /// `agent.share.*` 分发。
+    /// `agent.share.*` 分发。本机开关关闭时只放行 `config`（不访问云端，策略摘要为空）与
+    /// `setLocalConfig`（开启开关的唯一入口），其余一律 `ShareUnavailable`。
     pub async fn rpc(
         self: &Arc<Self>,
         method_name: &str,
         params: Option<Value>,
     ) -> Result<Value, RpcErrorData> {
+        if !self.is_enabled()
+            && method_name != method::AGENT_SHARE_CONFIG
+            && method_name != method::AGENT_SHARE_SET_LOCAL_CONFIG
+        {
+            return Err(unavailable());
+        }
         match method_name {
             method::AGENT_SHARE_USAGE_REFRESH => to_value(&self.usage_for_rpc().await?),
             method::AGENT_SHARE_REPORT => to_value(&self.report(parse(params)?).await?),
             method::AGENT_SHARE_APPEAL => to_value(&self.appeal(parse(params)?).await?),
             method::AGENT_SHARE_CONFIG => {
-                let cfg = self.config(true).await?;
                 let local = self.with(|i| i.local.clone());
+                let policy = if local.enabled {
+                    self.config(true).await?.summary()
+                } else {
+                    fluxdown_protocol::SharePolicySummaryDto::default()
+                };
                 to_value(&ShareConfigDto {
-                    policy: cfg.summary(),
+                    policy,
                     local_config: local,
                 })
             }
@@ -228,6 +239,12 @@ impl ShareService {
                 i.endpoint_dirty = true;
             }
         });
+        // 开关切换交给事件循环：开启按启动流程恢复，关闭收掉端点与全部运行期状态。
+        if old.enabled != next.enabled {
+            self.wake.notify_one();
+            self.publish().await;
+            return Ok(next);
+        }
         self.apply_swarm_policy();
         // 关闭「接收的文件参与共享」：立即停止全部共享。
         if old.auto_provide.unwrap_or(true) && !next.auto_provide.unwrap_or(true) {
@@ -1122,9 +1139,13 @@ impl ShareService {
     }
 }
 
+/// 本机开关关闭时分享链接一律 `ShareUnavailable`：不解析、不访问云端，也绝不落成下载任务。
 #[async_trait]
 impl ShareLinkSink for ShareService {
     async fn open_link(&self, link: &str) -> Result<(), RpcErrorData> {
+        if !self.is_enabled() {
+            return Err(unavailable());
+        }
         let dto = self.resolve_input(link, None).await?;
         let replaced = self.with(|i| i.pending_receive.replace(dto.resolve_id.clone()));
         if let Some(old) = replaced {
@@ -1135,6 +1156,9 @@ impl ShareLinkSink for ShareService {
     }
 
     async fn receive_link(&self, link: &str, save_dir: Option<&str>) -> Result<(), RpcErrorData> {
+        if !self.is_enabled() {
+            return Err(unavailable());
+        }
         self.receive(ShareReceiveParams {
             code_or_link: Some(link.to_owned()),
             save_dir: save_dir.map(str::to_owned),

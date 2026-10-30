@@ -9,6 +9,7 @@ const en: Record<MessageKey, string> = {
   "header.languageSwitch": "Switch to {language}",
   "header.checking": "Checking...",
   "header.connected": "Connected",
+  "header.androidHandoff": "To FluxDown app",
   "header.disconnected": "Disconnected",
 
   // Main switch
@@ -156,6 +157,8 @@ const en: Record<MessageKey, string> = {
   "notify.batchSentDetail": "{count} tasks sent to FluxDown",
   "notify.sendFailed": "Send Failed",
   "notify.connectionFailed": "Cannot connect to FluxDown app: {message}",
+  "notify.androidUnsupported": "This download can't be handed to the FluxDown Android app (audio/video track pairs, form submissions and FTP links need the desktop or remote channel)",
+  "notify.androidHandoffFailed": "The browser refused to open the FluxDown Android app",
   "notify.fallbackBrowser": "Fell back to browser download",
   "notify.fallbackBrowserDetail":
     "Could not send to FluxDown, fell back to browser: {url}",
@@ -350,7 +353,7 @@ const en: Record<MessageKey, string> = {
   "options.protocol.label": "FluxDown Protocol",
   "options.protocol.enabled": "On — launch app via fluxdown://",
   "options.protocol.disabled": "Off (default)",
-  "options.protocol.desc": "Launch the app via the fluxdown:// protocol — supported on Windows, macOS, Linux and Android. The native channel is more capable, so enable this only when it is unavailable",
+  "options.protocol.desc": "Launch the app via the fluxdown:// protocol — supported on Windows, macOS and Linux (browsers on Android hand downloads to the FluxDown app automatically, no need to enable this). The native channel is more capable, so enable this only when it is unavailable",
 
   // Task completion notification (task panel)
   "notify.taskCompletedTitle": "Download Complete",

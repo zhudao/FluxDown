@@ -1,0 +1,11 @@
+{
+  "languageNativeName": "Türkçe",
+  "appIcon": "Uygulama simgesi",
+  "appIconDesc": "Pencere, görev çubuğu ve sistem tepsisinde kullanılan simgeyi özelleştirin",
+  "appIconDefault": "Varsayılan",
+  "appIconCustom": "Özel",
+  "appIconBolt": "Şimşek",
+  "appIconChooseImage": "Görsel seç…",
+  "appIconApplyFailed": "Uygulama simgesi ayarlanamadı",
+  "searchKeywordsAppIcon": "uygulama simgesi,simge,görev çubuğu,sistem tepsisi,özel"
+}

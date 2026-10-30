@@ -10,7 +10,7 @@ import type { SelectOption } from '../../../../ui'
 import { claimOptions, tierLabel } from '../../../share/model'
 import { takeDiagnosticsRequest } from '../../../share/diagnosticsRequest'
 import { NetworkDiagnostics } from '../../../share/NetworkDiagnostics'
-import { useShareState } from '../../../share/state'
+import { useShareCapability, useShareState } from '../../../share/state'
 import { DropdownField, NumberField, SettingsPage, SettingsRow, SettingsSection, TextField } from '../../kit'
 import { formatBytes } from '../../../downloads/dialogs/utils'
 import { formatDailyCap, formatAddrList, parseAddrList, parseDailyCap, parsePort, portmapperChoice, portmapperWire, rateFromWire, rateToWire, saveLocalConfig } from './localConfig'
@@ -40,7 +40,9 @@ const AUTO_RELAY = ''
 
 export function ShareSettings() {
   const t = useT()
-  const { localConfig: config, policySummary, available } = useShareState()
+  const { localConfig: config, policySummary, available: serviceAvailable } = useShareState()
+  const capability = useShareCapability()
+  const available = capability && serviceAvailable
   // 分享面板「诊断此会话」带来的请求：直接落在网络诊断页签并聚焦该会话。
   const [focus] = useState(() => takeDiagnosticsRequest())
 
@@ -71,11 +73,30 @@ export function ShareSettings() {
 
   const general = (
     <>
-      {available ? null : (
+      {capability ? (
+        <SettingsSection>
+          <SettingsRow title={t('shareSetEnabled')} description={t('shareSetEnabledDesc')} compact>
+            <Switch
+              checked={config.enabled}
+              aria-label={t('shareSetEnabled')}
+              onCheckedChange={(enabled) => void saveLocalConfig({ enabled })}
+            />
+          </SettingsRow>
+        </SettingsSection>
+      ) : (
         <div role="status" className="rounded-md border border-hairline bg-nav-hover px-3 py-2 text-xs text-muted-foreground">
           {t('errReasonShareUnavailable')}
         </div>
       )}
+
+      {capability && config.enabled && !available ? (
+        <div role="status" className="rounded-md border border-hairline bg-nav-hover px-3 py-2 text-xs text-muted-foreground">
+          {t('errReasonShareUnavailable')}
+        </div>
+      ) : null}
+
+      {capability && config.enabled ? (
+        <>
 
       <SettingsSection title={t('shareSetGroupDefaults')}>
         <SettingsRow title={t('shareSetDefaultTier')} description={t('shareSetDefaultTierDesc')}>
@@ -218,6 +239,8 @@ export function ShareSettings() {
           />
         </SettingsRow>
       </SettingsSection>
+        </>
+      ) : null}
     </>
   )
 
@@ -225,10 +248,12 @@ export function ShareSettings() {
     <SettingsPage
       title={t('settingsCatShare')}
       description={t('settingsCatShareDesc')}
-      initialTabId={focus ? 'network' : 'general'}
+      initialTabId={focus && available ? 'network' : 'general'}
       tabs={[
         { id: 'general', label: t('settingsTabGeneral'), content: general },
-        { id: 'network', label: t('shareTabNetwork'), content: <NetworkDiagnostics focusSessionId={focus?.sessionId ?? null} /> },
+        ...(available
+          ? [{ id: 'network', label: t('shareTabNetwork'), content: <NetworkDiagnostics focusSessionId={focus?.sessionId ?? null} /> }]
+          : []),
       ]}
     />
   )

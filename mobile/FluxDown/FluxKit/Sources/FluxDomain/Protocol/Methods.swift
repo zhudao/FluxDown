@@ -255,6 +255,12 @@ public enum HostMethod {
     public static let agentPlatformSetUrlProtocol = "agent.platform.setUrlProtocol"
     /// 系统文件管理器为文件显示的图标（PNG）；参数见 `PlatformFileIconParams`。
     public static let agentPlatformFileIcon = "agent.platform.fileIcon"
+    /// 切换 / 导入桌面应用图标；仅桌面，移动端不使用。
+    public static let agentPlatformSetAppIcon = "agent.platform.setAppIcon"
+    /// 当前自定义桌面应用图标的 PNG；仅桌面，移动端不使用。
+    public static let agentPlatformAppIconImage = "agent.platform.appIconImage"
+    /// 为桌面界面进程现有窗口补设应用图标；仅桌面，移动端不使用。
+    public static let agentPlatformSyncWindowIcons = "agent.platform.syncWindowIcons"
     /// 由 agent 在本机播放一次提示音偏好值；仅桌面，移动端不使用。
     public static let agentSoundPreview = "agent.sound.preview"
     public static let agentCaptureSubmit = "agent.capture.submit"

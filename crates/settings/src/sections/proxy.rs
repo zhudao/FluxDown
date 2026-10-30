@@ -59,7 +59,7 @@ fn mode_section(ctx: &SectionContext, rule_count: usize) -> SettingsSection {
             set.update(cx, |store, cx| {
                 store.set_daemon("proxy_mode", value.to_string(), cx);
                 // 切到系统代理模式时立即重新检测（系统设置可能在两次切换之间变化）。
-                if value.as_ref() == "system" && !store.is_busy("systemProxy") {
+                if value.as_ref() == "system" && !store.in_flight("systemProxy") {
                     store.load_system_proxy(cx);
                 }
             });

@@ -120,9 +120,21 @@ impl ShareSettingsView {
         change: fn(&mut Self, bool, &mut Window, &mut Context<Self>),
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let disabled = !self.editable(cx);
+        self.switch_with(id, checked, disabled, change, cx)
+    }
+
+    pub(super) fn switch_with(
+        &self,
+        id: &'static str,
+        checked: bool,
+        disabled: bool,
+        change: fn(&mut Self, bool, &mut Window, &mut Context<Self>),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         Switch::new(id)
             .checked(checked)
-            .disabled(!self.editable(cx))
+            .disabled(disabled)
             .on_click(cx.listener(move |this, checked: &bool, window, cx| {
                 change(this, *checked, window, cx);
             }))

@@ -151,6 +151,19 @@ impl CloudApi {
             .await
     }
 
+    /// 任务实时通道（WebSocket）：心跳在连接内收发，取代 `remote_events` + `ping_presence`。
+    pub(crate) async fn remote_socket(
+        &self,
+        device_id: &str,
+    ) -> Result<super::CloudSocket, CloudError> {
+        self.client
+            .authenticated_socket_epoch(
+                &format!("/api/v1/tasks/ws?deviceId={}", encode(device_id)),
+                self.request_epoch(),
+            )
+            .await
+    }
+
     pub async fn plans(&self) -> Result<Value, CloudError> {
         self.client
             .public::<Value, Value>(Method::GET, "/api/v1/plans/catalog", None)
@@ -603,12 +616,6 @@ impl CloudApi {
             Some(&serde_json::json!({ "endpointId": endpoint_id })),
         )
         .await
-    }
-
-    /// `DELETE /share/endpoint`：注销本设备 endpoint。
-    pub async fn share_unregister_endpoint(&self) -> Result<Value, CloudError> {
-        self.authed(Method::DELETE, "/api/v1/share/endpoint", None::<&Value>)
-            .await
     }
 
     /// `POST /share/guest-session`（公开）：未登录发送方凭 endpoint 私钥签名换游客令牌。

@@ -14,6 +14,7 @@ import type { RpcState } from '../../lib/rpc'
 import { PICKUP_CODE_LENGTH, pickupCodeLength } from './model'
 
 export const EMPTY_LOCAL_CONFIG: ShareLocalConfigDto = {
+  enabled: false,
   udpPortV4: null,
   udpPortV6: null,
   portmapper: null,
@@ -112,12 +113,13 @@ export function useShareById(id: string | null): ShareDto | undefined {
 }
 
 export function useShareTaskFacts(taskId: string): ShareTaskFactsDto | undefined {
-  return useAgent((snapshot) => snapshot.share?.taskFacts[taskId], undefined)
+  return useAgent((snapshot) => (snapshot.share?.available === true ? snapshot.share.taskFacts[taskId] : undefined), undefined)
 }
 
 /** 菜单在打开时构建，读一次最新事实即可。 */
 export function peekShareTaskFacts(taskId: string): ShareTaskFactsDto | undefined {
-  return rpcStore.peek().snapshot?.share?.taskFacts[taskId]
+  const share = rpcStore.peek().snapshot?.share
+  return share?.available === true ? share.taskFacts[taskId] : undefined
 }
 
 /** 云端下发的取件码位数（0 / 未下发按默认 6 位）；新建下载框据此识别取件码。 */

@@ -6,6 +6,7 @@
  * 或 /api/changelog，应用内更新（含不带 User-Agent 的旧版客户端）先查 /api/release 再下载。
  * 因此以「同一访客 IP 在 24 小时内读过发布清单」为准入条件；直接批量请求 /api/download 的
  * 脚本拿不到 CDN 链接。常见脚本 / HTTP 库的 User-Agent 即使读过清单也不准入。
+ * 浏览器等非更新器请求另须带验证码通行证（needsDownloadPass，见 download-pass.ts）；应用内更新不受影响。
  *
  * 状态在进程内存（单容器部署），重启后清空：期间的首次下载回落 GitHub，下次读清单后恢复。
  */
@@ -112,9 +113,20 @@ export function recordPan123Link(ip: string, now = Date.now()): void {
   }
 }
 
-/** 该请求能否使用 CDN 镜像。 */
-export function mayUseMirror(ip: string, userAgent: string | null, now = Date.now()): boolean {
-  return !isScriptUserAgent(userAgent) && recentViewer(ip, now);
+/** FluxDown 应用内更新器的 User-Agent：`<产品>/<版本>`（fluxdown-agent / fluxdown-android，见 native/agent/src/update）。 */
+const UPDATER_USER_AGENT = /^fluxdown-[a-z]+\//i;
+
+/**
+ * 拿镜像前是否须带验证码通行证：浏览器与其余带 User-Agent 的请求要；FluxDown 更新器与
+ * 不带 User-Agent 的旧版更新器不要（它们无法过验证码，自升级不能因此变慢或失败）。
+ */
+export function needsDownloadPass(userAgent: string | null): boolean {
+  return !!userAgent && !UPDATER_USER_AGENT.test(userAgent);
+}
+
+/** 该请求能否使用 CDN 镜像；`hasPass` = 带有效验证码通行证或未启用通行证。 */
+export function mayUseMirror(ip: string, userAgent: string | null, hasPass: boolean, now = Date.now()): boolean {
+  return !isScriptUserAgent(userAgent) && recentViewer(ip, now) && (hasPass || !needsDownloadPass(userAgent));
 }
 
 /** 测试用：清空记录。 */

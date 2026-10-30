@@ -80,6 +80,8 @@ pub(crate) struct Desktop {
     pub account_host: Entity<AccountHost>,
     /// 设置侧栏「推介有奖」页的可见性（已登录 + 设备本地偏好），设置窗口与命令面板共用。
     pub referral_visibility: Entity<SlotVisibility>,
+    /// 设置「FluxMesh」页「网络诊断」Tab 的可见性（FluxMesh 可用时才出现），设置窗口与命令面板共用。
+    pub share_network_visibility: Entity<SlotVisibility>,
     /// FluxMesh状态中枢：管理页、分享面板、接收窗口、设置页与任务来源徽标共用的唯一一份FluxMesh投影。
     pub share_hub: Entity<fluxdown_ui_share::ShareHub>,
     /// 接收确认窗口内的视图（窗口关闭后失效）：新的来源交给它而不是再开一个窗口。
@@ -236,7 +238,9 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             log::error!("plugin desktop interfaces unavailable: {error}");
         }
         crate::logging::install_ui_watchdog(cx);
-        crate::app_icon::install();
+        crate::app_icon::install(cx);
+        // 先定汉字字体偏好再装主题：首次安装即用对的主字体与回退链，不重装第二次。
+        fluxdown_ui_theme::set_han_font_preference(han_font_preference(&translator), cx);
         fluxdown_ui_theme::init(cx);
         gpui_component::set_locale(&locale);
         let translator = cx.new(|_| translator);
@@ -274,6 +278,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         crate::menus::install(cx, &translator);
         crate::menus::install_global_actions(cx);
         let referral_visibility = cx.new(|_| SlotVisibility::default());
+        let share_network_visibility = cx.new(|_| SlotVisibility::default());
         cx.set_global(Desktop {
             translator: translator.clone(),
             session: session.clone(),
@@ -281,6 +286,7 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
             settings_store,
             account_host,
             referral_visibility,
+            share_network_visibility,
             share_hub,
             share_receive: None,
             main_downloads: None,
@@ -295,9 +301,12 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
         // 会话并叠加本地未回执编辑，外观与语言只从它投影（见 `observe_preferences`）。
         observe_preferences(cx);
         crate::account_host::bind_referral_visibility(cx);
+        crate::share_host::bind_network_visibility(cx);
         after_first_snapshot(cx, crate::legacy_themes::migrate);
         cx.subscribe(&session, |_, signal, cx| match signal {
             SessionSignal::Snapshot(snapshot) => {
+                #[cfg(windows)]
+                crate::app_icon::agent_link_changed(true, cx);
                 if let Some(body) = crate::session::agent_body(snapshot) {
                     let stats = body.daemon.runtime_stats.clone();
                     let shell = body.shell.clone();
@@ -328,7 +337,10 @@ pub(crate) fn run() -> Result<RunOutcome, AppError> {
                 log::error!("fatal FluxDown agent error: {:?}", error.code);
             }
             SessionSignal::ServiceStopped => crate::lifecycle::service_stopped(cx),
-            SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {}
+            SessionSignal::Stale | SessionSignal::ServiceFailed(_) => {
+                #[cfg(windows)]
+                crate::app_icon::agent_link_changed(false, cx);
+            }
         })
         .detach();
 
@@ -655,6 +667,10 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
     }
     fluxdown_ui_theme::apply_appearance_preferences(values, cx);
     fluxdown_ui_icon_pack::apply_icon_pack_preference(values, cx);
+    {
+        let client = Arc::clone(&Desktop::global(cx).client);
+        crate::app_icon::apply_preference(values, &client, cx);
+    }
     apply_activity_bar_preferences(values, cx);
     if let Some(locale) = values
         .get("general.locale")
@@ -678,6 +694,27 @@ fn apply_preferences(values: &BTreeMap<String, serde_json::Value>, cx: &mut App)
             // 下只有整窗刷新才能让没读 Translator 的库控件换成新语言。
             cx.refresh_windows();
         }
+    }
+    // 界面语言（含跟随系统）一变，汉字主字体与回退链随之更新；未变时为空操作。
+    let preference = han_font_preference(translator.read(cx));
+    fluxdown_ui_theme::set_han_font_preference(preference, cx);
+}
+
+/// 界面语言 → 汉字字体偏好：中文界面按界面语言的简 / 繁；非中文界面按系统语言推导回退链
+/// 里优先的字形（文件名等用户数据多与系统语言同字形），推不出时取简体。
+fn han_font_preference(translator: &Translator) -> fluxdown_ui_theme::HanFontPreference {
+    use fluxdown_ui_theme::{HanFontPreference, HanScript};
+    if let Some(script) = HanScript::from_locale(translator.locale()) {
+        return HanFontPreference {
+            script,
+            chinese_ui: true,
+        };
+    }
+    let mut system = translator.clone();
+    system.set_locale(&system_locale());
+    HanFontPreference {
+        script: HanScript::from_locale(system.locale()).unwrap_or_default(),
+        chinese_ui: false,
     }
 }
 

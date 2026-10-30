@@ -210,13 +210,8 @@ pub(super) fn setting_row(spec: RowSpec, window: &mut Window, cx: &mut App) -> A
     .into_any_element()
 }
 
-/// 一组设置：组标题（+ 可选说明）+ 一张行间发丝线分隔的卡片。
-pub(super) fn setting_group(
-    title: SharedString,
-    subtitle: Option<SharedString>,
-    rows: Vec<AnyElement>,
-    cx: &App,
-) -> AnyElement {
+/// 无标题的行卡片：行之间用发丝线分隔。
+pub(super) fn setting_card(rows: Vec<AnyElement>, cx: &App) -> AnyElement {
     let theme = active_theme(cx);
     let tokens = theme.tokens().clone();
     let hairline = theme.extended().colors.hairline;
@@ -233,6 +228,18 @@ pub(super) fn setting_group(
         }
         body = body.child(row);
     }
+    body.into_any_element()
+}
+
+/// 一组设置：组标题（+ 可选说明）+ 一张行间发丝线分隔的卡片。
+pub(super) fn setting_group(
+    title: SharedString,
+    subtitle: Option<SharedString>,
+    rows: Vec<AnyElement>,
+    cx: &App,
+) -> AnyElement {
+    let tokens = active_theme(cx).tokens().clone();
+    let body = setting_card(rows, cx);
     v_flex()
         .w_full()
         .child(

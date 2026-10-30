@@ -269,7 +269,7 @@ function PayingStep({ order, plan, onPaid, onBack }: { order: CloudOrder; plan: 
 
 export function PlanDialog({ session, initialTab = 'membership', onClose }: { session: AgentSessionDto; initialTab?: PlanDialogTab; onClose: () => void }) {
   const t = useT()
-  const [tab, setTab] = useState<PlanDialogTab>(initialTab)
+  const [requestedTab, setTab] = useState<PlanDialogTab>(initialTab)
   const [load, setLoad] = useState<Load>({ status: 'loading' })
   const [step, setStep] = useState<Step>({ kind: 'select' })
   const [selected, setSelected] = useState<string | null>(null)
@@ -355,6 +355,9 @@ export function PlanDialog({ session, initialTab = 'membership', onClose }: { se
   )
 
   const ready = load.status === 'ready' ? load : null
+  // 云端没有上架流量包：页签整体隐藏，落回会员页。
+  const hasPacks = ready !== null && packPlans(ready.catalog).length > 0
+  const tab: PlanDialogTab = hasPacks ? requestedTab : 'membership'
   const plans = ready ? (tab === 'packs' ? packPlans(ready.catalog) : purchasablePlans(ready.catalog)) : []
   const owned = ready ? ownedPriceMinor(ready.catalog, ready.currentCode) : 0
   const baseSort = ready ? baseSortOf(ready.catalog, ready.currentCode) : null
@@ -407,20 +410,22 @@ export function PlanDialog({ session, initialTab = 'membership', onClose }: { se
     )
     body = (
       <div className="flex flex-col gap-3">
-        <SegmentedTabs
-          aria-label={t('accountPlanDialogTitle')}
-          value={tab}
-          onValueChange={(next) => {
-            setTab(next)
-            setSelected(null)
-            setNotice(null)
-          }}
-          className="self-start"
-          items={[
-            { value: 'membership', label: t('accountPurchaseTabMembership') },
-            { value: 'packs', label: t('accountPurchaseTabPacks') },
-          ]}
-        />
+        {hasPacks ? (
+          <SegmentedTabs
+            aria-label={t('accountPlanDialogTitle')}
+            value={tab}
+            onValueChange={(next) => {
+              setTab(next)
+              setSelected(null)
+              setNotice(null)
+            }}
+            className="self-start"
+            items={[
+              { value: 'membership', label: t('accountPurchaseTabMembership') },
+              { value: 'packs', label: t('accountPurchaseTabPacks') },
+            ]}
+          />
+        ) : null}
         {load.status === 'loading' ? <SkeletonCards /> : null}
         {load.status === 'error' ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center">

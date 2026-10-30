@@ -14,6 +14,7 @@ use fluxdown_protocol::{
     ShellStatusDto, SiteAuthEntryDto, SyncStatusDto, SystemProxyDto, UpdateStatusDto,
     WebhookDeliveryDto, method, setting_spec, setting_value_kind, value_to_daemon_config,
 };
+use fluxdown_ui_components::BusyHold;
 use gpui::{Context, SharedString};
 use serde_json::{Value, json};
 
@@ -139,8 +140,11 @@ pub struct SettingsStore {
     conn_policy: Option<ConnPolicySummaryDto>,
     system_proxy: Option<SystemProxyDto>,
     update: UpdateStatusDto,
+    /// 真正在途的动作；内部去重 / 自动加载闸门只看它（[`Self::in_flight`]）。
     busy: BTreeSet<&'static str>,
-    /// 同一 `action` 下具体是哪个按钮发起的（如某条修复 / 某个站点）；随 `action` 完成清除。
+    /// 每个动作的最短可见「进行中」：本机 RPC 常在一帧内返回，没有它按钮转圈根本画不出来。
+    busy_holds: BTreeMap<&'static str, BusyHold>,
+    /// 同一 `action` 下具体是哪个按钮发起的（如某条修复 / 某个站点）；下次同 `action` 发起时清除。
     busy_tags: BTreeMap<&'static str, SharedString>,
     last_error: Option<SettingsError>,
     /// 最近一次动作的成功提示（i18n 键）。
@@ -193,6 +197,7 @@ impl SettingsStore {
             system_proxy: None,
             update: UpdateStatusDto::default(),
             busy: BTreeSet::new(),
+            busy_holds: BTreeMap::new(),
             busy_tags: BTreeMap::new(),
             last_error: None,
             last_notice: None,
@@ -533,8 +538,8 @@ impl SettingsStore {
     #[must_use]
     pub fn should_reveal_gateway_token(&self) -> bool {
         !self.stale
-            && !self.is_busy("gateway")
-            && !self.is_busy("gatewayToken")
+            && !self.in_flight("gateway")
+            && !self.in_flight("gatewayToken")
             && (self.gateway_token_stale
                 || (!self.transient.contains_key("gateway_user_token")
                     && !self.load_attempts.contains("gatewayToken")))
@@ -556,25 +561,37 @@ impl SettingsStore {
         self.transient.insert(key, value);
         cx.notify();
     }
+    /// 渲染用的「进行中」：在途，或仍在最短可见期内（见 [`BusyHold`]）。
     #[must_use]
     pub fn is_busy(&self, action: &str) -> bool {
+        self.in_flight(action) || self.busy_holds.get(action).is_some_and(BusyHold::is_held)
+    }
+    /// 请求是否真正在途：去重、自动加载等逻辑闸门用它，不受最短可见期影响。
+    #[must_use]
+    pub fn in_flight(&self, action: &str) -> bool {
         self.busy.contains(action)
     }
     /// `action` 进行中且由 `tag` 标记的按钮发起。
     #[must_use]
     pub fn is_busy_tagged(&self, action: &str, tag: &str) -> bool {
-        self.busy.contains(action) && self.busy_tags.get(action).is_some_and(|t| t == tag)
+        self.is_busy(action) && self.busy_tags.get(action).is_some_and(|t| t == tag)
     }
     /// `action` 进行中且未打标签（区分同一 action 下其他按钮发起的调用）。
     #[must_use]
     pub fn is_busy_untagged(&self, action: &str) -> bool {
-        self.busy.contains(action) && !self.busy_tags.contains_key(action)
+        self.is_busy(action) && !self.busy_tags.contains_key(action)
     }
     /// 给刚发起的 `action` 打上发起者标签，供对应按钮显示 loading；`action` 未在进行中则忽略。
     pub fn tag_busy(&mut self, action: &'static str, tag: impl Into<SharedString>) {
         if self.busy.contains(action) {
             self.busy_tags.insert(action, tag.into());
         }
+    }
+    /// 标记 `action` 开始：在途 + 最短可见期计时，并清掉上一次的发起者标签。
+    fn begin_busy(&mut self, action: &'static str, cx: &mut Context<Self>) {
+        self.busy.insert(action);
+        self.busy_tags.remove(action);
+        self.busy_holds.entry(action).or_default().start(cx);
     }
     #[must_use]
     pub fn last_error(&self) -> Option<&SettingsError> {
@@ -754,7 +771,7 @@ impl SettingsStore {
     // ───────────────────────── 网关 ─────────────────────────
 
     pub fn patch_gateway(&mut self, patch: GatewayPatchParams, cx: &mut Context<Self>) {
-        if self.is_busy("gateway") {
+        if self.in_flight("gateway") {
             return;
         }
         if self.stale {
@@ -825,8 +842,7 @@ impl SettingsStore {
             self.set_error(SettingsErrorKind::Disconnected, "", cx);
             return;
         }
-        self.busy.insert(action);
-        self.busy_tags.remove(action);
+        self.begin_busy(action, cx);
         self.last_error = None;
         self.last_notice = None;
         cx.notify();
@@ -851,8 +867,8 @@ impl SettingsStore {
             let result = future.await;
 
             let Ok(()) = this.update(cx, |this, cx| {
+                // 标签保留到最短可见期结束（下次发起时清除），转圈仍落在发起的那个按钮上。
                 this.busy.remove(action);
-                this.busy_tags.remove(action);
                 if let Err(error) = &result {
                     this.last_error = Some(SettingsError {
                         kind: SettingsErrorKind::from_rpc(error),

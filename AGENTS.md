@@ -147,7 +147,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 |---|---|
 |`rule://mirror-wire-protocol`|帧判定 `judge_frame` / 合帧、队列增量、任务表分页载入、protocol DTO / 方法 / 事件 ↔ agent、GPUI、移动端、`web/src/lib/rpc`|
 |`rule://mirror-mobile-bridge`|UniFFI DTO / 通用分区 / 方法名 / 设置目录、reducer、内置分类基线 ↔ Android / iOS|
-|`rule://mirror-downloads`|下载页纯模型（新建解析 / aria2c / 菜单事实 / 远程命令 / 做种 / 排序 / 任务组 / 来源构成 / 设备 / 重扫节流 / 历史与限速记忆）↔ Web / 移动端|
+|`rule://mirror-downloads`|下载页纯模型（新建解析 / aria2c / 菜单事实 / 远程命令 / 做种 / 排序 / 任务组 / 来源构成 / 设备 / 重扫节流 / 历史与限速记忆）↔ Web / 移动端；扩展 → Android App 外部唤起载荷（Intent extra / 协议参数）|
 |`rule://mirror-category-route`|分类目录路由、新建下载分类选择器、一键分类目录名推导（四端）|
 |`rule://mirror-engine-logic`|RSS 过滤、Content-Disposition / 字符集、Webhook 事件与端点、线程数风险档、代理直连名单归一化（engine ↔ agent）、站点代理规则宽松解析与路由标签（engine ↔ 四端）|
 |`rule://mirror-theme-shell`|主题 token 注册表、文件图标包、chrome 布局|
@@ -170,7 +170,7 @@ cd mobile/FluxDown && xcodebuild build -project FluxDown.xcodeproj -scheme FluxD
 **Rust**
 - Edition 2024；Clippy deny `unwrap_used` / `expect_used` / `wildcard_imports`（根 `clippy.toml` 允许测试 unwrap / expect），非测试代码用 `?` + `thiserror`。
 - 禁 `todo!` / `unimplemented!` 与静默忽略错误（workspace lints deny，所有 crate `[lints] workspace = true`）；禁止 `allow` / `drop(Result)` / 空错误分支绕过（`rule://no-ignored-errors-in-rust`）。
-- 默认安全：unsafe 仅限无语义等价安全替代的平台 FFI 边界，最小范围 + SAFETY + 健全接口（`rule://no-unsafe-in-rust`）；workspace deny `unsafe_op_in_unsafe_fn` 与 `clippy::undocumented_unsafe_blocks`。
+- 默认安全：unsafe 仅限无语义等价安全替代的平台 FFI 边界，最小范围 + SAFETY + 健全接口（`rule://no-unsafe-in-rust`）；workspace deny `unsafe_op_in_unsafe_fn` 与 `clippy::undocumented_unsafe_blocks`。`crates/*` 零 unsafe，唯一例外是 `crates/app/src/app_icon.rs` 的 macOS `setApplicationIconImage(Some)`。
 - 公开 API `///` + doctest；异步优先，阻塞走 `spawn_blocking`；重试指数退避（MAX=3，base=2s）；task panic 用 `AssertUnwindSafe` + `catch_unwind`。
 - 日志：`use crate::logger::log_info; log_info!("[mod] ...")`（每文件显式 use），格式 `HH:MM:SS.mmm [Tag] message`。
 - 解析不可信输入（文件名 / 头部 / 种子元数据 / 协议帧）：字符串用 `get(a..b)` / `split_at_checked` / 先 `is_char_boundary`，下标用 `get`，长度转换用 `try_from`。

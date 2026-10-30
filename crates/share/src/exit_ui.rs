@@ -47,7 +47,8 @@ impl Global for ExitDialogOpen {}
 
 fn decision(hub: &ShareHub) -> ExitDecision {
     // 与 agent 断开时状态是旧的、转换也发不出去：不拦退出。
-    if hub.is_stale() {
+    // FluxMesh 未启用 / 不可用时没有任何分享需要处理。
+    if hub.is_stale() || !hub.available() {
         return ExitDecision::Quit;
     }
     let state = hub.state();

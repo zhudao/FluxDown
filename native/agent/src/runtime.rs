@@ -454,7 +454,7 @@ async fn run_agent(
         events.clone(),
         auth,
         cloud,
-        sync,
+        sync.clone(),
         remote,
         notify,
         capture.clone(),
@@ -469,7 +469,7 @@ async fn run_agent(
             shell: shell.clone(),
             power: power.clone(),
             lifecycle: lifecycle.clone(),
-            notifier,
+            notifier: notifier.clone(),
         },
     )
     .with_server_mode(server.is_some())
@@ -479,16 +479,32 @@ async fn run_agent(
     let gateway_service = Arc::new(gateway);
     let shell_task = tokio::spawn(crate::shell::run_controller(
         ShellServices {
-            state: shell,
+            state: shell.clone(),
             lifecycle,
             power,
             daemon: daemon.clone(),
             events: events.clone(),
             gateway: gateway_service.clone(),
+            agent_data_dir: paths.agent_data_dir.clone(),
         },
         host,
         cancel.clone(),
     ));
+    #[cfg(feature = "desktop")]
+    if server.is_none() {
+        // 应用图标：启动对账 + 跟随偏好变化（托盘由外壳控制器读同一偏好）；旧 Flutter 选择在此一次性迁移。
+        tokio::spawn(
+            crate::app_icon::AppIconService::new(
+                &paths.agent_data_dir,
+                paths.daemon_data_dir.clone(),
+                sync,
+                events.clone(),
+                notifier,
+                shell,
+            )
+            .run(cancel.clone()),
+        );
+    }
     #[cfg(feature = "desktop")]
     if server.is_none() {
         crate::clipboard_watch::spawn(events.clone(), gateway_service.clone(), cancel.clone());

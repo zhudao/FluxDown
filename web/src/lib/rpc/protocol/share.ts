@@ -141,6 +141,8 @@ export interface SharePolicySummaryDto {
 
 /** 本机FluxMesh设置；`agent.share.setLocalConfig` 整体替换。 */
 export interface ShareLocalConfigDto {
+  /** 本机启用FluxMesh（实验性，默认 false）；关闭时 agent 不访问云端、不绑定端点，快照只带本机设置、`available=false`。 */
+  enabled: boolean;
   udpPortV4: number | null;
   udpPortV6: number | null;
   portmapper: boolean | null;

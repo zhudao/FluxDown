@@ -7,6 +7,7 @@ const zhCN = {
   "header.languageSwitch": "切换至{language}",
   "header.checking": "检测中...",
   "header.connected": "已连接",
+  "header.androidHandoff": "交给 FluxDown App",
   "header.disconnected": "未连接",
 
   // Main switch
@@ -145,6 +146,8 @@ const zhCN = {
   "notify.batchSentDetail": "{count} 个任务已发送到 FluxDown",
   "notify.sendFailed": "发送失败",
   "notify.connectionFailed": "无法连接到 FluxDown 应用: {message}",
+  "notify.androidUnsupported": "该下载无法交给 FluxDown Android 应用（音视频分轨、表单提交与 FTP 链接需要桌面或远程通道）",
+  "notify.androidHandoffFailed": "浏览器拒绝唤起 FluxDown Android 应用",
   "notify.fallbackBrowser": "已回退到浏览器下载",
   "notify.fallbackBrowserDetail":
     "无法发送到 FluxDown，已交由浏览器继续下载: {url}",
@@ -337,7 +340,7 @@ const zhCN = {
   "options.protocol.label": "FluxDown 自定义协议",
   "options.protocol.enabled": "已启用，经 fluxdown:// 唤起应用",
   "options.protocol.disabled": "关闭（默认）",
-  "options.protocol.desc": "经 fluxdown:// 协议唤起应用下载，Windows / macOS / Linux / Android 均支持。本机通道功能更全，建议仅在其不可用时开启",
+  "options.protocol.desc": "经 fluxdown:// 协议唤起应用下载，Windows / macOS / Linux 均支持（Android 版浏览器会自动把下载交给 FluxDown 应用，无需开启）。本机通道功能更全，建议仅在其不可用时开启",
 
   // 任务完成通知（任务面板）
   "notify.taskCompletedTitle": "下载完成",

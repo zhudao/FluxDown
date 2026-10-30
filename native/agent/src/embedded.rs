@@ -334,6 +334,7 @@ pub async fn start_embedded(
                 daemon: daemon.clone(),
                 events: events.clone(),
                 gateway: service.clone(),
+                agent_data_dir: store.data_dir().to_path_buf(),
             },
             ShellHost::without_tray(TrayUnavailableReason::NotBuilt, false),
             cancel.clone(),

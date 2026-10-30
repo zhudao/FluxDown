@@ -8,8 +8,10 @@
  * 休眠后由事件唤醒重新执行本入口；跨休眠的状态落 storage.session，见各模块）。
  */
 import { browser } from "wxt/browser";
+import type { Browser } from "wxt/browser";
 import { initI18n, t } from "@/utils/i18n";
 import { logWarn } from "@/utils/error-log";
+import { hasCommandsApi } from "@/utils/platform";
 import { installBackgroundErrorLog } from "@/utils/error-log-background";
 import { loadSettings, persistSettings } from "@/utils/settings";
 import type { ContentMessage } from "./protocol";
@@ -101,8 +103,8 @@ export function startBackground(): void {
   onEngineChanged(broadcastPageConfigChanged);
   applyInterceptState();
 
-  // 快捷键切换拦截开关（替代原来的 Alt+Click 绕过机制）
-  browser.commands.onCommand.addListener(async (command, tab) => {
+  // 快捷键切换拦截开关（替代原来的 Alt+Click 绕过机制）；移动端浏览器没有 commands API。
+  const handleCommand = async (command: string, tab?: Browser.tabs.Tab): Promise<void> => {
     if (command === "open-side-panel") {
       // Chromium 专用（Firefox 走内置 _execute_sidebar_action）。快捷键算用户手势，
       // 但 sidePanel.open 必须在任何 await 之前同步调用。
@@ -128,7 +130,8 @@ export function startBackground(): void {
       t("shortcut.toggleTitle"),
       enabled ? t("shortcut.interceptOn") : t("shortcut.interceptOff"),
     );
-  });
+  };
+  if (hasCommandsApi()) browser.commands.onCommand.addListener(handleCommand);
 
   // 清理已删除功能（发送失败重队列）的遗留数据。
   browser.storage.local.remove(LEGACY_PENDING_QUEUE_KEY).catch(() => {});

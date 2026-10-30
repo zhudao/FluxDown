@@ -10,7 +10,7 @@ use fluxdown_protocol::{
     ShareTaskFactsDto,
 };
 use fluxdown_ui_components::{
-    ButtonVariant, ControlExt as _, FluxIcon, button, loading_icon_button,
+    BusyExt as _, BusyHold, ButtonVariant, ControlExt as _, FluxIcon, button, loading_icon_button,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -27,6 +27,7 @@ use gpui_component::{
 };
 
 use crate::{
+    actions::{stop_providing_task, switch_to_bridge_task},
     hub::ShareHub,
     manage_ui::{chip, clipped, empty_state, kv_row, meta_text, text, text_with, tooltip_builder},
     model::{
@@ -36,7 +37,6 @@ use crate::{
     },
     report::open_report_dialog,
     session_view::{path_tone, session_detail},
-    stop_providing, switch_to_bridge,
 };
 
 /// 两次取数之间的最短间隔（毫秒）。
@@ -61,6 +61,14 @@ pub struct ShareDiagnosticsView {
     /// 当前 `diagnostics` 对应的会话 ID；任务换了承载会话后丢弃旧数据重新取。
     fetched_session: Option<String>,
     diagnostics: Option<ShareDiagnosticsDto>,
+    /// 诊断请求在途（自动 / 手动取数共用）：刷新按钮据此转圈，已有数据时手动刷新也看得见。
+    fetching: bool,
+    /// 用户点「刷新」后的最短转圈保持。
+    refresh_hold: BusyHold,
+    /// 「停止共享」请求在途。
+    stopping: bool,
+    /// 「切换桥接」请求在途。
+    switching: bool,
 }
 
 impl ShareDiagnosticsView {
@@ -88,6 +96,10 @@ impl ShareDiagnosticsView {
             load: Load::Loading,
             fetched_session: None,
             diagnostics: None,
+            fetching: false,
+            refresh_hold: BusyHold::default(),
+            stopping: false,
+            switching: false,
         }
     }
 
@@ -100,6 +112,7 @@ impl ShareDiagnosticsView {
         self.diagnostics = None;
         self.fetched_session = None;
         self.load = Load::Loading;
+        self.fetching = false;
         self.request += 1;
         self.refresh.mark_dirty();
         cx.notify();
@@ -124,6 +137,7 @@ impl ShareDiagnosticsView {
             self.diagnostics = None;
             self.fetched_session = None;
             self.load = Load::Loading;
+            self.fetching = false;
             self.refresh.mark_dirty();
         }
         let now = self.now_ms();
@@ -150,7 +164,11 @@ impl ShareDiagnosticsView {
     }
 
     fn start_fetch(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if !self.hub.read(cx).available() {
+            return;
+        }
         self.request += 1;
+        self.fetching = true;
         let request = self.request;
         let future = self
             .hub
@@ -180,6 +198,7 @@ impl ShareDiagnosticsView {
         if request != self.request {
             return;
         }
+        self.fetching = false;
         match result {
             Ok(diagnostics) => {
                 self.diagnostics = Some(diagnostics);
@@ -244,7 +263,7 @@ impl Render for ShareDiagnosticsView {
         };
 
         let relay_stuck = facts.as_ref().is_some_and(|facts| facts.relay_stuck);
-        let loading = self.load == Load::Loading;
+        let loading = self.fetching || self.refresh_hold.is_held();
         let label = text(&translator, "shareNetRefresh");
 
         // 标题行：标题 + 当前路径徽标 + 刷新。
@@ -281,7 +300,10 @@ impl Render for ShareDiagnosticsView {
             )
             .tooltip(tooltip_builder(label))
             .disabled(stale || loading)
-            .on_click(cx.listener(|this, _, _, cx| this.refresh_now(cx))),
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.refresh_hold.start(cx);
+                this.refresh_now(cx);
+            })),
         );
         let mut root = root.child(title);
 
@@ -383,16 +405,16 @@ impl ShareDiagnosticsView {
         if facts.provide_state == ShareProvideState::Providing
             && let Some(record_id) = facts.record_id.clone()
         {
-            let hub = self.hub.clone();
             row = row.child(
                 Button::new("share-diag-stop-providing")
                     .outline()
                     .label(text(translator, "shareStopProviding"))
                     .control(cx)
-                    .disabled(stale)
-                    .on_click(move |_, window, cx| {
-                        stop_providing(&hub, &record_id, window, cx);
-                    }),
+                    .busy(self.stopping)
+                    .disabled(stale || self.stopping)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.begin_stop_providing(record_id.clone(), window, cx);
+                    })),
             );
         }
         if let Some(share_id) = facts.share_id.clone() {
@@ -414,6 +436,58 @@ impl ShareDiagnosticsView {
 }
 
 impl ShareDiagnosticsView {
+    /// 「停止共享」：请求在途期间按钮转圈；完成（含失败提示）后恢复。
+    fn begin_stop_providing(
+        &mut self,
+        record_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.stopping {
+            return;
+        }
+        self.stopping = true;
+        let task = stop_providing_task(&self.hub, &record_id, window, cx);
+        cx.spawn(async move |this, cx| {
+            task.await;
+            let Ok(()) = this.update(cx, |this, cx| {
+                this.stopping = false;
+                cx.notify();
+            }) else {
+                return;
+            };
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// 「切换桥接」：请求在途期间按钮转圈；完成（含失败提示）后恢复。
+    fn begin_switch_to_bridge(
+        &mut self,
+        task_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.switching {
+            return;
+        }
+        self.switching = true;
+        let task = switch_to_bridge_task(&self.hub, &task_id, window, cx);
+        cx.spawn(async move |this, cx| {
+            task.await;
+            let Ok(()) = this.update(cx, |this, cx| {
+                this.switching = false;
+                cx.notify();
+            }) else {
+                return;
+            };
+        })
+        .detach();
+        cx.notify();
+    }
+}
+
+impl ShareDiagnosticsView {
     /// 「切换桥接」入口：仍在走中继时配说明并高亮（主按钮 + 警示框），其余路径只给普通按钮。
     fn render_switch_bridge(
         &self,
@@ -424,15 +498,15 @@ impl ShareDiagnosticsView {
     ) -> Div {
         let theme = active_theme(cx);
         let tokens = theme.tokens().clone();
-        let hub = self.hub.clone();
         let task_id = self.task_id.clone();
         let button = Button::new("share-diag-switch-bridge")
             .label(text(translator, "shareSwitchBridge"))
             .control(cx)
-            .disabled(stale)
-            .on_click(move |_, window, cx| {
-                switch_to_bridge(&hub, &task_id, window, cx);
-            });
+            .busy(self.switching)
+            .disabled(stale || self.switching)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.begin_switch_to_bridge(task_id.clone(), window, cx);
+            }));
         if !relay_stuck {
             return h_flex().w_full().child(button.outline());
         }

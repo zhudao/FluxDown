@@ -4,13 +4,12 @@
 
 import { ReceiveByInput, ReceivePending } from './ReceiveDialog'
 import { SharePanel } from './SharePanel'
-import { usePendingReceive, useShareAvailable, useShareCapability } from './state'
+import { usePendingReceive, useShareAvailable } from './state'
 import { closeSharePanel, closeShareReceive, useShareDialogs } from './store'
 
 export function ShareHost() {
   const { panel, receive } = useShareDialogs()
   const available = useShareAvailable()
-  const capability = useShareCapability()
   const pending = usePendingReceive()
 
   return (
@@ -18,7 +17,7 @@ export function ShareHost() {
       {available && panel ? <SharePanel key={panel.nonce} request={panel} onClose={closeSharePanel} /> : null}
       {available && receive ? (
         <ReceiveByInput key={receive.nonce} codeOrLink={receive.codeOrLink} onClose={closeShareReceive} />
-      ) : capability && pending ? (
+      ) : available && pending ? (
         <ReceivePending preview={pending} />
       ) : null}
     </>

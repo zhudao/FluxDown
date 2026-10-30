@@ -23,6 +23,11 @@ impl ShareSettingsView {
         hub.available() && !hub.is_stale()
     }
 
+    /// 与 agent 保持连接（总开关在功能未启用、`available == false` 时也要能改）。
+    pub(super) fn connected(&self, cx: &App) -> bool {
+        !self.hub.read(cx).is_stale()
+    }
+
     // ───────────────────────── 提交 ─────────────────────────
 
     /// 以底稿为基础改一个字段并整体提交。
@@ -43,7 +48,13 @@ impl ShareSettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.editable(cx) {
+        // 总开关本身只要求连接；其余字段要求功能可用。
+        let allowed = if next.enabled == self.shown.enabled {
+            self.editable(cx)
+        } else {
+            self.connected(cx)
+        };
+        if !allowed {
             return;
         }
         let offset = chrono::Local::now().offset().local_minus_utc();
@@ -242,6 +253,10 @@ impl ShareSettingsView {
         cx: &mut Context<Self>,
     ) {
         self.commit(|c| c.default_swarm = Some(value), window, cx);
+    }
+
+    pub(super) fn set_enabled(&mut self, value: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit(|c| c.enabled = value, window, cx);
     }
 
     pub(super) fn set_auto_provide(

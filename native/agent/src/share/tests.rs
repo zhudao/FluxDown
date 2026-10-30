@@ -68,9 +68,21 @@ pub(super) struct Mock {
     pub(super) peers_error: Mutex<Option<(StatusCode, &'static str)>>,
     /// 收到的 `POST /share/report` 请求体。
     pub(super) reports: Mutex<Vec<Value>>,
+    /// 收到的请求总数（任何路由）：开关关闭期间必须保持 0。
+    pub(super) requests: std::sync::atomic::AtomicUsize,
 }
 
 pub(super) type MockState = Arc<Mock>;
+
+async fn count_request(
+    State(mock): State<MockState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    mock.requests
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    next.run(request).await
+}
 
 fn error(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({ "code": code, "message": code }))).into_response()
@@ -643,6 +655,7 @@ pub(super) async fn start_mock() -> (String, MockState) {
         usage: Mutex::new(None),
         peers_error: Mutex::new(None),
         reports: Mutex::new(Vec::new()),
+        requests: std::sync::atomic::AtomicUsize::new(0),
     });
     let app = Router::new()
         .route("/api/v1/share/config", get(config))
@@ -667,6 +680,10 @@ pub(super) async fn start_mock() -> (String, MockState) {
         .route("/api/v1/share/swarm/announce", post(swarm_announce))
         .route("/api/v1/share/telemetry/net", post(telemetry_net))
         .route("/api/v1/share/telemetry/sessions", post(telemetry_sessions))
+        .layer(axum::middleware::from_fn_with_state(
+            mock.clone(),
+            count_request,
+        ))
         .with_state(mock.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -728,6 +745,18 @@ pub(super) async fn node_at(
     logged_in: bool,
     tasks: Vec<TaskDto>,
 ) -> Node {
+    node_with(base, dir, label, logged_in, tasks, true).await
+}
+
+/// `enabled`：本机FluxMesh开关（产品默认关；其余用例都在开启状态下测）。
+pub(super) async fn node_with(
+    base: &str,
+    dir: std::path::PathBuf,
+    label: &str,
+    logged_in: bool,
+    tasks: Vec<TaskDto>,
+    enabled: bool,
+) -> Node {
     // 旧服务的收尾任务可能还没放开状态目录锁。
     let store = {
         let mut opened = None;
@@ -776,6 +805,7 @@ pub(super) async fn node_at(
     })
     .await
     .unwrap();
+    service.with(|i| i.local.enabled = enabled);
     let cancel = CancellationToken::new();
     tokio::spawn(service.clone().run(cancel.clone()));
     Node {
@@ -1832,4 +1862,135 @@ fn strike_limited_carries_until_in_field() {
     assert_eq!(mapped.field.as_deref(), Some("2027-01-01T00:00:00Z"));
     err.details = None;
     assert_eq!(super::cloud::share_error(&err).field, None);
+}
+
+// ───────────── 实验性开关 ─────────────
+
+fn requests(mock: &Mock) -> usize {
+    mock.requests.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn endpoint_bound(node: &Node) -> bool {
+    node.service
+        .with(|i| i.endpoint.as_ref().is_some_and(|e| e.is_bound()))
+}
+
+/// 本机开关关闭（产品默认）：服务在跑但不访问云端、不绑定端点；`agent.share.*` 除 `config` /
+/// `setLocalConfig` 外报不可用，分享链接被拒，快照只带本机设置。开启后才拉策略、变为可用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disabled_share_stays_offline_until_enabled() {
+    use crate::share_link::ShareLinkSink;
+    use fluxdown_protocol::{ErrorReason, ShareConfigDto};
+    let (base, mock) = start_mock().await;
+    let dir = std::env::temp_dir().join(format!(
+        "fluxdown_share_switch_off_{}_{}",
+        std::process::id(),
+        now_unix_secs()
+    ));
+    let node = node_with(&base, dir, "switch_off", true, Vec::new(), false).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let created: Result<ShareDto, _> = call(
+        &node,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await;
+    assert_eq!(
+        created.unwrap_err().reason,
+        Some(ErrorReason::ShareUnavailable)
+    );
+    let usage: Result<Value, _> = call(&node, method::AGENT_SHARE_USAGE_REFRESH, json!({})).await;
+    assert_eq!(
+        usage.unwrap_err().reason,
+        Some(ErrorReason::ShareUnavailable)
+    );
+    let opened = node.service.open_link("fluxdown://share/abcdef").await;
+    assert_eq!(
+        opened.unwrap_err().reason,
+        Some(ErrorReason::ShareUnavailable)
+    );
+    let config: ShareConfigDto = call(&node, method::AGENT_SHARE_CONFIG, json!({}))
+        .await
+        .unwrap();
+    assert!(!config.local_config.enabled);
+    assert!(config.policy.live_tiers.is_empty());
+    let state = node.events.inspect(|s| s.share.clone());
+    assert!(!state.available);
+    assert!(!state.local_config.enabled);
+    assert_eq!(requests(&mock), 0);
+    assert!(node.service.with(|i| i.endpoint.is_none()));
+
+    let mut local = serde_json::to_value(config.local_config).unwrap();
+    local["enabled"] = json!(true);
+    let _: Value = call(&node, method::AGENT_SHARE_SET_LOCAL_CONFIG, local)
+        .await
+        .unwrap();
+    wait_until("policy fetched after enabling", || {
+        node.events
+            .inspect(|s| s.share.available && s.share.local_config.enabled)
+    })
+    .await;
+    assert!(requests(&mock) > 0);
+    node.cancel.cancel();
+}
+
+/// 关闭开关即收掉端点与运行期状态、之后不再访问云端；再次开启按启动流程恢复原有分享。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn disabling_share_tears_down_and_reenabling_restores() {
+    use fluxdown_protocol::{ErrorReason, ShareConfigDto};
+    let (base, mock) = start_mock().await;
+    let (sender, _dir, _payload) = sender_with_file(&base, "switch_toggle", 64 * 1024).await;
+    let share: ShareDto = call(
+        &sender,
+        method::AGENT_SHARE_CREATE,
+        json!({ "taskIds": ["t1"] }),
+    )
+    .await
+    .unwrap();
+    wait_until("endpoint bound", || endpoint_bound(&sender)).await;
+
+    let config: ShareConfigDto = call(&sender, method::AGENT_SHARE_CONFIG, json!({}))
+        .await
+        .unwrap();
+    let mut local = serde_json::to_value(config.local_config).unwrap();
+    local["enabled"] = json!(false);
+    let _: Value = call(&sender, method::AGENT_SHARE_SET_LOCAL_CONFIG, local.clone())
+        .await
+        .unwrap();
+    wait_until("runtime torn down", || {
+        sender
+            .service
+            .with(|i| i.endpoint.is_none() && i.config.is_none())
+    })
+    .await;
+    let state = sender.events.inspect(|s| s.share.clone());
+    assert!(!state.available);
+    assert!(state.shares.is_empty());
+    let stopped: Result<ShareDto, _> =
+        call(&sender, method::AGENT_SHARE_STOP, json!({ "id": share.id })).await;
+    assert_eq!(
+        stopped.unwrap_err().reason,
+        Some(ErrorReason::ShareUnavailable)
+    );
+    let quiet = requests(&mock);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(requests(&mock), quiet);
+
+    local["enabled"] = json!(true);
+    let _: Value = call(&sender, method::AGENT_SHARE_SET_LOCAL_CONFIG, local)
+        .await
+        .unwrap();
+    wait_until("share restored after re-enabling", || {
+        sender.events.inspect(|s| {
+            s.share.available
+                && s.share
+                    .shares
+                    .iter()
+                    .any(|s| s.id == share.id && s.status == ShareStatus::Active)
+        })
+    })
+    .await;
+    wait_until("endpoint bound again", || endpoint_bound(&sender)).await;
+    sender.cancel.cancel();
 }

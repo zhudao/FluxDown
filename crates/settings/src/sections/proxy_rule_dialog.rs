@@ -6,8 +6,8 @@
 use fluxdown_protocol::proxy_rules::{ProxyRuleSpec, encode_proxy_rules, new_proxy_rule};
 use fluxdown_protocol::{ProxyRouteResponse, RpcErrorData, method};
 use fluxdown_ui_components::{
-    ButtonVariant, ControlExt as _, FluxIcon, choice_chip, dialog_scroll_body, dialog_title,
-    field_error, form, form_field, input_with_action, loading_button, segmented_tabs,
+    BusyHold, ButtonVariant, ControlExt as _, FluxIcon, choice_chip, dialog_scroll_body,
+    dialog_title, field_error, form, form_field, input_with_action, loading_button, segmented_tabs,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -123,7 +123,10 @@ pub(crate) struct ProxyRuleDialog {
     proxy_error: Option<SharedString>,
     form_error: Option<SharedString>,
     try_result: Option<bool>,
-    checking: bool,
+    /// 进行中的检测：`Some(true)` 为保存前检测，`Some(false)` 为「试一试」；转圈只落在发起的按钮上。
+    checking: Option<bool>,
+    /// 「试一试」的最短可见转圈（本机路由判定常在一帧内返回）。
+    try_hold: BusyHold,
     /// 任一输入变化时 +1。
     edit_generation: u64,
 }
@@ -216,7 +219,8 @@ impl ProxyRuleDialog {
             proxy_error: None,
             form_error: None,
             try_result: None,
-            checking: false,
+            checking: None,
+            try_hold: BusyHold::default(),
             edit_generation: 0,
         }
     }
@@ -297,7 +301,7 @@ impl ProxyRuleDialog {
     /// 不使用 `SettingsStore::call_with`：它在断线时直接返回且不回调，`checking` 会一直卡住，
     /// 还会改写整页的错误 / 提示 / busy 状态。
     fn check(&mut self, then_save: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.checking {
+        if self.checking.is_some() {
             return;
         }
         let mut draft = self.draft(cx);
@@ -333,7 +337,10 @@ impl ProxyRuleDialog {
             has_sample: !sample.is_empty(),
             draft: self.draft(cx),
         };
-        self.checking = true;
+        self.checking = Some(then_save);
+        if !then_save {
+            self.try_hold.start(cx);
+        }
         self.form_error = None;
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
@@ -355,7 +362,7 @@ impl ProxyRuleDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.checking = false;
+        self.checking = None;
         let response = match result {
             Ok(value) => serde_json::from_value::<ProxyRouteResponse>(value)
                 .map_err(|error| self.generic_error(&error.to_string())),
@@ -571,14 +578,15 @@ impl ProxyRuleDialog {
         let tokens = theme.tokens().clone();
         let extended = theme.extended().clone();
         let empty = self.sample.read(cx).value().trim().is_empty();
+        let trying = self.checking == Some(false) || self.try_hold.is_held();
         let action = loading_button(
             "proxy-rule-try",
             self.t("proxyRouteCheck"),
             ButtonVariant::Secondary,
-            self.checking,
+            trying,
             cx,
         )
-        .disabled(self.checking || empty)
+        .disabled(self.checking.is_some() || trying || empty)
         .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
             this.check(false, window, cx);
         }));
@@ -644,9 +652,10 @@ impl ProxyRuleDialog {
                     "proxy-rule-dialog-save",
                     self.t("proxyRuleSave"),
                     ButtonVariant::Primary,
-                    self.checking,
+                    self.checking == Some(true),
                     cx,
                 )
+                .disabled(self.checking.is_some())
                 .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                     this.check(true, window, cx);
                 }))

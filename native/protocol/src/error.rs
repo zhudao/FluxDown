@@ -179,7 +179,7 @@ pub enum ErrorReason {
     ReferralPlanExcluded,
     /// 推介：自定义推荐码已被占用。
     ReferralCodeTaken,
-    /// FluxMesh：本构建未编入FluxMesh、agent FluxMesh服务未运行，或云端关闭了FluxMesh。
+    /// FluxMesh：本构建未编入FluxMesh、agent FluxMesh服务未运行、本机开关未开启，或云端关闭了FluxMesh。
     ShareUnavailable,
     /// FluxMesh：分享不存在（取件码 / 链接无对应分享，或不是本人的分享）。
     ShareNotFound,

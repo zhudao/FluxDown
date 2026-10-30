@@ -73,6 +73,8 @@ pub(crate) enum ReferralPage {
 pub(crate) struct ShareSlots {
     pub(crate) general: Option<AnyView>,
     pub(crate) network: Option<AnyView>,
+    /// 「网络诊断」Tab 是否出现（FluxMesh 未启用 / 不可用时不出现，也不取数）。
+    pub(crate) network_visible: bool,
 }
 
 /// app 注入的外部内容：账户 / 推介页与扩展页由对应 capability 提供；活动栏开关由 app 的
@@ -83,8 +85,8 @@ pub struct SettingsContentSlots {
     pub extensions: Option<AnyView>,
     /// 「FluxMesh」页（通知之后、扩展之前）「常规」Tab；内容由FluxMesh capability 提供。
     pub share: Option<AnyView>,
-    /// 「FluxMesh」页「网络诊断」Tab（占满高度、自管滚动）。
-    pub share_network: Option<AnyView>,
+    /// 「FluxMesh」页「网络诊断」Tab（占满高度、自管滚动）；FluxMesh 不可用时整个 Tab 不出现。
+    pub share_network: Option<VisibleSlot>,
     /// 「推介有奖」页（账户之后）；不可见时整页不出现在侧栏、搜索与直达里。
     pub referral: Option<VisibleSlot>,
     /// 「通用 → 活动栏」分区的开关行，按活动栏自上而下顺序。
@@ -175,6 +177,9 @@ impl SettingsView {
         if let Some(slot) = &slots.referral {
             cx.observe(&slot.visible, |_, _, cx| cx.notify()).detach();
         }
+        if let Some(slot) = &slots.share_network {
+            cx.observe(&slot.visible, |_, _, cx| cx.notify()).detach();
+        }
         Self {
             store,
             translator,
@@ -233,7 +238,16 @@ impl SettingsView {
             self.slots.account.clone(),
             ShareSlots {
                 general: self.slots.share.clone(),
-                network: self.slots.share_network.clone(),
+                network: self
+                    .slots
+                    .share_network
+                    .as_ref()
+                    .map(|slot| slot.view.clone()),
+                network_visible: self
+                    .slots
+                    .share_network
+                    .as_ref()
+                    .is_some_and(|slot| slot.visible.read(cx).visible()),
             },
             self.slots.extensions.clone(),
             match &self.slots.referral {
@@ -473,7 +487,7 @@ pub(crate) fn build_pages(
         proxy::page(ctx, cx),
         api::page(ctx, cx),
         notify::page(ctx, cx),
-        sections::share_page(ctx, share.general, share.network),
+        sections::share_page(ctx, share.general, share.network, share.network_visible),
         sections::slot_page(
             ctx,
             "extensions",

@@ -12,6 +12,8 @@
 //! `LSUIElement`，常驻时不占 Dock），桌面程序位于外层 `FluxDown.app/Contents/MacOS/`。
 //! 不在该布局内（开发期 `target/release` 平铺）时按同级目录解析。
 
+#[cfg(feature = "desktop")]
+pub(crate) mod app_icon;
 mod autostart;
 #[cfg(feature = "desktop")]
 mod clipboard_files;

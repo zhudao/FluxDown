@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 let base = "http://cloud.test";
 const configure = () => mock.module("astro:env/server", () => ({
-  GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo", FLUXCLOUD_API_BASE: base,
+  GITHUB_TOKEN: "", GITHUB_REPO: "owner/repo", FLUXCLOUD_API_BASE: base, DOWNLOAD_PASS_SECRET: undefined,
 }));
 configure();
 // 动态 import：路由模块须在 astro:env/server 被 mock 之后才加载（静态 import 会先于 mock 求值）。

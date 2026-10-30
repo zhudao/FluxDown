@@ -366,11 +366,13 @@ fn settings_items(labels: &Labels, cx: &mut App) -> Vec<PaletteItem> {
     let translator = desktop.translator.clone();
     let store = desktop.settings_store.clone();
     let referral_visible = desktop.referral_visibility.read(cx).visible();
+    let share_network_visible = desktop.share_network_visibility.read(cx).visible();
     let entries = search_index(
         &translator,
         &store,
         &crate::activity::toggles(),
         referral_visible,
+        share_network_visible,
         cx,
     );
     let root = labels.title(fluxdown_ui_i18n::keys::SETTINGS);

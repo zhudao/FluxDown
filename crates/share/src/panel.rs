@@ -37,7 +37,7 @@ use crate::{
     actions::convert_to_cloud,
     cloud_ui::{confirm_delete_cloud_copy, open_convert_dialog, tone_color, upload_texts},
     errors::error_text,
-    hub::ShareHub,
+    hub::{CloudOp, ShareHub},
     manage_ui::chip,
     model::{
         NetHealth, NetSegment, PanelTarget, claimed_summary, claims_label,
@@ -601,6 +601,7 @@ impl SharePanelView {
         let cloud = cloud_actions(share, policy, hub.signed_in(), hub.can_send());
         let upload = upload_line(share)
             .map(|line| self.render_upload(share, &line, cloud.phase, translator, cx));
+        let cloud_op = hub.cloud_op(&share.id);
         let convert_button = cloud
             .convert
             .filter(|_| cloud.phase != CloudPhase::Failed)
@@ -619,7 +620,8 @@ impl SharePanelView {
                             .icon(FluxIcon::CloudUpload)
                             .label(text(translator, "shareStageConvert"))
                             .control(cx)
-                            .disabled(stale || block.is_some())
+                            .busy(cloud_op == Some(CloudOp::Convert))
+                            .disabled(stale || block.is_some() || cloud_op.is_some())
                             .on_click(move |_, window, cx| {
                                 open_convert_dialog(&hub_entity, id.clone(), window, cx);
                             }),
@@ -633,7 +635,8 @@ impl SharePanelView {
                 .icon(FluxIcon::Trash2)
                 .label(text(translator, "shareStageDelete"))
                 .control(cx)
-                .disabled(stale)
+                .busy(cloud_op == Some(CloudOp::Delete))
+                .disabled(stale || cloud_op.is_some())
                 .on_click(move |_, window, cx| {
                     confirm_delete_cloud_copy(&hub_entity, id.clone(), false, window, cx);
                 })
@@ -1065,11 +1068,12 @@ impl SharePanelView {
         translator: &Translator,
         cx: &Context<Self>,
     ) -> Div {
-        let (stale, retry_tier) = {
+        let (stale, retry_tier, cloud_op) = {
             let hub = self.hub.read(cx);
             (
                 hub.is_stale(),
                 retry_tier(share, &hub.state().policy_summary).map(str::to_owned),
+                hub.cloud_op(&share.id),
             )
         };
         let theme = active_theme(cx);
@@ -1083,7 +1087,8 @@ impl SharePanelView {
                 .ghost()
                 .label(text(translator, "shareStageCancelUpload"))
                 .control(cx)
-                .disabled(stale)
+                .busy(cloud_op == Some(CloudOp::Delete))
+                .disabled(stale || cloud_op.is_some())
                 .on_click(move |_, window, cx| {
                     confirm_delete_cloud_copy(&hub, id.clone(), true, window, cx);
                 })
@@ -1097,7 +1102,8 @@ impl SharePanelView {
                 .icon(FluxIcon::RotateCw)
                 .label(text(translator, "shareStageRetry"))
                 .control(cx)
-                .disabled(stale)
+                .busy(cloud_op == Some(CloudOp::Convert))
+                .disabled(stale || cloud_op.is_some())
                 .on_click(move |_, window, cx| {
                     convert_to_cloud(&hub, &id, tier.as_deref(), window, cx);
                 })

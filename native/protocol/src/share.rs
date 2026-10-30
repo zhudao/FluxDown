@@ -479,6 +479,11 @@ pub struct ShareRelayDto {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ShareLocalConfigDto {
+    /// 本机启用FluxMesh（实验性功能，默认关、须用户手动开启）。关闭时 agent 不访问 FluxCloud 的
+    /// FluxMesh接口、不绑定端点、不登记 / 上报任何内容；`ShareStateDto` 只带本机设置（其余为空、
+    /// `available = false`），`agent.share.*` 除 `config` / `setLocalConfig` 外一律 `ShareUnavailable`。
+    #[serde(default)]
+    pub enabled: bool,
     /// IPv4 UDP 绑定端口，`None` / `0` 为随机端口。
     #[serde(default)]
     pub udp_port_v4: Option<u16>,
@@ -753,8 +758,8 @@ pub struct ShareStateDto {
     /// 云端策略当前允许FluxMesh（`/share/config.enabled`）。
     #[serde(default)]
     pub enabled: bool,
-    /// 本构建已编入FluxMesh、agent 的FluxMesh服务在运行，且云端允许使用（可接收）。
-    /// 为 `false` 时 UI 隐藏全部FluxMesh入口。
+    /// 本构建已编入FluxMesh、agent 的FluxMesh服务在运行、本机已开启（`localConfig.enabled`），
+    /// 且云端允许使用（可接收）。为 `false` 时 UI 隐藏全部FluxMesh入口（设置页的开启开关除外）。
     #[serde(default)]
     pub available: bool,
     /// 本机当前可发起分享（已登录，或云端允许游客发起）。

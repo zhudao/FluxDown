@@ -361,6 +361,10 @@ impl PlanPurchaseDialog {
                     Ok(plans) => {
                         this.plans = plans;
                         this.catalog = Catalog::Ready;
+                        // 云端没有上架流量包：页签整体隐藏，落回会员页。
+                        if pack_plans(&this.plans).is_empty() {
+                            this.tab = PurchaseTab::Membership;
+                        }
                     }
                     Err(error) => {
                         this.catalog = Catalog::Failed(this.fail_text(&error, cx));
@@ -758,20 +762,22 @@ impl PlanPurchaseDialog {
             .w_full()
             .min_h_0()
             .gap(tokens.spacing.md)
-            .child(h_flex().w_full().child(segmented_tabs(
-                "plan-purchase-tabs",
-                tab_labels,
-                self.tab.index(),
-                move |index, _, cx| {
-                    let Ok(()) = weak.update(cx, |this, cx| {
-                        this.set_tab(PurchaseTab::from_index(index), cx);
-                    }) else {
-                        // 对话框已释放，结束这次回调。
-                        return;
-                    };
-                },
-                cx,
-            )))
+            .when(ready && !pack_plans(&self.plans).is_empty(), |this| {
+                this.child(h_flex().w_full().child(segmented_tabs(
+                    "plan-purchase-tabs",
+                    tab_labels,
+                    self.tab.index(),
+                    move |index, _, cx| {
+                        let Ok(()) = weak.update(cx, |this, cx| {
+                            this.set_tab(PurchaseTab::from_index(index), cx);
+                        }) else {
+                            // 对话框已释放，结束这次回调。
+                            return;
+                        };
+                    },
+                    cx,
+                )))
+            })
             .child(list)
             .when(ready && !visible.is_empty(), |this| {
                 this.child(

@@ -218,6 +218,10 @@ export const METHOD = {
   AGENT_PLATFORM_SET_FILE_ASSOCIATION: 'agent.platform.setFileAssociation',
   AGENT_PLATFORM_SET_URL_PROTOCOL: 'agent.platform.setUrlProtocol',
   AGENT_PLATFORM_FILE_ICON: 'agent.platform.fileIcon',
+  /** 桌面应用图标（仅 GPUI 使用）：切换 / 导入、读取自定义图标、为现有窗口补设图标。 */
+  AGENT_PLATFORM_SET_APP_ICON: 'agent.platform.setAppIcon',
+  AGENT_PLATFORM_APP_ICON_IMAGE: 'agent.platform.appIconImage',
+  AGENT_PLATFORM_SYNC_WINDOW_ICONS: 'agent.platform.syncWindowIcons',
   AGENT_SOUND_PREVIEW: 'agent.sound.preview',
   AGENT_CAPTURE_SUBMIT: 'agent.capture.submit',
   AGENT_CAPTURE_SUBMIT_TORRENT_FILE: 'agent.capture.submitTorrentFile',

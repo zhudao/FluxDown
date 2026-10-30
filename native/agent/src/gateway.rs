@@ -733,6 +733,19 @@ impl GatewayService {
                     png: base64::engine::general_purpose::STANDARD.encode(png),
                 })
             }
+            method::AGENT_PLATFORM_SET_APP_ICON => {
+                let params = parse_params::<fluxdown_protocol::app_icon::PlatformSetAppIconParams>(
+                    request.params,
+                )?;
+                self.platform_set_app_icon(params).await
+            }
+            method::AGENT_PLATFORM_APP_ICON_IMAGE => {
+                let params = parse_params::<fluxdown_protocol::app_icon::PlatformAppIconImageParams>(
+                    request.params,
+                )?;
+                self.platform_app_icon_image(params).await
+            }
+            method::AGENT_PLATFORM_SYNC_WINDOW_ICONS => self.platform_sync_window_icons().await,
             method::AGENT_SOUND_PREVIEW => {
                 let params =
                     parse_params::<fluxdown_protocol::sound::SoundPreviewParams>(request.params)?;
@@ -1495,6 +1508,97 @@ impl GatewayService {
         platform_blocking(move || crate::platform::copy_task_files(&tasks))
             .await
             .map(|()| serde_json::json!({ "ok": true }))
+    }
+
+    /// 导入 / 校验应用图标图片，再写设备本地偏好 `desktop.app_icon`（偏好永远指向已落盘的图片）；
+    /// 之后由 `app_icon` 服务按偏好变化落实托盘、窗口、快捷方式。偏好已是目标值时不写。
+    #[cfg(feature = "desktop")]
+    async fn platform_set_app_icon(
+        &self,
+        params: fluxdown_protocol::app_icon::PlatformSetAppIconParams,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        use fluxdown_protocol::app_icon::{APP_ICON_PREF_KEY, AppIconStateDto};
+
+        // 导入与写偏好对 `app_icon` 服务的「回落默认」互斥（见 `app_icon::preference_lock`）。
+        let _guard = crate::app_icon::preference_lock().await;
+        let store = crate::app_icon::IconStore::new(self.store.data_dir());
+        let choice =
+            platform_blocking(move || crate::app_icon::resolve_request(&store, &params)).await?;
+        let value = choice.to_preference();
+        let unchanged = self.events.inspect(|snapshot| {
+            snapshot
+                .preferences
+                .values
+                .get(APP_ICON_PREF_KEY)
+                .and_then(serde_json::Value::as_str)
+                == Some(value.as_str())
+        });
+        if !unchanged {
+            self.sync
+                .set_local_preference(
+                    APP_ICON_PREF_KEY.to_owned(),
+                    serde_json::Value::String(value.clone()),
+                    false,
+                )
+                .await
+                .map_err(sync_error_data)?;
+        }
+        to_value(AppIconStateDto { value })
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    async fn platform_set_app_icon(
+        &self,
+        _params: fluxdown_protocol::app_icon::PlatformSetAppIconParams,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        Err(platform_error_data(PlatformError::Unsupported(
+            "app icons require the desktop build",
+        )))
+    }
+
+    /// 当前自定义应用图标母版缩放后的 PNG（设置页预览 / GPUI 贴图用）。
+    #[cfg(feature = "desktop")]
+    async fn platform_app_icon_image(
+        &self,
+        params: fluxdown_protocol::app_icon::PlatformAppIconImageParams,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        let store = crate::app_icon::IconStore::new(self.store.data_dir());
+        platform_blocking(move || crate::app_icon::icon_image(&store, params.size))
+            .await
+            .and_then(to_value)
+    }
+
+    #[cfg(not(feature = "desktop"))]
+    async fn platform_app_icon_image(
+        &self,
+        _params: fluxdown_protocol::app_icon::PlatformAppIconImageParams,
+    ) -> Result<serde_json::Value, RpcErrorData> {
+        Err(platform_error_data(PlatformError::Unsupported(
+            "app icons require the desktop build",
+        )))
+    }
+
+    /// 给桌面进程现有窗口补设当前图标（Windows / X11；其余平台无操作）。只做窗口这一步，
+    /// 托盘 / 快捷方式 / 通知由偏好变化触发。
+    #[cfg(feature = "desktop")]
+    async fn platform_sync_window_icons(&self) -> Result<serde_json::Value, RpcErrorData> {
+        use fluxdown_protocol::app_icon::{APP_ICON_PREF_KEY, AppIconChoice};
+
+        let store = crate::app_icon::IconStore::new(self.store.data_dir());
+        let stored = self
+            .events
+            .inspect(|snapshot| snapshot.preferences.values.get(APP_ICON_PREF_KEY).cloned());
+        let choice = AppIconChoice::from_preference(stored.as_ref());
+        platform_blocking(move || crate::app_icon::sync_window_icons(&store, &choice))
+            .await
+            .map(|()| serde_json::json!({ "ok": true }))
+    }
+
+    /// headless 构建没有桌面进程窗口可补设：与「其余平台无操作」一致，直接成功。
+    #[cfg(not(feature = "desktop"))]
+    #[allow(clippy::unused_async, reason = "与桌面构建的处理器签名一致")]
+    async fn platform_sync_window_icons(&self) -> Result<serde_json::Value, RpcErrorData> {
+        Ok(serde_json::json!({ "ok": true }))
     }
 
     async fn ui_connected(&self) {
@@ -2357,7 +2461,11 @@ fn lane_for(method_name: &str) -> Lane {
     if method_name == method::AGENT_CAPTURE_CREATE_GROUP {
         return Lane::Daemon;
     }
-    if method_name == fluxdown_protocol::method::AGENT_PLATFORM_FILE_ICON {
+    if matches!(
+        method_name,
+        fluxdown_protocol::method::AGENT_PLATFORM_FILE_ICON
+            | fluxdown_protocol::method::AGENT_PLATFORM_APP_ICON_IMAGE
+    ) {
         return Lane::Icon;
     }
     const CLOUD_PREFIXES: [&str; 10] = [

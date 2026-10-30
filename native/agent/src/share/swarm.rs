@@ -721,6 +721,10 @@ impl ShareService {
 
     /// 向云端登记本机持有的内容并撤销已不提供的；结果决定下一次登记的时刻。
     pub(super) async fn announce(&self) {
+        if !self.is_enabled() {
+            self.with(|i| i.announce_at = None);
+            return;
+        }
         self.persist_daily().await;
         if self.with(|i| i.swarm_unsupported) {
             self.with(|i| i.announce_at = None);

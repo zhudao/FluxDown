@@ -4,8 +4,8 @@ use std::ops::Range;
 
 use fluxdown_protocol::{ShareDto, ShareStatus};
 use fluxdown_ui_components::{
-    ButtonVariant, ControlExt as _, DialogIntent, FluxIcon, IconControlExt as _, icon_button,
-    tabular_numbers,
+    BusyExt as _, ButtonVariant, ControlExt as _, DialogIntent, FluxIcon, IconControlExt as _,
+    icon_button, loading_icon_button, tabular_numbers,
 };
 use fluxdown_ui_i18n::Translator;
 use fluxdown_ui_theme::active_theme;
@@ -154,7 +154,13 @@ impl ShareView {
     ) {
         let ids: Vec<String> = ids
             .into_iter()
-            .filter(|id| self.busy.insert(id.clone()))
+            .filter(|id| match self.busy.entry(id.clone()) {
+                std::collections::hash_map::Entry::Occupied(_) => false,
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(action);
+                    true
+                }
+            })
             .collect();
         if ids.is_empty() {
             return;
@@ -240,6 +246,13 @@ impl ShareView {
             .collect()
     }
 
+    /// 选中项里是否有正由 `action` 处理的分享：批量按钮据此转圈。
+    fn batch_busy(&self, action: ShareAction) -> bool {
+        self.selected
+            .iter()
+            .any(|id| self.busy.get(id) == Some(&action))
+    }
+
     /// 批量操作条：已选数量 + 开始 / 停止 / 删除。
     fn render_batch_bar(&self, translator: &Translator, cx: &mut Context<Self>) -> Div {
         let tokens = active_theme(cx).tokens().clone();
@@ -270,7 +283,8 @@ impl ShareView {
                     .icon(FluxIcon::Play)
                     .label(text(translator, "shareBatchStart"))
                     .control(cx)
-                    .disabled(!actions.start || stale)
+                    .busy(self.batch_busy(ShareAction::Start))
+                    .disabled(!actions.start || stale || self.batch_busy(ShareAction::Start))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let ids = this.batch_targets(ShareAction::Start, cx);
                         this.run_action(ShareAction::Start, ids, window, cx);
@@ -282,7 +296,8 @@ impl ShareView {
                     .icon(FluxIcon::X)
                     .label(text(translator, "shareBatchStop"))
                     .control(cx)
-                    .disabled(!actions.stop || stale)
+                    .busy(self.batch_busy(ShareAction::Stop))
+                    .disabled(!actions.stop || stale || self.batch_busy(ShareAction::Stop))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let ids = this.batch_targets(ShareAction::Stop, cx);
                         this.run_action(ShareAction::Stop, ids, window, cx);
@@ -294,7 +309,8 @@ impl ShareView {
                     .icon(FluxIcon::Trash2)
                     .label(text(translator, "shareBatchDelete"))
                     .control(cx)
-                    .disabled(!actions.delete || stale)
+                    .busy(self.batch_busy(ShareAction::Delete))
+                    .disabled(!actions.delete || stale || self.batch_busy(ShareAction::Delete))
                     .on_click(cx.listener(|this, _, window, cx| {
                         let ids = this.batch_targets(ShareAction::Delete, cx);
                         this.confirm_delete(ids, window, cx);
@@ -382,7 +398,8 @@ impl ShareView {
         let cols = columns(cx);
         let stale = self.hub.read(cx).is_stale();
         let editable = is_editable(&share);
-        let busy = self.busy.contains(&share.id);
+        let busy = self.busy.contains_key(&share.id);
+        let busy_action = self.busy.get(&share.id).copied();
         let selecting = !self.selected.is_empty();
         let checked = self.selected.contains(&share.id);
         let headline = or_placeholder(share_headline(&share));
@@ -455,13 +472,14 @@ impl ShareView {
 
         // 有效分享 = 停止；其余 = 删除。
         let stop_or_delete = if editable {
-            icon_button(
+            loading_icon_button(
                 row_id("stop"),
                 stop_label.clone(),
                 Icon::new(FluxIcon::X)
                     .size(icon_size)
                     .text_color(colors.destructive),
                 ButtonVariant::Ghost,
+                busy_action == Some(ShareAction::Stop),
                 cx,
             )
             .tooltip(tooltip_builder(stop_label))
@@ -471,13 +489,14 @@ impl ShareView {
                 this.confirm_stop(stop_id.clone(), window, cx);
             }))
         } else {
-            icon_button(
+            loading_icon_button(
                 row_id("delete"),
                 delete_label.clone(),
                 Icon::new(FluxIcon::Trash2)
                     .size(icon_size)
                     .text_color(colors.destructive),
                 ButtonVariant::Ghost,
+                busy_action == Some(ShareAction::Delete),
                 cx,
             )
             .tooltip(tooltip_builder(delete_label))

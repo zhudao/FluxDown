@@ -3,16 +3,18 @@
  * 下载源优先级：123 云盘直链（仅应用内更新）→ dl-cn 镜像（中国大陆访客）→ GitHub。
  * 两个镜像都不能回退 GitHub，302 前必须确认镜像有该资产且大小与 GitHub 资产一致。
  * 镜像只发给像正常客户端的请求（24 小时内读过发布清单、非脚本 User-Agent，见 download-gate.ts）；
- * 大陆按 Cloudflare 判定的访客国家（X-Client-Country = CN，见 client-ip.ts）判定。
+ * 浏览器等非更新器请求还须带验证码通行证 Cookie（ESA AI 验证码换取，见 download-pass.ts / pass.ts）。
+ * 大陆按边缘（阿里云 ESA）判定的访客国家（X-Client-Country = CN，见 client-ip.ts）判定。
  * 123 另外要求（不分地区）：≥ 0.6.0 更新器 User-Agent（isPan123Updater）、资产在当前更新清单里
  * （isUpdateAsset）、该 IP 未超签发配额（hasPan123Quota）；官网浏览器下载不走 123。
  * source=github：仅 GitHub；source=oss：大陆准入访客在镜像都不可用时返回 503，其余同 auto。
  */
 import type { APIRoute } from "astro";
-import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
+import { DOWNLOAD_PASS_SECRET, GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 import { getCached, setCached } from "@/lib/api-cache";
 import { getClientCountry, getClientIp } from "@/lib/client-ip";
 import { recordDownload } from "@/lib/download-ban";
+import { readDownloadPass, verifyDownloadPass } from "@/lib/download-pass";
 import { hasPan123Quota, isPan123Updater, isUpdateAsset, mayUseMirror, recordPan123Link } from "@/lib/download-gate";
 import { cdnConfigured, cdnDownloadUrl, ossConfigured, presignOssHeadUrl, releaseObjectKey } from "@/lib/oss";
 import { DownloadLookupCache } from "@/lib/download-cache";
@@ -122,7 +124,8 @@ export const GET: APIRoute = async ({ params, url, request, clientAddress }) => 
     });
   }
   const userAgent = request.headers.get("user-agent");
-  const admitted = source !== "github" && mayUseMirror(ip, userAgent);
+  const hasPass = !DOWNLOAD_PASS_SECRET || verifyDownloadPass(DOWNLOAD_PASS_SECRET, readDownloadPass(request), ip);
+  const admitted = source !== "github" && mayUseMirror(ip, userAgent, hasPass);
   const wantsMirror = admitted && getClientCountry(request) === "CN";
   const wantsPan123 = admitted && isPan123Updater(userAgent);
 

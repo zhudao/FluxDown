@@ -17,6 +17,9 @@ globs:
   - '**/mobile/FluxDown/FluxKit/Sources/FluxDomain/Protocol/Devices.swift'
   - '**/mobile/FluxDown/FluxDown/Features/Downloads/DownloadsModel.swift'
   - '**/mobile/FluxDown/FluxDown/Actions/TaskMenu.swift'
+  - '**/fluxDown/utils/android-intent{,.test}.ts'
+  - '**/mobile/Android/app/src/main/java/com/fluxdown/app/ExternalDownloadActivity.kt'
+  - '**/mobile/Android/core/src/main/java/com/fluxdown/core/capture/ExternalDownload.kt'
 interruptMode: never
 ---
 
@@ -73,3 +76,7 @@ interruptMode: never
 ## 文件跟踪重扫节流（`crates/downloads/src/model/file_rescan.rs::RescanThrottle`）
 
 → `web/src/lib/rescanThrottle.ts`（`RescanThrottle`）：逐条对齐 10s 冷却 / 尾沿排队 / 合并 / 尾沿后重计冷却；测试复用同组用例（`rescanThrottle.test.ts`）
+
+## 扩展 → Android App 的外部唤起载荷（`fluxDown/utils/android-intent.ts`：包名 `ANDROID_PACKAGE`、extra 键 `ANDROID_EXTRA`、Intent URI 编码；`fluxdown://download?url=&filename=&cookies=&referrer=&headers=` 协议参数同理）
+
+→ `mobile/Android/app/.../ExternalDownloadActivity.kt`（`EXTRA_*` 常量）+ `mobile/Android/core/.../capture/ExternalDownload.kt::ExternalIntake.fromView`：键名逐字一致，两侧测试（`android-intent.test.ts` / `ExternalDownloadTest`）都跑；改包名同步 `mobile/Android/app/build.gradle.kts::applicationId`

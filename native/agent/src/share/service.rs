@@ -6,6 +6,10 @@
 //! 空闲静默：端点只在存在有效分享或进行中的接收任务时绑定；没有任何周期性定时器——
 //! 仅有「最近到期时刻」的单次睡眠（且只在有有效分享时存在）与传输期间的一次性打洞提示计时。
 //! 传输进度只在内存里、经 `ShareProgress` 事件下发，不写盘。
+//!
+//! 实验性开关（`ShareLocalConfigDto.enabled`，默认关）：关闭期间事件循环只等开启——不访问 FluxCloud、
+//! 不绑定端点、不登记 / 上报，云端推来的FluxMesh事件直接丢弃；开启后按启动流程恢复，再次关闭时收掉
+//! 端点 / 适配器 / 会话 / 上传并丢弃运行期状态（持久化的分享表、接收记录与共享状态原样保留）。
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -273,6 +277,8 @@ impl ShareService {
     // ───────────── 事件循环 ─────────────
 
     /// 事件循环：会话事件、daemon 任务事件、云端 SSE FluxMesh事件、到期计时；取消即结束。
+    ///
+    /// 本机开关关闭（默认）期间只等开启：会话事件与云端事件直接丢弃，不订阅任务事件、不访问网络。
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
         if self.started.swap(true, Ordering::SeqCst) {
             return;
@@ -293,14 +299,53 @@ impl ShareService {
         else {
             return;
         };
+        let mut cloud_open = true;
+        // 先发布一次：快照里要有本机设置（含开关），UI 以它为底稿整体提交。
+        self.publish().await;
+        loop {
+            while !self.is_enabled() {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    () = self.wake.notified() => {}
+                    event = session_rx.recv() => if event.is_none() {
+                        return;
+                    },
+                    event = cloud_rx.recv(), if cloud_open => cloud_open = event.is_some(),
+                }
+            }
+            let disabled = self
+                .run_enabled(&mut session_rx, &mut cloud_rx, &mut cloud_open, &cancel)
+                .await;
+            if !disabled {
+                self.shutdown_runtime().await;
+                return;
+            }
+            self.deactivate().await;
+        }
+    }
+
+    /// 本机开关是否开启（`ShareLocalConfigDto.enabled`）。
+    pub(super) fn is_enabled(&self) -> bool {
+        self.with(|i| i.local.enabled)
+    }
+
+    /// 开启期间的事件循环。开关被关闭返回 `true`；取消或通道关闭返回 `false`。
+    async fn run_enabled(
+        self: &Arc<Self>,
+        session_rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+        cloud_rx: &mut mpsc::UnboundedReceiver<Value>,
+        cloud_open: &mut bool,
+        cancel: &CancellationToken,
+    ) -> bool {
         let mut frames = self.events.subscribe();
+        let poster_cancel = cancel.child_token();
         let poster = tokio::spawn(telemetry::post_loop(
             self.telemetry.clone(),
             self.cloud.clone(),
             self.weak.clone(),
-            cancel.child_token(),
+            poster_cancel.clone(),
         ));
-        // 启动检查只针对上次运行留下的分享：之后新建的分享不属于「重启恢复」。
+        // 启动检查只针对上次运行（或上次关闭前）留下的分享：之后新建的分享不属于「重启恢复」。
         let persisted: Vec<String> = self.with(|i| {
             i.shares
                 .iter()
@@ -309,11 +354,14 @@ impl ShareService {
                 .collect()
         });
         self.initial_sync(&persisted).await;
-        loop {
+        let disabled = loop {
+            if !self.is_enabled() {
+                break true;
+            }
             let deadline = self.next_expiry_delay();
             let announce_deadline = self.next_announce_delay();
             tokio::select! {
-                () = cancel.cancelled() => break,
+                () = cancel.cancelled() => break false,
                 () = self.wake.notified() => {}
                 () = async {
                     match deadline {
@@ -329,28 +377,58 @@ impl ShareService {
                 } => self.announce().await,
                 event = session_rx.recv() => match event {
                     Some(event) => self.handle_session_event(event).await,
-                    None => break,
+                    None => break false,
                 },
-                event = cloud_rx.recv() => {
-                    if let Some(event) = event {
-                        self.handle_cloud_event(&event).await;
-                    }
-                }
+                event = cloud_rx.recv(), if *cloud_open => match event {
+                    Some(event) => self.handle_cloud_event(&event).await,
+                    None => *cloud_open = false,
+                },
                 frame = frames.recv() => match frame {
                     Ok(frame) => self.handle_frame(frame.event).await,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         self.reconcile_tasks().await;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break false,
                 },
             }
-        }
-        self.shutdown_runtime().await;
+        };
+        poster_cancel.cancel();
         if let Err(error) = poster.await
             && !error.is_cancelled()
         {
             tracing::error!(error = %error, "share telemetry task panicked");
         }
+        disabled
+    }
+
+    /// 开关被关闭：收掉端点 / 适配器 / 会话 / 上传，丢弃全部运行期状态（含云端策略缓存、待确认接收、
+    /// 额度）。分享表、接收记录与共享状态的持久化文件原样保留，再次开启时按启动流程恢复（与重启等价）。
+    async fn deactivate(&self) {
+        self.shutdown_runtime().await;
+        self.with(|i| {
+            i.config = None;
+            i.endpoint_dirty = false;
+            i.registered_for = None;
+            i.resolves.clear();
+            i.pending_receive = None;
+            i.receive_tasks.clear();
+            i.dirty_records.clear();
+            i.sessions.clear();
+            i.net = ShareNetStatusDto::default();
+            i.hashing.clear();
+            i.keys_fetched = None;
+            i.uploads.clear();
+            i.guest_session = None;
+            i.announce_at = None;
+            i.swarm_unsupported = false;
+            i.swarm_blocks.clear();
+            i.swarm_login_waiting.clear();
+            i.usage = None;
+            i.usage_error = None;
+            i.usage_fetched_at = None;
+        });
+        self.sync_content();
+        self.publish().await;
     }
 
     /// 启动时的一次性同步：载入云端策略、重新登记仍有效的分享。没有本机分享时不做任何网络请求之外的事。

@@ -9,6 +9,7 @@ const zhTW = {
   "header.languageSwitch": "切換至 {language}",
   "header.checking": "偵測中...",
   "header.connected": "已連線",
+  "header.androidHandoff": "交給 FluxDown App",
   "header.disconnected": "未連線",
 
   // Main switch
@@ -147,6 +148,8 @@ const zhTW = {
   "notify.batchSentDetail": "{count} 個任務已傳送到 FluxDown",
   "notify.sendFailed": "傳送失敗",
   "notify.connectionFailed": "無法連線至 FluxDown 應用程式：{message}",
+  "notify.androidUnsupported": "此下載無法交給 FluxDown Android 應用程式（影音分軌、表單提交與 FTP 連結需要桌面或遠端通道）",
+  "notify.androidHandoffFailed": "瀏覽器拒絕啟動 FluxDown Android 應用程式",
   "notify.fallbackBrowser": "已改用瀏覽器下載",
   "notify.fallbackBrowserDetail":
     "無法傳送到 FluxDown，已交由瀏覽器繼續下載：{url}",
@@ -339,7 +342,7 @@ const zhTW = {
   "options.protocol.label": "FluxDown 自訂通訊協定",
   "options.protocol.enabled": "已啟用，透過 fluxdown:// 啟動應用程式",
   "options.protocol.disabled": "關閉（預設）",
-  "options.protocol.desc": "透過 fluxdown:// 通訊協定啟動應用程式進行下載，Windows / macOS / Linux / Android 均支援。本機通道的功能較完整，建議僅在無法使用本機通道時開啟",
+  "options.protocol.desc": "透過 fluxdown:// 通訊協定啟動應用程式進行下載，Windows / macOS / Linux 均支援（Android 版瀏覽器會自動把下載交給 FluxDown 應用程式，無需開啟）。本機通道的功能較完整，建議僅在無法使用本機通道時開啟",
 
   // 任务完成通知（任务面板）
   "notify.taskCompletedTitle": "下載完成",

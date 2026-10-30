@@ -1068,7 +1068,6 @@
   "appIconBolt": "闪电",
   "appIconChooseImage": "选择图片…",
   "appIconApplyFailed": "设置应用图标失败",
-  "appIconZoomHint": "滚轮缩放",
   "themeDefaultDark": "默认深色",
   "themeDefaultLight": "默认亮色",
   "themeMidnightBlue": "午夜蓝",
@@ -2750,7 +2749,7 @@
   "linkDispatchedToDevice": "已发送到 {device}，下载进度请在该设备上查看",
   "errReasonPeerOutdated": "对方 FluxDown 版本过旧，直连协议不兼容，请把两台设备都升级到最新版本",
   "errReasonLinkUnavailable": "本机直连服务未启动，请重启 FluxDown 后重试",
-  "errReasonShareUnavailable": "FluxMesh 当前不可用：服务端已关闭该功能，或当前版本未包含",
+  "errReasonShareUnavailable": "FluxMesh 当前不可用：未在「设置 › FluxMesh」中开启、服务端已关闭该功能，或当前版本未包含",
   "errReasonShareNotFound": "没有找到对应的分享，请检查取件码或链接后重试",
   "errReasonShareExpired": "该分享已过期",
   "errReasonShareStopped": "分享方已停止该分享",
@@ -3655,7 +3654,7 @@
   "shareNewDownloadLink": "检测到 FluxMesh 分享链接。点击「接收」后先确认文件，再开始下载。",
   "shareNewDownloadMixed": "检测到 FluxMesh 分享链接：它会打开接收确认，其余链接照常下载。",
   "shareNewDownloadMultiple": "检测到 {count} 个分享链接，会逐个接收，先处理第一个。",
-  "shareNewDownloadUnavailable": "FluxMesh 当前不可用，无法在这里接收分享链接。",
+  "shareNewDownloadUnavailable": "FluxMesh 未开启或当前不可用，无法在这里接收分享链接。可在「设置 › FluxMesh」中开启。",
   "shareNewDownloadCode": "检测到 FluxMesh 取件码。点击「接收」后先确认文件，再开始下载。",
   "shareReceivedFrom": "来自 {name}",
   "shareProvidingBadge": "共享中",
@@ -3820,5 +3819,7 @@
   "shareSetErrRate": "请输入不小于 0 的数字（最大 1,048,576 MB/s）。",
   "shareSetUnavailable": "FluxMesh 暂时不可用。",
   "shareSetStale": "与本机服务的连接已断开，重新连接前无法修改设置。",
-  "shareSetPortAuto": "自动"
+  "shareSetPortAuto": "自动",
+  "shareSetEnabled": "启用 FluxMesh（实验性）",
+  "shareSetEnabledDesc": "开启后可用取件码 / 链接点对点分享与接收文件。"
 }

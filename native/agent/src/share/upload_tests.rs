@@ -470,7 +470,10 @@ async fn start_node(base: &str, dir: &Path, logged_in: bool, timing: Timing) -> 
     })
     .await
     .unwrap();
-    service.with(|i| i.upload_timing = timing);
+    service.with(|i| {
+        i.upload_timing = timing;
+        i.local.enabled = true;
+    });
     let cancel = CancellationToken::new();
     tokio::spawn(service.clone().run(cancel.clone()));
     Node {

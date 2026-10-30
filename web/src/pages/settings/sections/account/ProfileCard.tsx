@@ -10,7 +10,7 @@ import type { AgentSessionDto } from '../../../../lib/rpc'
 import { Button, Card, CheckRow, ConfirmFooter, Dialog, FieldError, FieldHint, Form, FormField, Icon, Input, Switch, Tooltip, toast } from '../../../../ui'
 import { setPref, usePrefBoolean } from '../../kit'
 import { SHOW_REFERRAL_PREF } from '../referral/pref'
-import { localDate } from './billing'
+import { localDate, packPlans } from './billing'
 import { accountErrorKey } from './errorText'
 import { PlanBadge } from './PlanBadge'
 import { PlanDialog } from './PlanDialog'
@@ -164,6 +164,21 @@ export function ProfileCard({ session, disabled }: { session: AgentSessionDto; d
     return () => window.clearTimeout(timer)
   }, [copied])
 
+  // 云端是否上架了可购买的流量包；没有时隐藏「流量包」按钮（加载前 / 失败按无处理）。
+  const [packsAvailable, setPacksAvailable] = useState(false)
+  const [catalogVersion, setCatalogVersion] = useState(0)
+  useEffect(() => {
+    let alive = true
+    void rpc.agent.plan.list().then(
+      (catalog) => { if (alive) setPacksAvailable(packPlans(catalog).length > 0) },
+      (error: unknown) => {
+        console.warn('[plan] plan.list for pack button failed', error)
+        if (alive) setPacksAvailable(false)
+      },
+    )
+    return () => { alive = false }
+  }, [session.user.id, catalogVersion])
+
   const name = displayName(session)
   const initial = [...name.trim()][0]?.toUpperCase()
   const originId = session.user.originId
@@ -172,6 +187,7 @@ export function ProfileCard({ session, disabled }: { session: AgentSessionDto; d
     if (refreshing) return
     setRefreshing(true)
     setErrorKey(null)
+    setCatalogVersion((value) => value + 1)
     try {
       await rpc.agent.auth.refreshProfile()
       await rpc.agent.device.list()
@@ -256,10 +272,12 @@ export function ProfileCard({ session, disabled }: { session: AgentSessionDto; d
             {t('accountSubscriptionUntil', { date: localDate(session.activeSubscription.endsAt) ?? '' })}
           </span>
         ) : null}
-        <Button className="ml-auto" disabled={disabled} onClick={() => setPlanOpen('packs')}>
-          {t('accountPackBuy')}
-        </Button>
-        <Button variant="primary" disabled={disabled} onClick={() => setPlanOpen('membership')}>
+        {packsAvailable ? (
+          <Button className="ml-auto" disabled={disabled} onClick={() => setPlanOpen('packs')}>
+            {t('accountPackBuy')}
+          </Button>
+        ) : null}
+        <Button variant="primary" className={packsAvailable ? undefined : 'ml-auto'} disabled={disabled} onClick={() => setPlanOpen('membership')}>
           {t('accountPlanUpgrade')}
         </Button>
       </div>

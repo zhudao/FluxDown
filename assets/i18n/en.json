@@ -1068,7 +1068,6 @@
   "appIconBolt": "Bolt",
   "appIconChooseImage": "Choose Image…",
   "appIconApplyFailed": "Failed to set app icon",
-  "appIconZoomHint": "Scroll to zoom",
   "themeDefaultDark": "Default Dark",
   "themeDefaultLight": "Default Light",
   "themeMidnightBlue": "Midnight Blue",
@@ -2750,7 +2749,7 @@
   "linkDispatchedToDevice": "Sent to {device}. Check download progress on that device.",
   "errReasonPeerOutdated": "The other device runs an older FluxDown with an incompatible direct-link protocol. Update both devices to the latest version.",
   "errReasonLinkUnavailable": "Direct linking isn't running on this device. Restart FluxDown and try again.",
-  "errReasonShareUnavailable": "FluxMesh isn't available right now. It may be turned off on the server or not included in this version.",
+  "errReasonShareUnavailable": "FluxMesh isn't available right now. It may be turned off in Settings › FluxMesh or on the server, or not included in this version.",
   "errReasonShareNotFound": "No share matches this pickup code or link. Check it and try again.",
   "errReasonShareExpired": "This share has expired.",
   "errReasonShareStopped": "The sender has stopped this share.",
@@ -3655,7 +3654,7 @@
   "shareNewDownloadLink": "FluxMesh share link detected. Choose Receive to review the files before downloading.",
   "shareNewDownloadMixed": "FluxMesh share link detected. It opens the receive confirmation; the other links download normally.",
   "shareNewDownloadMultiple": "{count} share links found. They are received one at a time, starting with the first.",
-  "shareNewDownloadUnavailable": "FluxMesh is unavailable, so share links can't be received here.",
+  "shareNewDownloadUnavailable": "FluxMesh is off or unavailable, so share links can't be received here. Turn it on in Settings › FluxMesh.",
   "shareNewDownloadCode": "FluxMesh pickup code detected. Choose Receive to review the files before downloading.",
   "shareReceivedFrom": "From {name}",
   "shareProvidingBadge": "Swarm-sharing",
@@ -3820,5 +3819,7 @@
   "shareSetErrRate": "Enter a number of 0 or more (up to 1,048,576 MB/s).",
   "shareSetUnavailable": "FluxMesh isn't available right now.",
   "shareSetStale": "Disconnected from the local service. Settings can't be changed until it reconnects.",
-  "shareSetPortAuto": "Automatic"
+  "shareSetPortAuto": "Automatic",
+  "shareSetEnabled": "Enable FluxMesh (experimental)",
+  "shareSetEnabledDesc": "Share and receive files peer-to-peer with pickup codes and links."
 }
