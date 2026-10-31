@@ -5,7 +5,10 @@ import { Button, Icon, SegmentedTabs, Tooltip } from '../../../ui'
 import { usePluginDetailTabs } from '../../plugins/usePluginContributions'
 import { PluginViewHost } from '../../plugins/view/PluginViewHost'
 import { useDownloads } from '../state'
+import { isSeeding } from '../model/task'
 import { AdvancedTab } from './AdvancedTab'
+import { BtPeersTab } from './BtPeersTab'
+import { BtTrackersTab } from './BtTrackersTab'
 import { GeneralTab } from './GeneralTab'
 import { LogTab } from './LogTab'
 import { SeedingTab } from './SeedingTab'
@@ -27,12 +30,22 @@ function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | '
   const pluginTab = pluginTabs.find((item) => item.value === tab)
   // 插件 tab 随插件卸载 / 禁用消失时回到常规；seeding 仅 BT 任务有；传输诊断仅FluxMesh接收任务有。
   const active: DetailTab =
-    (tab === 'seeding' && !isBt) || (tab === 'shareDiag' && !hasShareDiagnostics) || (tab.startsWith('plugin:') && !pluginTab) ? 'general' : tab
+    ((tab === 'seeding' || tab === 'trackers' || tab === 'peers') && !isBt) ||
+    (tab === 'shareDiag' && !hasShareDiagnostics) ||
+    (tab.startsWith('plugin:') && !pluginTab)
+      ? 'general'
+      : tab
   const speedHistory = useSpeedHistory(view.taskId, view.state === 'downloading', active === 'speed')
   const items = [
     { value: 'general' as const, label: t('detailTabGeneral') },
     { value: 'speed' as const, label: t('detailTabSpeed') },
     ...(isBt ? [{ value: 'seeding' as const, label: t('tabSeeding') }] : []),
+    ...(isBt
+      ? [
+          { value: 'trackers' as const, label: t('btTabTrackers') },
+          { value: 'peers' as const, label: t('btTabPeers') },
+        ]
+      : []),
     ...(hasShareDiagnostics ? [{ value: 'shareDiag' as const, label: t('detailTabShareDiagnostics') }] : []),
     { value: 'log' as const, label: t('detailTabLog') },
     { value: 'advanced' as const, label: t('detailTabAdvanced') },
@@ -48,6 +61,8 @@ function TaskDetail({ view, mode }: { view: DownloadTaskView; mode: 'docked' | '
         {active === 'general' ? <GeneralTab view={view} /> : null}
         {active === 'speed' ? <SpeedTab view={view} history={speedHistory} /> : null}
         {active === 'seeding' ? <SeedingTab view={view} /> : null}
+        {active === 'trackers' ? <BtTrackersTab taskId={view.taskId} /> : null}
+        {active === 'peers' ? <BtPeersTab taskId={view.taskId} state={view.state} seeding={isSeeding(view)} /> : null}
         {active === 'shareDiag' ? <TransferDiagnosticsTab taskId={view.taskId} taskState={view.state} /> : null}
         {active === 'log' ? <LogTab taskId={view.taskId} /> : null}
         {active === 'advanced' ? <AdvancedTab view={view} /> : null}

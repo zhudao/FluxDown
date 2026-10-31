@@ -8,6 +8,7 @@ mod batch;
 mod components;
 mod controller;
 mod deletion;
+mod flags;
 mod model;
 mod pages;
 mod strings;
@@ -20,8 +21,9 @@ pub use components::title_bar::{
 pub use controller::{
     DownloadsCommand, DownloadsController, DownloadsPort, DownloadsResult,
     LAST_DOWNLOAD_TARGET_PREF, LAST_SAVE_DIR_PREF, PortFuture, QueueFields,
-    REMEMBER_LAST_SAVE_DIR_PREF, SeedLimits,
+    REMEMBER_LAST_SAVE_DIR_PREF, SeedLimits, TorrentShare,
 };
+pub use flags::{FlagAssets, flag_asset_path, flag_codes};
 pub use model::devices::{DeviceEntry, DeviceKind, DispatchTarget};
 pub use model::progress_window::{
     COMPLETION_WINDOW_PREF, MAX_TRACKED_WINDOW_TASKS, MainWindowState, PROGRESS_WINDOW_PREF,

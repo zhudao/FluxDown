@@ -174,6 +174,12 @@ fn commands(labels: &Labels, cx: &App) -> Vec<PaletteItem> {
             FluxIcon::Magnet,
             |_, cx| run_in_downloads(cx, PageCommand::OpenTorrentFile),
         ),
+        labels.command(
+            "cmd.seed_local",
+            "seedLocalTitle",
+            FluxIcon::HardDrive,
+            |_, cx| run_in_downloads(cx, PageCommand::SeedLocal),
+        ),
         labels
             .command("cmd.pause_all", "pauseAll", FluxIcon::Pause, |_, cx| {
                 run_in_downloads(cx, PageCommand::PauseAll);

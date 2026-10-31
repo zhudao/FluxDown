@@ -35,8 +35,9 @@ use gpui_component::{
 
 /// 行内文本输入框宽度档位。
 pub(crate) const INPUT_WIDTH: f32 = 240.;
-/// 行内数字输入框宽度档位：与下拉最小宽同档，同页数字与下拉右侧对齐、宽度一致。
-pub(crate) const NUMBER_WIDTH: f32 = DROPDOWN_MIN_WIDTH;
+/// 行内数字输入框宽度档位：数字框只放得下 5~6 位数字，比下拉窄；旁边的物理量单位
+/// （固定后缀或单位下拉）紧随其后。
+pub(crate) const NUMBER_WIDTH: f32 = 104.;
 /// 行内下拉按钮的最小宽度档位（文案更长时自然撑开）。
 pub(crate) const DROPDOWN_MIN_WIDTH: f32 = 160.;
 /// 数字输入旁单位下拉（KB/s、MB/s…）的固定宽度。

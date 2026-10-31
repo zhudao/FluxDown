@@ -33,7 +33,7 @@ use gpui_component::{
 use crate::{
     components::task_table::{DownloadTableDelegate, DraggedColumnMenuItem},
     model::view_prefs::{
-        DetailPlacement, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey,
+        DetailPlacement, HeaderAlign, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey,
     },
     pages::downloads::DownloadView,
     strings::SEARCH_SHORTCUT_HINT,
@@ -798,6 +798,29 @@ fn display_page(menu: &ViewMenuContext<'_>, style: MenuStyle, cx: &App) -> Vec<A
                     menu_text(menu, key, cx),
                     prefs.density == density,
                     move |cx| update_prefs(&view, move |prefs| prefs.density = density, cx),
+                )
+                .into_any_element(),
+        );
+    }
+    rows.push(style.separator().into_any_element());
+    rows.push(
+        style
+            .section_title(menu_text(menu, "viewSectionHeaderAlign", cx))
+            .into_any_element(),
+    );
+    for (align, key) in [
+        (HeaderAlign::Left, "viewHeaderAlignLeft"),
+        (HeaderAlign::Center, "viewHeaderAlignCenter"),
+        (HeaderAlign::Right, "viewHeaderAlignRight"),
+    ] {
+        let view = menu.view.clone();
+        rows.push(
+            style
+                .option_row(
+                    SharedString::from(format!("download-view-header-align-{align:?}")),
+                    menu_text(menu, key, cx),
+                    prefs.header_align == align,
+                    move |cx| update_prefs(&view, move |prefs| prefs.header_align = align, cx),
                 )
                 .into_any_element(),
         );

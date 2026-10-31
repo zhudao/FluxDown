@@ -15,6 +15,9 @@ pub mod bt_config;
 /// BitTorrent 会话与下载实现（librqbit）。仅 `bt` feature 下编译。
 #[cfg(feature = "bt")]
 pub mod bt_downloader;
+/// 本机文件做种：为磁盘上已有的文件 / 文件夹生成或匹配种子并登记为做种任务。
+#[cfg(feature = "bt")]
+pub mod bt_local_seed;
 /// BT 部分选择做种的 parts 边车（选中文件路径映射 + 跨文件边界字节）。
 #[cfg(feature = "bt")]
 pub mod bt_partfile;
@@ -23,6 +26,9 @@ pub mod bt_seeding;
 /// 存储包装仅 `bt` feature 下编译。
 #[cfg(target_os = "windows")]
 pub mod bt_sparse;
+/// BT 任务运行时状态：peer 列表与 tracker 状态（tracker 状态经 tracing 旁路采集）。
+#[cfg(feature = "bt")]
+pub mod bt_status;
 /// 已完成 BT 任务的完整性校验（按 piece 表重哈希落盘数据）。
 #[cfg(feature = "bt")]
 pub mod bt_verify;
@@ -47,6 +53,9 @@ pub mod egress;
 pub mod events;
 pub mod file_exists;
 pub mod ftp_downloader;
+/// IP → 国家（peer 国旗）：最小 MaxMind DB 读取器 + DB-IP 国家库按月下载。
+#[cfg(feature = "bt")]
+pub mod geoip;
 pub mod hls_downloader;
 /// 下载请求发送：逐跳跟随重定向，每跳按凭据作用域重建请求头。
 pub(crate) mod http_request;

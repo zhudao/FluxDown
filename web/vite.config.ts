@@ -29,6 +29,8 @@ export default defineConfig({
       '@gpui-theme': fileURLToPath(new URL('../website-v2/src/lib/gpui-theme', import.meta.url)),
       // 内置文件图标包与扩展名 → 大类表（GPUI `crates/icon_pack` 编译期嵌入同一批文件）。
       '@icon-packs': fileURLToPath(new URL('../assets/icon-packs', import.meta.url)),
+      // 国旗 SVG（flag-icons，MIT）：GPUI 编译期嵌入同一目录。
+      '@flags': fileURLToPath(new URL('../assets/flags', import.meta.url)),
     },
   },
   server: {

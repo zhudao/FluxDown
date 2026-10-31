@@ -29,6 +29,10 @@ use crate::config::demo_allows;
 use crate::event_hub::DaemonEventHub;
 use crate::selection::DaemonSelection;
 
+/// `daemon.task.seedLocal` 读取现成 `.torrent` 的大小上限。
+#[cfg(feature = "bt")]
+const SEED_LOCAL_TORRENT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
 /// daemon 运行时共享服务。
 pub struct DaemonService {
     hello: ServiceHello,
@@ -238,6 +242,36 @@ impl DaemonService {
                 }))
             }
             method::DAEMON_TASK_CREATE => self.create_task(params).await,
+            method::DAEMON_TASK_SEED_LOCAL => self.seed_local(params).await,
+            method::DAEMON_TASK_BT_STATUS => {
+                let params = parse_params::<fluxdown_protocol::DaemonBtStatusParams>(params)?;
+                match self
+                    .actor
+                    .execute(ActorOperation::BtStatus {
+                        task_id: params.task_id,
+                    })
+                    .await
+                {
+                    Ok(ActorResult::BtStatus(status)) => to_value(*status),
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
+            method::DAEMON_TASK_TORRENT_SHARE => {
+                let params = parse_params::<fluxdown_protocol::DaemonTorrentShareParams>(params)?;
+                match self
+                    .actor
+                    .execute(ActorOperation::TorrentShare {
+                        task_id: params.task_id,
+                        include_torrent: params.include_torrent,
+                    })
+                    .await
+                {
+                    Ok(ActorResult::TorrentShare(share)) => to_value(*share),
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
             method::DAEMON_TASK_CREATE_MANY => self.create_tasks(params).await,
             method::DAEMON_TASK_PAUSE => {
                 let params = parse_params::<IdParams>(params)?;
@@ -1522,6 +1556,72 @@ impl DaemonService {
                 }
                 to_value(json!({ "taskId": task_id }))
             }
+            Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+            Err(error) => Err(actor_error(error)),
+        }
+    }
+
+    /// `daemon.task.seedLocal`：现成 `.torrent`（有大小上限）从 daemon 主机读取，否则在 actor 之外
+    /// 为内容路径生成种子（哈希耗时与数据量成正比，故走慢方法通道），再交 actor 登记并开始做种。
+    async fn seed_local(&self, params: Option<Value>) -> Result<Value, RpcErrorObject> {
+        let params = parse_params::<fluxdown_protocol::DaemonSeedLocalParams>(params)?;
+        if params.path.trim().is_empty() {
+            return Err(invalid_argument("path", "path is required"));
+        }
+        #[cfg(feature = "bt")]
+        let torrent_bytes = match params
+            .torrent_path
+            .as_deref()
+            .filter(|path| !path.is_empty())
+        {
+            Some(torrent_path) => {
+                let metadata = tokio::fs::metadata(torrent_path)
+                    .await
+                    .map_err(|error| invalid_argument("torrentPath", &error.to_string()))?;
+                if !metadata.is_file() || metadata.len() > SEED_LOCAL_TORRENT_MAX_BYTES {
+                    return Err(invalid_argument(
+                        "torrentPath",
+                        "torrentPath must be a .torrent file no larger than 32 MiB",
+                    ));
+                }
+                tokio::fs::read(torrent_path)
+                    .await
+                    .map_err(|error| invalid_argument("torrentPath", &error.to_string()))?
+            }
+            None => fluxdown_engine::bt_local_seed::build_torrent(
+                std::path::Path::new(&params.path),
+                params
+                    .trackers
+                    .iter()
+                    .map(|tracker| tracker.trim().to_owned())
+                    .filter(|tracker| !tracker.is_empty())
+                    .collect(),
+            )
+            .await
+            .map_err(|error| match error {
+                fluxdown_engine::bt_local_seed::LocalSeedError::InvalidArgument(message) => {
+                    invalid_argument("path", &message)
+                }
+                fluxdown_engine::bt_local_seed::LocalSeedError::Operation(message) => {
+                    internal_error(message)
+                }
+                error @ fluxdown_engine::bt_local_seed::LocalSeedError::Duplicate { .. } => {
+                    internal_error(error.to_string())
+                }
+            })?,
+        };
+        #[cfg(not(feature = "bt"))]
+        let torrent_bytes = Vec::new();
+        match self
+            .actor
+            .execute(ActorOperation::SeedLocal {
+                path: params.path,
+                torrent_bytes,
+                unlimited: params.unlimited,
+            })
+            .await
+        {
+            Ok(ActorResult::SeedLocal(result)) => to_value(result),
             Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
             Err(error) => Err(actor_error(error)),
         }

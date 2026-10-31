@@ -54,6 +54,7 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
     let mut file = vec![
         MenuItem::action(t(translator, "menuNewDownload"), dl::NewDownload),
         MenuItem::action(t(translator, "openTorrentFile"), dl::OpenTorrentFile),
+        MenuItem::action(t(translator, "seedLocalTitle"), dl::SeedLocal),
     ];
     file.push(MenuItem::separator());
     if cfg!(target_os = "macos") {
@@ -83,6 +84,8 @@ pub fn build_menus(translator: &Translator) -> Vec<Menu> {
         MenuItem::action(t(translator, "openFolder"), dl::RevealSelected),
         MenuItem::action(t(translator, "copyFileAction"), dl::CopySelectedFiles),
         MenuItem::action(t(translator, "copyUrl"), dl::CopySelectedUrl),
+        MenuItem::action(t(translator, "btCopyMagnet"), dl::CopyMagnetSelected),
+        MenuItem::action(t(translator, "btExportTorrent"), dl::ExportTorrentSelected),
         MenuItem::action(t(translator, "renameTask"), dl::RenameSelected),
         MenuItem::action(t(translator, "webChangeUrl"), dl::ChangeSelectedUrl),
         MenuItem::action(t(translator, "editThreads"), dl::ChangeSelectedSegments),
@@ -228,6 +231,7 @@ pub fn install_global_actions(cx: &mut App) {
 /// 动作不会冒泡到这里，因此焦点在下载页内时行为不变。
 fn install_download_fallbacks(cx: &mut App) {
     forward_to_downloads::<dl::OpenTorrentFile>(cx);
+    forward_to_downloads::<dl::SeedLocal>(cx);
     forward_to_downloads::<dl::PauseSelected>(cx);
     forward_to_downloads::<dl::ResumeSelected>(cx);
     forward_to_downloads::<dl::DeleteSelected>(cx);
@@ -240,6 +244,8 @@ fn install_download_fallbacks(cx: &mut App) {
     forward_to_downloads::<dl::RevealSelected>(cx);
     forward_to_downloads::<dl::CopySelectedFiles>(cx);
     forward_to_downloads::<dl::CopySelectedUrl>(cx);
+    forward_to_downloads::<dl::CopyMagnetSelected>(cx);
+    forward_to_downloads::<dl::ExportTorrentSelected>(cx);
     forward_to_downloads::<dl::RenameSelected>(cx);
     forward_to_downloads::<dl::ChangeSelectedUrl>(cx);
     forward_to_downloads::<dl::ChangeSelectedSegments>(cx);

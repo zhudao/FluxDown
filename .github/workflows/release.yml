@@ -321,6 +321,7 @@ jobs:
                 assets/i18n/*)       APP=true; MOBILE=true; IOS=true; SERVER=true ;;
                 website-v2/src/lib/gpui-theme/*) SERVER=true ;;
                 assets/icon-packs/*) APP=true; SERVER=true ;;
+                assets/flags/*)      APP=true; SERVER=true ;;
                 # 官网独立部署（deploy-website-v2.yml），不发 release；gpui-theme 例外已在上方先匹配。
                 # website/ 是已删除的 v1 旧站：删除提交与历史 tag 区间的 diff 仍会列出它，同样不触发构建
                 website-v2/*|website/*) ;;
@@ -1374,15 +1375,13 @@ jobs:
           name: server-webroot
           path: webroot
 
-      # x86_64 目标使用基线 x86-64（RUSTFLAGS 整体替换 .cargo/config.toml 的 rustflags，
-      # 该文件当前只有 target-cpu 一项）；产品版本由 FLUXDOWN_APP_VERSION 注入。
+      # 产品版本由 FLUXDOWN_APP_VERSION 注入。
       - name: Build server binaries (agent + daemon)
         env:
           FLUXDOWN_ANALYTICS_APP_KEY: ${{ secrets.ANALYTICS_APP_KEY }}
           FLUXCLOUD_BASE_URL: ${{ secrets.FLUXCLOUD_BASE_URL }}
           FLUXDOWN_EMBED_WEBROOT: ${{ github.workspace }}/webroot
           FLUXDOWN_APP_VERSION: ${{ steps.version.outputs.VERSION }}
-          RUSTFLAGS: ${{ startsWith(matrix.target, 'x86_64') && '-C target-cpu=x86-64' || '' }}
         run: |
           cargo build --release --locked -p fluxdown_agent --features web-ui --target ${{ matrix.target }}
           cargo build --release --locked -p fluxdown_daemon --target ${{ matrix.target }}
@@ -1622,12 +1621,9 @@ jobs:
           restore-keys: |
             cli-${{ matrix.platform }}-
 
-      # 服务器/NAS 常见的老 x86_64 CPU 不一定有 SSE4.2/POPCNT：x86_64 目标回退基线 x86-64
-      # （RUSTFLAGS 整体替换 .cargo/config.toml 的 rustflags，该文件当前只有 target-cpu 一项）。
       - name: Build CLI binary
         env:
           FLUXDOWN_APP_VERSION: ${{ steps.version.outputs.VERSION }}
-          RUSTFLAGS: ${{ startsWith(matrix.target, 'x86_64') && '-C target-cpu=x86-64' || '' }}
         run: cargo build --release --locked -p fluxdown_cli --target ${{ matrix.target }}
 
       - name: Save Rust cache
@@ -2321,18 +2317,6 @@ jobs:
             rehearsal/SHA256SUMS.txt
             rehearsal/release-body.md
           if-no-files-found: warn
-
-  # ── 123 云盘镜像：发布成功后经东京服务器中转（pan123-upload.yml）──
-  # GitHub runner 直传 123 极慢，所以不在 upload-* 里做；发布已完成，这里失败只影响应用内更新的 123 下载源
-  # （回落 dl-cn / GitHub），补救：gh workflow run pan123-upload.yml -f tag=<tag>。远端已有同大小文件跳过。
-  mirror-pan123:
-    name: Mirror to 123pan
-    needs: [changes, publish-release]
-    if: ${{ !cancelled() && needs.changes.outputs.rehearsal == 'false' && needs.publish-release.result == 'success' }}
-    uses: ./.github/workflows/pan123-upload.yml
-    with:
-      tag: ${{ needs.changes.outputs.tag }}
-    secrets: inherit
 
   # ── 发布公告：草稿转正后推送到 Telegram 频道（t.me/fluxdown）──
   # release 由 GITHUB_TOKEN 发布，不会触发 on: release 事件，所以公告在本流水线内发送。

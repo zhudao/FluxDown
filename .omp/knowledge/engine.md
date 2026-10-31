@@ -100,12 +100,33 @@
   全部有磁盘依据（全量初检读盘 / Live 写盘后读回校验），完成即时。
 - **做种交互（对齐 qBittorrent）**（`bt_seeding.rs`）：完成即自动做种（`bt_seed_enabled`，默认开；
   关闭时完成即落 `seeding_status=4` UserStopped）。完成态 BT 任务的「暂停」= 停止做种（1 / 8 → 4），
-  「继续」= 恢复做种（2..=7，达限停止的恢复后下一 tick 会再停，与 qBit 同），其余完成态的继续一律
-  忽略（#935）。`daemon.task.pauseAll` 同时停做种中 / 排队做种（daemon `pause_all_task_ids`）；
+  「继续」= 恢复做种（2..=7），其余完成态的继续一律忽略（#935）。**达限停止（2 / 3 / 7）的手动继续 =
+  强制做种**（对齐 qBit 强制继续）：`tasks.seed_limits_exempt=1`（不进 `TASK_COLUMNS`，经
+  `Db::{set_task_seed_limits_exempt,list_seed_limits_exempt_ids}` 读写），`evaluate_seeding_limits` 对其用空限制，
+  否则同条件下一 tick 即再停；用户再次停止做种（`pause_task_inner`）或重新下载完成（`bt_downloader` 登记前）清除，
+  重启自动续种保留。用户停止（4）的继续不豁免。`daemon.task.pauseAll` 同时停做种中 / 排队做种（daemon `pause_all_task_ids`）；
   `resumeAll` 另恢复 UserStopped 且文件在的任务（`resume_user_stopped_seeds`，自动做种关闭或 BT
   禁用时跳过，达限停止的不纳入）。重启只续上次退出时仍在做种 / 排队的任务（`bt_auto_reseed`）。
   客户端判定：做种中 = status 3 且 seeding_status ∈ {1, 8}（侧栏「做种中」文件夹，同时计入
   「已完成」）；可恢复做种 = status 3 且 2..=7 且文件未丢失；仅本机任务，远程任务不变。
+- **本机做种**（`daemon.task.seedLocal`，`bt_local_seed.rs` + `DownloadManager::create_local_seed`）：把 daemon 主机上
+  已有的文件 / 文件夹登记为「已完成 + 做种」任务（`save_dir` = 路径父目录、`file_name` = 末段，与完成态布局一致，续种沿用
+  `spawn_reseed_from_disk` 异步校验，失败回落 UserStopped 并附原因）。无现成种子时在 **actor 之外**（服务层，慢方法通道）
+  `build_torrent` 哈希生成；给 `torrentPath` 时 `plan_local_seed` 校验形态（文件 ↔ 同名单文件种子，文件夹 ↔ 任意多文件种子）。
+  `unlimited` = 任务级四项限制写 -1（永不因限制停止，可在详情「做种」页改回）；不受「完成后自动做种」开关约束。
+  路径一律是 daemon 主机路径（Web 手输）；与 FluxMesh 分享无关，不受实验性开关门控。
+  创建前按 info hash 对全部 BT 任务（种子字节 + 磁力 URL）查重，重复时 `seedLocal` 返回 `duplicate=true` + 已有任务（不建新任务，客户端弹 `duplicateTorrentToast`）。
+- **BT 分享材料 / 实况**：`daemon.task.torrentShare` 返回磁力链接（种子自带 tracker ∪ `extra_trackers_for` 会话追加 tracker，去重）与可选
+  `.torrent` base64（库里无字节的纯磁力任务不返回）；右键「复制磁力链接 / 导出 .torrent」用它。`daemon.task.btStatus` 返回逐 peer
+  （地址 / 客户端 / 传输 / 累计 / 速度）与逐 tracker 状态，详情页「Tracker / 连接」页签每 2 秒轮询。librqbit 不暴露 tracker 汇报状态，
+  所以 `bt_status::layer()` 旁路采集 `tracker_comms` 的 `http_tracker` / `udp_tracker` span 与 announce 事件（成功 / 失败 / 休眠间隔），
+  **必须挂在宿主全局 subscriber 上**（现仅 `engine/logger.rs` 挂；其它宿主自装 subscriber 时 tracker 状态显示「未知」，`bt_status::installed()`
+  判定）。peer 速度 = 相邻两次采样的字节差（`apply_speeds`，同任务多客户端轮询共享采样，间隔 <400ms 沿用上次值）。与 qBittorrent 的差距：
+  无增删 / 编辑 tracker、无强制重新汇报、无 peer 进度 / flags / 国家、无封禁 peer、tracker 无 seeds / leeches / 完成数（librqbit 不提供）。
+- **peer 国旗**（`geoip.rs`，对齐 qBittorrent）：DB-IP「国家 lite」`.mmdb`（CC BY 4.0，关于页署名）+ 自带最小 MaxMind DB 读取器（零依赖，24/28/32 位记录，
+  真实库 IPv4/IPv6 回归见 `FLUXDOWN_TEST_MMDB`）。有人查看 peer 列表（`bt_status`）才触发 `ensure_background`：当月文件 `<data_dir>/geoip/dbip-country-lite-YYYY-MM.mmdb`
+  不在就经统一出口（`egress::RoutedClients`）下载 `https://download.db-ip.com/free/<name>.gz`（当月未发布回退上月），解压校验后原子落盘并清旧文件，失败 1 小时内不重试；
+  不新增周期任务（空闲静默）。`BtPeerDto.country` 为大写 ISO 码，库未就绪 / 内网缺省；旗帜 SVG 在 `assets/flags/`（qBittorrent 同源 flag-icons，MIT），GPUI 内嵌、Web 经 `@flags` 别名按需加载。
 - **做种上传帧节奏**（#939）：限速本身在 librqbit 会话 / torrent 级 `ratelimits`，实测准确且热生效。
   宿主总上传速率（状态栏 ↑）由 daemon `event_hub` 用相邻进度帧的累计上传增量折算，要求每任务帧间隔
   ≤ ~500ms（单帧最多摊 1 秒、窗口滞后 700ms）。所以做种上传由 `tick_seeding_upload` 每

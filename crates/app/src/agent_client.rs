@@ -111,6 +111,7 @@ impl ClientCommand {
         match self.method.as_str() {
             method::DAEMON_TASK_CREATE
             | method::DAEMON_TASK_CREATE_MANY
+            | method::DAEMON_TASK_SEED_LOCAL
             | method::DAEMON_GROUP_CREATE
             | method::AGENT_CAPTURE_CREATE_GROUP
             | method::AGENT_CAPTURE_SUBMIT_TORRENT_FILE => true,

@@ -14,6 +14,7 @@ import type { SiteProfile } from "./site-profiles";
 import { RemoteSettingsStore } from "./remote-settings";
 import type { RemoteSettings } from "./remote-settings";
 import type { RemotePingResult, RemoteServerConfig } from "./remote-server";
+import { SNIFF_MAX_RESOURCES_DEFAULT, normalizeSniffMaxResources } from "./sniff-limit";
 
 /**
  * 拦截模式：
@@ -86,6 +87,11 @@ export interface FluxDownSettings {
   floatButtonPosition: "top-right" | "top-left" | "bottom-right" | "bottom-left";
   /** 是否在资源列表中显示低置信度项 */
   showLowConfidence: boolean;
+  /**
+   * 单页面 DOM 扫描最多上报的资源数（#288：长列表页无节制扫描会卡顿）。fetch / XHR 嗅探到的媒体不计入。
+   * 取值经 `normalizeSniffMaxResources`（utils/sniff-limit.ts）规整到 1…99999。
+   */
+  sniffMaxResources: number;
 
   // === 失败回退与询问 ===
 
@@ -265,6 +271,7 @@ const DEFAULT_SETTINGS: FluxDownSettings = {
   floatButtonPosition: "top-right",
   showLowConfidence: false,
   sniffImages: false,
+  sniffMaxResources: SNIFF_MAX_RESOURCES_DEFAULT,
 
   // 失败回退与询问
   fallbackOnReject: true,
@@ -429,6 +436,7 @@ export function migrateSettings(raw: unknown): FluxDownSettings {
   if ((merged.interceptMode as string) === "extension") {
     merged.interceptMode = "smart";
   }
+  merged.sniffMaxResources = normalizeSniffMaxResources(merged.sniffMaxResources);
   return merged;
 }
 
@@ -612,6 +620,40 @@ export function shouldIntercept(
   //    同类产品（IDM/FDM）在此场景下也会拦截。
   //    如果用户不想拦截特定站点，可通过排除域名列表处理。
   return true;
+}
+
+/**
+ * 点击链接时（响应头到达前）是否像一次会被接管的下载：用于提前预热 NMH，让 App 冷启动与
+ * 对方服务器首字节等待并行。只认强信号——`<a download>` 或 URL 扩展名命中生效拦截列表；
+ * 预热会拉起 App，普通网页链接绝不能触发。站点 never、排除扩展名、自身远程 Web UI 一律否。
+ */
+export function isLikelyDownloadClick(
+  url: string,
+  hasDownloadAttr: boolean,
+  pageUrl: string | undefined,
+  settings: FluxDownSettings,
+  profiles: Record<string, SiteProfile> = {},
+): boolean {
+  if (!settings.enabled) return false;
+  if (isFluxDownServerDownload(url, pageUrl, settings.remoteUrl)) return false;
+  for (const target of [url, pageUrl]) {
+    if (!target) continue;
+    let host: string;
+    try {
+      host = new URL(target).hostname;
+    } catch {
+      if (target === url) return false;
+      continue;
+    }
+    if (profileFor(profiles, host).profile.intercept === "never") return false;
+  }
+  if (
+    settings.excludeExtensions.length > 0 &&
+    matchByExtension(url, undefined, settings.excludeExtensions)
+  ) {
+    return false;
+  }
+  return hasDownloadAttr || matchByExtension(url, undefined, effectiveExtensions(settings));
 }
 
 /**

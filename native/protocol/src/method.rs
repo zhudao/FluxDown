@@ -34,6 +34,16 @@ pub const DAEMON_TASK_SET_SEED_LIMITS: &str = "daemon.task.setSeedLimits";
 /// 重哈希落盘数据，只读。慢方法：耗时与数据量成正比，同一任务同时只跑一个（`conflict`），
 /// 非已完成 BT 任务返回 `invalidArgument`，任务不存在返回 `notFound`。
 pub const DAEMON_TASK_VERIFY: &str = "daemon.task.verify";
+/// 本机做种（`DaemonSeedLocalParams` → `{taskId}`）：把 daemon 主机上已有的文件 / 文件夹
+/// （可选现成 `.torrent`）登记为已完成并开始做种。无现成种子时需要为数据做哈希，慢方法；
+/// BT 被禁用或路径 / 种子不匹配返回 `invalidArgument`。
+pub const DAEMON_TASK_SEED_LOCAL: &str = "daemon.task.seedLocal";
+/// BT 任务分享材料（`DaemonTorrentShareParams` → `TorrentShareDto`）：磁力链接与可选 `.torrent`
+/// 内容。非 BT 任务 / 任务不存在返回 `invalidArgument` / `notFound`。
+pub const DAEMON_TASK_TORRENT_SHARE: &str = "daemon.task.torrentShare";
+/// BT 任务实况（`DaemonBtStatusParams` → `BtStatusDto`）：peer 列表与逐 tracker 汇报状态，
+/// 供详情页轮询（对齐 qBittorrent 的 Peers / Trackers 页签）。非 BT 任务返回 `invalidArgument`。
+pub const DAEMON_TASK_BT_STATUS: &str = "daemon.task.btStatus";
 /// 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。
 pub const DAEMON_TASK_PAUSE_MANY: &str = "daemon.task.pauseMany";
 pub const DAEMON_TASK_RESUME_MANY: &str = "daemon.task.resumeMany";
@@ -450,6 +460,9 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_RESCAN,
     DAEMON_TASK_SET_SEED_LIMITS,
     DAEMON_TASK_VERIFY,
+    DAEMON_TASK_SEED_LOCAL,
+    DAEMON_TASK_TORRENT_SHARE,
+    DAEMON_TASK_BT_STATUS,
     DAEMON_TASK_PAUSE_MANY,
     DAEMON_TASK_RESUME_MANY,
     DAEMON_TASK_DELETE_MANY,
@@ -705,6 +718,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_DIAGNOSTICS_PROBE,
     DAEMON_DIAGNOSTICS_FIX_COMPONENT,
     DAEMON_TASK_VERIFY,
+    DAEMON_TASK_SEED_LOCAL,
     DAEMON_EGRESS_PLAN,
 ];
 

@@ -6608,6 +6608,18 @@ impl DownloadManager {
         if task_ids.is_empty() {
             return Vec::new();
         }
+        // 手动恢复（强制做种）的任务不受任何限制约束，只刷新上传活动。
+        let exempt = match self.db.list_seed_limits_exempt_ids().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                crate::logger::report_error(
+                    "download-manager",
+                    "load seed limits exemption",
+                    &error,
+                );
+                HashSet::new()
+            }
+        };
 
         // Build per-task effective configs and live snapshots from DB totals.
         let mut resolved: HashMap<String, (SeedingLimitConfig, SeedingUploadSnapshot)> =
@@ -6636,7 +6648,11 @@ impl DownloadManager {
             resolved.insert(
                 task_id.clone(),
                 (
-                    overrides.apply(&global),
+                    if exempt.contains(task_id) {
+                        SeedingLimitConfig::default()
+                    } else {
+                        overrides.apply(&global)
+                    },
                     SeedingUploadSnapshot {
                         total_uploaded: t.uploaded_bytes,
                         total_downloaded: t.downloaded_bytes,
@@ -10974,6 +10990,14 @@ impl DownloadManager {
                         );
                         return;
                     }
+                    // 用户再次停止做种：撤销手动恢复时的限制豁免，下次普通恢复重新受限制约束。
+                    if let Err(error) = self.db.set_task_seed_limits_exempt(task_id, false).await {
+                        crate::logger::report_error(
+                            "download-manager",
+                            "clear seed limits exemption",
+                            &error,
+                        );
+                    }
                     self.emit_progress_from_db(
                         task_id,
                         3,
@@ -13117,8 +13141,11 @@ impl DownloadManager {
     /// 任务按做种语义处理完毕（含失败提示），调用方不得再走普通恢复路径；
     /// `false` 表示任务不属于做种恢复场景。
     ///
-    /// 恢复后若限制未调整，下一次求值 tick 会再次停止——先调高全局或任务级
-    /// 限制才有意义。
+    /// 因分享率 / 时长 / 不活跃限制（2 / 3 / 7）停止的任务，手动恢复即「强制做种」
+    /// （对齐 qBittorrent 强制继续）：置 `seed_limits_exempt`，求值 tick 不再按
+    /// 全局 / 任务级限制停它，直到用户再次停止做种（[`Self::pause_task_inner`]）；
+    /// 否则同一条件下一个 tick 就会把刚恢复的任务停回去。标记落库，重启后的自动
+    /// 续种同样生效。
     #[cfg(feature = "bt")]
     async fn try_resume_seeding(&mut self, task_id: &str, task: &TaskInfo) -> bool {
         if task.status != 3 || !(2..=7).contains(&task.seeding_status) {
@@ -13126,6 +13153,21 @@ impl DownloadManager {
         }
         let stopped_status = task.seeding_status;
         let stopped_message = task.seeding_message.as_str();
+        if [
+            SeedingStopReason::RatioReached,
+            SeedingStopReason::TimeReached,
+            SeedingStopReason::InactiveTimeReached,
+        ]
+        .iter()
+        .any(|reason| reason.as_i32() == stopped_status)
+            && let Err(error) = self.db.set_task_seed_limits_exempt(task_id, true).await
+        {
+            crate::logger::report_error(
+                "download-manager",
+                "persist seed limits exemption",
+                &error,
+            );
+        }
         // 重启后 BT 会话是惰性创建的——恢复做种前先把它拉起来。
         if self.bt_session.is_none()
             && let Err(e) = self.ensure_bt_session().await
@@ -13237,6 +13279,279 @@ impl DownloadManager {
             }
         }
         true
+    }
+
+    /// BT 任务实况：已连接 peer（含速度）、peer 数量汇总与逐 tracker 汇报状态。
+    /// 任务未在跑 / 暂停时 peer 为空，tracker 行仍列出（状态「未联系」）。
+    ///
+    /// # Errors
+    /// 任务不存在、不是 BT 任务或读库失败。
+    #[cfg(feature = "bt")]
+    pub async fn bt_status(
+        &self,
+        task_id: &str,
+    ) -> Result<crate::bt_status::BtStatusView, crate::bt_local_seed::LocalSeedError> {
+        use crate::bt_local_seed::LocalSeedError;
+        use crate::bt_status::{BtStatusView, PeerCounts, PeerRow};
+        let db_error = |error: crate::db::DbError| LocalSeedError::Operation(format!("{error:#}"));
+        let task = self
+            .db
+            .load_task_by_id(task_id)
+            .await
+            .map_err(db_error)?
+            .ok_or_else(|| LocalSeedError::InvalidArgument("task not found".to_owned()))?;
+        let bytes = self
+            .db
+            .load_torrent_file_bytes(task_id)
+            .await
+            .map_err(db_error)?
+            .filter(|bytes| !bytes.is_empty());
+        let (info_hash, own): (String, Vec<String>) = if let Some(bytes) = &bytes {
+            let parsed = librqbit::torrent_from_bytes(bytes).map_err(|error| {
+                LocalSeedError::InvalidArgument(format!("torrent parse error: {error}"))
+            })?;
+            let own = parsed
+                .iter_announce()
+                .map(|tracker| String::from_utf8_lossy(tracker.as_ref()).into_owned())
+                .collect();
+            (parsed.info_hash.as_string(), own)
+        } else if is_magnet(&task.url) {
+            let info_hash = TorrentSource::Magnet(task.url.clone())
+                .info_hash_hex()
+                .ok_or_else(|| LocalSeedError::InvalidArgument("invalid magnet link".to_owned()))?;
+            let own = librqbit::Magnet::parse(&crate::bt_downloader::normalize_magnet(&task.url))
+                .map(|magnet| magnet.trackers)
+                .unwrap_or_default();
+            (info_hash, own)
+        } else {
+            return Err(LocalSeedError::InvalidArgument(
+                "not a BitTorrent task".to_owned(),
+            ));
+        };
+        let session = crate::bt_downloader::extra_trackers_for(&self.bt_config);
+        let trackers = crate::bt_status::merge_trackers(
+            &own,
+            &session,
+            &crate::bt_status::snapshot(&info_hash),
+        );
+
+        let mut peers: Vec<PeerRow> = Vec::new();
+        let mut counts = PeerCounts::default();
+        let handle = match &self.bt_session {
+            Some(bt) => bt.cached_handle(task_id).await,
+            None => None,
+        };
+        if let Some(handle) = handle {
+            if let Some(live) = handle.live() {
+                // 国旗：库未就绪时后台下载（只在有人查看 peer 列表时触发）。
+                crate::geoip::ensure_background(self.data_dir.clone(), self.proxy_config.clone());
+                let filter = serde_json::from_value(serde_json::json!({ "state": "live" }))
+                    .map_err(|error| LocalSeedError::Operation(error.to_string()))?;
+                peers = live
+                    .per_peer_stats_snapshot(filter)
+                    .peers
+                    .into_iter()
+                    .map(|(addr, stats)| {
+                        let country = crate::geoip::lookup_addr(&addr);
+                        PeerRow {
+                            addr,
+                            client: stats.client_name.unwrap_or_default(),
+                            transport: stats
+                                .conn_kind
+                                .map(|kind| format!("{kind:?}").to_lowercase())
+                                .unwrap_or_default(),
+                            downloaded: stats.counters.fetched_bytes,
+                            uploaded: stats.counters.uploaded_bytes,
+                            down_bps: 0,
+                            up_bps: 0,
+                            country,
+                        }
+                    })
+                    .collect();
+            }
+            if let Some(live) = handle.stats().live {
+                let ps = &live.snapshot.peer_stats;
+                counts = PeerCounts {
+                    live: ps.live,
+                    connecting: ps.connecting,
+                    queued: ps.queued,
+                    seen: ps.seen,
+                    dead: ps.dead,
+                };
+            }
+        }
+        crate::bt_status::apply_speeds(task_id, &mut peers);
+        peers.sort_by(|a, b| {
+            (b.down_bps + b.up_bps)
+                .cmp(&(a.down_bps + a.up_bps))
+                .then_with(|| (b.downloaded + b.uploaded).cmp(&(a.downloaded + a.uploaded)))
+                .then_with(|| a.addr.cmp(&b.addr))
+        });
+        Ok(BtStatusView {
+            dht_enabled: self.bt_config.enable_dht,
+            counts,
+            trackers,
+            peers,
+        })
+    }
+
+    /// BT 任务的分享材料：磁力链接（含种子自带与会话追加的 tracker）与可选 `.torrent` 字节。
+    /// 优先用库里持久化的种子字节；纯磁力任务只有磁力链接，不返回种子字节。
+    ///
+    /// # Errors
+    /// 任务不存在、不是 BT 任务或读库失败。
+    #[cfg(feature = "bt")]
+    pub async fn torrent_share(
+        &self,
+        task_id: &str,
+        include_torrent: bool,
+    ) -> Result<
+        (crate::bt_local_seed::TorrentShare, Option<Vec<u8>>),
+        crate::bt_local_seed::LocalSeedError,
+    > {
+        use crate::bt_local_seed::{LocalSeedError, TorrentShare, torrent_share};
+        let db_error = |error: crate::db::DbError| LocalSeedError::Operation(format!("{error:#}"));
+        let task = self
+            .db
+            .load_task_by_id(task_id)
+            .await
+            .map_err(db_error)?
+            .ok_or_else(|| LocalSeedError::InvalidArgument("task not found".to_owned()))?;
+        let extras = crate::bt_downloader::extra_trackers_for(&self.bt_config);
+        let bytes = self
+            .db
+            .load_torrent_file_bytes(task_id)
+            .await
+            .map_err(db_error)?
+            .filter(|bytes| !bytes.is_empty());
+        if let Some(bytes) = bytes {
+            let share = torrent_share(&bytes, &extras)?;
+            return Ok((share, include_torrent.then_some(bytes)));
+        }
+        if is_magnet(&task.url) {
+            let info_hash = TorrentSource::Magnet(task.url.clone())
+                .info_hash_hex()
+                .ok_or_else(|| LocalSeedError::InvalidArgument("invalid magnet link".to_owned()))?;
+            let name = crate::bt_downloader::magnet_display_name(&task.url).unwrap_or_default();
+            let magnet = crate::bt_downloader::magnet_with_trackers(&task.url, &extras);
+            return Ok((
+                TorrentShare {
+                    info_hash,
+                    name,
+                    magnet,
+                },
+                None,
+            ));
+        }
+        Err(LocalSeedError::InvalidArgument(
+            "not a BitTorrent task".to_owned(),
+        ))
+    }
+
+    /// 把磁盘上已有的内容登记为「已完成 + 做种」的 BT 任务并立即开始做种（本机做种）。
+    ///
+    /// 数据校验与挂载走续种路径（[`Self::spawn_reseed_from_disk`]，BT runtime 上异步），
+    /// 期间显示为排队做种并附校验说明；校验失败回退「用户停止」并附原因。`unlimited` 为真时
+    /// 任务级分享率 / 时长 / 不活跃限制全部写成「不限制」（永不因限制停止）。
+    /// 用户显式发起，不受「任务完成后自动做种」全局开关约束。
+    ///
+    /// # Errors
+    /// BT 被禁用、会话不可用或落库失败。
+    #[cfg(feature = "bt")]
+    pub async fn create_local_seed(
+        &mut self,
+        plan: crate::bt_local_seed::LocalSeedPlan,
+        queue_id: String,
+        unlimited: bool,
+    ) -> Result<String, crate::bt_local_seed::LocalSeedError> {
+        use crate::bt_local_seed::LocalSeedError;
+        if !self.bt_config.enabled {
+            return Err(LocalSeedError::InvalidArgument(
+                BT_DISABLED_MESSAGE.to_owned(),
+            ));
+        }
+        let db_error = |error: crate::db::DbError| LocalSeedError::Operation(format!("{error:#}"));
+        // 同一 info hash 已被别的任务持有（下载 / 做种，含纯磁力任务）：不重复创建。
+        let new_hash = TorrentSource::TorrentFileBytes(plan.torrent_bytes.clone()).info_hash_hex();
+        if let Some(new_hash) = new_hash {
+            let (torrents, magnets) = self.db.list_bt_task_refs().await.map_err(db_error)?;
+            for (id, name) in torrents {
+                let Some(bytes) = self
+                    .db
+                    .load_torrent_file_bytes(&id)
+                    .await
+                    .map_err(db_error)?
+                else {
+                    continue;
+                };
+                if TorrentSource::TorrentFileBytes(bytes)
+                    .info_hash_hex()
+                    .as_deref()
+                    == Some(new_hash.as_str())
+                {
+                    return Err(LocalSeedError::Duplicate { task_id: id, name });
+                }
+            }
+            for (id, url, name) in magnets {
+                if TorrentSource::Magnet(url).info_hash_hex().as_deref() == Some(new_hash.as_str())
+                {
+                    return Err(LocalSeedError::Duplicate { task_id: id, name });
+                }
+            }
+        }
+        let task_id = Uuid::now_v7().to_string();
+        self.db
+            .insert_task(
+                &task_id,
+                "torrent-file://local",
+                &plan.file_name,
+                &plan.save_dir,
+                1,
+                plan.total_bytes,
+                "",
+                &queue_id,
+                "",
+                3,
+            )
+            .await
+            .map_err(db_error)?;
+        self.db
+            .save_torrent_file_bytes(&task_id, &plan.torrent_bytes)
+            .await
+            .map_err(db_error)?;
+        self.db
+            .update_task_progress(&task_id, plan.total_bytes)
+            .await
+            .map_err(db_error)?;
+        self.db
+            .update_task_status(&task_id, 3, "")
+            .await
+            .map_err(db_error)?;
+        if unlimited {
+            self.db
+                .set_task_seed_limits(&task_id, -1, -1, -1, -1, 0)
+                .await
+                .map_err(db_error)?;
+        }
+        let stopped = SeedingStopReason::UserStopped;
+        self.db
+            .update_task_seeding_status(&task_id, stopped.as_i32(), stopped.message())
+            .await
+            .map_err(db_error)?;
+        let task = self
+            .db
+            .load_task_by_id(&task_id)
+            .await
+            .map_err(db_error)?
+            .ok_or_else(|| LocalSeedError::Operation("local seed task vanished".to_owned()))?;
+        self.sink
+            .emit(EngineEvent::TaskChanged(Box::new(task.clone())));
+        if !self.try_resume_seeding(&task_id, &task).await {
+            return Err(LocalSeedError::Operation(
+                "failed to start seeding".to_owned(),
+            ));
+        }
+        Ok(task_id)
     }
 
     /// 应用重启后的做种恢复：句柄已丢失，把磁盘上的完成数据重新挂载进
@@ -17556,6 +17871,326 @@ mod tests {
         drop(new);
         if let Err(error) = std::fs::remove_dir_all(&work) {
             tracing::debug!(%error, "BT rebuild test directory cleanup skipped");
+        }
+    }
+
+    /// 因分享率达标停止做种的任务被用户手动恢复后，求值 tick 不得再按同一限制把它
+    /// 停回去（对齐 qBittorrent 强制继续）；用户再次停止做种即撤销豁免。
+    #[cfg(feature = "bt")]
+    #[tokio::test]
+    async fn manual_resume_after_ratio_stop_is_exempt_from_limits_until_stopped_again() {
+        let (work, port) = bt_test_dir("resume_exempt");
+        let save = work.join("save");
+        std::fs::create_dir_all(&save).expect("save dir");
+        let payload: Vec<u8> = (0..1024 * 1024_u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        std::fs::write(save.join("payload.bin"), &payload).expect("payload");
+        let torrent = librqbit::create_torrent(
+            &save.join("payload.bin"),
+            librqbit::CreateTorrentOptions {
+                piece_length: Some(64 * 1024),
+                ..Default::default()
+            },
+            &librqbit::spawn_utils::BlockingSpawner::new(1),
+        )
+        .await
+        .expect("create torrent")
+        .as_bytes()
+        .expect("torrent bytes");
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        db.insert_task(
+            "seed",
+            "torrent-file://local",
+            "payload.bin",
+            &save.to_string_lossy(),
+            1,
+            payload.len() as i64,
+            "",
+            "",
+            "",
+            3,
+        )
+        .await
+        .expect("insert task");
+        db.save_torrent_file_bytes("seed", &torrent)
+            .await
+            .expect("save torrent bytes");
+        // 已上传 = 一倍体积，全局分享率上限 0.5：达标停止。
+        db.add_task_uploaded_bytes("seed", payload.len() as i64)
+            .await
+            .expect("uploaded");
+        let stopped = SeedingStopReason::RatioReached;
+        db.update_task_seeding_status("seed", stopped.as_i32(), stopped.message())
+            .await
+            .expect("mark ratio stop");
+
+        let config = BtConfig {
+            seed_ratio_limit: 0.5,
+            ..bt_test_config(port)
+        };
+        let mut mgr = bt_test_manager(db, &work, config);
+        mgr.resume_task("seed").await;
+        assert!(
+            mgr.db
+                .list_seed_limits_exempt_ids()
+                .await
+                .expect("exempt ids")
+                .contains("seed"),
+            "manual resume of a limit-stopped seed must be exempted"
+        );
+
+        let seeding_status = |mgr: &DownloadManager| {
+            let db = mgr.db.clone();
+            async move {
+                db.load_task_by_id("seed")
+                    .await
+                    .expect("load task")
+                    .expect("task row")
+                    .seeding_status
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while seeding_status(&mgr).await != SEEDING_STATUS_ACTIVE {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "resumed seed must become active"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        mgr.tick_seeding_evaluation().await;
+        assert_eq!(
+            seeding_status(&mgr).await,
+            SEEDING_STATUS_ACTIVE,
+            "an exempt seed must survive the limit evaluation tick"
+        );
+
+        mgr.pause_task("seed").await;
+        assert_eq!(
+            seeding_status(&mgr).await,
+            SeedingStopReason::UserStopped.as_i32()
+        );
+        assert!(
+            mgr.db
+                .list_seed_limits_exempt_ids()
+                .await
+                .expect("exempt ids")
+                .is_empty(),
+            "stopping seeding again must clear the exemption"
+        );
+
+        mgr.shutdown().await;
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT resume exemption test directory cleanup skipped");
+        }
+    }
+
+    /// 本机做种：为磁盘上已有的文件生成种子，登记为已完成任务并开始做种；
+    /// `unlimited` 把任务级限制全写成「不限制」，即便全局分享率上限已被超过也不会停。
+    #[cfg(feature = "bt")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_seed_registers_completed_task_and_never_stops_when_unlimited() {
+        let (work, port) = bt_test_dir("local_seed");
+        let content = work.join("content");
+        std::fs::create_dir_all(&content).expect("content dir");
+        let file = content.join("payload.bin");
+        let payload: Vec<u8> = (0..1024 * 1024_u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        std::fs::write(&file, &payload).expect("payload");
+        let bytes = crate::bt_local_seed::build_torrent(&file, Vec::new())
+            .await
+            .expect("build torrent");
+        let plan = crate::bt_local_seed::plan_local_seed(&file, bytes).expect("plan");
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let config = BtConfig {
+            seed_ratio_limit: 0.0001,
+            ..bt_test_config(port)
+        };
+        let mut mgr = bt_test_manager(db, &work, config);
+        let task_id = mgr
+            .create_local_seed(plan, "main".to_owned(), true)
+            .await
+            .expect("create local seed");
+
+        let load = |mgr: &DownloadManager| {
+            let db = mgr.db.clone();
+            let task_id = task_id.clone();
+            async move {
+                db.load_task_by_id(&task_id)
+                    .await
+                    .expect("load task")
+                    .expect("task row")
+            }
+        };
+        let row = load(&mgr).await;
+        assert_eq!(row.status, 3);
+        assert_eq!(row.file_name, "payload.bin");
+        assert_eq!(row.save_dir, content.to_string_lossy());
+        assert_eq!(row.total_bytes, payload.len() as i64);
+        assert_eq!(row.seed_ratio_limit_milli, -1);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while load(&mgr).await.seeding_status != SEEDING_STATUS_ACTIVE {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "local seed must become active"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // 即便已有上传量、全局分享率上限极低，不限制的任务也不会被停。
+        mgr.db
+            .add_task_uploaded_bytes(&task_id, payload.len() as i64)
+            .await
+            .expect("uploaded");
+        mgr.tick_seeding_evaluation().await;
+        assert_eq!(load(&mgr).await.seeding_status, SEEDING_STATUS_ACTIVE);
+
+        // 同一份数据再做种一次：按 info hash 识别为重复，不创建第二个任务。
+        let again_bytes = crate::bt_local_seed::build_torrent(&file, Vec::new())
+            .await
+            .expect("rebuild torrent");
+        let again = crate::bt_local_seed::plan_local_seed(&file, again_bytes).expect("plan again");
+        match mgr.create_local_seed(again, "main".to_owned(), false).await {
+            Err(crate::bt_local_seed::LocalSeedError::Duplicate {
+                task_id: owner,
+                name,
+            }) => {
+                assert_eq!(owner, task_id);
+                assert_eq!(name, "payload.bin");
+            }
+            other => panic!("expected duplicate, got {other:?}"),
+        }
+
+        // 实况：本机做种生成的种子无 tracker，列表来自会话追加（内置公共 tracker）；无人连接时无 peer。
+        let status = mgr.bt_status(&task_id).await.expect("bt status");
+        assert!(!status.trackers.is_empty());
+        assert!(
+            status
+                .trackers
+                .iter()
+                .all(|row| row.source == crate::bt_status::TrackerSource::Session)
+        );
+        assert!(status.peers.is_empty());
+
+        mgr.shutdown().await;
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT local seed test directory cleanup skipped");
+        }
+    }
+
+    /// 端到端：真实 librqbit 会话向本地 HTTP tracker announce，状态采集层把它折叠成「正常」。
+    /// 验证 `bt_status::layer` 确实能从 `tracker_comms` 的真实 span / 事件里读到汇报结果
+    /// （单元测试只用手写事件）。需全局 subscriber，所以单独成测（nextest 每测一进程）。
+    #[cfg(feature = "bt")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tracker_status_layer_sees_real_announces() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tracing_subscriber::layer::SubscriberExt as _;
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::registry().with(crate::bt_status::layer()),
+        )
+        .expect("global subscriber");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("tracker listener");
+        let tracker_port = listener.local_addr().expect("tracker addr").port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_in = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                hits_in.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    if socket.read(&mut buf).await.is_err() {
+                        return;
+                    }
+                    let body = b"d8:intervali1800e5:peers0:e";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if socket.write_all(body).await.is_err() {
+                        tracing::debug!("test tracker client went away");
+                    }
+                });
+            }
+        });
+
+        let (work, port) = bt_test_dir("tracker_layer");
+        let content = work.join("content");
+        std::fs::create_dir_all(&content).expect("content dir");
+        let file = content.join("payload.bin");
+        std::fs::write(&file, vec![5u8; 256 * 1024]).expect("payload");
+        let tracker_url = format!("http://127.0.0.1:{tracker_port}/announce");
+        let bytes = crate::bt_local_seed::build_torrent(&file, Vec::new())
+            .await
+            .expect("torrent");
+        let plan = crate::bt_local_seed::plan_local_seed(&file, bytes).expect("plan");
+
+        let db = Db::connect("sqlite::memory:")
+            .await
+            .expect("connect mem db");
+        let config = BtConfig {
+            custom_trackers: tracker_url.clone(),
+            ..bt_test_config(port)
+        };
+        let mut mgr = bt_test_manager(db, &work, config);
+        let task_id = mgr
+            .create_local_seed(plan, "main".to_owned(), false)
+            .await
+            .expect("local seed");
+
+        assert!(crate::bt_status::installed());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let status = mgr.bt_status(&task_id).await.expect("bt status");
+            let working = status.trackers.iter().find(|row| {
+                row.url == tracker_url
+                    && row
+                        .entry
+                        .as_ref()
+                        .is_some_and(|entry| entry.state == crate::bt_status::TrackerState::Working)
+            });
+            if let Some(row) = working {
+                let entry = row.entry.clone().expect("entry");
+                assert_eq!(entry.peers, Some(0));
+                assert!(entry.last_ok_at > 0);
+                assert!(entry.next_announce_at > entry.last_ok_at);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tracker never reported working (hits={}, seeding_status={:?}): {:?}",
+                hits.load(std::sync::atomic::Ordering::SeqCst),
+                mgr.db
+                    .load_task_by_id(&task_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|t| t.seeding_status),
+                status.trackers
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
+        mgr.shutdown().await;
+        if let Err(error) = std::fs::remove_dir_all(&work) {
+            tracing::debug!(%error, "BT tracker layer test directory cleanup skipped");
         }
     }
 

@@ -47,7 +47,8 @@ use crate::{
         row_order::{InteractionHold, RowOrder},
         share::{ShareBlock, ShareRow, share_control},
         view_prefs::{
-            DateBucket, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey, state_group_key,
+            DateBucket, HeaderAlign, SortDir, ViewDensity, ViewGroupBy, ViewPrefs, ViewSortKey,
+            state_group_key,
         },
     },
     pages::downloads::{DownloadView, PluginTaskCommand},
@@ -219,11 +220,6 @@ impl DownloadColumnKind {
         } else {
             width.max(min_width)
         }
-    }
-
-    /// 数字列：单元格与表头右对齐。
-    fn is_numeric(self) -> bool {
-        matches!(self, Self::Size | Self::Speed | Self::Eta | Self::Created)
     }
 
     /// 点击表头切换到的排序键。
@@ -510,6 +506,11 @@ impl TaskMenuFacts {
         self.is_local && self.is_bt && self.state == TaskState::Completed && !self.file_missing
     }
 
+    /// 「复制磁力链接 / 导出 .torrent」可用：本机 BT 任务（任意状态）。
+    pub(crate) fn can_share_torrent(&self) -> bool {
+        self.is_local && self.is_bt
+    }
+
     /// 本地已完成且产物仍在下载目录：「打开文件」「复制文件」的共同前提。
     pub(crate) fn has_product_on_disk(&self) -> bool {
         self.is_local && self.state == TaskState::Completed && !self.file_missing
@@ -570,6 +571,10 @@ pub(crate) enum MenuEntry {
     ChangeSegments,
     /// 完整性校验（单选；条件见 [`TaskMenuFacts::can_verify_integrity`]）。
     VerifyIntegrity,
+    /// 复制磁力链接（单选；条件见 [`TaskMenuFacts::can_share_torrent`]）。
+    CopyMagnet,
+    /// 导出 .torrent 文件（单选；条件同 [`MenuEntry::CopyMagnet`]）。
+    ExportTorrent,
     /// 分享选中的已完成任务（`None` = 可点击；`Some(原因)` = 禁用并提示原因）。
     Share(Option<ShareBlock>),
     /// 停止共享已接收的文件（单选；条件见 [`TaskMenuFacts::stop_providing`]）。
@@ -675,6 +680,12 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
         items.push(MenuEntry::StopProviding);
     }
     items.push(MenuEntry::CopyUrl);
+    if let [only] = selection
+        && only.can_share_torrent()
+    {
+        items.push(MenuEntry::CopyMagnet);
+        items.push(MenuEntry::ExportTorrent);
+    }
     if selection.iter().all(|task| task.is_local) {
         items.push(MenuEntry::MoveToQueue);
     }
@@ -2899,6 +2910,16 @@ impl DownloadTableDelegate {
                 FluxIcon::Copy,
                 Box::new(crate::actions::CopySelectedUrl),
             ),
+            MenuEntry::CopyMagnet => menu.menu_with_icon(
+                self.strings.copy_magnet.clone(),
+                FluxIcon::Copy,
+                Box::new(crate::actions::CopyMagnetSelected),
+            ),
+            MenuEntry::ExportTorrent => menu.menu_with_icon(
+                self.strings.export_torrent.clone(),
+                FluxIcon::Download,
+                Box::new(crate::actions::ExportTorrentSelected),
+            ),
             MenuEntry::MoveToQueue => self.append_move_to_queue(menu),
             MenuEntry::Separator => menu.separator(),
             MenuEntry::Delete => destructive_menu_item(
@@ -3258,7 +3279,6 @@ impl TableDelegate for DownloadTableDelegate {
         let Some(kind) = self.shown_column(col_ix).map(|column| column.kind) else {
             return div().into_any_element();
         };
-        let numeric = kind.is_numeric();
         let sort_key = kind.sort_key();
         // 只有当前排序列显示方向箭头；智能（默认）排序不对应任何列。
         let arrow =
@@ -3327,13 +3347,11 @@ impl TableDelegate for DownloadTableDelegate {
             .line_height(typography.xs.line_height)
             .font_weight(FontWeight::MEDIUM)
             .text_color(extended.colors.text_tertiary)
-            // 数字列右对齐：箭头放在标签左侧，保持标签右缘与数值对齐。
-            .map(|this| {
-                if numeric {
-                    this.justify_end().children(arrow).child(label)
-                } else {
-                    this.child(label).children(arrow)
-                }
+            // 表头对齐按视图偏好（默认左对齐）；右对齐时箭头放在标签左侧，保持标签贴右缘。
+            .map(|this| match self.prefs.header_align {
+                HeaderAlign::Left => this.child(label).children(arrow),
+                HeaderAlign::Center => this.justify_center().child(label).children(arrow),
+                HeaderAlign::Right => this.justify_end().children(arrow).child(label),
             })
             .when_some(on_click, |this, on_click| {
                 this.cursor_pointer().on_click(on_click)
@@ -6096,6 +6114,43 @@ mod context_menu_tests {
             );
         }
         assert!(!context_menu_items(&[bt, bt]).contains(&MenuEntry::VerifyIntegrity));
+    }
+
+    #[test]
+    fn torrent_share_entries_need_single_local_bt_task_in_any_state() {
+        let mut bt = task(true, TaskState::Completed);
+        bt.is_bt = true;
+        for state in [
+            TaskState::Downloading,
+            TaskState::Paused,
+            TaskState::Completed,
+            TaskState::Failed,
+        ] {
+            let mut facts = bt;
+            facts.state = state;
+            let items = context_menu_items(&[facts]);
+            let at = items
+                .iter()
+                .position(|entry| *entry == MenuEntry::CopyUrl)
+                .expect("copy URL is always offered");
+            assert_eq!(items.get(at + 1), Some(&MenuEntry::CopyMagnet), "{state:?}");
+            assert_eq!(
+                items.get(at + 2),
+                Some(&MenuEntry::ExportTorrent),
+                "{state:?}"
+            );
+        }
+
+        let mut remote = bt;
+        remote.is_local = false;
+        for facts in [remote, task(true, TaskState::Completed)] {
+            let items = context_menu_items(&[facts]);
+            assert!(!items.contains(&MenuEntry::CopyMagnet), "{facts:?}");
+            assert!(!items.contains(&MenuEntry::ExportTorrent), "{facts:?}");
+        }
+        let items = context_menu_items(&[bt, bt]);
+        assert!(!items.contains(&MenuEntry::CopyMagnet));
+        assert!(!items.contains(&MenuEntry::ExportTorrent));
     }
 
     #[test]

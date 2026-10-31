@@ -186,6 +186,57 @@ export function copyUrls(views: readonly DownloadTaskView[]): void {
   toast.key('urlCopied', 'success')
 }
 
+/** 「复制磁力链接 / 导出 .torrent」：单选的本地 BT 任务（任意状态）。 */
+export const canShareTorrent = (views: readonly DownloadTaskView[]): boolean =>
+  views.length === 1 && views.every((view) => view.source === 'local' && view.protocol === 'bt')
+
+export async function copyMagnet(view: DownloadTaskView): Promise<void> {
+  try {
+    const share = await rpc.daemon.task.torrentShare({ taskId: view.taskId, includeTorrent: false })
+    copyText(share.magnet)
+    toast.key('btMagnetCopied', 'success')
+  } catch (error) {
+    toastRpcError(error)
+  }
+}
+
+/** 文件名去掉路径分隔符与保留字符，空名回退 `torrent`。 */
+export function torrentFileName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  const clean = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').trim().replace(/^\.+/, '')
+  const base = clean === '' ? 'torrent' : clean
+  return base.toLowerCase().endsWith('.torrent') ? base : `${base}.torrent`
+}
+
+function decodeBase64(b64: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+export async function exportTorrent(view: DownloadTaskView): Promise<void> {
+  try {
+    const share = await rpc.daemon.task.torrentShare({ taskId: view.taskId, includeTorrent: true })
+    if (!share.torrentB64) {
+      toast.key('btNoTorrentFile', 'error')
+      return
+    }
+    const url = URL.createObjectURL(new Blob([decodeBase64(share.torrentB64)], { type: 'application/x-bittorrent' }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = torrentFileName(share.name)
+    anchor.setAttribute('data-fluxdown-skip', '1')
+    document.body.append(anchor)
+    anchor.click()
+    anchor.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    toast.key('btTorrentExported', 'success')
+  } catch (error) {
+    toastRpcError(error)
+  }
+}
+
 /** 只有本地已完成且文件仍在磁盘上的任务有可下载的最终文件。 */
 export const isDownloadable = (view: DownloadTaskView): boolean =>
   view.source === 'local' && view.state === 'completed' && !view.fileMissing

@@ -70,6 +70,7 @@ import com.fluxdown.fluxui.controls.StatItem
 import com.fluxdown.fluxui.controls.Tone
 import com.fluxdown.fluxui.feedback.FluxEmpty
 import com.fluxdown.fluxui.feedback.FluxGlyph
+import com.fluxdown.fluxui.feedback.FluxSpinner
 import com.fluxdown.fluxui.icons.FluxIcons
 import com.fluxdown.fluxui.material.FluxGlass
 import com.fluxdown.fluxui.material.FluxGlassKind
@@ -81,8 +82,8 @@ import com.fluxdown.fluxui.theme.FluxText
 import com.fluxdown.fluxui.theme.FluxTheme
 
 /**
- * V1 设备页（Dock 目的地）：当前主机卡 + 云端已信任设备（presence 未知时显示「状态未知」）+ 已配对设备
- * （直连：在线点 / 刷新状态 / 下发 / 重命名 / 解除配对）。
+ * V1 设备页（Dock 目的地）：当前主机卡 + 云端已信任设备（presence 未知时显示「状态未知」；可删除，含离线设备）
+ * + 已配对设备（直连：在线点 / 刷新状态 / 下发 / 重命名 / 解除配对）。
  * 添加设备（账户 / 直连配对）经页头「+」打开 [AddDeviceSheet]；入站配对确认是全局弹层（[InboundPairingPrompt]）。
  */
 @Composable
@@ -119,6 +120,7 @@ fun DevicesScreen() {
     val linkCap by remember { derivedStateOf { host.value.has(HostCapability.agentDeviceLink) } }
     val readOnly by remember { derivedStateOf { host.value.isReadOnly } }
     val links = rememberLinkedDeviceActions()
+    val clouds = rememberCloudDeviceActions()
     var renaming by remember { mutableStateOf<LinkDevice?>(null) }
 
     val listState = rememberLazyListState()
@@ -169,8 +171,15 @@ fun DevicesScreen() {
                     footer = str(R.string.accountDevicesDesc),
                 ) {
                     cloudSorted.forEach { d ->
+                        val online = if (presenceKnown) d.isOnline else null
                         row(hasIcon = true) {
-                            DeviceRow(d.name, d.platform, if (presenceKnown) d.isOnline else null, d.appVersion, d.isCurrent)
+                            CloudDeviceRow(
+                                device = d,
+                                online = online,
+                                deleting = d.deviceId in clouds.deleting,
+                                actionsEnabled = !readOnly,
+                                onDelete = { clouds.confirmDelete(d, online) },
+                            )
                         }
                     }
                 }
@@ -401,6 +410,48 @@ private fun DeviceRow(
             }
         },
         trailing = trailing ?: if (current) ({ FluxTag(str(R.string.thisDevice), tone = Tone.Accent) }) else null,
+    )
+}
+
+/**
+ * 账号已信任设备行（云端）：在线点、名称、平台 / 版本；本机挂「本机」标签。操作 = 删除（离线设备同样可删，
+ * 删除进行中换成加载圈）；删除本机会退出登录，确认框单独警示。
+ */
+@Composable
+private fun CloudDeviceRow(
+    device: CloudDevice,
+    /** null = 云端 presence 不可信（状态未知）。 */
+    online: Boolean?,
+    deleting: Boolean,
+    actionsEnabled: Boolean,
+    onDelete: () -> Unit,
+) {
+    DeviceRow(
+        name = device.name,
+        platform = device.platform,
+        online = online,
+        version = device.appVersion,
+        current = device.isCurrent,
+        trailing = {
+            Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (device.isCurrent) FluxTag(str(R.string.thisDevice), tone = Tone.Accent)
+                if (deleting) {
+                    Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        FluxSpinner(size = 18.dp, label = str(R.string.mobileLoading))
+                    }
+                } else {
+                    FluxIconButton(
+                        FluxIcons.Trash2,
+                        str(R.string.accountDeviceDeleteAction),
+                        onClick = onDelete,
+                        size = IconButtonSize.Sm,
+                        glass = false,
+                        danger = true,
+                        enabled = actionsEnabled,
+                    )
+                }
+            }
+        },
     )
 }
 

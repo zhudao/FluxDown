@@ -230,6 +230,21 @@ export interface CreatedTask {
   taskId: string;
 }
 
+/** `daemon.task.seedLocal` 结果；`duplicate` 为真时未新建任务，`taskId` 是已有同 info hash 的任务。 */
+export interface SeedLocalResult {
+  taskId: string;
+  duplicate?: boolean;
+  existingName?: string;
+}
+
+/** `daemon.task.torrentShare` 结果；`torrentB64` 仅在请求带回且库中有 .torrent 字节时出现。 */
+export interface TorrentShareDto {
+  infoHash: string;
+  name: string;
+  magnet: string;
+  torrentB64?: string;
+}
+
 export type TaskVerifyStatus = 'intact' | 'damaged' | 'unverifiable';
 
 /** `daemon.task.verify` 结果（BT 已完成任务的分块完整性校验）。 */
@@ -303,6 +318,63 @@ export interface DownloadRequest {
   method?: string | null;
   body?: RequestBody | null;
   audioUrl?: string | null;
+}
+
+/** tracker 汇报状态（`BtTrackerStatus`）。 */
+export type BtTrackerStatus = 'working' | 'updating' | 'notWorking' | 'notContacted' | 'unknown';
+
+/** tracker 来源（`BtTrackerSource`）：种子 / 磁力自带，或会话级（设置 / 订阅）追加。 */
+export type BtTrackerSource = 'torrent' | 'session';
+
+/** `daemon.task.btStatus` 的单个 tracker（`BtTrackerDto`），顺序即服务端顺序。 */
+export interface BtTrackerDto {
+  url: string;
+  source: BtTrackerSource;
+  status: BtTrackerStatus;
+  /** 最近一次成功 announce 返回的 peer 数；未知缺省。 */
+  peers?: number;
+  /** 失败原因的简短归类（如 `Timed out`）；正常为空。 */
+  message?: string;
+  /** 失败的原始错误文本（供复制）；正常为空。 */
+  detail?: string;
+  /** 最近一次成功的 unix 秒；0 / 缺省 = 从未。 */
+  lastOkAt?: number;
+  /** 下次 announce 的 unix 秒；0 / 缺省 = 未知。 */
+  nextAnnounceAt?: number;
+}
+
+/** 连接传输（`BtPeerDto.transport`）。 */
+export type BtPeerTransport = 'tcp' | 'utp' | 'socks';
+
+/** `daemon.task.btStatus` 的单个 peer（`BtPeerDto`），已按活跃度排序。 */
+export interface BtPeerDto {
+  /** `ip:port`。 */
+  addr: string;
+  client?: string;
+  transport: BtPeerTransport;
+  downloaded: number;
+  uploaded: number;
+  downBps: number;
+  upBps: number;
+  /** ISO 3166-1 alpha-2 国家码（大写）；未知 / 私网 / 地理库未就绪时缺省。 */
+  country?: string;
+}
+
+/** peer 池各状态计数（`BtPeerCountsDto`）。 */
+export interface BtPeerCountsDto {
+  live: number;
+  connecting: number;
+  queued: number;
+  seen: number;
+  dead: number;
+}
+
+/** `daemon.task.btStatus` 结果（`BtStatusDto`）；非 BT 任务返回 `invalidArgument`。 */
+export interface BtStatusDto {
+  dhtEnabled: boolean;
+  peerCounts: BtPeerCountsDto;
+  trackers: BtTrackerDto[];
+  peers: BtPeerDto[];
 }
 
 /** `daemon.task.speedHistory` 参数。 */

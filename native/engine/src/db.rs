@@ -140,7 +140,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     seed_post_ratio_limit_milli INTEGER NOT NULL DEFAULT -2,
     seed_time_limit_minutes INTEGER NOT NULL DEFAULT -2,
     seed_inactive_time_limit_minutes INTEGER NOT NULL DEFAULT -2,
-    seed_upload_limit_bps INTEGER NOT NULL DEFAULT 0
+    seed_upload_limit_bps INTEGER NOT NULL DEFAULT 0,
+    seed_limits_exempt INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS task_segments (
     task_id TEXT NOT NULL,
@@ -375,7 +376,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     seed_post_ratio_limit_milli INTEGER NOT NULL DEFAULT -2,
     seed_time_limit_minutes INTEGER NOT NULL DEFAULT -2,
     seed_inactive_time_limit_minutes INTEGER NOT NULL DEFAULT -2,
-    seed_upload_limit_bps BIGINT NOT NULL DEFAULT 0
+    seed_upload_limit_bps BIGINT NOT NULL DEFAULT 0,
+    seed_limits_exempt INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS task_segments (
     task_id TEXT NOT NULL,
@@ -1498,6 +1500,10 @@ impl Db {
             "BIGINT NOT NULL DEFAULT 0",
         )
         .await?;
+        // 手动恢复做种后的限制豁免标记（1 = 不受分享率 / 时长 / 不活跃限制约束，直到
+        // 用户再次停止做种）。不进 `TASK_COLUMNS`，只经专用访问器读写。
+        self.add_column_if_missing("tasks", "seed_limits_exempt", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
         // 队列级上传限速（KB/s；0 = 不限）。BT add/re-add 时与任务级
         // 覆盖一起折算成 librqbit 上传上限，见 download_manager。
         self.add_column_if_missing("queues", "upload_limit_kbps", "BIGINT NOT NULL DEFAULT 0")
@@ -2279,6 +2285,29 @@ impl Db {
         Ok(())
     }
 
+    /// 标记 / 取消任务的做种限制豁免（手动恢复做种置 1，再次停止做种或重新下载完成时清 0）。
+    pub async fn set_task_seed_limits_exempt(
+        &self,
+        task_id: &str,
+        exempt: bool,
+    ) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET seed_limits_exempt = $1 WHERE id = $2")
+            .bind(i32::from(exempt))
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 所有带做种限制豁免标记的任务 ID（做种求值 tick 用）。
+    pub async fn list_seed_limits_exempt_ids(&self) -> Result<HashSet<String>, DbError> {
+        let ids: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM tasks WHERE seed_limits_exempt = 1")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(ids.into_iter().collect())
+    }
+
     /// 查询所有残留做种态的任务（启动恢复/重置用）。
     pub async fn load_tasks_with_seeding_status(
         &self,
@@ -2925,6 +2954,24 @@ impl Db {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(name.unwrap_or_default())
+    }
+
+    /// 持有 `.torrent` 字节的任务 id 与以 `magnet:` 开头的任务 `(id, url, file_name)`；
+    /// 本机做种创建前按 info hash 查重用（先取轻量清单，再逐个按需读字节）。
+    pub async fn list_bt_task_refs(
+        &self,
+    ) -> Result<(Vec<(String, String)>, Vec<(String, String, String)>), DbError> {
+        let torrents: Vec<(String, String)> = sqlx::query_as(
+            "SELECT t.id, t.file_name FROM tasks t \
+             WHERE EXISTS (SELECT 1 FROM torrent_files f WHERE f.task_id = t.id)",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let magnets: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT id, url, file_name FROM tasks WHERE url LIKE 'magnet:%'")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok((torrents, magnets))
     }
 
     /// Load raw .torrent file bytes for a task (used when resuming).

@@ -620,6 +620,7 @@ pub fn detect_system_proxy() -> Result<Option<ProxyConfig>, DownloadError> {
         username: String::new(),
         password: String::new(),
         no_proxy_list: no_proxy,
+        rules: None,
     }))
 }
 

@@ -8,6 +8,8 @@ actions!(
     [
         NewDownload,
         OpenTorrentFile,
+        /// 本机做种：把 daemon 主机上已有的文件 / 文件夹登记为已完成 BT 任务并做种。
+        SeedLocal,
         PauseSelected,
         ResumeSelected,
         TogglePauseSelected,
@@ -27,6 +29,10 @@ actions!(
         /// 在停靠详情面板中查看选中任务（右键「详情」）。
         ShowSelectedDetail,
         CopySelectedUrl,
+        /// 复制选中 BT 任务的磁力链接（右键「复制磁力链接」）。
+        CopyMagnetSelected,
+        /// 把选中 BT 任务的 .torrent 导出为文件（右键「导出 .torrent 文件…」）。
+        ExportTorrentSelected,
         RenameSelected,
         /// 更换选中任务的下载链接（右键「更换链接」）。
         ChangeSelectedUrl,

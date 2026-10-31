@@ -6,6 +6,8 @@
 //! `pub fn`）订阅，自带一个私有 [`DownloadsController`] 维护任务列表。
 #[path = "task_detail_activity.rs"]
 mod activity;
+#[path = "task_detail_bt.rs"]
+mod bt;
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -43,6 +45,7 @@ use gpui_component::{
 };
 
 use activity::ActivityFeed;
+use bt::BtLive;
 
 use crate::{
     UserStartIntent,
@@ -100,6 +103,10 @@ enum DetailTab {
     /// FluxMesh接收任务的传输诊断（内容由宿主工厂提供）。
     ShareDiagnostics,
     Seeding,
+    /// BT 任务的 tracker 汇报状态。
+    Trackers,
+    /// BT 任务的已连接 peer。
+    Peers,
     Log,
     Advanced,
     /// 插件贡献的 tab，下标对应 `TaskDetailView::plugin_tabs`。
@@ -113,12 +120,14 @@ fn visible_tabs(is_bt: bool, share_diagnostics: bool, plugin_tabs: usize) -> Vec
         DetailTab::Speed,
         DetailTab::ShareDiagnostics,
         DetailTab::Seeding,
+        DetailTab::Trackers,
+        DetailTab::Peers,
         DetailTab::Log,
         DetailTab::Advanced,
     ]
     .into_iter()
     .filter(move |tab| match tab {
-        DetailTab::Seeding => is_bt,
+        DetailTab::Seeding | DetailTab::Trackers | DetailTab::Peers => is_bt,
         DetailTab::ShareDiagnostics => share_diagnostics,
         _ => true,
     });
@@ -163,6 +172,8 @@ pub struct TaskDetailView {
     speed_was_downloading: bool,
     speed_last_fetch: Option<Instant>,
     activity: ActivityFeed,
+    /// Tracker / 连接页签的 BT 实况轮询状态。
+    bt: BtLive,
     runtime: Option<TaskRuntimeDto>,
     activity_stale: bool,
     activity_online: bool,
@@ -276,6 +287,7 @@ impl TaskDetailView {
 
         let this = Self {
             activity: ActivityFeed::new(task_id.clone()),
+            bt: BtLive::default(),
             runtime: None,
             activity_stale: false,
             activity_online: true,
@@ -338,6 +350,7 @@ impl TaskDetailView {
                     .update(cx, |this, cx| {
                         this.sample_speed(cx);
                         this.tick_speed_history(cx);
+                        this.tick_bt_clock(cx);
                     })
                     .is_err()
                 {
@@ -359,6 +372,7 @@ impl TaskDetailView {
         self.share_views.clear();
         self.dto = None;
         self.activity.switch_task(self.task_id.clone());
+        self.bt.reset();
         self.activity_stale = false;
         self.speed_history.clear();
         self.speed_stats = None;
@@ -1084,6 +1098,8 @@ impl TaskDetailView {
             DetailTab::General => "detailTabGeneral",
             DetailTab::Speed => "detailTabSpeed",
             DetailTab::Seeding => "tabSeeding",
+            DetailTab::Trackers => "btTabTrackers",
+            DetailTab::Peers => "btTabPeers",
             DetailTab::ShareDiagnostics => "detailTabShareDiagnostics",
             DetailTab::Log => "detailTabLog",
             DetailTab::Advanced => "detailTabAdvanced",
@@ -2020,28 +2036,28 @@ impl TaskDetailView {
                         0,
                         "btSeedRatioLimit",
                         &self.seed_ratio,
-                        None,
+                        "btSeedRatioUnit",
                     ))
                     .child(self.render_seed_limit_field(
                         cx,
                         1,
                         "btSeedPostRatioLimit",
                         &self.seed_post_ratio,
-                        None,
+                        "btSeedRatioUnit",
                     ))
                     .child(self.render_seed_limit_field(
                         cx,
                         2,
                         "btSeedTimeLimit",
                         &self.seed_time_limit,
-                        Some("timeUnitMinutes"),
+                        "timeUnitMinutes",
                     ))
                     .child(self.render_seed_limit_field(
                         cx,
                         3,
                         "btSeedInactiveTimeLimit",
                         &self.seed_inactive_limit,
-                        Some("timeUnitMinutes"),
+                        "timeUnitMinutes",
                     ))
                     .child(self.render_seed_upload_field(cx))
                     .child(
@@ -2057,14 +2073,14 @@ impl TaskDetailView {
             .into_any_element()
     }
 
-    /// 做种限制字段：标签 → 模式下拉 + 数字输入（仅自定义模式可编辑）→ 可选说明。
+    /// 做种限制字段：标签 → 模式下拉 + 数字输入（仅自定义模式可编辑）+ 数字右侧的单位。
     fn render_seed_limit_field(
         &self,
         cx: &mut Context<Self>,
         index: usize,
         label_key: &str,
         state: &Entity<InputState>,
-        hint_key: Option<&str>,
+        unit_key: &str,
     ) -> AnyElement {
         let mode = self.seed_modes[index];
         let options: Vec<(SeedMode, SharedString)> = SeedMode::ALL
@@ -2097,22 +2113,37 @@ impl TaskDetailView {
                     )
                 })
             });
+        let extended = active_theme(cx).extended().clone();
         form_field(
             self.t(cx, label_key),
-            // 详情面板很窄：每项独占一行，下拉与数字框各占一半，避免挤压重叠。
+            // 详情面板很窄：每项独占一行，下拉占一半，数字框 + 单位占另一半，避免挤压重叠。
             h_flex()
                 .w_full()
                 .gap(px(8.))
                 .child(div().flex_1().min_w_0().child(dropdown))
                 .child(
-                    div().flex_1().min_w_0().child(
-                        NumberInput::new(state)
-                            .control(cx)
-                            .w_full()
-                            .disabled(mode != SeedMode::Custom),
-                    ),
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                NumberInput::new(state)
+                                    .control(cx)
+                                    .w_full()
+                                    .disabled(mode != SeedMode::Custom),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(extended.caption.size)
+                                .text_color(extended.colors.text_tertiary)
+                                .child(self.t(cx, unit_key)),
+                        ),
                 ),
-            hint_key.map(|key| self.t(cx, key)),
+            None,
             cx,
         )
         .into_any_element()
@@ -2385,6 +2416,9 @@ impl gpui::Render for TaskDetailView {
         if self.tab == DetailTab::Seeding {
             self.sync_seed_inputs(window, cx);
         }
+        if self.bt_tab_active() {
+            self.bt_touch(cx);
+        }
         // 页签依赖的FluxMesh事实消失（任务不再是FluxMesh接收任务 / FluxMesh不可用）：回到「常规」并丢弃缓存。
         if !self.share_diagnostics_visible() {
             if self.tab == DetailTab::ShareDiagnostics {
@@ -2396,6 +2430,8 @@ impl gpui::Render for TaskDetailView {
             DetailTab::General => self.render_general(cx),
             DetailTab::Speed => self.render_speed(cx),
             DetailTab::Seeding => self.render_seeding(cx),
+            DetailTab::Trackers => self.render_bt_trackers(window, cx),
+            DetailTab::Peers => self.render_bt_peers(window, cx),
             DetailTab::Log => self.render_log(cx),
             DetailTab::Advanced => self.render_advanced(cx),
             DetailTab::ShareDiagnostics => self.render_share_diagnostics(window, cx),
@@ -2791,6 +2827,8 @@ mod tests {
                 DetailTab::Speed,
                 DetailTab::ShareDiagnostics,
                 DetailTab::Seeding,
+                DetailTab::Trackers,
+                DetailTab::Peers,
                 DetailTab::Log,
                 DetailTab::Advanced,
             ]

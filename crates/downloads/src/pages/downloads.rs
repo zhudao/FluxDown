@@ -13,8 +13,8 @@ use crate::{
         DeleteSelected, DeleteSelectedWithFiles, EnterMultiSelect, FocusSearch, KEY_CONTEXT,
         NewDownload, OpenQueueManager, OpenSelected, OpenSelectedInWindow, OpenTorrentFile,
         PauseAll, PauseSelected, RedownloadSelected, RenameSelected, ResumeAll, ResumeSelected,
-        RevealSelected, SelectAllTasks, ShowSelectedDetail, ToggleBoostSelected, ToggleDetailPanel,
-        TogglePauseSelected,
+        RevealSelected, SeedLocal, SelectAllTasks, ShowSelectedDetail, ToggleBoostSelected,
+        ToggleDetailPanel, TogglePauseSelected,
     },
     components::{
         task_table::{
@@ -37,6 +37,7 @@ use crate::{
         view_prefs::{DetailPlacement, VIEW_PREFS_KEY, ViewPrefs},
     },
     pages::new_download::{NewDownloadContext, build_new_download_context},
+    pages::seed_local::open_seed_local_dialog,
     pages::task_detail::TaskDetailView,
     strings::{DownloadStrings, error_text},
     submission::{
@@ -77,6 +78,7 @@ pub const MAX_TASK_WINDOWS_PER_ACTION: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PageCommand {
     OpenTorrentFile,
+    SeedLocal,
     PauseAll,
     ResumeAll,
     ClearFinished,
@@ -2215,6 +2217,10 @@ impl DownloadView {
         self.run_page_command(PageCommand::OpenTorrentFile, window, cx);
     }
 
+    fn on_seed_local(&mut self, _: &SeedLocal, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_page_command(PageCommand::SeedLocal, window, cx);
+    }
+
     fn open_torrent_file(&mut self, cx: &mut Context<Self>) {
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
@@ -2274,6 +2280,13 @@ impl DownloadView {
     ) {
         match command {
             PageCommand::OpenTorrentFile => self.open_torrent_file(cx),
+            PageCommand::SeedLocal => open_seed_local_dialog(
+                Arc::clone(&self.port),
+                self.strings.clone(),
+                self.translator.clone(),
+                window,
+                cx,
+            ),
             PageCommand::PauseAll => self.execute_toolbar(ToolbarCommand::PauseAll, cx),
             PageCommand::ResumeAll => self.execute_toolbar(ToolbarCommand::ResumeAll, cx),
             PageCommand::ClearFinished => {
@@ -2608,6 +2621,8 @@ impl Render for DownloadView {
             .on_action(cx.listener(Self::on_open_selected_in_window))
             .on_action(cx.listener(Self::on_show_selected_detail))
             .on_action(cx.listener(Self::on_copy_selected_url))
+            .on_action(cx.listener(Self::on_copy_magnet_selected))
+            .on_action(cx.listener(Self::on_export_torrent_selected))
             .on_action(cx.listener(Self::on_redownload_selected))
             .on_action(cx.listener(Self::on_toggle_boost_selected))
             .on_action(cx.listener(Self::on_cycle_density))
@@ -2615,6 +2630,7 @@ impl Render for DownloadView {
             .on_action(cx.listener(Self::on_cycle_sort))
             .on_action(cx.listener(Self::on_new_download))
             .on_action(cx.listener(Self::on_open_torrent_file))
+            .on_action(cx.listener(Self::on_seed_local))
             .on_action(cx.listener(Self::on_open_queue_manager))
             .on_action(cx.listener(Self::on_clear_finished))
             .on_action(cx.listener(Self::on_focus_search))

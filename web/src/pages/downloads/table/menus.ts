@@ -8,9 +8,11 @@ import {
   CircleCheck,
   Copy,
   Download,
+  FileDown,
   Files,
   Layers,
   Link2,
+  Magnet,
   FolderOpen,
   Pause,
   PanelRight,
@@ -40,6 +42,9 @@ import {
   confirmIgnorePluginRetry,
   copySourceLink,
   copyUrls,
+  copyMagnet,
+  exportTorrent,
+  canShareTorrent,
   copyTaskFiles,
   deleteGroup,
   deleteViews,
@@ -230,6 +235,10 @@ export function buildTaskMenu({ t, views, queues, queueName, showDetail, selecti
     })
   }
   entries.push({ type: 'item', key: 'copy-url', label: t('copyUrl'), icon: Copy, onSelect: () => copyUrls(views) })
+  if (only && canShareTorrent(views)) {
+    entries.push({ type: 'item', key: 'copy-magnet', label: t('btCopyMagnet'), icon: Magnet, onSelect: () => void copyMagnet(only) })
+    entries.push({ type: 'item', key: 'export-torrent', label: t('btExportTorrent'), icon: FileDown, onSelect: () => void exportTorrent(only) })
+  }
   if (allLocal && queues.length > 0) {
     entries.push({
       type: 'sub',

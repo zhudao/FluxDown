@@ -99,6 +99,8 @@ pub enum DownloadsCommand {
     TaskActivity(TaskActivityQuery),
     /// 读取 daemon 持久化的任务全生命周期速度曲线与统计（`daemon.task.speedHistory`）。
     TaskSpeedHistory(fluxdown_protocol::TaskSpeedHistoryQuery),
+    /// 读取 BT 任务的 peer / tracker 实况（`daemon.task.btStatus`），详情页轮询。
+    BtStatus(fluxdown_protocol::DaemonBtStatusParams),
     Create(Box<fluxdown_protocol::DaemonCreateTaskParams>),
     /// 批量建任务（`daemon.task.createMany`）：整块一个事务、按 `batch_id` 幂等，
     /// 结果不确定时可原样重发。
@@ -129,6 +131,12 @@ pub enum DownloadsCommand {
     /// [`DownloadsResult::TaskVerify`]；同一任务校验在途时为 `conflict`。
     VerifyTask {
         task_id: String,
+    },
+    /// BT 任务的分享材料（`daemon.task.torrentShare`）：结果为
+    /// [`DownloadsResult::TorrentShare`]。
+    TorrentShare {
+        task_id: String,
+        include_torrent: bool,
     },
     Delete {
         task_id: String,
@@ -257,6 +265,17 @@ pub enum DownloadsCommand {
         queue_id: Option<String>,
         start_paused: Option<bool>,
     },
+    /// 本机做种（`daemon.task.seedLocal`，慢方法：无现成种子时 daemon 要为数据做哈希）：
+    /// 把 daemon 主机上已有的文件 / 文件夹登记为已完成 BT 任务并开始做种。结果为
+    /// `{taskId, duplicate?, existingName?}`（`DownloadsResult::Value`；`duplicate` 为真时未新建任务，
+    /// `taskId` 是已持有同 info hash 的现有任务）；路径 / 种子不匹配或 BT 被禁用为 `invalidArgument`。
+    /// 提交类命令，失败后不自动重试。`trackers` 仅在 `torrent_path` 为 `None` 时有意义。
+    SeedLocal {
+        path: String,
+        torrent_path: Option<String>,
+        trackers: Vec<String>,
+        unlimited: bool,
+    },
     /// 系统文件管理器为该文件显示的图标（`agent.platform.fileIcon`，结果为 PNG）。
     FileIcon(fluxdown_protocol::PlatformFileIconParams),
     /// 设备本地偏好写入（`sync:false`，不进云同步）。
@@ -291,6 +310,8 @@ pub enum DownloadsResult {
     TaskActivity(TaskActivityPage),
     /// 无记录（从未下载或已重新下载重置）时为 `None`。
     TaskSpeedHistory(Option<fluxdown_protocol::TaskSpeedHistoryDto>),
+    /// `BtStatus` 的 peer / tracker 实况。
+    BtStatus(fluxdown_protocol::BtStatusDto),
     Preview(fluxdown_protocol::ResolvePreviewResponse),
     /// `FileIcon` 的 PNG 字节。
     FileIcon(Vec<u8>),
@@ -298,6 +319,16 @@ pub enum DownloadsResult {
     CreateMany(fluxdown_protocol::DaemonCreateTasksResult),
     /// `VerifyTask` 的校验报告。
     TaskVerify(fluxdown_protocol::TaskVerifyResult),
+    /// `TorrentShare` 的磁力链接与（按需）已解码的 `.torrent` 字节。
+    TorrentShare(TorrentShare),
+}
+
+/// [`DownloadsResult::TorrentShare`] 载荷。
+pub struct TorrentShare {
+    pub name: String,
+    pub magnet: String,
+    /// `.torrent` 文件内容；未请求或纯磁力任务（库里没有种子字节）为 `None`。
+    pub torrent: Option<Vec<u8>>,
 }
 
 impl DownloadsResult {

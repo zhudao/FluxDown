@@ -38,6 +38,21 @@ pub enum ActorOperation {
         /// 分类目录路由，见 `DaemonCreateTaskParams::category_route`。
         category_route: Option<fluxdown_protocol::CategoryRouteDto>,
     },
+    /// BT 任务实况（`daemon.task.btStatus`）：peer 与 tracker 状态。
+    BtStatus {
+        task_id: String,
+    },
+    /// BT 任务的分享材料（`daemon.task.torrentShare`）。
+    TorrentShare {
+        task_id: String,
+        include_torrent: bool,
+    },
+    /// 本机做种（`daemon.task.seedLocal`）：`torrent_bytes` 已由服务层在 actor 之外生成 / 读取。
+    SeedLocal {
+        path: String,
+        torrent_bytes: Vec<u8>,
+        unlimited: bool,
+    },
     /// 批量建任务（`daemon.task.createMany`）：保存目录与队列只解析一次，
     /// 整块一个事务落库，按 `batch_id` 幂等。
     CreateTasks {
@@ -266,6 +281,9 @@ pub enum ActorResult {
     WebhookSimulation(usize),
     WebhookTest(Box<fluxdown_engine::webhook::WebhookDelivery>),
     TaskVerify(fluxdown_protocol::TaskVerifyResult),
+    SeedLocal(fluxdown_protocol::SeedLocalResultDto),
+    TorrentShare(Box<fluxdown_protocol::TorrentShareDto>),
+    BtStatus(Box<fluxdown_protocol::BtStatusDto>),
 }
 
 /// actor 领域错误。
@@ -928,6 +946,119 @@ async fn execute_operation(
                 .ok_or_else(|| ActorError::Operation("failed to persist task".to_owned()))?;
             return Ok(ActorResult::Created(task_id));
         }
+        ActorOperation::SeedLocal {
+            path,
+            torrent_bytes,
+            unlimited,
+        } => {
+            #[cfg(feature = "bt")]
+            {
+                use fluxdown_engine::bt_local_seed::{LocalSeedError, plan_local_seed};
+                let local_error = |error: LocalSeedError| match error {
+                    LocalSeedError::InvalidArgument(message) => {
+                        ActorError::InvalidArgument(message)
+                    }
+                    LocalSeedError::Operation(message) => ActorError::Operation(message),
+                    error @ LocalSeedError::Duplicate { .. } => {
+                        ActorError::Operation(error.to_string())
+                    }
+                };
+                let plan = plan_local_seed(std::path::Path::new(&path), torrent_bytes)
+                    .map_err(local_error)?;
+                let queue_id = resolve_queue_id(&engine.db, String::new()).await?;
+                let created = engine
+                    .manager
+                    .create_local_seed(plan, queue_id, unlimited)
+                    .await;
+                return match created {
+                    Ok(task_id) => Ok(ActorResult::SeedLocal(
+                        fluxdown_protocol::SeedLocalResultDto {
+                            task_id,
+                            duplicate: false,
+                            existing_name: String::new(),
+                        },
+                    )),
+                    Err(LocalSeedError::Duplicate { task_id, name }) => Ok(ActorResult::SeedLocal(
+                        fluxdown_protocol::SeedLocalResultDto {
+                            task_id,
+                            duplicate: true,
+                            existing_name: name,
+                        },
+                    )),
+                    Err(error) => Err(local_error(error)),
+                };
+            }
+            #[cfg(not(feature = "bt"))]
+            {
+                let _ = (path, torrent_bytes, unlimited);
+                return Err(ActorError::InvalidArgument(
+                    UNSUPPORTED_PROTOCOL_MESSAGE.to_owned(),
+                ));
+            }
+        }
+        ActorOperation::BtStatus { task_id } => {
+            #[cfg(feature = "bt")]
+            {
+                use fluxdown_engine::bt_local_seed::LocalSeedError;
+                let view =
+                    engine
+                        .manager
+                        .bt_status(&task_id)
+                        .await
+                        .map_err(|error| match error {
+                            LocalSeedError::InvalidArgument(message) => {
+                                ActorError::InvalidArgument(message)
+                            }
+                            other => ActorError::Operation(other.to_string()),
+                        })?;
+                return Ok(ActorResult::BtStatus(Box::new(bt_status_to_dto(view))));
+            }
+            #[cfg(not(feature = "bt"))]
+            {
+                let _ = task_id;
+                return Err(ActorError::InvalidArgument(
+                    UNSUPPORTED_PROTOCOL_MESSAGE.to_owned(),
+                ));
+            }
+        }
+        ActorOperation::TorrentShare {
+            task_id,
+            include_torrent,
+        } => {
+            #[cfg(feature = "bt")]
+            {
+                use fluxdown_engine::bt_local_seed::LocalSeedError;
+                let (share, torrent) = engine
+                    .manager
+                    .torrent_share(&task_id, include_torrent)
+                    .await
+                    .map_err(|error| match error {
+                        LocalSeedError::InvalidArgument(message) => {
+                            ActorError::InvalidArgument(message)
+                        }
+                        error @ LocalSeedError::Duplicate { .. } => {
+                            ActorError::Operation(error.to_string())
+                        }
+                        LocalSeedError::Operation(message) => ActorError::Operation(message),
+                    })?;
+                return Ok(ActorResult::TorrentShare(Box::new(
+                    fluxdown_protocol::TorrentShareDto {
+                        info_hash: share.info_hash,
+                        name: share.name,
+                        magnet: share.magnet,
+                        torrent_b64: torrent
+                            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes)),
+                    },
+                )));
+            }
+            #[cfg(not(feature = "bt"))]
+            {
+                let _ = (task_id, include_torrent);
+                return Err(ActorError::InvalidArgument(
+                    UNSUPPORTED_PROTOCOL_MESSAGE.to_owned(),
+                ));
+            }
+        }
         ActorOperation::CreateTasks {
             batch_id,
             common,
@@ -1545,6 +1676,78 @@ async fn commit_ed2k_refresh(
 }
 
 /// 引擎完整性校验报告 → wire DTO（引擎不依赖 protocol，转换放在 daemon 边界）。
+#[cfg(feature = "bt")]
+fn bt_status_to_dto(
+    view: fluxdown_engine::bt_status::BtStatusView,
+) -> fluxdown_protocol::BtStatusDto {
+    use fluxdown_engine::bt_status::{TrackerSource, TrackerState};
+    use fluxdown_protocol::{BtPeerDto, BtTrackerDto, BtTrackerSource, BtTrackerStatus};
+    let available = fluxdown_engine::bt_status::installed();
+    fluxdown_protocol::BtStatusDto {
+        dht_enabled: view.dht_enabled,
+        peer_counts: fluxdown_protocol::BtPeerCountsDto {
+            live: view.counts.live,
+            connecting: view.counts.connecting,
+            queued: view.counts.queued,
+            seen: view.counts.seen,
+            dead: view.counts.dead,
+        },
+        trackers: view
+            .trackers
+            .into_iter()
+            .map(|row| {
+                let source = match row.source {
+                    TrackerSource::Torrent => BtTrackerSource::Torrent,
+                    TrackerSource::Session => BtTrackerSource::Session,
+                };
+                let status = match (&row.entry, available) {
+                    (_, false) => BtTrackerStatus::Unknown,
+                    (None, true) => BtTrackerStatus::NotContacted,
+                    (Some(entry), true) => match entry.state {
+                        TrackerState::Updating => BtTrackerStatus::Updating,
+                        TrackerState::Working => BtTrackerStatus::Working,
+                        TrackerState::NotWorking => BtTrackerStatus::NotWorking,
+                    },
+                };
+                let entry = row
+                    .entry
+                    .unwrap_or(fluxdown_engine::bt_status::TrackerEntry {
+                        state: TrackerState::Updating,
+                        peers: None,
+                        message: String::new(),
+                        detail: String::new(),
+                        last_ok_at: 0,
+                        next_announce_at: 0,
+                    });
+                BtTrackerDto {
+                    url: row.url,
+                    source,
+                    status,
+                    peers: entry.peers,
+                    message: entry.message,
+                    detail: entry.detail,
+                    last_ok_at: entry.last_ok_at,
+                    next_announce_at: entry.next_announce_at,
+                }
+            })
+            .collect(),
+        peers: view
+            .peers
+            .into_iter()
+            .map(|peer| BtPeerDto {
+                addr: peer.addr,
+                client: peer.client,
+                transport: peer.transport,
+                downloaded: peer.downloaded,
+                uploaded: peer.uploaded,
+                down_bps: peer.down_bps,
+                up_bps: peer.up_bps,
+                country: peer.country,
+            })
+            .collect(),
+    }
+}
+
 #[cfg(feature = "bt")]
 fn task_verify_to_dto(
     report: fluxdown_engine::bt_verify::BtIntegrityReport,

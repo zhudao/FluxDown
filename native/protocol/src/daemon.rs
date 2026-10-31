@@ -258,6 +258,176 @@ pub struct DaemonCreateTaskParams {
     pub category_route: Option<crate::agent::CategoryRouteDto>,
 }
 
+/// `daemon.task.seedLocal` 参数：把 daemon 主机磁盘上已有的文件 / 文件夹登记为已完成并开始做种。
+/// 路径都指 daemon 所在主机上的绝对路径。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonSeedLocalParams {
+    /// 要做种的文件或文件夹（绝对路径）。
+    pub path: String,
+    /// 现成的 `.torrent` 文件路径；缺省 / 空 = 由 daemon 为 `path` 现场生成种子。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torrent_path: Option<String>,
+    /// 生成种子时写入的 tracker（每项一条 announce URL）；给了 `torrentPath` 时忽略。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trackers: Vec<String>,
+    /// `true` = 该任务永不因分享率 / 时长 / 不活跃限制停止做种（任务级限制全部「不限制」）。
+    #[serde(default)]
+    pub unlimited: bool,
+}
+
+/// `daemon.task.seedLocal` 结果。`duplicate = true` 表示同一个种子（info hash）已被另一任务
+/// 持有，**未**创建新任务：`taskId` 是已有任务，`existingName` 是它的显示名（可能为空）。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SeedLocalResultDto {
+    pub task_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub duplicate: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub existing_name: String,
+}
+
+/// `daemon.task.btStatus` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonBtStatusParams {
+    pub task_id: String,
+}
+
+/// tracker 汇报状态（对齐 qBittorrent：工作 / 更新中 / 未工作 / 未联系）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum BtTrackerStatus {
+    /// 最近一次 announce 成功。
+    Working,
+    /// 监控已启动，尚无结果。
+    Updating,
+    /// 最近一次 announce 失败，原因见 `message`。
+    NotWorking,
+    /// 任务当前没有在向它汇报（暂停 / 未运行）。
+    #[default]
+    NotContacted,
+    /// 宿主未提供 tracker 状态采集（旧宿主 / 嵌入式宿主）。
+    Unknown,
+}
+
+/// tracker 来源。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum BtTrackerSource {
+    /// 种子 / 磁力链接自带。
+    #[default]
+    Torrent,
+    /// 会话按设置追加（自定义 / 内置公共 / 订阅）。
+    Session,
+}
+
+/// 一个 tracker 行。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BtTrackerDto {
+    pub url: String,
+    pub source: BtTrackerSource,
+    pub status: BtTrackerStatus,
+    /// 最近一次成功 announce 返回的 peer 数；未知缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peers: Option<u64>,
+    /// 失败原因的简短归类（qBittorrent 风格，如 `Timed out`）；非失败为空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
+    /// 失败的原始错误文本（供「复制错误」）；非失败为空。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// 最近一次成功的 unix 秒；0 = 从未成功。
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub last_ok_at: i64,
+    /// 预计下次 announce 的 unix 秒；0 = 未知。
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub next_announce_at: i64,
+}
+
+/// 一个已连接 peer。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BtPeerDto {
+    /// `ip:port`。
+    pub addr: String,
+    /// 对端客户端名（握手上报，可能为空）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub client: String,
+    /// `tcp` / `utp` / `socks`。
+    pub transport: String,
+    /// 从该 peer 下载的字节。
+    pub downloaded: u64,
+    /// 上传给该 peer 的字节。
+    pub uploaded: u64,
+    /// 下载速度（字节/秒），按相邻两次采样折算。
+    pub down_bps: u64,
+    /// 上传速度（字节/秒）。
+    pub up_bps: u64,
+    /// peer 所在国家（ISO 3166-1 两位大写码）；国家库未就绪 / 内网 / 未收录缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+}
+
+/// peer 数量汇总。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BtPeerCountsDto {
+    pub live: u32,
+    pub connecting: u32,
+    pub queued: u32,
+    pub seen: u32,
+    pub dead: u32,
+}
+
+/// `daemon.task.btStatus` 结果：任务的 peer 与 tracker 实况。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BtStatusDto {
+    /// DHT 是否启用（影响无 tracker 时的发现能力）。
+    pub dht_enabled: bool,
+    pub peer_counts: BtPeerCountsDto,
+    pub trackers: Vec<BtTrackerDto>,
+    pub peers: Vec<BtPeerDto>,
+}
+/// `daemon.task.torrentShare` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonTorrentShareParams {
+    pub task_id: String,
+    /// `true` 时结果带 `.torrent` 文件内容（base64）；只要磁力链接时留 `false`。
+    #[serde(default)]
+    pub include_torrent: bool,
+}
+
+/// `daemon.task.torrentShare` 结果：把 BT 任务分享给别人所需的材料。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TorrentShareDto {
+    /// 小写十六进制 info hash。
+    pub info_hash: String,
+    /// 种子名（磁力任务尚无元数据时可能为空）。
+    pub name: String,
+    /// 磁力链接：含种子自带 tracker 与本机会话追加的 tracker。
+    pub magnet: String,
+    /// `.torrent` 内容（base64）；未请求或库里没有种子字节（纯磁力任务）时缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torrent_b64: Option<String>,
+}
+
 /// `daemon.task.createMany` 单次调用的条目上限；客户端须按块拆分更大的导入。
 pub const CREATE_TASKS_MAX_ITEMS: usize = 512;
 /// `daemon.task.createMany` 幂等键的最大长度（字节）。

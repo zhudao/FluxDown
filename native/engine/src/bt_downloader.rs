@@ -5559,6 +5559,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 .await?
                 .map(|v| v != "0")
                 .unwrap_or(true);
+            // 新一轮下载完成：清掉上一轮手动恢复做种遗留的限制豁免，新完成的做种照常受限制约束。
+            db.set_task_seed_limits_exempt(&task_id, false).await?;
             // 完成阶段（重哈希/搬移可持续数分钟）内用户或队列要求暂停时，
             // 不能再登记为活动做种者：暂停不会被撤销，登记会让 UI 显示
             // 「做种中」而实际不上传。

@@ -1175,6 +1175,11 @@ export function installIntercept(): void {
   setInterceptListenersActive(true);
 }
 
+/** 拦截监听当前是否挂着（总开关关闭时已整体摘除）。 */
+export function isInterceptActive(): boolean {
+  return interceptListenersActive;
+}
+
 /**
  * 右键链接能否走浏览器捕获（与点击下载同一路径）：需要 onDeterminingFilename（Firefox 没有，
  * 其 blocking 拦截只覆盖页面导航）、拦截已开启（关闭时监听已移除且浏览器下载栏可见），且 App

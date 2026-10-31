@@ -167,6 +167,7 @@ fn is_non_idempotent_submission(command: &DownloadsCommand) -> bool {
         DownloadsCommand::Create(_)
             | DownloadsCommand::CreateGroup { .. }
             | DownloadsCommand::SubmitTorrentFile { .. }
+            | DownloadsCommand::SeedLocal { .. }
             | DownloadsCommand::Redownload(..)
     ) || matches!(command, DownloadsCommand::CaptureResolve(params) if params.accepted)
 }
@@ -192,7 +193,8 @@ impl DownloadsPort for AgentDownloadsPort {
             DownloadsCommand::CaptureResolve(params) => {
                 params.request.as_ref().map(|request| request.url.clone())
             }
-            DownloadsCommand::SubmitTorrentFile { path, .. } => Some(path.clone()),
+            DownloadsCommand::SubmitTorrentFile { path, .. }
+            | DownloadsCommand::SeedLocal { path, .. } => Some(path.clone()),
             DownloadsCommand::Redownload(request, _) => Some(request.url.clone()),
             _ => None,
         };
@@ -269,6 +271,12 @@ impl AgentDownloadsPort {
                         .await?;
                     return Ok(DownloadsResult::TaskSpeedHistory(history));
                 }
+                DownloadsCommand::BtStatus(params) => {
+                    let status = client
+                        .call(method::DAEMON_TASK_BT_STATUS, Some(params))
+                        .await?;
+                    return Ok(DownloadsResult::BtStatus(status));
+                }
                 DownloadsCommand::FileIcon(params) => {
                     let icon: fluxdown_protocol::PlatformFileIconDto = client
                         .call(method::AGENT_PLATFORM_FILE_ICON, Some(params))
@@ -314,6 +322,46 @@ impl AgentDownloadsPort {
                         .await?;
                     return Ok(DownloadsResult::TaskVerify(result));
                 }
+                DownloadsCommand::TorrentShare {
+                    task_id,
+                    include_torrent,
+                } => {
+                    let share: fluxdown_protocol::TorrentShareDto = client
+                        .call(
+                            method::DAEMON_TASK_TORRENT_SHARE,
+                            Some(serialize(fluxdown_protocol::DaemonTorrentShareParams {
+                                task_id,
+                                include_torrent,
+                            })?),
+                        )
+                        .await?;
+                    let torrent = share
+                        .torrent_b64
+                        .map(|encoded| base64::engine::general_purpose::STANDARD.decode(encoded))
+                        .transpose()
+                        .map_err(|_| internal_error())?;
+                    return Ok(DownloadsResult::TorrentShare(
+                        fluxdown_ui_downloads::TorrentShare {
+                            name: share.name,
+                            magnet: share.magnet,
+                            torrent,
+                        },
+                    ));
+                }
+                DownloadsCommand::SeedLocal {
+                    path,
+                    torrent_path,
+                    trackers,
+                    unlimited,
+                } => (
+                    method::DAEMON_TASK_SEED_LOCAL,
+                    serialize(fluxdown_protocol::DaemonSeedLocalParams {
+                        path,
+                        torrent_path,
+                        trackers,
+                        unlimited,
+                    })?,
+                ),
                 DownloadsCommand::Delete {
                     task_id,
                     delete_files,

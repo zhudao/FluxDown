@@ -338,6 +338,8 @@ export interface MessageMap {
   bypassKey: { req: { held: boolean }; res: { ok: boolean } };
   /** sensor 上报带跳过接管修饰键的真实点击；`href` = 点中的链接（按钮等非链接为空）。见 breaker.armBypassClick。 */
   bypassClick: { req: { href?: string }; res: { ok: boolean } };
+  /** sensor 上报一次真实链接按下（响应头到达前）；像下载时 background 预热 NMH。见 messages.linkPress。 */
+  linkPress: { req: { href: string; download: boolean }; res: { ok: boolean } };
   /** 页面探测降级时由 UI 触发：刷新该 tab（内容脚本内的面板没有 tabs API）。 */
   reloadTab: { req: { tabId?: number }; res: { ok: boolean } };
   contextTarget: { req: { elementKey: string | null }; res: { ok: boolean } };

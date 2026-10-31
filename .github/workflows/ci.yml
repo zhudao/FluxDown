@@ -64,6 +64,7 @@ jobs:
               - 'assets/i18n/**'
               - 'website-v2/src/lib/gpui-theme/**'
               - 'assets/icon-packs/**'
+              - 'assets/flags/**'
               - 'crates/icon_pack/tests/fixtures/**'
               - 'native/protocol/tests/fixtures/plugin_view_apply.json'
               - 'native/protocol/src/plugin_view_tones.json'

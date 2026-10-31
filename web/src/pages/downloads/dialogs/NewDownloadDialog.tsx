@@ -6,7 +6,7 @@
 // - 单条 http(s) 链接先 `daemon.group.resolvePreview` 探测插件多文件清单，命中则进入清单选择建任务组；
 // - 外部捕获（`agent.capture.*`）作为链接行并入表单，提交时经 `agent.capture.resolve` 确认，关闭时未确认的一并忽略。
 
-import { ChevronDown, ChevronRight, FileText, FolderOpen, Plus, Share2, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, FileText, FolderOpen, Plus, Share2, Sprout, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { useT } from '../../../i18n'
@@ -31,7 +31,7 @@ import type { FillTracking, RequestHints } from './aria2c'
 import { IMPORT_CHUNK_SIZE, importNotice, runImport } from './importRunner'
 import type { ImportProgress } from './importRunner'
 import { SplitButton } from './SplitButton'
-import { capturesShown, closeNewDownload } from './store'
+import { capturesShown, closeNewDownload, openSeedLocal } from './store'
 import type { NewDownloadSession } from './store'
 import { isTorrentFile, submitTorrentFiles } from './torrents'
 import { SaveDirCombo } from './SaveDirCombo'
@@ -786,6 +786,17 @@ export function NewDownloadDialog({ session }: { session: NewDownloadSession }) 
             <div className="flex flex-wrap gap-2">
               <Button variant="ghost" icon={FolderOpen} disabled={busy || target !== null} onClick={() => torrentInput.current?.click()}>
                 {t('openTorrentFile')}
+              </Button>
+              <Button
+                variant="ghost"
+                icon={Sprout}
+                disabled={busy || target !== null}
+                onClick={() => {
+                  closeNewDownload()
+                  openSeedLocal()
+                }}
+              >
+                {t('seedLocalTitle')}
               </Button>
               <Button variant="ghost" icon={FileText} disabled={busy} onClick={() => txtInput.current?.click()}>
                 {t('importTxtFile')}

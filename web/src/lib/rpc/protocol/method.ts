@@ -14,6 +14,8 @@ export const METHOD = {
   DAEMON_TASK_GET: 'daemon.task.get',
   DAEMON_TASK_ACTIVITY: 'daemon.task.activity',
   DAEMON_TASK_SPEED_HISTORY: 'daemon.task.speedHistory',
+  /** BT 任务实况（`TaskIdParams` → `BtStatusDto`）：详情页 Tracker / 连接标签轮询；非 BT 任务 `invalidArgument`。 */
+  DAEMON_TASK_BT_STATUS: 'daemon.task.btStatus',
   DAEMON_TASK_CREATE: 'daemon.task.create',
   /** 批量建任务（`DaemonCreateTasksParams`）：整块一个事务、一次 `tasksChanged` 事件，按 `batchId` 幂等。 */
   DAEMON_TASK_CREATE_MANY: 'daemon.task.createMany',
@@ -29,6 +31,8 @@ export const METHOD = {
   DAEMON_TASK_RESCAN: 'daemon.task.rescan',
   DAEMON_TASK_SET_SEED_LIMITS: 'daemon.task.setSeedLimits',
   DAEMON_TASK_VERIFY: 'daemon.task.verify',
+  DAEMON_TASK_SEED_LOCAL: 'daemon.task.seedLocal',
+  DAEMON_TASK_TORRENT_SHARE: 'daemon.task.torrentShare',
   DAEMON_TASK_PAUSE_MANY: 'daemon.task.pauseMany',
   DAEMON_TASK_RESUME_MANY: 'daemon.task.resumeMany',
   DAEMON_TASK_DELETE_MANY: 'daemon.task.deleteMany',
