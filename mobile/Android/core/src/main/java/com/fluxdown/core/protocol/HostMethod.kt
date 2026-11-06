@@ -34,6 +34,8 @@ object HostMethod {
     const val daemonTaskRescan = "daemon.task.rescan"
     const val daemonTaskSetSeedLimits = "daemon.task.setSeedLimits"
     const val daemonTaskVerify = "daemon.task.verify"
+    /** 已完成任务落盘文件的哈希（`{taskId, algorithm}` → `{fileHash}`），结果同时记入任务 `fileHash`。 */
+    const val daemonTaskHash = "daemon.task.hash"
     /** 批量暂停 / 恢复（`{taskIds}`）：整批只推一次任务快照；未知 id 忽略，空列表为空操作。 */
     const val daemonTaskPauseMany = "daemon.task.pauseMany"
     const val daemonTaskResumeMany = "daemon.task.resumeMany"
@@ -269,7 +271,7 @@ object HostMethod {
     const val agentUpdateDownload = "agent.update.download"
     const val agentUpdateInstall = "agent.update.install"
     const val agentUpdateCancel = "agent.update.cancel"
-    /** 完成后关机：`{delaySecs}`；无活跃任务时拒绝（`InvalidArgument`）。 */
+    /** 定时关机 / 睡眠：`{delaySecs, action}` → `{armed}`；没有任务时立即倒计时，`delaySecs = 0` 仅有任务时受理。 */
     const val agentPowerArm = "agent.power.arm"
     const val agentPowerDisarm = "agent.power.disarm"
     const val agentCloudNotifyGet = "agent.cloudNotify.get"

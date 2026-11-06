@@ -17,8 +17,12 @@ pub enum SelectionKind {
     Hls {
         options: Vec<HlsQualityOptionDto>,
     },
+    /// BT 文件选择。`save_dir` = 任务当前保存目录（主机路径，供选择窗预填；旧 daemon 缺省）。
+    #[serde(rename_all = "camelCase")]
     Bt {
         files: Vec<BtFileDto>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        save_dir: String,
     },
     Variant {
         options: Vec<ResolveVariantOptionDto>,
@@ -146,8 +150,12 @@ pub enum SelectionOutcome {
     Hls {
         index: i32,
     },
+    /// 应答 [`SelectionKind::Bt`]：`save_dir` 非空且不同于任务当前目录时，引擎丢弃已暂存的
+    /// 数据、把任务改到该目录后重新开始；缺省 = 沿用当前目录。
     Bt {
         indices: Vec<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save_dir: Option<String>,
     },
     Variant {
         index: i32,
@@ -299,6 +307,25 @@ pub struct DaemonSeedLocalParams {
     /// `true` = 该任务永不因分享率 / 时长 / 不活跃限制停止做种（任务级限制全部「不限制」）。
     #[serde(default)]
     pub unlimited: bool,
+}
+
+/// `daemon.task.hash` 参数。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonTaskHashParams {
+    pub task_id: String,
+    /// 摘要算法：[`crate::HASH_ALGORITHMS`] 之一（也接受 `sha-256` 等带连字符写法）。
+    pub algorithm: String,
+}
+
+/// `daemon.task.hash` 结果。
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TaskHashResult {
+    /// 记入任务的哈希，格式同 [`TaskDto::file_hash`]。
+    pub file_hash: String,
 }
 
 /// `daemon.task.seedLocal` 结果。`duplicate = true` 表示同一个种子（info hash）已被另一任务
@@ -1175,6 +1202,11 @@ pub struct TaskDto {
     /// 记录下载真正完成（status→3）的时刻，不含插件 hook 后处理耗时。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub completed_at: String,
+    /// 落盘文件的哈希记录，格式 `algo=hexhash`（小写，`algo` ∈ [`crate::HASH_ALGORITHMS`]；
+    /// 空 = 尚未计算）。校验和校验通过、下载完成后自动计算或 `daemon.task.hash` 写入；
+    /// 重新下载时清空。只对 status=3 有意义。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file_hash: String,
     /// Source page URL captured by the browser extension (empty = none).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub referrer: String,

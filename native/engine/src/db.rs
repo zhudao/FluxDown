@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     orig_last_modified TEXT NOT NULL DEFAULT '',
     audio_url TEXT NOT NULL DEFAULT '',
     file_missing INTEGER NOT NULL DEFAULT 0,
+    file_hash TEXT NOT NULL DEFAULT '',
     range_verified INTEGER NOT NULL DEFAULT 1,
     name_inferred INTEGER NOT NULL DEFAULT 0,
     resp_name TEXT NOT NULL DEFAULT '',
@@ -418,6 +419,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     orig_last_modified TEXT NOT NULL DEFAULT '',
     audio_url TEXT NOT NULL DEFAULT '',
     file_missing INTEGER NOT NULL DEFAULT 0,
+    file_hash TEXT NOT NULL DEFAULT '',
     range_verified INTEGER NOT NULL DEFAULT 1,
     name_inferred INTEGER NOT NULL DEFAULT 0,
     resp_name TEXT NOT NULL DEFAULT '',
@@ -686,15 +688,14 @@ CREATE TABLE IF NOT EXISTS bt_guard_cloud_meta (
 /// checkpoint 时同步；进程崩溃不丢已提交事务，仅整机掉电可能丢失最近
 /// 数秒的提交（数据库本身不会损坏）。下载进度/任务元数据可由续传重建，
 /// 换来批量导入与进度落库的 fsync 开销归零。
-/// cache_size=-16384（16MiB，负值单位为 KiB）：23 万任务级别的库里 UUID 主键
-/// 的 B 树随机访问，512KiB 页缓存几乎必然未命中并反复 pread；16MiB 足以容纳
-/// 常用索引的热页。内存取舍：该值是「每连接」上限且按需增长（空库不预占），
-/// 连接池上限 5 条，最坏占用 = 5 × 16MiB，对桌面/NAS/手机均可接受，
-/// 因此不按平台区分，避免出现两套行为。
+/// cache_size（负值单位为 KiB）：23 万任务级别的库里 UUID 主键的 B 树随机访问，
+/// 512KiB 页缓存几乎必然未命中并反复 pread；标准档 16MiB 足以容纳常用索引的热页。
+/// 该值是「每连接」上限且按需增长（空库不预占），连接池上限 5 条；按本机有效内存
+/// 分档（[`crate::mem_budget`]：<1.5GiB 取 4MiB、<3GiB 取 8MiB），在 after_connect
+/// 中单独设置。
 const SQLITE_PRAGMAS: &str = "PRAGMA journal_mode=WAL;\
  PRAGMA synchronous=NORMAL;\
  PRAGMA busy_timeout=5000;\
- PRAGMA cache_size=-16384;\
  PRAGMA temp_store=MEMORY;\
  PRAGMA mmap_size=0;\
  PRAGMA wal_autocheckpoint=1000;";
@@ -822,6 +823,7 @@ fn task_from_row(row: &AnyRow) -> Result<TaskInfo, sqlx::Error> {
         ignore_tls_errors: row.try_get::<i32, _>("ignore_tls_errors").unwrap_or(0) != 0,
         file_missing: row.try_get::<i32, _>("file_missing").unwrap_or(0) != 0,
         completed_at: row.try_get("completed_at").unwrap_or_default(),
+        file_hash: row.try_get("file_hash").unwrap_or_default(),
         segments: row.try_get("segments").unwrap_or(0),
         queue_order: row.try_get("queue_order").unwrap_or(0),
         uploaded_bytes: row.try_get("uploaded_bytes").unwrap_or_default(),
@@ -849,7 +851,7 @@ fn task_from_row(row: &AnyRow) -> Result<TaskInfo, sqlx::Error> {
     })
 }
 
-const TASK_COLUMNS: &str = "id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id, checksum, ignore_tls_errors, file_missing, completed_at, segments, queue_order, uploaded_bytes, uploaded_at_completion, seeding_status, seeding_message, seeding_time_secs, seed_ratio_limit_milli, seed_post_ratio_limit_milli, seed_time_limit_minutes, seed_inactive_time_limit_minutes, seed_upload_limit_bps, referrer, group_id, rss_source_id, origin_url, auto_route, src_cdn_bytes, src_proxy_bytes, src_nic_bytes";
+const TASK_COLUMNS: &str = "id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id, checksum, ignore_tls_errors, file_missing, completed_at, file_hash, segments, queue_order, uploaded_bytes, uploaded_at_completion, seeding_status, seeding_message, seeding_time_secs, seed_ratio_limit_milli, seed_post_ratio_limit_milli, seed_time_limit_minutes, seed_inactive_time_limit_minutes, seed_upload_limit_bps, referrer, group_id, rss_source_id, origin_url, auto_route, src_cdn_bytes, src_proxy_bytes, src_nic_bytes";
 
 /// 新建任务的完整落库行（[`Db::insert_new_tasks`]）。
 ///
@@ -1370,6 +1372,13 @@ impl Db {
                 Box::pin(async move {
                     if conn.backend_name() == "SQLite" {
                         sqlx::raw_sql(SQLITE_PRAGMAS).execute(&mut *conn).await?;
+                        let cache = format!(
+                            "PRAGMA cache_size=-{};",
+                            crate::mem_budget::current().sqlite_cache_kib
+                        );
+                        sqlx::raw_sql(AssertSqlSafe(cache))
+                            .execute(&mut *conn)
+                            .await?;
                     }
                     Ok(())
                 })
@@ -1516,6 +1525,9 @@ impl Db {
         // 完成（status→3）的时刻，插件 onDone 等 hook 后处理不计入；任务
         // 重新开始下载（status→0/1/5）时清空，供重下后重新记录。
         self.add_column_if_missing("tasks", "completed_at", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        // 落盘文件的哈希记录（`algo=hex`，空 = 未计算）；维护规则见 `update_task_status`。
+        self.add_column_if_missing("tasks", "file_hash", "TEXT NOT NULL DEFAULT ''")
             .await?;
         // 队列内启动顺序（0 = 未显式排序，按 created_at 先来先启动）。
         self.add_column_if_missing("tasks", "queue_order", "INTEGER NOT NULL DEFAULT 0")
@@ -2121,6 +2133,8 @@ impl Db {
     ///   不含 hook 耗时；重复写 3（幂等竞态）不会覆盖首次记录。
     /// - `status ∈ {0, 1, 5}`（重新排队/下载/准备）→ 清空，重下后重新记录。
     /// - 其余状态（暂停/错误）保持不变。
+    ///
+    /// `file_hash` 描述的是上一次落盘的文件：同样在 `status ∈ {0, 1, 5}` 时清空。
     pub async fn update_task_status(
         &self,
         id: &str,
@@ -2133,7 +2147,8 @@ impl Db {
                      WHEN $1 = 3 AND completed_at = '' THEN $3
                      WHEN $1 IN (0, 1, 5) THEN ''
                      ELSE completed_at
-                 END
+                 END,
+                 file_hash = CASE WHEN $1 IN (0, 1, 5) THEN '' ELSE file_hash END
              WHERE id = $4",
         )
         .bind(status)
@@ -2146,7 +2161,7 @@ impl Db {
     }
 
     /// 批量更新任务状态（同一状态写入多任务），`error_message` 统一清空；
-    /// `completed_at` 维护规则与 [`Db::update_task_status`] 一致。批量操作
+    /// `completed_at` / `file_hash` 维护规则与 [`Db::update_task_status`] 一致。批量操作
     /// （停止队列/批量暂停/批量恢复排队）专用：N 任务一条（分块）SQL，
     /// 取代逐任务 N 次 UPDATE。
     ///
@@ -2183,7 +2198,8 @@ impl Db {
                          WHEN $1 = 3 AND completed_at = '' THEN $2
                          WHEN $1 IN (0, 1, 5) THEN ''
                          ELSE completed_at
-                     END
+                     END,
+                     file_hash = CASE WHEN $1 IN (0, 1, 5) THEN '' ELSE file_hash END
                  WHERE id IN ({placeholders})"
             );
             let mut query = sqlx::query(AssertSqlSafe(sql))
@@ -2195,6 +2211,36 @@ impl Db {
             query.execute(&self.pool).await?;
         }
         Ok(())
+    }
+
+    /// 记录任务落盘文件的哈希（`algo=hex`）。下载器在校验和校验通过时调用，此时
+    /// 任务尚在下载态，随后的完成写入（status→3）保留该值。
+    pub async fn set_task_file_hash(&self, id: &str, file_hash: &str) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET file_hash = $1 WHERE id = $2")
+            .bind(file_hash)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 写回一次完成后的哈希计算结果：仅当任务仍是计算开始时那一次完成（status = 3 且
+    /// `completed_at` 未变）时写入。返回是否写入；期间被重新下载 / 删除则为 `false`。
+    pub async fn commit_task_file_hash(
+        &self,
+        id: &str,
+        completed_at: &str,
+        file_hash: &str,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE tasks SET file_hash = $1 WHERE id = $2 AND status = 3 AND completed_at = $3",
+        )
+        .bind(file_hash)
+        .bind(id)
+        .bind(completed_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// 更新任务的「文件已丢失」标志（文件跟踪）。仅当任务仍处于 completed
@@ -5510,13 +5556,16 @@ impl Db {
 
     /// 更换任务下载源地址（`change_task_url` 专用）并标记 `source_changed`；不触碰
     /// 分段/进度行（`task_segments` 按 `task_id` 索引，与 `url` 无关）。续传时由
-    /// [`Self::settle_source_change`] 决定已下进度能否沿用。
+    /// [`Self::settle_source_change`] 决定已下进度能否沿用。用户换上的是普通链接：同时
+    /// 清掉浏览器接管时记录的非 GET 方法（`request_method`），新地址按 GET 续传。
     pub async fn update_task_url(&self, task_id: &str, url: &str) -> Result<(), DbError> {
-        sqlx::query("UPDATE tasks SET url = $1, source_changed = 1 WHERE id = $2")
-            .bind(url)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE tasks SET url = $1, source_changed = 1, request_method = '' WHERE id = $2",
+        )
+        .bind(url)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -7704,6 +7753,70 @@ mod tests {
         // 重新下载 → 清空。
         db.update_task_status("c1", 1, "").await.expect("restart");
         assert_eq!(load(db.clone()).await.completed_at, "");
+
+        close_test_db(&db, dir).await;
+    }
+
+    /// file_hash 生命周期契约：
+    /// - 下载中由校验和校验写入的记录在完成（→3）后保留；暂停/错误（2/4）保持；
+    /// - 重新下载（0/1/5，单任务与批量）清空；
+    /// - 完成后的计算结果只在任务仍是同一次完成（status=3 且 completed_at 未变）时写回。
+    #[tokio::test]
+    async fn file_hash_survives_completion_and_clears_on_restart() {
+        let (db, dir) = open_test_db().await;
+        insert_task_with_size(&db, "h1", 1000).await;
+        let load = |db: Db| async move {
+            db.load_task_by_id("h1")
+                .await
+                .expect("load")
+                .expect("task exists")
+        };
+
+        db.update_task_status("h1", 1, "")
+            .await
+            .expect("downloading");
+        db.set_task_file_hash("h1", "md5=aa")
+            .await
+            .expect("verified");
+        db.update_task_status("h1", 3, "").await.expect("completed");
+        let done = load(db.clone()).await;
+        assert_eq!(done.file_hash, "md5=aa");
+        db.update_task_status("h1", 4, "boom").await.expect("error");
+        assert_eq!(load(db.clone()).await.file_hash, "md5=aa");
+
+        db.update_task_status("h1", 3, "")
+            .await
+            .expect("completed again");
+        assert!(
+            !db.commit_task_file_hash("h1", "stale-generation", "sha1=bb")
+                .await
+                .expect("commit stale"),
+            "a different completion must not be overwritten"
+        );
+        assert!(
+            db.commit_task_file_hash("h1", &done.completed_at, "sha1=bb")
+                .await
+                .expect("commit"),
+        );
+        assert_eq!(load(db.clone()).await.file_hash, "sha1=bb");
+
+        db.update_task_status("h1", 1, "").await.expect("restart");
+        assert_eq!(load(db.clone()).await.file_hash, "");
+        assert!(
+            !db.commit_task_file_hash("h1", &done.completed_at, "sha1=bb")
+                .await
+                .expect("commit after restart"),
+            "results of a restarted task must be discarded"
+        );
+
+        db.update_task_status("h1", 3, "")
+            .await
+            .expect("completed third");
+        db.set_task_file_hash("h1", "md5=cc").await.expect("set");
+        db.update_tasks_status_batch(&["h1".to_owned()], 0)
+            .await
+            .expect("batch requeue");
+        assert_eq!(load(db.clone()).await.file_hash, "");
 
         close_test_db(&db, dir).await;
     }

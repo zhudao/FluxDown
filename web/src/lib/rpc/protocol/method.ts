@@ -31,6 +31,8 @@ export const METHOD = {
   DAEMON_TASK_RESCAN: 'daemon.task.rescan',
   DAEMON_TASK_SET_SEED_LIMITS: 'daemon.task.setSeedLimits',
   DAEMON_TASK_VERIFY: 'daemon.task.verify',
+  /** 已完成任务落盘文件的哈希（`DaemonTaskHashParams` → `TaskHashResult`）。慢方法。 */
+  DAEMON_TASK_HASH: 'daemon.task.hash',
   DAEMON_TASK_SEED_LOCAL: 'daemon.task.seedLocal',
   DAEMON_TASK_TORRENT_SHARE: 'daemon.task.torrentShare',
   DAEMON_TASK_PAUSE_MANY: 'daemon.task.pauseMany',
@@ -258,7 +260,7 @@ export const METHOD = {
   AGENT_UPDATE_DOWNLOAD: 'agent.update.download',
   AGENT_UPDATE_INSTALL: 'agent.update.install',
   AGENT_UPDATE_CANCEL: 'agent.update.cancel',
-  /** 完成后关机；无活跃任务时拒绝（invalidArgument）。 */
+  /** 定时关机 / 睡眠 `{delaySecs, action}` → `{armed}`；没有任务时立即倒计时，`delaySecs = 0` 仅有任务时受理。 */
   AGENT_POWER_ARM: 'agent.power.arm',
   AGENT_POWER_DISARM: 'agent.power.disarm',
   AGENT_CLOUD_NOTIFY_GET: 'agent.cloudNotify.get',

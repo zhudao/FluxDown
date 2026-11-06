@@ -365,6 +365,28 @@ impl DaemonService {
                     Err(error) => Err(actor_error(error)),
                 }
             }
+            method::DAEMON_TASK_HASH => {
+                let params = parse_params::<fluxdown_protocol::DaemonTaskHashParams>(params)?;
+                let algorithm = fluxdown_engine::file_hash::HashAlgorithm::parse(&params.algorithm)
+                    .ok_or_else(|| {
+                        invalid_argument(
+                            "algorithm",
+                            &format!("unsupported hash algorithm: {}", params.algorithm),
+                        )
+                    })?;
+                match self
+                    .actor
+                    .execute(ActorOperation::HashTask {
+                        task_id: params.task_id,
+                        algorithm,
+                    })
+                    .await
+                {
+                    Ok(ActorResult::TaskHash(result)) => to_value(result),
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
             method::DAEMON_TASK_PAUSE_MANY => {
                 let params = parse_params::<DaemonTaskIdsParams>(params)?;
                 self.execute_unit(ActorOperation::PauseTasks {
@@ -2149,13 +2171,13 @@ fn component_name(component: fluxdown_protocol::ComponentKind) -> &'static str {
 impl DaemonService {
     async fn runtime_stats(&self) -> fluxdown_protocol::DaemonRuntimeStatsDto {
         let (save_dir, active_tasks, pending_tasks, stats) = self.events.inspect(|snapshot| {
-            let save_dir = snapshot
-                .config
-                .values
-                .get("default_save_dir")
-                .cloned()
-                .filter(|path| !path.trim().is_empty())
-                .unwrap_or_else(fluxdown_engine::user_dirs::download_dir_or_cwd);
+            let save_dir = crate::disk_free::stats_save_dir(
+                snapshot
+                    .config
+                    .values
+                    .get("default_save_dir")
+                    .map(String::as_str),
+            );
             let active = snapshot
                 .tasks
                 .iter()

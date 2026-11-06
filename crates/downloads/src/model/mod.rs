@@ -6,6 +6,7 @@ pub(crate) mod counts;
 pub(crate) mod devices;
 pub(crate) mod dispatch;
 pub(crate) mod file_conflict;
+pub(crate) mod file_hash;
 pub(crate) mod file_rescan;
 pub(crate) mod group_tree;
 pub(crate) mod manifest;
@@ -359,6 +360,8 @@ pub(crate) struct DownloadTaskView {
     /// 该任务有待确认的「文件已存在」请求（任务表「待确认」角标）。
     pub(crate) conflict_pending: bool,
     pub(crate) file_missing: bool,
+    /// 落盘文件哈希，格式 `algo=hex`（空 = 尚未计算）。只对已完成的本地任务有意义。
+    pub(crate) file_hash: String,
     pub(crate) seeding_status: i32,
     pub(crate) uploaded_bytes: i64,
     pub(crate) boosted: bool,
@@ -395,6 +398,7 @@ impl DownloadTaskView {
         view.group_id.clone_from(&task.group_id);
         view.error_message.clone_from(&task.error_message);
         view.file_missing = task.file_missing;
+        view.file_hash.clone_from(&task.file_hash);
         view.seeding_status = task.seeding_status;
         view.uploaded_bytes = task.uploaded_bytes;
         view.boosted = boosted;
@@ -496,6 +500,7 @@ impl DownloadTaskView {
             error_message: String::new(),
             conflict_pending: false,
             file_missing: false,
+            file_hash: String::new(),
             seeding_status: 0,
             uploaded_bytes: 0,
             boosted: false,
@@ -562,6 +567,15 @@ impl DownloadTaskView {
     pub(crate) fn source_site(&self) -> &str {
         let host = url_host(&self.referrer);
         if host.is_empty() { &self.site } else { host }
+    }
+
+    /// 可在浏览器打开的来源页：仅 `http(s)://` 且有 host 的 `referrer`。
+    /// `referrer` 来自浏览器捕获 / API，不可信；`file://`、`javascript:` 等交给系统打开
+    /// 会触发本地文件或协议处理器，只能复制不能点开。
+    pub(crate) fn source_page_url(&self) -> Option<&str> {
+        let (scheme, _) = self.referrer.split_once("://")?;
+        let web = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+        (web && !url_host(&self.referrer).is_empty()).then_some(self.referrer.as_str())
     }
 
     /// 文件扩展名（小写，无点）。
@@ -808,6 +822,32 @@ mod tests {
         assert_eq!(url_host("https://u:p@host.example:443/x"), "host.example");
         assert_eq!(url_host("http://[::1]:80/"), "::1");
         assert_eq!(url_host("magnet:?xt=abc"), "");
+    }
+
+    #[test]
+    fn source_page_url_only_opens_http_pages_with_host() {
+        let page = |referrer: &str| DownloadTaskView {
+            referrer: referrer.to_owned(),
+            ..local_task(1, 0, false)
+        };
+        for web in [
+            "https://a.example/p?q=1",
+            "HTTP://a.example",
+            "http://[::1]:8080/",
+        ] {
+            assert_eq!(page(web).source_page_url(), Some(web));
+        }
+        for blocked in [
+            "",
+            "https://",
+            "file:///etc/passwd",
+            "javascript:alert(1)//https://x",
+            "ftp://a.example/",
+            "chrome-extension://abc/page.html",
+            " https://a.example/",
+        ] {
+            assert_eq!(page(blocked).source_page_url(), None, "{blocked}");
+        }
     }
 
     #[test]
