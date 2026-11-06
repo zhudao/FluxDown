@@ -152,6 +152,7 @@
 - **测试里对同一 `HostSession.signals` 连续多次 `first {}` 等待会丢事件**：信号流是单队列拉取（`next_signal`），`first {}` 会消费并丢弃所有不匹配的信号；本机偏好的 `SectionChanged` 常先于经 daemon→agent 异步转发的 `ConfigChanged` 到达，被前一次等待丢掉后后一次永远等不到（CI 偶发 90s 超时）。多个条件必须在同一次收集里累积判定（同 `ConfigEditor` 等待归约后的 store 状态）→ `mobile/Android/bridge/src/test/.../LocalHostSmokeTest.kt::preferencesChannelWritesSyncedDaemonKeysAndLocalPreferences`。
 
 - **多行链接输入框不能用 `KeyboardType.Uri`**：Compose 对多行框虽加 `TYPE_TEXT_FLAG_MULTI_LINE` + `IME_FLAG_NO_ENTER_ACTION`，但小米 / 搜狗 / 百度等输入法见到 `TYPE_TEXT_VARIATION_URI` 就固定给「前往」键、回车不换行（#1010）；多行框一律 `KeyboardType.Text` + `ImeAction.Default`，单行 URL 框不受影响 → `mobile/Android/app/src/main/java/com/fluxdown/app/feature/newtask/NewDownloadSheet.kt`（批量链接框）。
+- **真模糊玻璃面采样的背景源必须不透明**：页面级 `fluxBackdropSource` 常只录透明的列表（画布 / 颗粒在壳层），模糊副本透明处会让下方清晰文字透过玻璃显出来；推入页内的玻璃面又拿不到舞台级源（壳层对页面内容提供 null 防 RenderNode 环），不自建页面级源就静默退化为实色。`GlassNode` 在副本下先垫 `canvas`；推入页浮层自建源并只对浮层提供 `LocalFluxBackdrop` → `mobile/Android/fluxui/src/main/java/com/fluxdown/fluxui/material/FluxGlass.kt::GlassNode.draw`、`app/.../feature/rss/RssItemsScreen.kt`（选择坞）、`feature/downloads/DownloadsScreen.kt`（`listBackdrop`）。
 
 ## iOS
 
@@ -171,6 +172,7 @@
 - **Windows 安装器判定旧版已移除，看 UI 入口文件是否还在，不依赖 HKLM 卸载键**：对旧版全用户安装的卸载等待因此加固（提交 322a3901）；等待上限 60 秒，卸载器起不来要写日志 → `installer/windows/setup.iss`（`LegacyUninstallTimeoutMs`、「legacy copy counts as removed」注释段）。
 - **macOS 包上贴了 Finder 自定义图标（`Icon\r`）后 `codesign --verify --deep --strict` 必失败**（"resource fork, Finder information, or similar detritus not allowed"；`-dv` 与非 strict 仍可用，2026-10-30 ad-hoc 包实测）：应用图标功能会给已安装的 `FluxDown.app` / 辅助包贴图标，所以只能对**下载的新包**做 strict 校验，对已安装包做 strict 校验或重签名前必须先 `setIcon(nil)` 撤掉 → `native/agent/src/platform/app_icon/macos.rs`、`native/agent/src/update/install/macos.rs::verify`。
 - **Linux x64 musl 产物不得在 `ubuntu-latest`（≥26.04）上编**：26.04 runner 镜像启用 `amd64v3` 变体，gcc 默认开 AVX2，mimalloc 等 C 依赖经 cc 编进无运行时分派的 AVX2 代码，0.6.4 x64 服务端 / NAS 包 / CLI 在 J4125 等 NAS CPU 上启动即 SIGILL（`.comment` 段可见 `GCC 15.2.0-…ubuntu1`）；cc 不从 RUSTFLAGS 的 `target-cpu` 推导 `-march`，所以 C 侧只能靠显式 `CFLAGS_x86_64_unknown_linux_musl` → `.github/workflows/release.yml`（`build-server-binaries` / `build-cli-binaries` 钉 `ubuntu-24.04` + `-march=x86-64`）、`.github/scripts/check_x86_64_baseline.sh`（qemu64 启动自检）。
+- **本机 huacnlee/cargo 改版（`~/.cargo/bin/cargo`，官方被保留为 `cargo.rustup`）下 `cargo check` / `clippy` 报 librqbit `BindDevice` 类型不匹配（`librqbit_dualstack_sockets::BindDevice` vs `librqbit_utp::BindDevice`）是改版 bug，与代码无关，CI 官方工具链不受影响**：改版在 check 模式把 registry / git 依赖提升为 Build 编进共享目录（`check_or_build_mode`），git 包 `librqbit-utp` 的 path 依赖（`[patch]` 的 `third_party/librqbit-dualstack-sockets`）随之按 Build 编一份，而 path 包 librqbit 直接依赖的那份仍按 Check 编，同一 crate 两份产物同时进图；`cargo build` 不受影响。全依赖图只有 `librqbit-utp → librqbit-dualstack-sockets` 这一条「非 path 包 → path 包」边。本机绕过：`CARGO_CHECK_SHARED_DEPS=0`（只能走进程环境变量，`.cargo/config.toml` 的 `[env]` 对 cargo 自身无效）→ 根 `Cargo.toml` `[patch.crates-io]`（`librqbit-utp` git 补丁 + `librqbit-dualstack-sockets` path 补丁）。
 
 ## Windows 专属
 

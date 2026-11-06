@@ -85,11 +85,23 @@
   可用 peer 仅 5–10）；连接中数量由 `connect_rate` × 超时另行约束。下调前先实测。
 - **uTP（`bt_enable_utp`，默认开）**：开启时监听模式为 `TcpAndUtp`，出站并发拨 TCP + uTP；
   #825 实测在上限 512 基础上稳态再翻倍，代价是 UDP 收发的系统态 CPU 明显更高（上游仍标为
-  experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `zerx-lab/rqbit`（当前 rev 在分支 `fluxdown/peer-policy`：
-  上游 main + MSE + Android HTTPS + 握手超时下发 + 初检末尾暂停不丢失 + 防吸血 `PeerPolicy` 钩子），升级上游时在 fork 新开
-  `fluxdown/*` 分支合并上游并推送，再改根 `Cargo.toml` 的 rev（`zerx/main` 停在 00374a6d，不再是事实源）。`librqbit-utp` 临时 patch 到上游 git main：
+  experimental）。改动经 daemon 重建共享会话生效。librqbit 来自 `zerx-lab/rqbit` 分支 `fluxdown/main`（FluxDown 补丁分支：
+  上游 main + MSE + Android HTTPS + 握手超时下发 + 初检末尾暂停不丢失 + 防吸血 `PeerPolicy` 钩子 + 最稀有优先选片）。升级上游时在该分支
+  合并 `upstream/main` 并推送（不变基、不强推，FluxDown 历史钉过的 rev 都须仍是它的祖先），再改根 `Cargo.toml` 的 rev；fork 的 `main` 只跟上游同步，不是事实源；
+  `upstream/*` 分支各对应一个给 ikatson/rqbit 的开放 PR，同步上游也用合并。`librqbit-utp` 临时 patch 到上游 git main：
   crates.io 0.7.0 的分发循环遇 Windows `WSAECONNRESET(10054)` 即退出，整个会话 uTP 失效；
   上游发版后删 patch。
+- **BT 选片（对齐 qBittorrent / libtorrent piece picker）**：fork `crates/librqbit/src/piece_picker.rs`。默认最稀有优先：
+  每片可用度 = 连接中 peer 的位图计数（`PeerStates.availability`，位图到达 / HAVE 时计入，peer 离开 Live 时按入账方式扣回；
+  位图到达即满的 peer 记一次「种子」而非逐片计数），平局按每次开局随机盐打散；已有 < 4 片时纯随机（libtorrent
+  `initial_picker_threshold`）。任务级两项（`tasks.bt_sequential` / `bt_first_last_pieces_first`，`daemon.task.setPiecePicking`
+  部分更新，GPUI / Web / Android / iOS 右键菜单可勾选）：按顺序 = 选中文件按文件名排序后逐片；首尾 = 每个选中文件首尾各
+  ceil(1% 文件大小 / 片长) 片优先于一切（qBittorrent `applyFirstLastPiecePriority`）。流式播放的预读片仍最先，偷慢 peer 的片不变。
+  设置（BT「常规」页「新任务」分组，云同步）：`bt_piece_order`（rarest 默认 / sequential，用户 2026-11-06 决定提供）与
+  `bt_first_last_pieces_first`（默认关）= 此后新建 BT 任务的默认选片方式（建档 `PreparedTask` 落库，已建任务不变）。
+  右键菜单「选片方式」：最稀有优先 / 按顺序下载二选一 + 首尾独立复选。
+  宿主侧以 `SharedBtSession` 的登记为准：启动 BT 任务时由 manager 按 DB 登记，`store_handle` 每次入册都按登记重设句柄
+  （盖掉 librqbit 自持久化里的旧值），改选项在同一把锁内作用于已入册句柄，下载中从下一个请求的块起生效。
 - **BT 会话保活与完成校验**：`maybe_release_bt_session` 在存在「已暂停的未完成
   torrent（句柄在册）」时**不拆**共享会话——resume 走 `unpause`（Paused→Live
   零校验秒恢复）；全部 BT 任务终态化（完成/删除且无做种）才释放。初检中暂停由
@@ -132,7 +144,7 @@
   （`ipGroup` / `groupDeliveredBytes` / `suspicion` / `rules` / `action` / `observeOnly`，来自 `BtGuard::peer_insight`）。与 qBittorrent 的差距：
   无增删 / 编辑 tracker、无强制重新汇报、无 peer 进度 / flags、tracker 无 seeds / leeches / 完成数（librqbit 不提供）。
 - **BT 防吸血**（`bt_guard/`，经 rqbit fork 的 `PeerPolicy` 钩子接入 `SharedBtSession::new`）：规则、处置阶梯、分层封禁、持久化与空闲静默约束见
-  `ops.md`「已实现（BT 防吸血）」条；改 rqbit fork 先在 `fluxdown/peer-policy` 分支提交再更新根 `Cargo.toml` 的 rev。
+  `ops.md`「已实现（BT 防吸血）」条；改 rqbit fork 先在 `fluxdown/main` 分支提交再更新根 `Cargo.toml` 的 rev。
 - **peer 国旗**（`geoip.rs`，对齐 qBittorrent）：DB-IP「国家 lite」`.mmdb`（CC BY 4.0，关于页署名）+ 自带最小 MaxMind DB 读取器（零依赖，24/28/32 位记录，
   真实库 IPv4/IPv6 回归见 `FLUXDOWN_TEST_MMDB`）。有人查看 peer 列表（`bt_status`）才触发 `ensure_background`：当月文件 `<data_dir>/geoip/dbip-country-lite-YYYY-MM.mmdb`
   不在就经统一出口（`egress::RoutedClients`）下载 `https://download.db-ip.com/free/<name>.gz`（当月未发布回退上月），解压校验后原子落盘并清旧文件，失败 1 小时内不重试；
