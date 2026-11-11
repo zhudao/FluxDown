@@ -291,6 +291,10 @@ pub fn bt_config_from_map(cfg: &HashMap<String, String>) -> fluxdown_engine::bt_
             .map(String::as_str)
             .map(BtMseMode::from)
             .unwrap_or_default(),
+        upload_slots: cfg
+            .get("bt_upload_slots")
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0),
         sequential: cfg
             .get("bt_piece_order")
             .is_some_and(|value| value == "sequential"),
@@ -341,7 +345,7 @@ pub fn bt_guard_config_from_map(cfg: &HashMap<String, String>) -> BtGuardConfig 
         rule_fingerprint: rule("bt_guard_rule_fingerprint", defaults.rule_fingerprint),
         cloud_mode: rule("bt_guard_cloud_mode", defaults.cloud_mode),
         excess_ratio_pct: as_u32(
-            number("bt_guard_excess_ratio_pct", 110, 1000),
+            number("bt_guard_excess_ratio_pct", 110, 2000),
             defaults.excess_ratio_pct,
         ),
         min_torrent_mib: number("bt_guard_min_torrent_mib", 0, 1_048_576)

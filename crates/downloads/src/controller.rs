@@ -14,7 +14,7 @@ use fluxdown_protocol::{
 };
 
 use crate::model::{
-    CategoryIndex, DownloadTaskView, TaskStore,
+    CategoryIndex, DownloadTaskView, TaskState, TaskStore,
     devices::{DeviceEntry, local_device_id, other_devices},
     file_conflict::FileConflictSet,
     group_tree::{GroupAggregate, GroupMeta},
@@ -106,6 +106,11 @@ pub enum DownloadsCommand {
     TaskSpeedHistory(fluxdown_protocol::TaskSpeedHistoryQuery),
     /// 读取 BT 任务的 peer / tracker 实况（`daemon.task.btStatus`），详情页轮询。
     BtStatus(fluxdown_protocol::DaemonBtStatusParams),
+    /// 读取 eD2K 任务的来源 / 服务器 / Kad / 本机网络实况（`daemon.task.ed2kStatus`），详情页轮询。
+    Ed2kStatus(fluxdown_protocol::DaemonEd2kStatusParams),
+    /// eD2K HighID / LowID 检测（`daemon.ed2k.idCheck`，慢方法），结果为
+    /// [`DownloadsResult::Ed2kNetwork`]。
+    Ed2kIdCheck,
     /// 防吸血：给 IP 组加封禁 / 限速 / 加白条目（`daemon.bt.guard.entries.add`），连接页右键菜单用。
     BtGuardAddEntry(fluxdown_protocol::BtGuardEntriesAddParams),
     /// 防吸血「查看证据」：读取该 IP 组相关的名单条目与近期事件，结果为
@@ -134,7 +139,7 @@ pub enum DownloadsCommand {
         url: String,
     },
     /// 修改线程数（`daemon.task.setSegments`）：`<= 0` = 自动，已下进度保留；
-    /// 下载中任务由引擎静默暂停 → 改配置 → 恢复。
+    /// 下载中任务由引擎静默暂停 → 改配置 → 恢复（eD2K 任务不暂停，直接热生效）。
     SetSegments {
         task_id: String,
         segments: i32,
@@ -337,6 +342,10 @@ pub enum DownloadsResult {
     TaskSpeedHistory(Option<fluxdown_protocol::TaskSpeedHistoryDto>),
     /// `BtStatus` 的 peer / tracker 实况。
     BtStatus(fluxdown_protocol::BtStatusDto),
+    /// `Ed2kStatus` 的 eD2K 实况（体积大，装箱保持结果枚举小）。
+    Ed2kStatus(Box<fluxdown_protocol::Ed2kStatusDto>),
+    /// `Ed2kIdCheck` 的本机网络状态。
+    Ed2kNetwork(fluxdown_protocol::Ed2kNetworkDto),
     /// `BtGuardEvidence` 的名单条目与事件。
     BtGuardEvidence(BtGuardEvidence),
     /// Rare, metadata-heavy payload stays boxed so every command result remains small.
@@ -689,6 +698,20 @@ impl DownloadsController {
     #[must_use]
     pub(crate) fn has_pausable_tasks(&self) -> bool {
         self.store.pausable_count() > 0
+    }
+
+    pub(crate) fn retry_failed_commands(&self) -> Vec<DownloadsCommand> {
+        if self.is_stale() || self.tables_loading() {
+            return Vec::new();
+        }
+        self.store
+            .local()
+            .iter()
+            .filter(|row| row.state == TaskState::Failed)
+            .map(|row| DownloadsCommand::Resume {
+                task_id: row.key.task_id().to_owned(),
+            })
+            .collect()
     }
 
     /// 状态栏「全部开始」的作用对象：与引擎 `eligible_resume_task_ids` 同判定——
@@ -1548,6 +1571,63 @@ mod tests {
             assert_eq!(runtime.segments.len(), 1);
             assert_eq!(runtime.active_transfers, Some(0));
         }
+    }
+
+    #[test]
+    fn retry_failed_targets_only_local_failures_and_tracks_readiness() {
+        let mut controller = DownloadsController::new(Arc::new(NullPort));
+        controller.stale = false;
+        let mut failed = task("failed");
+        failed.status = 4;
+        let mut rows = vec![failed.clone()];
+        for (id, status) in [
+            ("waiting", 0),
+            ("running", 1),
+            ("paused", 2),
+            ("completed", 3),
+            ("preparing", 5),
+        ] {
+            let mut row = task(id);
+            row.status = status;
+            rows.push(row);
+        }
+        controller.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::TasksSnapshot {
+            tasks: rows,
+        }));
+        let mut remote = controller.store.local()[0].clone();
+        remote.key = crate::model::RowKey::Remote("remote-failed".into());
+        remote.source = crate::model::TaskSource::Remote;
+        controller.store.replace_remote(vec![remote]);
+        let retry_ids = |controller: &DownloadsController| {
+            controller
+                .retry_failed_commands()
+                .into_iter()
+                .map(|command| match command {
+                    DownloadsCommand::Resume { task_id } => task_id,
+                    _ => panic!("retry must use the existing local resume operation"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(retry_ids(&controller), ["failed"]);
+        assert_eq!(controller.store.failed_count(), 1);
+        controller.store.set_loading(Some(6));
+        assert!(retry_ids(&controller).is_empty());
+        controller.store.set_loading(None);
+        controller.stale = true;
+        assert!(retry_ids(&controller).is_empty());
+        controller.stale = false;
+        failed.status = 1;
+        controller.apply_daemon_event(&DaemonEvent::TaskChanged(failed.clone()));
+        assert_eq!(controller.store.failed_count(), 0);
+        assert!(retry_ids(&controller).is_empty());
+        failed.status = 4;
+        controller.apply_daemon_event(&DaemonEvent::TaskChanged(failed));
+        assert_eq!(retry_ids(&controller), ["failed"]);
+        controller.apply_daemon_event(&DaemonEvent::Engine(WsServerMsg::TasksSnapshot {
+            tasks: Vec::new(),
+        }));
+        assert_eq!(controller.store.failed_count(), 0);
+        assert!(retry_ids(&controller).is_empty());
     }
 
     #[test]

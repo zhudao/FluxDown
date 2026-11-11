@@ -33,7 +33,7 @@ use bytes::Bytes;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, ListenerMode,
     ListenerOptions, ManagedTorrent, PeerConnectionOptions, PeerPolicy, PiecePicking, Session,
-    SessionOptions, SessionPersistenceConfig,
+    SessionOptions, SessionPersistenceConfig, UploadSlots,
 };
 
 /// Alias for librqbit's `BtHandle` (`Arc<ManagedTorrent>`).
@@ -263,6 +263,18 @@ const DHT_PERSIST_DUMP_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// 512 让信号量不再成为瓶颈：稳态 1.1 → 12.6 MB/s（交错重复多轮的均值），
 /// RSS 增加约 15 MB。
 const BT_PEER_LIMIT: usize = 512;
+
+/// 每个种子同时上传给多少个对端（`bt_upload_slots` → librqbit `SessionOptions::upload_slots`，choker）。
+///
+/// 其余感兴趣的对端被 choke 排队：常规槽每 10 秒按「给我们下载最快 → 我们上传最快」重排，
+/// 另有 1/5（至少 1 个）乐观解锁槽每 30 秒轮给等得最久的对端。`0`（默认）= 按上传速率
+/// （qBittorrent「上传槽位行为」的同名一档）：槽数从 4 起步，只在已占槽的对端都以可观
+/// 速率在取数据时才逐轮加一（libtorrent rate based choker 的阈值，1 MiB/s 约 22 槽、
+/// 5 MiB/s 约 50 槽），上行被限速或吃满时自动收敛；固定 4 槽在对端普遍较慢的 swarm 里
+/// 跑不满上行。非零 = 用户指定的固定槽数。
+fn upload_slots(configured: u32) -> UploadSlots {
+    NonZeroU32::new(configured).map_or(UploadSlots::RateBased, UploadSlots::Fixed)
+}
 
 /// Well-known public trackers used to accelerate peer discovery for magnet
 /// links that ship without `tr=` parameters.
@@ -803,6 +815,7 @@ impl SharedBtSession {
             }),
             // 连接中与已连接共用此上限，见 `BT_PEER_LIMIT`。
             peer_limit: Some(BT_PEER_LIMIT),
+            upload_slots: upload_slots(bt_config.upload_slots),
             peer_policy: peer_policy.clone(),
             ..Default::default()
         };
