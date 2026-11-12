@@ -258,6 +258,8 @@ pub struct DownloadView {
     import_suspended: bool,
     /// 下载页所在窗口：删除结束的异步通知经它推送。
     window: AnyWindowHandle,
+    /// 「移动到…」进行中的任务 id：同一任务在完成前不再发起第二次移动。
+    pub(crate) bt_moving: std::collections::HashSet<String>,
 }
 
 impl DownloadView {
@@ -394,6 +396,7 @@ impl DownloadView {
             next_delete_id: 0,
             import_suspended: false,
             window: window.window_handle(),
+            bt_moving: std::collections::HashSet::new(),
         }
     }
 
@@ -973,7 +976,22 @@ impl DownloadView {
     }
 
     pub fn apply_event(&mut self, event: &fluxdown_protocol::ServiceEvent, cx: &mut Context<Self>) {
-        let table_changed = self.controller.apply_event(event);
+        let mut table_changed = self.controller.apply_event(event);
+        if matches!(
+            event,
+            fluxdown_protocol::ServiceEvent::Agent(fluxdown_protocol::AgentEvent::Daemon(
+                fluxdown_protocol::DaemonEvent::ConfigChanged(_)
+                    | fluxdown_protocol::DaemonEvent::RuntimeStatsChanged(_)
+            ))
+        ) {
+            let configured = self.controller.config_str("default_save_dir");
+            let root = if configured.is_empty() {
+                &self.controller.runtime_stats().save_dir
+            } else {
+                configured
+            };
+            table_changed |= self.table_state.read(cx).delegate().directory_root() != root;
+        }
         if let Some(detail) = self.detail.clone() {
             detail.update(cx, |detail, cx| detail.apply_event(event, cx));
         }
@@ -1118,12 +1136,20 @@ impl DownloadView {
             .iter()
             .map(|group| (group.group_id.clone(), GroupMeta::from_dto(group)))
             .collect();
-        let devices: HashMap<String, String> = self
-            .controller
-            .other_devices()
-            .into_iter()
-            .map(|device| (device.id, device.label))
-            .collect();
+        let mut devices = HashMap::new();
+        let mut device_roots = HashMap::new();
+        for device in self.controller.other_devices() {
+            if let Some(root) = device.default_save_dir {
+                device_roots.insert(device.id.clone(), root);
+            }
+            devices.insert(device.id, device.label);
+        }
+        let configured_root = self.controller.config_str("default_save_dir");
+        let default_root = if configured_root.is_empty() {
+            self.controller.runtime_stats().save_dir.clone()
+        } else {
+            configured_root.to_owned()
+        };
         let categories = Rc::clone(self.controller.categories());
         if let Some(detail) = self.detail.clone() {
             detail.update(cx, |detail, cx| detail.set_queue_names(queues.clone(), cx));
@@ -1133,6 +1159,7 @@ impl DownloadView {
             delegate.set_queue_names(queues);
             delegate.set_groups(groups);
             delegate.set_device_names(devices);
+            delegate.set_directory_context(default_root, device_roots);
             delegate.set_categories(categories);
         });
     }
@@ -2720,6 +2747,10 @@ impl Render for DownloadView {
             .on_action(cx.listener(Self::on_set_rarest_first_selected))
             .on_action(cx.listener(Self::on_set_sequential_selected))
             .on_action(cx.listener(Self::on_toggle_first_last_pieces_selected))
+            .on_action(cx.listener(Self::on_force_recheck_selected))
+            .on_action(cx.listener(Self::on_move_storage_selected))
+            .on_action(cx.listener(Self::on_task_limits_selected))
+            .on_action(cx.listener(Self::on_toggle_super_seeding_selected))
             .on_action(cx.listener(Self::on_toggle_detail_panel))
             .on_drop(cx.listener(Self::on_paths_dropped))
             .drag_over::<ExternalPaths>(|style, _, _, cx| {

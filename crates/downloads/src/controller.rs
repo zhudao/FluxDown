@@ -22,6 +22,8 @@ use crate::model::{
 
 /// 本机偏好：新建下载对话框上次使用的保存目录（设备本地，不进云同步）。
 pub const LAST_SAVE_DIR_PREF: &str = "download.last_save_dir";
+/// 本机偏好：新建下载分类模式（`auto` / `none` / `category:<id>`；设备本地，不进云同步）。
+pub(crate) const LAST_CATEGORY_MODE_PREF: &str = "download.last_category_mode";
 /// 偏好：新建下载默认沿用上次保存目录。
 pub const REMEMBER_LAST_SAVE_DIR_PREF: &str = "download.remember_last_save_dir";
 /// 本机偏好：新建下载保存目录历史（字符串数组，最新在前；设备本地，不进云同步）。
@@ -113,6 +115,12 @@ pub enum DownloadsCommand {
     Ed2kIdCheck,
     /// 防吸血：给 IP 组加封禁 / 限速 / 加白条目（`daemon.bt.guard.entries.add`），连接页右键菜单用。
     BtGuardAddEntry(fluxdown_protocol::BtGuardEntriesAddParams),
+    /// 防吸血「封禁此客户端」：基于最新 `bt_guard_client_rules` 追加
+    /// `clientName contains <value> → ban`（见 [`crate::append_ban_client_rule`]），冲突时重取重放。
+    /// 结果为 [`DownloadsResult::Value`]：`true` 新增、`false` 已有同名规则。
+    BtGuardBanClient {
+        value: String,
+    },
     /// 防吸血「查看证据」：读取该 IP 组相关的名单条目与近期事件，结果为
     /// [`DownloadsResult::BtGuardEvidence`]。
     BtGuardEvidence {
@@ -167,6 +175,30 @@ pub enum DownloadsCommand {
     TorrentShare {
         task_id: String,
         include_torrent: bool,
+    },
+    /// BT 任务文件表（`daemon.task.btFiles`），详情「文件」页签轮询；结果为
+    /// [`DownloadsResult::BtFiles`]。
+    BtFiles {
+        task_id: String,
+    },
+    /// 部分更新 BT 文件优先级（`daemon.task.setFilePriorities`）：已完成为 `taskStateConflict`，
+    /// 会导致没有文件要下载为 `invalidArgument`。
+    SetFilePriorities(fluxdown_protocol::SetTaskFilePrioritiesParams),
+    /// 改种子内单个文件的相对路径（`daemon.task.renameBtFile`）。
+    RenameBtFile(fluxdown_protocol::RenameBtFileParams),
+    /// 未完成 BT 任务丢弃进度、按磁盘数据全量重新校验（`daemon.task.recheck`）。
+    RecheckTask {
+        task_id: String,
+    },
+    /// 把 BT 任务数据移到新的保存目录（`daemon.task.moveStorage`，慢方法）。
+    MoveStorage(fluxdown_protocol::MoveTaskStorageParams),
+    /// 任务级 BT 限速（`daemon.task.setBtLimits`）：缺省字段不变，`0` = 不限。
+    SetBtLimits(fluxdown_protocol::SetTaskBtLimitsParams),
+    /// 超级做种开关（`daemon.task.setSuperSeeding`）。
+    SetSuperSeeding(fluxdown_protocol::SetTaskSuperSeedingParams),
+    /// 立即向 tracker 重新汇报（`daemon.task.reannounce`）；不在运行为 `taskStateConflict`。
+    Reannounce {
+        task_id: String,
     },
     Delete {
         task_id: String,
@@ -297,15 +329,10 @@ pub enum DownloadsCommand {
     },
     /// 本机做种（`daemon.task.seedLocal`，慢方法：无现成种子时 daemon 要为数据做哈希）：
     /// 把 daemon 主机上已有的文件 / 文件夹登记为已完成 BT 任务并开始做种。结果为
-    /// `{taskId, duplicate?, existingName?}`（`DownloadsResult::Value`；`duplicate` 为真时未新建任务，
-    /// `taskId` 是已持有同 info hash 的现有任务）；路径 / 种子不匹配或 BT 被禁用为 `invalidArgument`。
-    /// 提交类命令，失败后不自动重试。`trackers` 仅在 `torrent_path` 为 `None` 时有意义。
-    SeedLocal {
-        path: String,
-        torrent_path: Option<String>,
-        trackers: Vec<String>,
-        unlimited: bool,
-    },
+    /// [`fluxdown_protocol::SeedLocalResultDto`]（`DownloadsResult::Value`；`duplicate` 为真时未新建任务，
+    /// `taskId` 是已持有同 info hash 的现有任务；`createOnly` 时只写出 `torrentPath`、`taskId` 为空）；
+    /// 路径 / 种子不匹配或 BT 被禁用为 `invalidArgument`。提交类命令，失败后不自动重试。
+    SeedLocal(Box<fluxdown_protocol::DaemonSeedLocalParams>),
     /// 系统文件管理器为该文件显示的图标（`agent.platform.fileIcon`，结果为 PNG）。
     FileIcon(fluxdown_protocol::PlatformFileIconParams),
     /// 设备本地偏好写入（`sync:false`，不进云同步）。
@@ -342,6 +369,8 @@ pub enum DownloadsResult {
     TaskSpeedHistory(Option<fluxdown_protocol::TaskSpeedHistoryDto>),
     /// `BtStatus` 的 peer / tracker 实况。
     BtStatus(fluxdown_protocol::BtStatusDto),
+    /// `BtFiles` 的文件表。
+    BtFiles(fluxdown_protocol::BtFilesDto),
     /// `Ed2kStatus` 的 eD2K 实况（体积大，装箱保持结果枚举小）。
     Ed2kStatus(Box<fluxdown_protocol::Ed2kStatusDto>),
     /// `Ed2kIdCheck` 的本机网络状态。

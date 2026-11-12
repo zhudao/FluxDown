@@ -58,6 +58,8 @@ object SettingsCatalog {
     val btSeedThenActions = listOf("stop", "delete", "delete_files")
     val btMseModes = listOf("disabled", "enabled", "forced")
     val btPieceOrders = listOf("rarest", "sequential")
+    val btUtpCongestions = listOf("ledbat", "cubic")
+    val btProxySources = listOf("manual", "system")
     val proxyModes = listOf("none", "system", "manual", "auto")
     val proxyTypes = listOf("http", "https", "socks4", "socks5")
     val themeModes = listOf("system", "light", "dark")
@@ -119,6 +121,21 @@ object SettingsCatalog {
         daemon("bt_tracker_sub_urls", text, ""),
         daemon("bt_tracker_sub_cache", readOnly, ""),
         daemon("bt_tracker_sub_updated_at", readOnly, "0"),
+        // BT 连接 / 汇报策略 / 代理 / I2P（设备本地，不进云同步目录）
+        daemon("bt_enable_lsd", bool, "true"),
+        daemon("bt_utp_congestion", choice(btUtpCongestions), "ledbat"),
+        daemon("bt_max_connections", int(0, 65_535), "0"),
+        daemon("bt_max_connections_per_torrent", int(1, 4096), "512"),
+        daemon("bt_enable_webseed", bool, "true"),
+        daemon("bt_announce_all_tiers", bool, "true"),
+        daemon("bt_announce_all_trackers", bool, "true"),
+        daemon("bt_proxy_enabled", bool, "false"),
+        daemon("bt_proxy_source", choice(btProxySources), "manual"),
+        daemon("bt_proxy_peers", bool, "true"),
+        daemon("bt_i2p_enabled", bool, "false"),
+        daemon("bt_i2p_sam_host", text, "127.0.0.1"),
+        daemon("bt_i2p_sam_port", int(1, 65_535), "7656"),
+        daemon("bt_i2p_mixed", bool, "false"),
         daemon("bt_seed_enabled", bool, "true"),
         daemon("bt_auto_reseed", bool, "true"),
         daemon("bt_seed_max_active", int(0, MAX), "0"),
@@ -136,7 +153,7 @@ object SettingsCatalog {
         daemon("bt_guard_rule_rerequest", choice(btGuardModes), "observe"),
         daemon("bt_guard_rule_rewind", choice(btGuardModes), "observe"),
         daemon("bt_guard_rule_lag", choice(btGuardModes), "observe"),
-        daemon("bt_guard_rule_fingerprint", choice(btGuardModes), "observe"),
+        daemon("bt_guard_rule_fingerprint", choice(btGuardModes), "enforce"),
         daemon("bt_guard_cloud_mode", choice(btGuardModes), "observe"),
         daemon("bt_guard_excess_ratio_pct", int(110, 2000), "200"),
         daemon("bt_guard_min_torrent_mib", int(0, 1_048_576), "64"),
@@ -149,6 +166,7 @@ object SettingsCatalog {
         daemon("bt_guard_skip_lan", bool, "true"),
         daemon("bt_guard_ipv6_prefix", int(48, 128), "64"),
         daemon("bt_guard_filter_urls", text, ""),
+        daemon("bt_guard_client_rules", text, ""),
         daemon("bt_guard_cloud_enabled", bool, "true"),
         daemon("bt_guard_report_enabled", bool, "false"),
         // ED2K
@@ -203,6 +221,7 @@ object SettingsCatalog {
         pref("download.remember_last_save_dir", bool, "false"),
         pref("download.notify_on_complete", bool, "true"),
         pref("download.silent_download", bool, "false"),
+        pref("download.silent_auto_category", bool, "true"),
         pref("download.silent_skip_selection", bool, "false"),
         pref("download.keep_awake", bool, "false"),
     )
@@ -281,6 +300,7 @@ object SettingsCatalog {
         "bt_guard_skip_lan" to "bt.guard.skip_lan",
         "bt_guard_ipv6_prefix" to "bt.guard.ipv6_prefix",
         "bt_guard_filter_urls" to "bt.guard.filter_urls",
+        "bt_guard_client_rules" to "bt.guard.client_rules",
         "bt_guard_cloud_enabled" to "bt.guard.cloud_enabled",
         "ed2k_enable_kad" to "ed2k.enable_kad",
         "ed2k_enable_upnp" to "ed2k.enable_upnp",
