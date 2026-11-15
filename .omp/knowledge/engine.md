@@ -44,6 +44,8 @@
 
 **建任务管线**：`create_task` 与 `create_tasks_batch` 共用「内存准备（thunder 解码 / BT 禁用 / 去重 / checksum / 站点凭据 / UA 并入请求头 / 队列默认 / ED2K / 相对文件名）→ 单事务落库（每队列一次 `MAX(queue_order)` 后内存递增、每行一条全列 INSERT、一次 `IN` 回读）→ 发布」三段，单条与批量语义不能分叉。批量一块只读一次 `dedup_same_url` / 活跃 URL / 站点凭据库，块内重复链接解析为块内首个任务；发布顺序 = 先一条 `EngineEvent::TasksChanged`（wire `DaemonEvent::TasksChanged`），再逐条 webhook `task.created`、解析插件缺失报错、稍后下载探测 / 入队。逐条拒绝（`CreateRejection`：BT 禁用 / thunder 解码失败 / checksum 非法 / 请求头非法）不影响同块其他条目；整块事务失败则整块回滚且不留幂等记录。
 **任务 HTTP client**：需要专属 client 的任务（单任务代理 / UA、队列默认 UA、忽略 TLS、Auto 走代理、站点规则出口）经进程级 `client_cache.rs` 按（代理指纹, 生效 UA, ignore_tls）缓存复用（超过 64 个整体清空，指纹不含 `rules`）；构建一次约 70ms，禁止每任务 / 每请求重建。同键任务共享连接池与 cookie jar，与全局 client 语义一致。
+- **任务代理编辑**（#1112）：`DownloadManager::set_task_proxy` → `daemon.task.setProxy`；先持久化 `proxy_url` 并更新排队副本，再对活跃 HTTP / FTP（含 HLS / DASH / 插件解析）走 `pause_task_for_reconnect` / `resume_task`，等待旧 writer 的 `TaskDone` 后立即用新出口重建连接，不重启宿主；失败任务立即重试，暂停 / 排队保持状态。空值恢复全局 + 站点规则；BT / eD2K 与完成态拒绝。UI 保存前说明非续传源站可能从头下载、直播可能留缺口。回归 `native/engine/tests/engine/proxy_switch.rs::task_proxy_edit_*`。
+- **统一任务编辑**（#1112）：`native/protocol/src/task_edit.rs` 定义 `daemon.task.editInfo` 的脱敏快照及带 `expectedRevision` 的 `daemon.task.edit` 部分补丁；`native/engine/src/task_edit.rs` 统一校验并以同一事务提交属性与受保护凭据，`download_manager/task_properties.rs` 协调旧 writer 退出、即时限速、单次计划与 BT 会话摘挂；`task_edit/storage.rs` 在 actor 外发布文件，保留源到提交完成，冲突不覆盖，失败回滚并以日志恢复。`TaskDto.properties` 只含非敏感覆盖；Cookie／敏感头不进入任务投影。GPUI `pages/task_properties.rs` 与 Web `dialogs/TaskPropertiesDialog.tsx` 只提交变化字段，手动分类与标签进入过滤／搜索。回归 `proxy_switch::unified_edit_*`。
 
 ---
 
@@ -140,6 +142,14 @@
   先建新目录 → 删本任务 librqbit 条目与旧 staging → `set_task_location` + 保存选择并发布位置 →
   `run_bt_download` 以新目录、Path A/S 重跑一轮（不再弹窗）。建目录失败 / 新目录落在旧 staging 内
   均报错、库内位置不变，重试会重新询问。
+- **BT 文件选择窗的「取消」按钮 = 删除任务**（GPUI / Web / Android / iOS 四端同语义）：客户端发 `daemon.task.delete`（`deleteFiles: true`，
+  只删已暂存数据）而不答复 `Cancelled`；删除取消 worker，daemon 撤回待选项，窗口随之关闭（GPUI `crates/downloads/src/pages/selection.rs::cancel_command`、
+  Web `SelectionDialogs.tsx` 的 `cancel`、Android `SelectionResolver.cancelButton`、iOS `SelectionResolver.cancel`；移动端判定 `SelectionKind.cancelDeletesTask`）。
+  关闭 / 划走不是取消：Web 关闭对话框与 Android 划走仍答复 `Cancelled`（`[-1]` 暂停），iOS 下拉关闭保持请求待处理。
+- **BT 文件选择窗可改名**（四端）：`SelectionOutcome::Bt.custom_name`（UniFFI `SelectionOutcomeDto::Bt.custom_name`）仅在去空白后非空且与预填任务名不同时下发
+  （GPUI `bt_name_outcome` ↔ Web `btSelection.ts::btSelectionName` ↔ Android / iOS `btNameOutcome`）。引擎按
+  `naming::sanitize_filename` 清洗后先写 `bt_custom_name` 再用于完成落盘（迁目录重跑与恢复都从库里读）；单文件种子改文件名（缺扩展名时沿用原扩展名），
+  多文件种子改外层目录名，不论勾了哪些文件（`compute_completion_layout` 有改名即走容器分支）。
 - **BT 文件选择的自动默认（#885）**：引擎以 `timeout: None` 询问，等待上限由 daemon `selection.rs::bt_selection_timeout`
   决定：daemon 配置 `bt_selection_auto_default`（默认开）= 60s 后按默认（全部文件）开始；关闭 = 请求
   `deadline_unix_ms = SELECTION_NO_DEADLINE`（i64::MAX），只等用户答复，**从不替用户采用默认值**：最后一个订阅者离开
@@ -198,6 +208,10 @@
   「未联系」行（私有种子不追加，BEP 27）。`daemon.task.reannounce` 立即重新汇报（不在运行为 `taskStateConflict`）。peer 速度 = 相邻两次采样的字节差
   （`apply_speeds`，同任务多客户端轮询共享采样，间隔 <400ms 沿用上次值）。`BtPeerDto` 另带防吸血研判
   （`ipGroup` / `groupDeliveredBytes` / `suspicion` / `rules` / `action` / `observeOnly`，来自 `BtGuard::peer_insight`）。
+  `BtStatusDto.dht`（`bt_status::DhtStatus::resolve`）给任务视角的 DHT 实况：`disabled`（设置关）> `private`（私有种子，磁力取元数据后经句柄得知）>
+  `idle`（会话未建）/ `unavailable`（会话在跑但 DHT 启动失败已退回，见 `ensure_bt_session` 三级兜底）/ `running` + IPv4 / IPv6 路由表节点数
+  （`BtSession::dht_nodes` = librqbit `DhtStats.routing_table_size{,_v6}`，会话级共享）；`dhtEnabled` 仍是设置开关，供旧客户端。按任务的 DHT 来源 peer 数
+  librqbit 不区分来源（DHT / tracker / LSD 合并成一条 peer 流），要显示须改 fork。
 - **BT 存储操作**（`download_manager/bt_storage_ops.rs` + `bt_move.rs` + `bt_task_files.rs`）：
   - **重命名文件**（`daemon.task.renameBtFile`，仅未完成且选择已确认的任务）：路径先过 `normalize_rename`（`\` 视作分隔符、不越出任务目录、Windows
     保留名 / 尾随点空格、与其他文件或其上级目录撞名一律拒，不分大小写）。会话里的任务交 librqbit `Session::rename_file` 当场挪 staging 里的文件；
@@ -220,7 +234,7 @@
 - **peer 国旗**（`geoip.rs`，对齐 qBittorrent）：DB-IP「国家 lite」`.mmdb`（CC BY 4.0，关于页署名）+ 自带最小 MaxMind DB 读取器（零依赖，24/28/32 位记录，
   真实库 IPv4/IPv6 回归见 `FLUXDOWN_TEST_MMDB`）。有人查看 peer 列表（`bt_status`）才触发 `ensure_background`：当月文件 `<data_dir>/geoip/dbip-country-lite-YYYY-MM.mmdb`
   不在就经统一出口（`egress::RoutedClients`）下载 `https://download.db-ip.com/free/<name>.gz`（当月未发布回退上月），解压校验后原子落盘并清旧文件，失败 1 小时内不重试；
-  不新增周期任务（空闲静默）。`BtPeerDto.country` 为大写 ISO 码，库未就绪 / 内网缺省；旗帜 SVG 在 `assets/flags/`（qBittorrent 同源 flag-icons，MIT），GPUI 内嵌、Web 经 `@flags` 别名按需加载。
+  不新增周期任务（空闲静默）。已加载的库（约 8MB 整读进内存）自最后一次查询起空闲 5 分钟即释放（`IdleSlot`：释放任务只在库已加载时存在，释放后退出），下次看 peer 列表再从磁盘加载、不重新下载。`BtPeerDto.country` 为大写 ISO 码，库未就绪 / 内网缺省；旗帜 SVG 在 `assets/flags/`（qBittorrent 同源 flag-icons，MIT），GPUI 内嵌、Web 经 `@flags` 别名按需加载。
 - **做种上传帧节奏**（#939）：限速本身在 librqbit 会话 / torrent 级 `ratelimits`，实测准确且热生效。
   宿主总上传速率（状态栏 ↑）由 daemon `event_hub` 用相邻进度帧的累计上传增量折算，要求每任务帧间隔
   ≤ ~500ms（单帧最多摊 1 秒、窗口滞后 700ms）。所以做种上传由 `tick_seeding_upload` 每

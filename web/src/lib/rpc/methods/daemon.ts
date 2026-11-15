@@ -60,6 +60,7 @@ import type {
   PluginViewOpenParams,
   PluginViewOpenedDto,
   PluginViewSessionParams,
+  PluginViewSetLocaleParams,
   PluginViewSnapshotDto,
   PluginIdentityParams,
   PluginInstallDevParams,
@@ -128,6 +129,7 @@ import type {
   TaskChangeUrlParams,
   TaskSetSegmentsParams,
   TaskSetPiecePickingParams,
+  SetTaskProxyParams,
   TaskDtoWire,
   DaemonSeedLocalParams,
   DaemonTaskHashParams,
@@ -140,6 +142,8 @@ import type {
   WebhookEndpointDraft,
   WebhookSimulateResponse,
   WebhookTestResponse,
+  EditTaskParams,
+  TaskEditSnapshot,
 } from '../protocol';
 
 /** 服务端逐源串行拉取镜像（每源 20s），最坏远超默认 30s。 */
@@ -153,6 +157,10 @@ const SLOW_DISK_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const task = {
   get: async (params: TaskIdParams) =>
     normalizeTask(await call<TaskDtoWire>(METHOD.DAEMON_TASK_GET, params)),
+  editInfo: (params: TaskIdParams) => call<TaskEditSnapshot>(METHOD.DAEMON_TASK_EDIT_INFO, params),
+  /** Unified edit can move data across volumes; match moveStorage's disk-operation timeout. */
+  edit: (params: EditTaskParams) =>
+    call<OkResult>(METHOD.DAEMON_TASK_EDIT, params, { timeoutMs: SLOW_DISK_TIMEOUT_MS }),
   activity: (params: TaskActivityQuery) =>
     call<TaskActivityPage>(METHOD.DAEMON_TASK_ACTIVITY, params),
   speedHistory: (params: TaskSpeedHistoryQuery) =>
@@ -168,7 +176,8 @@ const task = {
   rename: (params: TaskRenameParams) => call<OkResult>(METHOD.DAEMON_TASK_RENAME, params),
   changeUrl: (params: TaskChangeUrlParams) =>
     call<OkResult>(METHOD.DAEMON_TASK_CHANGE_URL, params),
-  /** 修改线程数：已下进度保留；下载中任务由引擎静默暂停 → 改配置 → 恢复。 */
+  /** 修改任务代理；后端对活动任务重连、对失败任务自动重试。 */
+  setProxy: (params: SetTaskProxyParams) => call<OkResult>(METHOD.DAEMON_TASK_SET_PROXY, params),
   setSegments: (params: TaskSetSegmentsParams) =>
     call<OkResult>(METHOD.DAEMON_TASK_SET_SEGMENTS, params),
   /** BT 选块：只传本次切换的字段，另一项保持不变。 */
@@ -358,6 +367,9 @@ const plugin = {
   /** 打开可移植视图会话（可能激活常驻宿主，按慢方法超时）。 */
   viewOpen: (params: PluginViewOpenParams) =>
     call<PluginViewOpenedDto>(METHOD.DAEMON_PLUGIN_VIEW_OPEN, params, { timeoutMs: SLOW_MIRROR_TIMEOUT_MS }),
+  /** 更新现有可移植视图会话的界面语言，不重新运行插件初始化。 */
+  viewSetLocale: (params: PluginViewSetLocaleParams) =>
+    call<OkResult>(METHOD.DAEMON_PLUGIN_VIEW_SET_LOCALE, params),
   /** 投递视图事件；入队即返回，结果经 `pluginViewFrame` 事件送出。 */
   viewEvent: (params: PluginViewEventParams) =>
     call<OkResult>(METHOD.DAEMON_PLUGIN_VIEW_EVENT, params),

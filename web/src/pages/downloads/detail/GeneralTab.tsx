@@ -1,4 +1,4 @@
-import { Copy, Download, Layers, Link2 } from 'lucide-react'
+import { Copy, Download, Layers, Link2, Pen } from 'lucide-react'
 import { useT } from '../../../i18n'
 import { usePrefBool } from '../../../lib/rpc'
 import { Button, Icon, Tooltip } from '../../../ui'
@@ -11,7 +11,7 @@ import { localizeTaskError } from '../model/taskError'
 import type { DownloadTaskView, TaskState } from '../model/task'
 import { canChangeSegments, canChangeUrl } from '../model/taskEdit'
 import { HIDE_TASK_SOURCE_PREF } from '../model/viewPrefs'
-import { openChangeSegments, openChangeUrl, openGroupDetail } from '../dialogs'
+import { openChangeSegments, openChangeUrl, openGroupDetail, openTaskEdit } from '../dialogs'
 import { routeLabel } from '../../../lib/taskRoute'
 import { CopyButton, SourcePageLink } from './CopyButton'
 import { FileHashRow } from './FileHashRow'
@@ -122,6 +122,9 @@ export function GeneralTab({ view }: { view: DownloadTaskView }) {
           ) : null}
           <Button icon={Copy} onClick={() => copyUrls([view])}>
             {t('copyUrl')}
+          </Button>
+          <Button icon={Pen} onClick={() => openTaskEdit(view.taskId)}>
+            {t('taskEditTitle')}
           </Button>
           {canChangeUrl(view) ? (
             <Button icon={Link2} onClick={() => openChangeUrl(view.taskId)}>

@@ -6196,8 +6196,8 @@ mod tests {
         assert!(!resume_is_usable(3, 100, 120, 10, false, true));
     }
 
-    /// 清单引出的每个请求都以用户清单 URL 为凭据锚点：Cookie 发往同站主机（含子域与其他
-    /// 端口），Authorization 只发往同源；跨站与 https → http 降级两者都不带。
+    /// 清单引出的请求均以用户清单 URL 为锚点：Cookie 按同站作用域，
+    /// 敏感头仅同源发送；普通自定义头跨站保留，凭据不随 https → http 降级。
     #[test]
     fn segment_credentials_follow_manifest_scope() {
         let mut identity = crate::downloader::RequestSpec::empty_get();
@@ -6210,7 +6210,10 @@ mod tests {
             .insert("Proxy-Authorization".to_string(), "Basic x".to_string());
         identity
             .extra_headers
-            .insert("X-Token".to_string(), "keep".to_string());
+            .insert("X-Token".to_string(), "private-token".to_string());
+        identity
+            .extra_headers
+            .insert("X-Editor".to_string(), "keep".to_string());
         let spec = crate::downloader::DownloadSpec::new(identity.clone());
         let ctx = HlsRequestCtx {
             spec: &spec,
@@ -6224,25 +6227,29 @@ mod tests {
                 has("cookie"),
                 has("authorization") && has("proxy-authorization"),
                 has("x-token"),
+                has("x-editor"),
             )
         };
 
-        assert_eq!(sent("https://www.site.example/seg0.ts"), (true, true, true));
+        assert_eq!(
+            sent("https://www.site.example/seg0.ts"),
+            (true, true, true, true)
+        );
         assert_eq!(
             sent("https://cdn.site.example/seg0.ts"),
-            (true, false, true)
+            (true, false, false, true)
         );
         assert_eq!(
             sent("https://www.site.example:8443/seg0.ts"),
-            (true, false, true)
+            (true, false, false, true)
         );
         assert_eq!(
             sent("https://cdn.other.example/seg0.ts"),
-            (false, false, true)
+            (false, false, false, true)
         );
         assert_eq!(
             sent("http://www.site.example/seg0.ts"),
-            (false, false, true)
+            (false, false, false, true)
         );
     }
 
@@ -6557,7 +6564,7 @@ v360.m3u8\n\
         let (address, _) = static_server(audio_routes()).await?;
         let dir = scratch_dir("audio_checkpoint_failure");
         let temp = dir.join("clip.audio.m4a.fdownloading");
-        let url = format!("sqlite://{}?mode=rwc", dir.join("checkpoint.db").display());
+        let url = crate::db::sqlite_url(&dir.join("checkpoint.db"));
         let db = crate::db::Db::connect(&url).await?;
         let pool = sqlx::AnyPool::connect(&url).await?;
         sqlx::query("CREATE TRIGGER fail_checkpoint BEFORE INSERT ON config WHEN NEW.key = 'hls_audio_resume_t-audio' AND NEW.value NOT LIKE '0:0:%' BEGIN SELECT RAISE(ABORT, 'checkpoint write failed'); END")

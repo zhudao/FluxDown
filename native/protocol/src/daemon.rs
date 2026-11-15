@@ -151,11 +151,14 @@ pub enum SelectionOutcome {
         index: i32,
     },
     /// 应答 [`SelectionKind::Bt`]：`save_dir` 非空且不同于任务当前目录时，引擎丢弃已暂存的
-    /// 数据、把任务改到该目录后重新开始；缺省 = 沿用当前目录。
+    /// 数据、把任务改到该目录后重新开始；缺省 = 沿用当前目录。`custom_name` 是用户改的落盘名
+    /// （单文件种子 = 文件名，多文件种子 = 外层目录名）；缺省 = 种子内名称。
     Bt {
         indices: Vec<i32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         save_dir: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        custom_name: Option<String>,
     },
     Variant {
         index: i32,
@@ -952,13 +955,51 @@ pub struct BtPeerCountsDto {
     pub dead: u32,
 }
 
+/// 任务视角的 DHT 状态（[`BtDhtDto::state`]）。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum BtDhtState {
+    /// 设置里关闭了 DHT。
+    Disabled,
+    /// 私有种子（BEP 27）不走 DHT。
+    Private,
+    /// 已启用，但 BT 会话未运行（没有在跑的 BT 任务）。
+    Idle,
+    /// 会话在运行，DHT 却没能启动（只靠 tracker / PeX）。
+    Unavailable,
+    /// 运行中，节点数见 [`BtDhtDto`]。
+    Running,
+    /// 对端发送了本端不认识的状态。
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// `daemon.task.btStatus` 的 DHT 实况。
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct BtDhtDto {
+    pub state: BtDhtState,
+    /// IPv4 路由表节点数（会话级，所有 BT 任务共享）；非 `running` 为 0。
+    #[serde(default)]
+    pub nodes_v4: u32,
+    /// IPv6 路由表节点数；非 `running` 或只走 IPv4 时为 0。
+    #[serde(default)]
+    pub nodes_v6: u32,
+}
+
 /// `daemon.task.btStatus` 结果：任务的 peer 与 tracker 实况。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct BtStatusDto {
-    /// DHT 是否启用（影响无 tracker 时的发现能力）。
+    /// 设置里的 DHT 开关（旧客户端只认它）。
     pub dht_enabled: bool,
+    /// 任务视角的 DHT 实况；旧 daemon 缺省（客户端退回只看 `dht_enabled`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dht: Option<BtDhtDto>,
     pub peer_counts: BtPeerCountsDto,
     pub trackers: Vec<BtTrackerDto>,
     pub peers: Vec<BtPeerDto>,
@@ -1908,6 +1949,9 @@ pub struct TaskDto {
     /// `rule:system` / `rule:manual` / `rule:custom`；空串 = 非 Auto 且未命中规则。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auto_route: String,
+    /// Non-secret task overrides from the unified property editor.
+    #[serde(default, skip_serializing_if = "crate::TaskPropertiesDto::is_empty")]
+    pub properties: crate::TaskPropertiesDto,
     /// 加速来源累计字节（多 CDN / 智能代理 / 多网卡）；源站 = 已下载 − 三者之和。
     #[serde(default, skip_serializing_if = "is_default_source_bytes")]
     pub source_bytes: crate::TaskSourceBytesDto,
@@ -2190,6 +2234,10 @@ pub struct SettingFieldDto {
     /// 辅助脚本按钮文案（空则用默认文案）。
     #[serde(default)]
     pub helper_label: Option<String>,
+    /// Per-client display text keyed by locale; technical values remain unchanged.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub localizations:
+        std::collections::BTreeMap<String, crate::plugin_i18n::SettingLocalizationDto>,
 }
 
 /// plugin 层嗅探规则包（`daemon.plugin.sniffRules`）：`pack` 为 `null` 表示从未有过插件规则
@@ -2513,6 +2561,18 @@ pub struct ChangeTaskUrlParams {
 pub struct SetTaskSegmentsParams {
     pub task_id: String,
     pub segments: i32,
+}
+
+/// `daemon.task.setProxy` 参数：修改未完成 HTTP / FTP 任务的出口。
+///
+/// 活跃任务立即重建连接，失败任务立即重试；暂停 / 排队任务保留原状态。
+/// 不支持续传的源站可能从头下载，直播可能出现缺口；无需重启宿主。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTaskProxyParams {
+    pub task_id: String,
+    /// 空 = 跟随全局与站点规则；也接受 `direct://` / `system://`。
+    pub proxy_url: String,
 }
 
 /// `daemon.task.setPiecePicking` 参数：修改 BT 任务的选片方式（对齐 qBittorrent 右键

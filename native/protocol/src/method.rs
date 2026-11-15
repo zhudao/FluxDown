@@ -25,6 +25,12 @@ pub const DAEMON_TASK_RENAME: &str = "daemon.task.rename";
 pub const DAEMON_TASK_CHANGE_URL: &str = "daemon.task.changeUrl";
 /// 修改任务线程数（`SetTaskSegmentsParams`），已下进度保留；完成或不存在的任务返回 `not-found`。
 pub const DAEMON_TASK_SET_SEGMENTS: &str = "daemon.task.setSegments";
+/// 修改任务代理并立即重建活跃连接（`SetTaskProxyParams`），不重启宿主。
+pub const DAEMON_TASK_SET_PROXY: &str = "daemon.task.setProxy";
+/// Redacted editable task settings (`{taskId}` → `TaskEditSnapshot`).
+pub const DAEMON_TASK_EDIT_INFO: &str = "daemon.task.editInfo";
+/// Validate and atomically apply a unified task property update.
+pub const DAEMON_TASK_EDIT: &str = "daemon.task.edit";
 pub const DAEMON_TASK_DELETE: &str = "daemon.task.delete";
 pub const DAEMON_TASK_PAUSE_ALL: &str = "daemon.task.pauseAll";
 pub const DAEMON_TASK_RESUME_ALL: &str = "daemon.task.resumeAll";
@@ -180,6 +186,8 @@ pub const DAEMON_PLUGIN_VIEW_EVENT: &str = "daemon.plugin.view.event";
 pub const DAEMON_PLUGIN_VIEW_CLOSE: &str = "daemon.plugin.view.close";
 /// 取会话当前 `{seq, tree}`（序号断档 / 重连后重新同步）。
 pub const DAEMON_PLUGIN_VIEW_SNAPSHOT: &str = "daemon.plugin.view.snapshot";
+/// Update one view session's client locale and re-render without resetting its state.
+pub const DAEMON_PLUGIN_VIEW_SET_LOCALE: &str = "daemon.plugin.view.setLocale";
 /// 会话续期（`{sessions: [...]}`）；90 s 无续期的会话会被关闭。
 pub const DAEMON_PLUGIN_VIEW_KEEPALIVE: &str = "daemon.plugin.view.keepalive";
 /// 执行插件命令（`{identity, command, taskIds}`）。慢方法：可能激活宿主。
@@ -477,6 +485,9 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_TASK_RENAME,
     DAEMON_TASK_CHANGE_URL,
     DAEMON_TASK_SET_SEGMENTS,
+    DAEMON_TASK_SET_PROXY,
+    DAEMON_TASK_EDIT_INFO,
+    DAEMON_TASK_EDIT,
     DAEMON_TASK_DELETE,
     DAEMON_TASK_PAUSE_ALL,
     DAEMON_TASK_RESUME_ALL,
@@ -567,6 +578,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_PLUGIN_VIEW_EVENT,
     DAEMON_PLUGIN_VIEW_CLOSE,
     DAEMON_PLUGIN_VIEW_SNAPSHOT,
+    DAEMON_PLUGIN_VIEW_SET_LOCALE,
     DAEMON_PLUGIN_VIEW_KEEPALIVE,
     DAEMON_PLUGIN_COMMAND,
     DAEMON_PLUGIN_INVOKE,
@@ -760,6 +772,7 @@ pub const SLOW_DAEMON_METHODS: &[&str] = &[
     DAEMON_TASK_HASH,
     DAEMON_TASK_SEED_LOCAL,
     DAEMON_TASK_MOVE_STORAGE,
+    DAEMON_TASK_EDIT,
     DAEMON_EGRESS_PLAN,
 ];
 

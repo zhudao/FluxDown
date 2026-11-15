@@ -559,7 +559,8 @@ pub(crate) enum MenuEntry {
     /// 更换下载链接（单选；条件见 [`TaskMenuFacts::can_change_url`]）。
     ChangeUrl,
     /// 修改线程数（单选；条件见 [`TaskMenuFacts::can_change_segments`]）。
-    ChangeSegments,
+    /// Edit all supported properties of a single local task.
+    EditTask,
     /// 完整性校验（单选；条件见 [`TaskMenuFacts::can_verify_integrity`]）。
     VerifyIntegrity,
     /// 最稀有优先（本地未完成 BT；可多选。选中态见 [`piece_picking_order`]）。
@@ -654,8 +655,8 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
         if only.can_change_url() {
             items.push(MenuEntry::ChangeUrl);
         }
-        if only.can_change_segments() {
-            items.push(MenuEntry::ChangeSegments);
+        if only.is_local {
+            items.push(MenuEntry::EditTask);
         }
         if only.can_verify_integrity() {
             items.push(MenuEntry::VerifyIntegrity);
@@ -1653,6 +1654,8 @@ impl DownloadTableDelegate {
         task.name_fold.contains(&self.query)
             || task.url_fold.contains(&self.query)
             || task.site_fold.contains(&self.query)
+            || task.category_fold.contains(&self.query)
+            || task.tags_fold.contains(&self.query)
             || self.group_name_matches(task)
     }
 
@@ -2190,10 +2193,15 @@ impl DownloadTableDelegate {
     }
 
     /// 指针移到 `row_ix`。返回选区是否变化。文件拖放进行时没有划选会话，本方法直接返回。
+    /// 没按着左键的移动说明会话的 mouse_up 被别处吞掉（#1123），此时直接收束会话。
     pub(super) fn drag_sweep_to(&mut self, row_ix: usize, event: &MouseMoveEvent) -> bool {
         let Some(sweep) = self.row_sweep.as_mut() else {
             return false;
         };
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.row_sweep = None;
+            return false;
+        }
         if !sweep.active {
             let delta = event.position - sweep.origin_pos;
             if !sweep_past_slop(delta) {
@@ -2558,6 +2566,8 @@ impl DownloadTableDelegate {
         if !checkbox_pinned {
             let tooltip = self.strings.select_task_tooltip.clone();
             // 选择列只负责点进多选。拖出文件只在文件名列，避免和图标点击抢手势。
+            // 按下在本元素截断：行的划选不得由选择格启动。on_click 在 mouse_up 冒泡阶段会
+            // stop_propagation，行的 finish_row_sweep 收不到，会话就残留了（#1123）。
             return div()
                 .id(("download-task-select-cell", row_ix))
                 .group(SELECT_CELL_GROUP)
@@ -2586,6 +2596,7 @@ impl DownloadTableDelegate {
                             style.border_color(hover_border)
                         })),
                 )
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(toggle)
                 .into_any_element();
         }
@@ -3189,10 +3200,10 @@ impl DownloadTableDelegate {
                 FluxIcon::Globe,
                 Box::new(crate::actions::ChangeSelectedUrl),
             ),
-            MenuEntry::ChangeSegments => menu.menu_with_icon(
-                self.strings.edit_threads.clone(),
-                FluxIcon::Layers,
-                Box::new(crate::actions::ChangeSelectedSegments),
+            MenuEntry::EditTask => menu.menu_with_icon(
+                self.strings.task_edit_title.clone(),
+                FluxIcon::Pen,
+                Box::new(crate::actions::EditSelectedTask),
             ),
             MenuEntry::VerifyIntegrity => menu.menu_with_icon(
                 self.strings.verify_integrity.clone(),
@@ -4791,7 +4802,7 @@ mod tests {
         statuses: &[i32],
         missing: &[usize],
     ) -> Result<DownloadTableDelegate, I18nError> {
-        let catalog = std::sync::Arc::new(I18nCatalog::load_embedded()?);
+        let catalog = I18nCatalog::load_embedded()?;
         let strings = DownloadStrings::from_translator(&catalog.translator("en"));
         let store = Rc::new(TaskStore::default());
         let rows = statuses
@@ -5539,6 +5550,122 @@ mod tests {
         assert!(!app.read(|cx| cx.has_active_drag()));
         win.simulate_mouse_up(at(other_x, 2), MouseButton::Left);
         assert_eq!(selected(&win).len(), 3);
+        Ok(())
+    }
+
+    /// 回归 #1123：初次点选择格（非多选状态）不得留下划选会话，否则之后不按键移动也会改选区。
+    #[test]
+    fn selection_cell_click_enters_multi_select_without_leaving_a_sweep() -> Result<(), I18nError> {
+        use gpui::{
+            AppContext as _, Context, Entity, IntoElement, Modifiers, MouseMoveEvent,
+            ParentElement as _, Pixels, Point, Render, Styled as _, TestApp, Window, div, point,
+            px,
+        };
+        use gpui_component::table::TableState;
+
+        struct Host {
+            table: Entity<TableState<DownloadTableDelegate>>,
+        }
+
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().child(render_download_table(
+                    "select-cell-test-table",
+                    &self.table,
+                    cx,
+                ))
+            }
+        }
+
+        let delegate = delegate(&[3, 3, 3, 3])?;
+        let keys = delegate.visible_task_keys();
+        let mut app = TestApp::new();
+        app.update(|cx| {
+            gpui_component::init(cx);
+            fluxdown_ui_theme::init(cx);
+        });
+        let mut win = app.open_window(move |window, cx| Host {
+            table: cx.new(|cx| {
+                TableState::new(delegate, window, cx)
+                    .row_selectable(false)
+                    .col_selectable(false)
+            }),
+        });
+        for _ in 0..3 {
+            win.draw();
+            app.run_until_parked();
+        }
+
+        let (header, row, cell_x) = win.read(|host, cx| {
+            let delegate = host.table.read(cx).delegate();
+            (
+                f32::from(table_header_height(cx)),
+                f32::from(
+                    delegate
+                        .prefs
+                        .density
+                        .row_height(fluxdown_ui_theme::active_theme(cx).density()),
+                ),
+                delegate.selection_column_width() / 2.,
+            )
+        });
+        let at = |x: f32, row_ix: usize| -> Point<Pixels> {
+            point(px(x), px(header + row * (row_ix as f32 + 0.5)))
+        };
+
+        win.simulate_mouse_move(at(cell_x, 0));
+        win.simulate_click(at(cell_x, 0), gpui::MouseButton::Left);
+        win.read(|host, cx| {
+            let delegate = host.table.read(cx).delegate();
+            assert!(delegate.in_multi_select());
+            assert_eq!(delegate.selected_keys(), [keys[0].clone()]);
+            assert!(delegate.row_sweep.is_none());
+        });
+
+        // 没按键的移动不改选区。
+        for row_ix in [1, 3, 2] {
+            win.simulate_event(MouseMoveEvent {
+                position: at(cell_x + 200., row_ix),
+                modifiers: Modifiers::default(),
+                pressed_button: None,
+            });
+        }
+        win.read(|host, cx| {
+            let delegate = host.table.read(cx).delegate();
+            assert_eq!(delegate.selected_keys(), [keys[0].clone()]);
+            assert!(delegate.row_sweep.is_none());
+        });
+        Ok(())
+    }
+
+    /// 回归 #1123 的纵深防御：划选会话残留（漏掉 mouse_up）时，无按键移动立即收束会话。
+    #[test]
+    fn drag_sweep_ends_when_no_button_is_pressed() -> Result<(), I18nError> {
+        use gpui::{Modifiers, MouseButton, MouseMoveEvent, point, px};
+
+        let mut delegate = delegate(&[1, 1, 1, 1])?;
+        let stale = || super::RowSweep {
+            origin_ix: 0,
+            origin_pos: point(px(0.), px(0.)),
+            additive: false,
+            base: HashSet::new(),
+            active: false,
+        };
+        let moved = |pressed_button| MouseMoveEvent {
+            position: point(px(100.), px(100.)),
+            modifiers: Modifiers::default(),
+            pressed_button,
+        };
+
+        delegate.row_sweep = Some(stale());
+        assert!(!delegate.drag_sweep_to(2, &moved(None)));
+        assert!(delegate.row_sweep.is_none());
+        assert!(delegate.selected_tasks.is_empty());
+
+        // 按住左键时照常划选。
+        delegate.row_sweep = Some(stale());
+        assert!(delegate.drag_sweep_to(2, &moved(Some(MouseButton::Left))));
+        assert_eq!(delegate.selected_tasks.len(), 3);
         Ok(())
     }
 
@@ -6533,28 +6660,6 @@ mod context_menu_tests {
     }
 
     #[test]
-    fn single_local_completed_task_shows_full_menu() {
-        let items = context_menu_items(&[task(true, TaskState::Completed)]);
-        assert_eq!(
-            items,
-            vec![
-                MenuEntry::Boost,
-                MenuEntry::OpenFile,
-                MenuEntry::OpenFolder,
-                MenuEntry::CopyFile,
-                MenuEntry::Rename,
-                MenuEntry::Redownload,
-                MenuEntry::CopyUrl,
-                MenuEntry::MoveToQueue,
-                MenuEntry::Separator,
-                MenuEntry::Delete,
-                MenuEntry::DeleteWithFiles,
-                MenuEntry::ShowDetail,
-            ]
-        );
-    }
-
-    #[test]
     fn multi_select_only_keeps_items_valid_for_every_selected_task() {
         // 一个本地已完成 + 一个远程下载中：单选专属项（重命名/加速/忽略插件重试）
         // 消失；要求全体本地的项（打开文件/目录/移动队列/重下载）因远程任务
@@ -6722,32 +6827,27 @@ mod context_menu_tests {
     }
 
     #[test]
-    fn change_segments_needs_single_local_unfinished_non_bt_task() {
-        // 下载中也允许：引擎静默暂停 → 改 → 恢复。
+    fn task_editor_needs_single_local_task_including_completed_and_bt() {
         for state in [
             TaskState::Downloading,
             TaskState::Paused,
             TaskState::Failed,
             TaskState::Pending,
+            TaskState::Completed,
         ] {
             assert!(
-                context_menu_items(&[task(true, state)]).contains(&MenuEntry::ChangeSegments),
+                context_menu_items(&[task(true, state)]).contains(&MenuEntry::EditTask),
                 "{state:?}"
             );
         }
-        assert!(
-            !context_menu_items(&[task(true, TaskState::Completed)])
-                .contains(&MenuEntry::ChangeSegments)
-        );
         let mut bt = task(true, TaskState::Paused);
         bt.is_bt = true;
-        assert!(!context_menu_items(&[bt]).contains(&MenuEntry::ChangeSegments));
+        assert!(context_menu_items(&[bt]).contains(&MenuEntry::EditTask));
         assert!(
-            !context_menu_items(&[task(false, TaskState::Paused)])
-                .contains(&MenuEntry::ChangeSegments)
+            !context_menu_items(&[task(false, TaskState::Paused)]).contains(&MenuEntry::EditTask)
         );
         let pair = [task(true, TaskState::Paused), task(true, TaskState::Failed)];
-        assert!(!context_menu_items(&pair).contains(&MenuEntry::ChangeSegments));
+        assert!(!context_menu_items(&pair).contains(&MenuEntry::EditTask));
     }
 
     #[test]
@@ -7043,29 +7143,6 @@ mod context_menu_tests {
         let items = context_menu_items(&[bt, bt]);
         assert!(!items.contains(&MenuEntry::CopyMagnet));
         assert!(!items.contains(&MenuEntry::ExportTorrent));
-    }
-
-    #[test]
-    fn failed_local_task_menu_places_edit_entries_between_rename_and_redownload() {
-        assert_eq!(
-            context_menu_items(&[task(true, TaskState::Failed)]),
-            vec![
-                MenuEntry::Resume,
-                MenuEntry::Pause,
-                MenuEntry::Boost,
-                MenuEntry::OpenFolder,
-                MenuEntry::Rename,
-                MenuEntry::ChangeUrl,
-                MenuEntry::ChangeSegments,
-                MenuEntry::Redownload,
-                MenuEntry::CopyUrl,
-                MenuEntry::MoveToQueue,
-                MenuEntry::Separator,
-                MenuEntry::Delete,
-                MenuEntry::DeleteWithFiles,
-                MenuEntry::ShowDetail,
-            ]
-        );
     }
 
     #[test]
