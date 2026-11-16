@@ -244,6 +244,10 @@ pub struct DaemonRuntimeStatsDto {
     /// 「完成后关机」「空闲退出」等联动必须把它们算作仍有工作。
     #[serde(default)]
     pub retry_pending_tasks: u32,
+    /// In-flight local verification / finalization jobs. Missing on older daemons:
+    /// consumers must not infer that it is safe to execute a low-speed power action.
+    #[serde(default)]
+    pub local_work_count: Option<u32>,
 }
 
 /// daemon 托管组件标识。
@@ -1942,11 +1946,14 @@ pub struct TaskDto {
     /// `torrent-file://local` 哨兵，客户端「复制链接」应优先取本字段。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub origin_url: String,
-    /// Auto 路由或站点规则标签（可追溯性）：Auto 为 `direct` /
+    /// 任务出口「链路」标签（可追溯性）：Auto 为 `direct` /
     /// `direct:sampled` / `direct:pinned` / `direct:failover` /
     /// `proxy:cached` / `proxy:sampled` / `proxy:failover`（代理类标签带
     /// 候选来源后缀 `:system`/`:manual`）；站点规则为 `rule:direct` /
-    /// `rule:system` / `rule:manual` / `rule:custom`；空串 = 非 Auto 且未命中规则。
+    /// `rule:system` / `rule:manual` / `rule:custom`；全局代理为 `global:direct` /
+    /// `global:bypass` / `global:manual` / `global:system` / `global:pac`；任务级代理为
+    /// `task:proxy` / `task:direct`；BT 会话为 `bt:direct` / `bt:trackers:{manual,system}` /
+    /// `bt:all:{manual,system}`。空串 = 尚未启动过（或出口构建失败退回全局直连）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auto_route: String,
     /// Non-secret task overrides from the unified property editor.
@@ -3762,8 +3769,8 @@ pub enum WsServerMsg {
     QueuesChanged { queues: Vec<QueueDto> },
     /// 单任务队列归属变化（move_task_to_queue 定向广播）。
     TaskQueueChanged { task_id: String, queue_id: String },
-    /// Auto 路由或站点规则标签的落定/变更（详情面板「链路」行）。
-    /// `route` wire 标签同 `TaskDto.autoRoute`；恒非空（空串 = 非 Auto 且未命中规则，不广播）。
+    /// 任务出口「链路」标签的落定/变更（详情面板「链路」行）。
+    /// `route` wire 标签同 `TaskDto.autoRoute`；恒非空（空串不广播）。
     TaskRouteChanged { task_id: String, route: String },
     /// 队列位置全量替换（首次发布 / 用户调整顺序导致整表重排）；按 `order` 升序。
     QueuePositionsChanged { positions: Vec<QueuePositionDto> },
@@ -4323,7 +4330,7 @@ pub struct ComponentFfmpegStatus {
     pub managed_version: String,
     /// 系统 PATH 中探测到的 ffmpeg 路径（无论是否生效；空 = 无）。
     pub system_path: String,
-    /// 当前平台是否提供托管安装（BtbN 构建）。`false` = macOS 等——Web UI 隐藏
+    /// 当前平台是否提供托管安装（FFmpeg-Builds 构建）。`false` = macOS 等——Web UI 隐藏
     /// 托管安装区块，只引导系统 PATH / 手动指定，避免反复弹「不支持安装」。
     pub managed_supported: bool,
 }

@@ -25,7 +25,8 @@
 - **来源元数据不等于目录移动授权**：解析器可把 `archiveMetadata` 持久化到 `tasks.category_route`，即使用户已手选目录；完成期必须检查非空 `base_dir`，不能因 JSON 存在就执行插件目录规划，否则显式目录任务可能被搬走。任务组的现代 `directories` 输出也必须以授权基础目录为根，而不是已经拼过组名的 fallback → `category_route.rs::relocate_completed` / `archive_group_root`、`download_manager.rs::create_task_group`；回归 `plugin_interceptors::{explicit_save_directory_bypasses_archive_callback,archive_plugin_group_preserves_member_tree_under_authorized_base}`。
 - **HLS 小响应拉取不得在共享 client 上设全局 timeout，播放列表首行带 BOM 要先剥**：全局 timeout 会误伤普通 HTTP 长下载；`m3u8_rs` 要求首行就是 `#EXTM3U` → `native/engine/src/hls_downloader.rs::fetch_small` / `trim_playlist_prefix`。
 - **下载结束到完成帧之间有长收尾（remux / mux / 插件后处理）的协议，必须在收尾前发一帧「总量 = 已落盘」且能越过 manager 节流的帧**：manager 对状态 1 帧按 `MIN_DART_INTERVAL_MS`（500ms）节流，被吞的帧不会补发；HLS 写完最后一段的帧常落在节流窗口内，ffmpeg 转封装期间界面一直停在 9x%。携带非空 `file_name` 的帧必定转发；进度估值另须保证「有未落盘段 < 100%、全部落盘 = 100%」→ `native/engine/src/hls_downloader.rs::run_hls_download_inner`（「全部分段已落盘」注释段）、`hls_downloader/size_estimate.rs`、回归 `vod_progress_estimates_total_and_converges_to_actual_bytes`。
-- **收尾阶段不得把整份媒体文件读进内存**：ts2mp4 的 `convert_ts_to_mp4` 同时持有输入与 5 份中间拷贝，150MB TS 峰值 ≈1GB（6.6 倍）；1G 内存的 NAS 上 141MB 文件转换耗时 66s 并拖得 sqlx 取连接 22s（换页）。HLS 兜底必须走 `ts_remux` 流式两遍，新增后处理同样按块读写 → `native/engine/src/ts_remux/`、回归 `ts_remux::tests::random_streams_match_ts2mp4_byte_for_byte`。
+- **收尾阶段不得把整份媒体文件读进内存**：ts2mp4 的 `convert_ts_to_mp4` 同时持有输入与 5 份中间拷贝，150MB TS 峰值 ≈1GB（6.6 倍）；1G 内存的 NAS 上 141MB 文件转换耗时 66s 并拖得 sqlx 取连接 22s（换页）。HLS 兜底必须走 `ts_remux` 流式两遍，新增后处理同样按块读写 → `native/engine/src/ts_remux/`、回归 `ts_remux::tests::random_streams_remux_identically_across_read_windows`。
+- **TS→MP4 的音轨参数与时长必须来自码流，不能写死，也不能用 PTS 范围估帧率**：`ts_remux` 移植自 ts2mp4 0.3.2 时连同其 48kHz 写死（stsd 48000、ASC `0x1190`、1920 tick/帧）一起照搬，并用「逐字节等于 ts2mp4」的差分测试钉住，44.1kHz 源成片音频加速 1.088 倍（#1136，65 分钟片尾差 320s）；视频帧长按 (max−min)/(n−1) 估算，`EXT-X-DISCONTINUITY` 重置 PTS 后估成 3559 / 1799 tick。参数取 ADTS 头、时长按逐样本时间戳、断点两轨配对对齐 → `native/engine/src/ts_remux/{demux,timing,mp4}.rs`、回归 `ts_remux::tests::{audio_track_uses_sample_rate_and_channels_from_adts,timestamp_reset_keeps_nominal_frame_duration,tracks_realign_after_timestamp_reset}`；真实素材 `ffmpeg_encoded_44k_stream_stays_in_sync`（`FLUXDOWN_TEST_FFMPEG`，结果须被 ffmpeg `-xerror` 无错解码）。
 - **订阅源正文无有效 tracker 必须算该源失败**：HTML 错误页或空页若当「成功 + 空列表」，会覆盖宿主缓存并在刷新间隔内丢光订阅 tracker → `native/engine/src/tracker_subscription.rs::parse_source_body`。
 - **浏览器 POST 接管的任务只能原样重放整条请求事务，不得改发 GET、不得丢弃探测响应再提交**：请求体（OneDrive 打包下载的 `pacToken` 等）不落库，只存引擎内存 `DownloadManager::replayable_requests`；同进程内自动重试 / 恢复按原 method + body 从 0 重下（`is_resume: false`，不按 Range 拼接——POST 被 303 带去的签出直链、重新生成的打包每次都可能不同），引擎重启后内存条目不在，恢复体首以 `POST_ONLY_RESUME_MESSAGE` 失败（旧逻辑按 GET 发 HEAD + Range，只收 POST 的端点恒 405，#970）。探测与数据共用一次提交：非 GET 恒走 `ProbeKind::Held`，旧 `resolve_file_info_non_get` 拿到响应头就丢弃、下载阶段再 POST 一次，OneDrive 把整个 zip 打包两遍。换源（`update_task_url`）同时清空 `request_method` 与内存事务，新链接按 GET 续传。以 GET 撞上 `405 + Allow` 只含 POST 时探测标 `405 post-only`、立即停止并报 `POST_ONLY_ENDPOINT_MESSAGE`。两条文案由 GPUI / Web / Android / iOS 按全文匹配本地化（`taskErrorPostOnly*`），改文案须同步各端镜像 → `native/engine/src/downloader.rs`（`adapt_probe_request` / `allows_only_post` / `probe_post_only`）、`native/engine/src/download_manager.rs`（`ReplayableRequest` / `do_resume_task` / `fail_post_only_resume`）、回归 `native/engine/tests/engine/post_only.rs`（`#[ignore]`，需 `--ignored`）。
 - **Cookie 登录态失效的直链会被 302 到登录页，HTML 安全网必须点出终点**：OneDrive 单文件下载是带 Cookie 的 GET `…/_layouts/15/download.aspx?UniqueId=…`，缺 Cookie 时 302 到 `Authenticate.aspx` 返回 HTML，旧文案只说「form-POST endpoint accessed via GET」误导排查（#970）。`html_response_hint` 在响应被重定向时写出终点（不含 query），终点以含 `://` 的独立词元出现，`is_retriable_error` 关键词判定跳过它 → `native/engine/src/downloader.rs::html_response_hint`、回归 `downloader.rs::html_hint_names_the_redirect_landing_without_its_query`。
@@ -43,6 +44,8 @@
 ## BT / eD2K
 
 另见 AGENTS.md §4：BT 判定只认 `magnet:` 与 `torrent-file://`、「复制链接」读 `origin_url`、`dht.json` 撞端口排除区间。
+
+- **随机默认监听端口只能在配置缺失时生成，并原子保存 BT 两个边界**：每次启动重随机会破坏手动 NAT / 防火墙规则；无差别迁移旧值会覆盖用户自选范围与 eD2K 的显式 `0`。只缺一个 BT 边界时沿用另一个，不能拼接随机值 → `native/engine/src/db.rs::init_default_config`、回归 `default_listen_ports_*`（#872）。
 
 - **Windows 子路径 NotFound 不保证父路径是目录**：BT 完成命名先检查目标目录本身，普通文件返回 NotADirectory，避免把其下的候选名误判为空闲 → `native/engine/src/bt_downloader.rs::dedup_name_in_dir`；回归 `completion_layout_propagates_destination_scan_error`。
 - **路径安全测试的 `Path` 解析跟随宿主平台**：Windows 上 `Path::new("a:b")` 会成为盘符前缀，即使传给校验函数的 `windows_rules` 为 false 也不是 `Normal` 组件；「非 Windows 可使用冒号」断言只在非 Windows 执行 → `native/engine/src/bt_downloader.rs::torrent_path_guard_windows_rules_reject_drive_and_reserved`、`native/engine/src/bt_task_files.rs::rename_applies_windows_rules_only_when_asked`。
@@ -110,6 +113,7 @@
 
 另见 AGENTS.md §4：本机端口默认宽松显式严格（WSAEACCES 回退）、远程控制凭据与会话撤销、空闲静默、遥测只有两条匿名事件。
 
+- **需要行号／键名的配置草稿诊断须放在预览结果中，不能只依赖 RPC 错误 message**：现有 agent 网关会用 `agent RPC failed` 包装失败，Web 实测只剩通用文案，丢掉 daemon 原始逐行原因。Aria2 编辑器用 `Aria2OptionsResponse.error` 携带诊断，有错时 `values` 为空、两端禁止提交 patch → `native/protocol/src/aria2_options.rs`、`native/daemon/src/service.rs::aria2_options_preview_is_read_only_and_preserves_omitted_settings`、`native/agent/src/gateway.rs`。
 - **归档能力扩展不能顺带改变云端 / LAN 被动接收任务的分类策略**：这两类任务沿用既有 `category_route: None`，不得因接收端存在分类偏好而自动附加路由；默认目录跟随授权只在原本支持该交互的建任务入口传递 → `native/agent/src/remote.rs::create_local_task`、`native/agent/src/link/service.rs`（`DaemonTaskCreator`）。
 - **捕获确认必须显式传递用户禁用自动分类的意图**：仅比较目录值无法区分自动预填与用户手动选回同一目录，确认请求用 `disableCategoryRoute` 阻止 agent 在完成阶段重新启用分类 → `native/agent/src/capture.rs::resolve`、`crates/downloads/src/submission.rs`，回归 `manual_category_directory_disables_capture_route`。
 - **进程测试要区分强杀回收与优雅关停**：Windows `Child::kill` 不是正常退出，不能复用要求成功退出码的断言；`system.shutdown` 与 Unix SIGTERM 仍必须成功退出 → `native/daemon/tests/daemon/process_contract.rs::ProcessGuard::{terminate,wait_for_success,wait_for_exit}`。
@@ -168,6 +172,7 @@
 
 - **新建下载等处生成 UUID 不得用 `crypto.randomUUID()`，一律 `randomUuid()`**：浏览器只在安全上下文（HTTPS / localhost）暴露它，NAS / Docker 经 `http://<局域网 IP>:17800` 访问时缺失，调用即抛错；`getRandomValues` 无此限制 → `web/src/lib/uuid.ts::randomUuid`（使用方 `web/src/pages/downloads/dialogs/importRunner.ts`）。
 - **新增可省略的任务 DTO 字段须同步 Web 归一化契约测试**：Rust `TaskDto.properties` 在全默认时省略，Web `normalizeTask` 会补齐；只更新 `TASK_DEFAULTS` 而漏更新测试的独立期望，会同时破坏任务、快照、事件和转发帧的四个契约用例（#1146 CI）。默认值应对齐 Rust serde，非默认的编辑属性也须验证保留 → `native/protocol/src/task_edit.rs::TaskPropertiesDto`、`web/src/lib/rpc/normalize.ts::TASK_DEFAULTS`、`normalize.test.ts`。
+- **设置行的 `pointer-events-none` 不会禁用键盘与辅助技术操作**：偏好开关依赖另一开关时，除行级灰化外还须把 `disabled` 传给底层 `Switch`；静默自动更新关闭自动检查后必须原生禁用 → `web/src/pages/settings/kit/fields.tsx::PrefSwitchRow`。
 
 ## 浏览器扩展
 

@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod app_icon;
+pub mod aria2_options;
 pub mod capture_link;
 pub mod cloud_notify;
 pub mod coalesce;
@@ -49,10 +50,11 @@ pub use agent::{
     LinkDiscoveryParams, LinkDispatchParams, LinkDispatchResult, LinkPairBeginParams,
     LinkPairFinishParams, LinkPairingCodeDto, LinkPairingRequestDto, LinkRenameParams,
     LinkStopPairingParams, LogExportParams, LogExportResult, LogPathsDto, OriginIdCheckResult,
-    PLATFORM_COPY_TASK_FILES_MAX, PathStyle, PendingCaptureDto, PlatformCopyTaskFilesParams,
-    PlatformFileIconDto, PlatformFileIconParams, PlatformIntegrationDto, PlatformOpenPathParams,
-    PlatformToggleParams, PlatformUrlProtocolParams, PluginFavoriteResultDto,
-    PluginFavoriteSetRequest, PluginFavoritesDto, PowerAction, PowerArmParams, PowerStatusDto,
+    PLATFORM_COPY_TASK_FILES_MAX, POWER_LOW_SPEED_WARNING_SECS, PathStyle, PendingCaptureDto,
+    PlatformCopyTaskFilesParams, PlatformFileIconDto, PlatformFileIconParams,
+    PlatformIntegrationDto, PlatformOpenPathParams, PlatformToggleParams,
+    PlatformUrlProtocolParams, PluginFavoriteResultDto, PluginFavoriteSetRequest,
+    PluginFavoritesDto, PowerAction, PowerArmParams, PowerLowSpeedCondition, PowerStatusDto,
     PrivatePluginInstallRequest, PrivatePluginListDto, ReleaseNoteDto, RemoteCommandAction,
     RemoteCommandParams, RemoteDispatchParams, RemoteDispatchResult, RemoteTaskDto,
     RemoteTaskStatus, ShellStatusDto, SyncLocalOnlyParams, SyncStatusDto, TrayUnavailableReason,

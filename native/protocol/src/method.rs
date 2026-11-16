@@ -70,8 +70,9 @@ pub const DAEMON_TASK_RENAME_BT_FILE: &str = "daemon.task.renameBtFile";
 /// 强制重新校验未完成的 BT 任务（`{taskId}`）：丢弃已有进度记录，按磁盘数据全量重哈希后回到
 /// 原状态。已完成任务返回 `taskStateConflict`（改用只读的 `daemon.task.verify`）。
 pub const DAEMON_TASK_RECHECK: &str = "daemon.task.recheck";
-/// 移动 BT 任务的数据到新的保存目录（`MoveTaskStorageParams`）并更新任务位置，完成后任务回到
-/// 原状态（下载 / 暂停 / 做种）。慢方法：跨卷移动耗时与数据量成正比；目标已有同名文件返回 `conflict`。
+/// 移动任务数据到新的保存目录（`MoveTaskStorageParams`）并更新任务位置，完成后任务回到原状态
+/// （下载 / 暂停 / 做种）。BT 任务走 BT 会话搬移；HTTP / FTP / eD2K 等走统一编辑的搬移（含
+/// `.fdownloading` 续传文件与附属产物）。慢方法：跨卷移动耗时与数据量成正比；目标已有同名文件返回 `conflict`。
 pub const DAEMON_TASK_MOVE_STORAGE: &str = "daemon.task.moveStorage";
 /// 任务级 BT 限速（`SetTaskBtLimitsParams`，缺省字段不变，`0` = 不限），运行中立即生效。
 pub const DAEMON_TASK_SET_BT_LIMITS: &str = "daemon.task.setBtLimits";
@@ -111,6 +112,8 @@ pub const DAEMON_GROUP_DELETE: &str = "daemon.group.delete";
 
 pub const DAEMON_CONFIG_GET: &str = "daemon.config.get";
 pub const DAEMON_CONFIG_PATCH: &str = "daemon.config.patch";
+/// Preview/import text or export supported aria2-style native defaults (read-only).
+pub const DAEMON_CONFIG_ARIA2_OPTIONS: &str = "daemon.config.aria2Options";
 pub const DAEMON_CONFIG_PROXY_TEST: &str = "daemon.config.proxyTest";
 /// 站点代理规则草稿校验 + 「测试网址」解释（可能起 `scutil` 子进程，慢方法）。
 pub const DAEMON_CONFIG_PROXY_ROUTE: &str = "daemon.config.proxyRoute";
@@ -433,6 +436,8 @@ pub const AGENT_UPDATE_INSTALL: &str = "agent.update.install";
 pub const AGENT_UPDATE_CANCEL: &str = "agent.update.cancel";
 /// 定时关机 / 睡眠：`{delaySecs, action}` → `{armed}`；没有任务时立即开始倒计时，
 /// `delaySecs = 0` 只在有任务（活跃 / 排队 / 待重试）时接受，否则 `armed = false`。
+/// 可选 `lowSpeed {thresholdBps, durationSecs}` 改为持续低速触发；必须有下载工作，
+/// 达标后固定 30 秒可取消倒计时，不使用 `delaySecs`。
 pub const AGENT_POWER_ARM: &str = "agent.power.arm";
 pub const AGENT_POWER_DISARM: &str = "agent.power.disarm";
 
@@ -529,6 +534,7 @@ pub const ALL_METHODS: &[&str] = &[
     DAEMON_GROUP_DELETE,
     DAEMON_CONFIG_GET,
     DAEMON_CONFIG_PATCH,
+    DAEMON_CONFIG_ARIA2_OPTIONS,
     DAEMON_CONFIG_PROXY_TEST,
     DAEMON_CONFIG_PROXY_ROUTE,
     DAEMON_CONFIG_CONN_POLICY,
