@@ -337,6 +337,14 @@ impl DaemonService {
                 })
                 .await
             }
+            method::DAEMON_TASK_ADD_WEB_SEED => {
+                let params = parse_params::<fluxdown_protocol::AddTaskWebSeedParams>(params)?;
+                self.execute_unit(ActorOperation::AddTaskWebSeed {
+                    task_id: params.task_id,
+                    url: params.url,
+                })
+                .await
+            }
             method::DAEMON_TASK_BT_FILES => {
                 let params = parse_params::<fluxdown_protocol::DaemonBtStatusParams>(params)?;
                 match self
@@ -427,6 +435,21 @@ impl DaemonService {
                 }
             }
             method::DAEMON_TASK_CREATE_MANY => self.create_tasks(params).await,
+            method::DAEMON_TASK_SAVE_HTML => {
+                let params = parse_params::<IdParams>(params)?;
+                self.demo_forbid("saving HTML responses")?;
+                match self
+                    .actor
+                    .execute(ActorOperation::SaveHtmlResponse { task_id: params.id })
+                    .await
+                {
+                    Ok(ActorResult::Created(task_id)) => {
+                        to_value(fluxdown_protocol::CreatedTask { task_id })
+                    }
+                    Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                    Err(error) => Err(actor_error(error)),
+                }
+            }
             method::DAEMON_TASK_PAUSE => {
                 let params = parse_params::<IdParams>(params)?;
                 self.execute_unit(ActorOperation::PauseTask { task_id: params.id })
@@ -503,6 +526,27 @@ impl DaemonService {
                     delete_files: params.delete_files,
                 })
                 .await
+            }
+            method::DAEMON_TASK_CLEAR_FILE => {
+                let params = parse_params::<IdParams>(params)?;
+                self.execute_unit(ActorOperation::ClearTaskFile { task_id: params.id })
+                    .await
+            }
+            method::DAEMON_TASK_RESTART_FILE => {
+                let params = parse_params::<RestartFileParams>(params)?;
+                let operation = ActorOperation::RestartMissingFile {
+                    task_id: params.id,
+                    recreate_if_present: params.recreate_if_present,
+                };
+                if params.recreate_if_present {
+                    match self.actor.execute(operation).await {
+                        Ok(ActorResult::Boolean(recreate)) => Ok(json!(recreate)),
+                        Ok(_) => Err(internal_error("unexpected actor result".to_owned())),
+                        Err(error) => Err(actor_error(error)),
+                    }
+                } else {
+                    self.execute_unit(operation).await
+                }
             }
             method::DAEMON_TASK_PAUSE_ALL => self.execute_unit(ActorOperation::PauseAll).await,
             method::DAEMON_TASK_RESUME_ALL => self.execute_unit(ActorOperation::ResumeAll).await,
@@ -2684,6 +2728,15 @@ struct IdParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RestartFileParams {
+    #[serde(alias = "taskId", alias = "queueId", alias = "groupId")]
+    id: String,
+    #[serde(default)]
+    recreate_if_present: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RenameParams {
     task_id: String,
     file_name: String,
@@ -2921,6 +2974,13 @@ fn actor_error(error: ActorCallError) -> RpcErrorObject {
             message,
             RpcErrorData::new(ApplicationErrorCode::Conflict, false),
         ),
+        ActorCallError::Operation(ActorError::BrowserRequestRequired) => {
+            RpcErrorObject::application(
+                fluxdown_engine::downloader::POST_ONLY_RESUME_MESSAGE,
+                RpcErrorData::new(ApplicationErrorCode::Conflict, false)
+                    .with_reason(fluxdown_protocol::ErrorReason::BrowserRequestRequired),
+            )
+        }
         ActorCallError::Operation(ActorError::TaskStateConflict(message)) => {
             RpcErrorObject::application(
                 message,
