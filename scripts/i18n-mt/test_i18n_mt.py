@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import email.utils
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from catalogs import TsCatalog, merge_order
-from common import LocaleConfig, MemoryPool, check_translation, numbered_mask, plan_catalog, short_hash
+from common import (
+    LocaleConfig,
+    MemoryPool,
+    RateLimitError,
+    check_translation,
+    configure_batching,
+    numbered_mask,
+    plan_catalog,
+    short_hash,
+    site_locale_config,
+    translate_catalog,
+)
 from docs import DOCS, DocDraft, DocPlan, align_blocks, heading_slugs, map_anchors, render_doc
+from qwen import FATAL_ERROR_CODES, error_codes, retry_after_seconds
 
 
 def fake_translate(text, source_lang, target_lang, terms, tm, domains):
@@ -65,6 +79,7 @@ class CheckTest(unittest.TestCase):
         self.assertIn("占位符", check_translation("Hi {name}", "嗨 {nombre}", False))
         self.assertIn("换行", check_translation("a\nb", "ab", False))
         self.assertIn("Big5", check_translation("Files", "文件设置", True))
+        self.assertIn("HTML", check_translation('Read <a href="/x">docs</a>', "Lee docs", False))
 
     def test_numbered_mask_roundtrip(self):
         masked, restore = numbered_mask("{count} of {total} from {count}")
@@ -79,6 +94,23 @@ class CheckTest(unittest.TestCase):
         cfg = config(terms={"Task": "任务"})
         self.assertEqual(cfg.terms_for("New task"), [{"source": "Task", "target": "任务"}])
         self.assertEqual(cfg.terms_for("Multitasking"), [])
+
+    def test_terms_follow_source_case(self):
+        cfg = config(locale="es", target_lang="Spanish", terms={"Task": "Tarea", "Task group": "Grupo de tareas"})
+        self.assertEqual(
+            cfg.terms_for("Move the task to a task group"),
+            [{"source": "task", "target": "tarea"}, {"source": "task group", "target": "grupo de tareas"}],
+        )
+        self.assertEqual(cfg.terms_for("Task list")[0], {"source": "Task", "target": "Tarea"})
+        tr = config(locale="tr", target_lang="Turkish", terms={"Cancel": "İptal"})
+        self.assertEqual(tr.terms_for("or cancel"), [{"source": "cancel", "target": "iptal"}])
+
+    def test_site_config_reads_from_english(self):
+        tw = site_locale_config("zh-tw")
+        self.assertEqual((tw.source, tw.target_lang), ("en", "Traditional Chinese"))
+        self.assertTrue(tw.domains.startswith("Website and documentation"))
+        self.assertEqual(tw.terms["Settings"], "設定")
+        self.assertFalse(any("\u4e00" <= ch <= "\u9fff" for term in tw.terms for ch in term))
 
 
 TS = """/**
@@ -97,6 +129,62 @@ const ru: Record<MessageKey, string> = {
 
 export default ru;
 """
+
+
+class BatchTest(unittest.TestCase):
+    def tearDown(self):
+        configure_batching(1, 1200)
+
+    def test_batches_single_lines_and_falls_back_per_item(self):
+        configure_batching(10, 1200)
+        calls = []
+
+        def translate(text, source_lang, target_lang, terms, tm, domains):
+            calls.append(text)
+            lines = text.split("\n")
+            if len(lines) > 1:
+                # 模型把第二行的占位符译坏：该条单独重试，其余照用批量结果。
+                return "\n".join("译" + (line.replace("{name}", "{nombre}") if i == 1 else line) for i, line in enumerate(lines))
+            return "译" + text
+
+        source = {"a": ("Open", "English"), "b": ("Hi {name}", "English"), "c": ("Close", "English"), "d": ("Two\nlines", "English")}
+        done, failures = translate_catalog(translate, config(), list(source), source, MemoryPool([]), 2)
+        self.assertEqual(failures, {})
+        self.assertEqual(done, {"a": "译Open", "b": "译Hi {name}", "c": "译Close", "d": "译Two\n译lines"})
+        self.assertIn("Open\nHi {name}\nClose", calls)
+        self.assertIn("Hi {name}", calls)
+        self.assertEqual(len(calls), 3)
+
+    def test_rate_limit_exhaustion_does_not_retry_per_item(self):
+        configure_batching(10, 1200)
+        calls = []
+
+        def translate(text, source_lang, target_lang, terms, tm, domains):
+            calls.append(text)
+            raise RateLimitError("限流重试 12 次仍失败：HTTP 429")
+
+        source = {"a": ("Open", "English"), "b": ("Close", "English")}
+        done, failures = translate_catalog(translate, config(), list(source), source, MemoryPool([]), 2)
+        self.assertEqual(done, {})
+        self.assertEqual(set(failures), {"a", "b"})
+        self.assertEqual(calls, ["Open\nClose"])
+
+
+class QwenErrorTest(unittest.TestCase):
+    def test_retry_after_seconds_and_http_date(self):
+        self.assertEqual(retry_after_seconds("30"), 30.0)
+        later = email.utils.format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90), usegmt=True)
+        self.assertAlmostEqual(retry_after_seconds(later), 90.0, delta=2.0)
+        for value in (None, "", "soon", "nan", "-5", "Mon, 01 Jan 2001 00:00:00 GMT"):
+            self.assertEqual(retry_after_seconds(value), 0.0, value)
+
+    def test_error_codes_flag_account_states_only(self):
+        arrearage = '{"error": {"code": "Arrearage", "type": "Arrearage", "message": "Access denied"}}'
+        throttled = '{"error": {"code": "insufficient_quota", "type": "insufficient_quota"}}'
+        self.assertTrue(FATAL_ERROR_CODES.intersection(error_codes(arrearage)))
+        self.assertTrue(FATAL_ERROR_CODES.intersection(error_codes('{"code": "AllocationQuota.FreeTierOnly"}')))
+        self.assertFalse(FATAL_ERROR_CODES.intersection(error_codes(throttled)))
+        self.assertEqual(error_codes("<html>busy</html>"), [])
 
 
 class TsCatalogTest(unittest.TestCase):
@@ -126,6 +214,14 @@ class DocsTest(unittest.TestCase):
             render(results), "译Run `fluxdown add` then see [译the API](/docs/zh/api/overview/#auth) or https://x.dev/a."
         )
 
+    def test_links_point_at_target_language(self):
+        draft = DocDraft(config(), MemoryPool([]), "doc", "zh-tw")
+        render = draft.segment("See [the API](/docs/en/api/overview/#auth).")
+        from common import run_units
+
+        results, _ = run_units(fake_translate, draft.units, 1)
+        self.assertEqual(render(results), "译See [译the API](/docs/zh-tw/api/overview/#auth).")
+
     def test_block_kinds(self):
         draft = DocDraft(config(), MemoryPool([]), "doc")
         table = draft.block("| Field | Rules |\n|---|---|\n| `id` | Must be `x \\| y` |")
@@ -150,7 +246,7 @@ class DocsTest(unittest.TestCase):
         text, failures, fresh = render_doc(plan, config(), fake_translate, 1)
         self.assertEqual(failures, {})
         self.assertEqual(fresh, [2])
-        final = map_anchors(text, fresh, en, {})
+        final = map_anchors(text, fresh, en, {}, "zh")
         self.assertIn("title: 指南\norder: 2\nsourceHash:", final)
         self.assertTrue(final.endswith("## 安装\n\n保留我。\n\n译See [译setup](#安装).\n"))
 

@@ -4,7 +4,7 @@ import { defineMessages } from "../define";
  * 账户中心共用的错误文案：键是 FluxCloud / 官网 BFF 返回的 `code`（snake_case 原样），
  * 未登记的 code 一律落到 `fallback`。按 code 取文案用 `src/lib/account/client.ts::accountErrorText`。
  */
-export const accountErrors = defineMessages({
+export const accountErrors = defineMessages("accountErrors", {
   en: {
     invalid_credentials: "Incorrect account or password",
     invalid_code: "The verification code is wrong or has expired",
@@ -18,6 +18,9 @@ export const accountErrors = defineMessages({
     validation_error: "Please check what you entered",
     wrong_password: "The current password is incorrect",
     device_limit: "This account has reached its device limit",
+    ai_unavailable: "The AI assistant is unavailable right now, please try again later",
+    ai_disabled: "Your plan doesn't include the AI assistant",
+    ai_quota_exceeded: "You've used all of today's questions — come back tomorrow",
     not_found: "Not found — it may already have been removed",
     unauthorized: "Your session has expired, please sign in again",
     forbidden: "The request was blocked, please reload the page and try again",
@@ -42,6 +45,9 @@ export const accountErrors = defineMessages({
     validation_error: "请检查填写的内容",
     wrong_password: "当前密码不正确",
     device_limit: "该账户的设备数已达上限",
+    ai_unavailable: "AI 助手暂时不可用，请稍后再试",
+    ai_disabled: "当前套餐不含 AI 助手",
+    ai_quota_exceeded: "今日提问次数已用完，明天再来吧",
     not_found: "未找到，可能已被移除",
     unauthorized: "登录已失效，请重新登录",
     forbidden: "请求被拦截，请刷新页面后重试",
