@@ -63,6 +63,9 @@ export default {
     busy: "The assistant is still answering this conversation — wait for it to finish.",
     stopped: "Stopped.",
     failed: "The assistant couldn't finish this answer. Please try again.",
+    maxTurns: "The assistant reached its limit of tool steps before it could reach a conclusion. Try asking a more specific question.",
+    noAnswer: "The model ended without giving an answer. Please try again.",
+    timedOut: "The answer took too long and timed out. Please try again.",
     interrupted: "The connection was interrupted before the answer finished.",
     attachImage: "Add image",
     removeImage: "Remove image",
@@ -114,6 +117,11 @@ export default {
     discard: "Discard",
     openGithub: (n: number) => `View #${n} on GitHub`,
     reviewNote: "Reviewer note",
+  },
+  membership: {
+    title: "Upgrade membership",
+    body: "Pick a plan and scan the QR code to pay. It takes effect as soon as payment completes.",
+    plansLabel: "Plans on sale",
   },
   widget: {
     launcher: "AI Assistant",

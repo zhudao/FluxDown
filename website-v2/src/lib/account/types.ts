@@ -158,10 +158,17 @@ export interface AccountCodeSent {
 /** 不可用原因：`off` 未开放 / `internal_only` 只对内部账号开放 / `plan_disabled` 当前套餐不含 AI 助手。 */
 export type AiUnavailableReason = "off" | "internal_only" | "plan_disabled";
 
+/** `GET /api/account/ai/status`：各端 AI 入口是否显示（匿名取公开口径，有会话按本人身份，由 FluxCloud 判定）。 */
+export interface AiStatus {
+  visible: boolean;
+}
+
 /** `GET /api/account/ai/config`。 */
 export interface AiConfig {
   available: boolean;
   reason: AiUnavailableReason | null;
+  /** 入口是否显示：与 `available` 无关（套餐不含助手时入口照常显示，只是不可用）。 */
+  visible: boolean;
   /** 单次提问的字数上限（不可用时为 0）。 */
   maxMessageChars: number;
   /** 每日提问次数上限；0 = 不限。 */
@@ -176,6 +183,9 @@ export interface AiConfig {
   maxImageBytes: number;
 }
 
+/** 对一条回答的评价。 */
+export type AiRating = "up" | "down";
+
 export type AiSessionKind = "ask" | "feedback";
 
 export interface AiSession {
@@ -186,7 +196,8 @@ export interface AiSession {
   /** 首条提问的首行（空 = 尚未提问）。 */
   title: string;
   messageCount: number;
-  rating: "up" | "down" | null;
+  /** 会话汇总：最近一次回答评价（界面按回答评价，不用它表示某条回答的状态）。 */
+  rating: AiRating | null;
   /** 正在回答中。 */
   active: boolean;
   /** RFC 3339 */
@@ -205,10 +216,14 @@ export interface AiMessage {
   id: string;
   runId: string | null;
   seq: number;
-  role: "user" | "assistant";
+  /** `membership_offer` 由官网 BFF 合成（上游 `offer_membership` 成功的工具结果），无文本，仅表示该轮（同 `runId`）要显示开通会员卡片。 */
+  role: "user" | "assistant" | "membership_offer";
   content: string;
   /** 提问附带的图片 id（只有用户消息可能非空），经 `/api/account/ai/attachments/<id>` 取。 */
   images: string[];
+  /** 对这条回答的评价（只有助手消息有值；旧版 FluxCloud 不带）。 */
+  rating?: AiRating | null;
+  ratingComment?: string | null;
   /** RFC 3339 */
   createdAt: string;
 }
@@ -244,6 +259,9 @@ export interface AiSessionDetail {
 
 export type AiToolKind = "client" | "server" | "mcp";
 
+/** 异常结束的原因：轮数用尽 / 无回答 / 超时 / 取消 / 其它失败。旧版 FluxCloud 不带。 */
+export type AiFailReason = "maxTurns" | "noAnswer" | "timeout" | "canceled" | "error";
+
 /** `POST /api/account/ai/sessions/{id}/messages` 的 SSE 事件（每帧 `data` 一个）。 */
 export type AiStreamEvent =
   | { type: "run"; runId: string; sessionId: string }
@@ -254,4 +272,4 @@ export type AiStreamEvent =
   | { type: "toolFinished"; callId: string; name: string; kind: AiToolKind; isError: boolean; durationMs: number | null }
   | { type: "issueDraft"; issue: AiIssue }
   | { type: "done"; status: "completed" | "replied"; messageId: string | null; text: string }
-  | { type: "error"; status: "failed" | "canceled"; message: string };
+  | { type: "error"; status: "failed" | "canceled"; reason?: AiFailReason; message: string };

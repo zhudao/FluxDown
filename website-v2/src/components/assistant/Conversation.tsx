@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type TouchEvent, type WheelEvent } from "react";
-import { ArrowDown, Bot, CircleAlert, CircleCheck, LoaderCircle } from "lucide-react";
+import { ArrowDown, Bot, CircleAlert, CircleCheck, LoaderCircle, ThumbsDown, ThumbsUp } from "lucide-react";
 import type { Lang } from "@/i18n/config";
 import type { AssistantMessages } from "@/i18n/messages/assistant";
-import type { AiIssue, AiMessage } from "@/lib/account/types";
+import { accountErrorText } from "@/lib/account/client";
+import type { AiIssue, AiMessage, AiRating } from "@/lib/account/types";
 import type { Guard } from "@/components/account/dashboard/resource";
 import { attachmentUrl } from "./attachments";
 import ImageViewer, { type ViewerImage } from "./ImageViewer";
 import IssueCard from "./IssueCard";
 import { toolLabel, type LiveRun, type Segment } from "./live";
 import Markdown from "./Markdown";
-import type { RunNotice } from "./useAssistant";
+import MembershipCard from "./MembershipCard";
+import { ratingOf, type Ratings, type RunNotice } from "./useAssistant";
 
 interface Props {
   lang: Lang;
@@ -20,6 +22,9 @@ interface Props {
   /** 本会话进行中（或刚结束、详情尚未刷新）的提问。 */
   live: LiveRun | null;
   notice: RunNotice | null;
+  ratings: Ratings;
+  /** 评价一条回答（`null` 清除）；失败返回错误码（已回滚）。 */
+  onRate: (messageId: string, rating: AiRating | null) => Promise<string | null>;
   onIssueChange: (issue: AiIssue) => void;
 }
 
@@ -85,10 +90,13 @@ function ToolChip({ segment, t }: { segment: Extract<Segment, { kind: "tool" }>;
   );
 }
 
-function noticeText(phase: RunNotice["phase"], t: AssistantMessages): string {
+function noticeText(phase: RunNotice["phase"], reason: RunNotice["reason"], t: AssistantMessages): string {
   if (phase === "stopped") return t.chat.stopped;
-  if (phase === "failed") return t.chat.failed;
-  return t.chat.interrupted;
+  if (phase === "interrupted") return t.chat.interrupted;
+  if (reason === "maxTurns") return t.chat.maxTurns;
+  if (reason === "noAnswer") return t.chat.noAnswer;
+  if (reason === "timeout") return t.chat.timedOut;
+  return t.chat.failed;
 }
 
 function Notice({ text }: { text: string }) {
@@ -100,13 +108,88 @@ function Notice({ text }: { text: string }) {
   );
 }
 
+function Segments({ segments, t }: { segments: Segment[]; t: AssistantMessages }) {
+  return segments.map((segment, i) =>
+    segment.kind === "text" ? (
+      <Markdown key={i} text={segment.text} labels={t.chat} />
+    ) : (
+      <ToolChip key={segment.callId} segment={segment} t={t} />
+    ),
+  );
+}
+
+/** 一条回答下的评价：赞 / 踩，再点同一个清除。乐观更新由 `onRate` 负责，失败时已回滚，这里只显示错误。 */
+function RateBar({
+  lang, t, messageId, rating, onRate,
+}: {
+  lang: Lang;
+  t: AssistantMessages;
+  messageId: string;
+  rating: AiRating | null;
+  onRate: Props["onRate"];
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  const click = async (value: AiRating) => {
+    setBusy(true);
+    setError(null);
+    const code = await onRate(messageId, rating === value ? null : value);
+    if (!mounted.current) return;
+    setBusy(false);
+    if (code !== null) setError(accountErrorText(lang, code));
+  };
+
+  const button = (value: AiRating) => {
+    const pressed = rating === value;
+    const Icon = value === "up" ? ThumbsUp : ThumbsDown;
+    const label = value === "up" ? t.chat.rateUp : t.chat.rateDown;
+    // 选中态只靠图标变色（赞强调色、踩危险色），不加边框 / 底色
+    const tone = pressed ? (value === "up" ? "text-accent-ink" : "text-danger") : "text-subtle hover:text-fg";
+    return (
+      <button
+        type="button"
+        aria-pressed={pressed}
+        aria-label={label}
+        title={label}
+        disabled={busy}
+        onClick={() => void click(value)}
+        className={`grid size-7 place-items-center rounded-md transition-colors disabled:opacity-60 ${tone}`}
+      >
+        <Icon size={14} aria-hidden className={pressed ? "fill-current" : ""} />
+      </button>
+    );
+  };
+
+  return (
+    <div className="-mt-1">
+      <div className="flex items-center gap-0.5">
+        {button("up")}
+        {button("down")}
+      </div>
+      {error && (
+        <p role="alert" className="mt-1 text-[12.5px] text-danger">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /**
  * 会话的消息时间线：历史消息、进行中的回答（文本 / 工具进度）与问题单卡片。
  *
  * 跟随最新：缺省新内容到达即滚到底；用户往上滚（滚动位置变小）立即停止跟随，回答照常在下方生成；
  * 不在底部时显示「回到最新」，点它或自己滚回底部即恢复跟随。新的提问开始时强制回到跟随。
  */
-export default function Conversation({ lang, t, guard, messages, issues, live, notice, onIssueChange }: Props) {
+export default function Conversation({ lang, t, guard, messages, issues, live, notice, ratings, onRate, onIssueChange }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const lastTop = useRef(0);
@@ -182,6 +265,18 @@ export default function Conversation({ lang, t, guard, messages, issues, live, n
   const shownIssues = live ? [...issues.filter((i) => !live.issues.some((l) => l.id === i.id)), ...live.issues] : issues;
   const liveText = live?.segments.some((s) => s.kind === "text") ?? false;
 
+  // 开通会员卡片：历史里由 `membership_offer` 消息标出所属执行（runId），卡片挂在该轮回答之后；同一轮只一张。
+  // 该轮没有落库的回答时（理论上不会出现）就地显示。
+  const offerRuns = new Set(messages.flatMap((m) => (m.role === "membership_offer" && m.runId !== null ? [m.runId] : [])));
+  const answeredRuns = new Set(messages.flatMap((m) => (m.role === "assistant" && m.runId !== null ? [m.runId] : [])));
+  const offerShown = new Set<string>();
+  const takeOffer = (runId: string | null): boolean => {
+    if (runId === null || !offerRuns.has(runId) || offerShown.has(runId)) return false;
+    offerShown.add(runId);
+    return true;
+  };
+  const card = <MembershipCard lang={lang} t={t} guard={guard} />;
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
     <div
@@ -197,37 +292,55 @@ export default function Conversation({ lang, t, guard, messages, issues, live, n
       aria-live="off"
     >
       <div ref={content} className="mx-auto flex max-w-[760px] flex-col gap-6">
-        {messages.map((message) =>
-          message.role === "user" ? (
-            <UserBubble key={message.id} text={message.content} images={message.images.map(attachmentUrl)} t={t} />
-          ) : (
+        {messages.map((message) => {
+          if (message.role === "user") {
+            return <UserBubble key={message.id} text={message.content} images={message.images.map(attachmentUrl)} t={t} />;
+          }
+          if (message.role === "membership_offer") {
+            return message.runId !== null && !answeredRuns.has(message.runId) && takeOffer(message.runId) ? (
+              <AssistantTurn key={message.id} t={t}>
+                {card}
+              </AssistantTurn>
+            ) : null;
+          }
+          return (
             <AssistantTurn key={message.id} t={t}>
               <Markdown text={message.content} labels={t.chat} />
+              <RateBar lang={lang} t={t} messageId={message.id} rating={ratingOf(ratings, message.id, message.rating)} onRate={onRate} />
+              {takeOffer(message.runId) && card}
             </AssistantTurn>
-          ),
-        )}
+          );
+        })}
         {live && (
           <>
             <UserBubble text={live.question} images={live.images} t={t} />
             <AssistantTurn t={t}>
-              {live.segments.map((segment, i) =>
-                segment.kind === "text" ? (
-                  <Markdown key={i} text={segment.text} labels={t.chat} />
-                ) : (
-                  <ToolChip key={segment.callId} segment={segment} t={t} />
-                ),
-              )}
+              <Segments segments={live.segments} t={t} />
               {live.phase === "streaming" && !liveText && (
                 <p role="status" className="flex items-center gap-2 text-[13px] text-muted">
                   <LoaderCircle size={14} aria-hidden className="animate-spin motion-reduce:animate-none" />
                   {t.chat.thinking}
                 </p>
               )}
-              {live.phase !== "streaming" && live.phase !== "done" && <Notice text={noticeText(live.phase, t)} />}
+              {live.phase !== "streaming" && live.phase !== "done" && <Notice text={noticeText(live.phase, live.failReason, t)} />}
+              {live.phase === "done" && live.messageId !== null && (
+                <RateBar lang={lang} t={t} messageId={live.messageId} rating={ratingOf(ratings, live.messageId, null)} onRate={onRate} />
+              )}
+              {/* 回答结束后才出现：流式输出期间不让购买弹窗开着被后续重渲染 / 详情刷新打断 */}
+              {live.membershipOffer && live.phase !== "streaming" && card}
             </AssistantTurn>
           </>
         )}
-        {!live && notice && <Notice text={noticeText(notice.phase, t)} />}
+        {!live && notice && (notice.segments.length > 0 || notice.membershipOffer) && (
+          <AssistantTurn t={t}>
+            <Segments segments={notice.segments} t={t} />
+            <Notice text={noticeText(notice.phase, notice.reason, t)} />
+            {notice.membershipOffer && card}
+          </AssistantTurn>
+        )}
+        {!live && notice && notice.segments.length === 0 && !notice.membershipOffer && (
+          <Notice text={noticeText(notice.phase, notice.reason, t)} />
+        )}
         {shownIssues.map((issue) => (
           <IssueCard key={issue.id} issue={issue} lang={lang} t={t} guard={guard} onChange={onIssueChange} />
         ))}

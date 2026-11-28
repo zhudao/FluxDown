@@ -3,16 +3,19 @@
  * 挂在账户 BFF 下，复用会话 Cookie（Path `/api/account`）、刷新与 CSRF 闸。
  *
  * - 会话一律以 `channel: "website"` 创建，不声明客户端工具（官网没有本机状态可查）。
- * - 会话详情只回用户 / 助手消息（工具调用与结果不下发），用户消息带图片 id，图片经 `ai/attachments/{id}` 取。
+ * - 会话详情只回用户 / 助手消息，用户消息带图片 id，图片经 `ai/attachments/{id}` 取。工具调用与结果不下发，唯一例外：
+ *   上游 `offer_membership` 成功的工具结果（`role: "tool_result"`、`isError: false`）以官网本地合成的
+ *   `role: "membership_offer"` 消息下发（`content` 置空，只带白名单字段，`runId` 即所属执行），
+ *   前端据此在该轮显示开通会员卡片；失败的结果与其它工具消息一律不下发。
  * - 提问的 SSE 按 `ai-stream.ts` 白名单逐帧裁剪后转发；访客断开即中止上游，FluxCloud 随之取消本次执行。
  * - 提问可带图片（`data:image/(png|jpeg|gif|webp);base64,...`，张数 / 单张大小同 FluxCloud `ai::attachments`）；
  *   BFF 只做形状与长度预检，格式识别与解码后大小由 FluxCloud 判定。
  */
-import { failureResponse, NOINDEX_ROBOTS, proxyNoContent } from "@/lib/cloud-proxy";
+import { callUpstream, failureResponse, NOINDEX_ROBOTS, proxyNoContent } from "@/lib/cloud-proxy";
 import { isRecord, pick } from "@/lib/is-record";
 import { AI_ISSUE_KEYS, aiEventFilter } from "./ai-stream";
 import { jsonInit, mapped, ROW_ID_RE, text, validationError, type Body, type Route } from "./route-kit";
-import { callAuthed, callAuthedStream, type AccountContext } from "./session";
+import { callAuthed, callAuthedStream, hasSession, type AccountContext } from "./session";
 
 /** FluxCloud `limits.maxMessageChars` 的取值上限；实际上限由 FluxCloud 按设置再校验。 */
 const MAX_ASK_CHARS = 16_000;
@@ -34,13 +37,16 @@ const MAX_PAGE = 100;
 const LOCALE_RE = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}$/;
 
 const CONFIG_KEYS = [
-  "available", "reason", "maxMessageChars", "dailyLimit", "usedToday", "imagesSupported", "maxImages", "maxImageBytes",
+  "available", "reason", "visible", "maxMessageChars", "dailyLimit", "usedToday", "imagesSupported", "maxImages", "maxImageBytes",
 ] as const;
 const SESSION_KEYS = [
   "id", "channel", "kind", "title", "messageCount", "rating", "active", "createdAt", "updatedAt",
 ] as const;
-const MESSAGE_KEYS = ["id", "runId", "seq", "role", "content", "createdAt"] as const;
+const MESSAGE_KEYS = ["id", "runId", "seq", "role", "content", "rating", "ratingComment", "createdAt"] as const;
 const SHOWN_ROLES: Record<string, true> = { user: true, assistant: true };
+/** 开通会员卡片的唯一信号：FluxCloud 的服务端工具名与官网本地合成的消息角色。 */
+const OFFER_MEMBERSHIP_TOOL = "offer_membership";
+const MEMBERSHIP_OFFER_ROLE = "membership_offer";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream; charset=utf-8",
@@ -76,13 +82,49 @@ function askImages(body: Body): string[] | null {
   return ok ? (images as string[]) : null;
 }
 
+/** 界面语言（BCP 47）：缺省为 undefined；否则须合形。null = 不合法。 */
+function askLocale(body: Body): string | undefined | null {
+  if (body.locale === undefined) return undefined;
+  const locale = text(body, "locale", 35);
+  return locale !== null && LOCALE_RE.test(locale) ? locale : null;
+}
+
+/** 上游成功的 `offer_membership` 工具结果（须带所属执行 `runId`，卡片按它挂到轮次上）。 */
+function isMembershipOfferResult(message: Record<string, unknown>): boolean {
+  return (
+    message.role === "tool_result" &&
+    message.toolName === OFFER_MEMBERSHIP_TOOL &&
+    message.isError === false &&
+    typeof message.runId === "string"
+  );
+}
+
+/** 工具结果 → 合成的 `membership_offer` 消息：只留白名单字段，正文清空（工具输出是给模型看的）。 */
+function membershipOfferOf(message: unknown): Body | null {
+  const out = pick(message, MESSAGE_KEYS);
+  return out && { ...out, role: MEMBERSHIP_OFFER_ROLE, content: "", images: [] };
+}
+
+function messagesOf(upstream: unknown): Body[] | null {
+  if (!Array.isArray(upstream)) return null;
+  const out: Body[] = [];
+  for (const message of upstream) {
+    if (!isRecord(message)) continue;
+    const mapped = Object.hasOwn(SHOWN_ROLES, String(message.role))
+      ? messageOf(message)
+      : isMembershipOfferResult(message)
+        ? membershipOfferOf(message)
+        : undefined;
+    if (mapped === null) return null;
+    if (mapped !== undefined) out.push(mapped);
+  }
+  return out;
+}
+
 function detailOf(body: unknown): Body | null {
   if (!isRecord(body)) return null;
   const session = sessionOf(body.session);
-  const shown = Array.isArray(body.messages)
-    ? body.messages.filter((m) => isRecord(m) && typeof m.role === "string" && Object.hasOwn(SHOWN_ROLES, m.role))
-    : null;
-  const messages = all(shown, messageOf);
+  const messages = messagesOf(body.messages);
   const issues = all(body.issues, issueOf);
   return session && messages && issues ? { session, messages, issues } : null;
 }
@@ -103,6 +145,10 @@ async function noContent(ctx: AccountContext, path: string, init: { method: stri
   return res.ok ? proxyNoContent() : failureResponse(res);
 }
 
+/** 入口可见性：上游 `ai/config` 与公开 `ai/status` 都带布尔 `visible`，只取这一个字段。 */
+const visibleOf = (body: unknown): Body | null =>
+  isRecord(body) && typeof body.visible === "boolean" ? { visible: body.visible } : null;
+
 export const AI_ROUTES: Route[] = [
   {
     method: "GET",
@@ -110,6 +156,21 @@ export const AI_ROUTES: Route[] = [
     json: false,
     async handle(ctx) {
       return mapped(await callAuthed(ctx, "/api/v1/ai/config", { method: "GET" }), (body) => pick(body, CONFIG_KEYS));
+    },
+  },
+  {
+    // 各端 AI 入口是否显示（FluxCloud 判定，官网不复刻规则）。静态页拿不到登录态，所以允许匿名：
+    // 有会话按本人身份取 `ai/config.visible`（`internal` 模式只对内部账号显示）；无会话、或会话已失效（401，
+    // `callAuthed` 已清会话）退回免鉴权的 `ai/status.visible`。其它上游失败原样返回，客户端据此保留上次已知值。
+    method: "GET",
+    path: /^ai\/status$/,
+    json: false,
+    async handle(ctx) {
+      if (hasSession(ctx.cookies)) {
+        const res = await callAuthed(ctx, "/api/v1/ai/config", { method: "GET" });
+        if (res.ok || res.status !== 401) return mapped(res, visibleOf);
+      }
+      return mapped(await callUpstream("/api/v1/ai/status", { method: "GET" }, ctx.ip), visibleOf);
     },
   },
   {
@@ -134,10 +195,10 @@ export const AI_ROUTES: Route[] = [
     async handle(ctx, body) {
       const kind = body.kind === undefined ? "ask" : body.kind;
       if (kind !== "ask" && kind !== "feedback") return validationError();
-      const locale = body.locale === undefined ? null : text(body, "locale", 35);
-      if (body.locale !== undefined && (locale === null || !LOCALE_RE.test(locale))) return validationError();
+      const locale = askLocale(body);
+      if (locale === null) return validationError();
       const client: Body = { clientTools: [] };
-      if (locale !== null) client.locale = locale;
+      if (locale !== undefined) client.locale = locale;
       const res = await callAuthed(ctx, "/api/v1/ai/sessions", jsonInit("POST", { channel: "website", kind, client }));
       return mapped(res, sessionOf);
     },
@@ -162,16 +223,16 @@ export const AI_ROUTES: Route[] = [
   },
   {
     method: "PUT",
-    path: /^ai\/sessions\/([^/]+)\/rating$/,
+    path: /^ai\/sessions\/([^/]+)\/messages\/([^/]+)\/rating$/,
     json: true,
-    async handle(ctx, body, [id]) {
+    async handle(ctx, body, [id, messageId]) {
       const rating = body.rating;
-      if (!validId(id) || (rating !== null && rating !== "up" && rating !== "down")) return validationError();
+      if (!validId(id) || !validId(messageId) || (rating !== null && rating !== "up" && rating !== "down")) return validationError();
       const hasComment = typeof body.comment === "string" && body.comment.trim() !== "";
       const comment = hasComment ? text(body, "comment", MAX_RATING_COMMENT_CHARS) : null;
       if (hasComment && comment === null) return validationError();
       const payload: Body = comment === null || rating === null ? { rating } : { rating, comment };
-      return noContent(ctx, sessionPath(id, "/rating"), jsonInit("PUT", payload));
+      return noContent(ctx, sessionPath(id, `/messages/${encodeURIComponent(messageId)}/rating`), jsonInit("PUT", payload));
     },
   },
   {
@@ -182,8 +243,10 @@ export const AI_ROUTES: Route[] = [
     async handle(ctx, body, [id]) {
       const question = text(body, "text", MAX_ASK_CHARS);
       const images = askImages(body);
-      if (!validId(id) || question === null || images === null) return validationError();
+      const locale = askLocale(body);
+      if (!validId(id) || question === null || images === null || locale === null) return validationError();
       const payload: Body = images.length > 0 ? { text: question, images } : { text: question };
+      if (locale !== undefined) payload.locale = locale;
       const res = await callAuthedStream(ctx, sessionPath(id, "/messages"), jsonInit("POST", payload));
       if (!res.ok) return failureResponse(res);
       return new Response(res.body.pipeThrough(aiEventFilter()), { status: 200, headers: SSE_HEADERS });

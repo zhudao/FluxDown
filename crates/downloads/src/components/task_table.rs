@@ -23,7 +23,7 @@ use gpui::{
 };
 use gpui::{Bounds, ScrollStrategy};
 use gpui_component::{
-    ElementExt as _, Icon, IconName, Sizable as _, Size, h_flex,
+    ElementExt as _, FocusableExt as _, Icon, IconName, Sizable as _, Size, h_flex,
     menu::{PopupMenu, PopupMenuItem},
     scroll::Scrollbar,
     spinner::Spinner,
@@ -662,6 +662,10 @@ pub(crate) enum MenuEntry {
     Separator,
     Delete,
     DeleteWithFiles,
+    /// 清理无效任务（所选中有失败 / 文件已丢失的任务即显示）。
+    CleanStale,
+    /// 清理暂停或失败任务（所选中有本机暂停 / 失败任务即显示）。
+    CleanUnfinished,
     ClearTaskFile,
     /// 在主窗口停靠详情面板中查看（独立窗口经面板头部「在独立窗口打开」）。
     ShowDetail,
@@ -768,6 +772,19 @@ pub(crate) fn context_menu_items(selection: &[TaskMenuFacts]) -> Vec<MenuEntry> 
     if selection.iter().any(|task| task.controllable) {
         items.push(MenuEntry::Delete);
         items.push(MenuEntry::DeleteWithFiles);
+    }
+    // 与 `TaskCleanup::matches` 同判定；确认时按完整行再复核。
+    if selection
+        .iter()
+        .any(|task| task.state == TaskState::Failed || (task.is_local && task.file_missing))
+    {
+        items.push(MenuEntry::CleanStale);
+    }
+    if selection
+        .iter()
+        .any(|task| task.is_local && matches!(task.state, TaskState::Paused | TaskState::Failed))
+    {
+        items.push(MenuEntry::CleanUnfinished);
     }
     if let [only] = selection
         && only.can_clear_task_file()
@@ -3608,6 +3625,16 @@ impl DownloadTableDelegate {
                 self.strings.delete_task_and_file.clone(),
                 Box::new(crate::actions::DeleteSelectedWithFiles),
             ),
+            MenuEntry::CleanStale => menu.menu_with_icon(
+                self.strings.clean_stale_tasks.clone(),
+                FluxIcon::Trash2,
+                Box::new(crate::actions::CleanStaleSelected),
+            ),
+            MenuEntry::CleanUnfinished => menu.menu_with_icon(
+                self.strings.clean_unfinished_selection.clone(),
+                FluxIcon::Trash2,
+                Box::new(crate::actions::CleanUnfinishedSelected),
+            ),
             MenuEntry::ClearTaskFile => destructive_menu_item(
                 menu,
                 destructive,
@@ -4849,10 +4876,13 @@ pub(crate) fn render_download_table(
         })
         .child(
             div().absolute().inset_0().child(
+                // 表格整块获焦时 gpui-component 会在键盘输入后描一圈 ring 色边线
+                // （Cmd+A / Esc 后闪现，鼠标一动又消失）；行选中高亮已表达焦点位置。
                 DataTable::new(table_state)
                     .with_size(Size::Size(table_header_height(cx)))
                     .stripe(false)
                     .bordered(false)
+                    .focus_ring(false)
                     .scrollbar_visible(true, true),
             ),
         )
